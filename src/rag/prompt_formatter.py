@@ -18,7 +18,11 @@ def format_reflections_for_prompt(reflections: list[dict]) -> str:
 
 
 def format_news_for_prompt(news_entries: list[dict]) -> str:
-    """RAG取得ニュースをOllamaプロンプト用テキストに整形する。"""
+    """RAG取得ニュースをOllamaプロンプト用テキストに整形する。
+
+    カテゴリ別分析結果（category メタデータ）と
+    旧ペア別分析結果（pair メタデータ）の両方に対応する。
+    """
     if not news_entries:
         return "No recent news available in knowledge base."
     lines = ["=== Recent News & Sentiment (RAG) ==="]
@@ -31,5 +35,7 @@ def format_news_for_prompt(news_entries: list[dict]) -> str:
         seen.add(summary)
         collected = meta.get("collected_at", "?")[:16]
         score = meta.get("sentiment_score", 0)
-        lines.append(f"[{collected}] score={score:+.2f} | {summary}")
+        # カテゴリ or ペアのラベル
+        label = meta.get("category", meta.get("pair", "?"))
+        lines.append(f"[{collected}] [{label}] score={score:+.2f} | {summary}")
     return "\n".join(lines)

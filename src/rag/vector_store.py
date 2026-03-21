@@ -35,6 +35,86 @@ class VectorStore:
             f"(news={self._news.count()}, reflections={self._reflections.count()})"
         )
 
+    # ---- Category News (カテゴリ別分析結果) --------------------------------
+
+    def upsert_category_news(
+        self,
+        entry_id: str,
+        text: str,
+        embedding: list[float],
+        category: str,
+        sentiment_score: float,
+        confidence: float,
+        key_themes: list[str],
+        summary: str,
+        news_count: int,
+        collected_at: datetime,
+    ) -> None:
+        """カテゴリ別ニュース分析結果を格納する。"""
+        self._news.upsert(
+            ids=[entry_id],
+            embeddings=[embedding],
+            documents=[text],
+            metadatas=[{
+                "category": category,
+                "sentiment_score": sentiment_score,
+                "confidence": confidence,
+                "key_themes": ", ".join(key_themes),
+                "summary": summary,
+                "news_count": news_count,
+                "collected_at": collected_at.isoformat(),
+                "collected_ts": collected_at.timestamp(),
+            }],
+        )
+        logger.debug(f"Upserted category news {entry_id} ({category})")
+
+    def get_last_collected_ts(self, category: str) -> float | None:
+        """カテゴリの最終収集タイムスタンプを返す。"""
+        try:
+            results = self._news.get(
+                where={"category": {"$eq": category}},
+                include=["metadatas"],
+            )
+        except Exception:
+            return None
+        timestamps = [m.get("collected_ts", 0) for m in results.get("metadatas", [])]
+        return max(timestamps) if timestamps else None
+
+    def get_recent_category_news(
+        self,
+        categories: list[str],
+        lookback_hours: int = 24,
+    ) -> list[dict]:
+        """カテゴリ指定で直近ニュース分析を取得する。"""
+        since_ts = (datetime.now() - timedelta(hours=lookback_hours)).timestamp()
+        try:
+            if len(categories) == 1:
+                where = {
+                    "$and": [
+                        {"category": {"$eq": categories[0]}},
+                        {"collected_ts": {"$gte": since_ts}},
+                    ]
+                }
+            else:
+                where = {
+                    "$and": [
+                        {"category": {"$in": categories}},
+                        {"collected_ts": {"$gte": since_ts}},
+                    ]
+                }
+            results = self._news.get(
+                where=where,
+                include=["documents", "metadatas"],
+            )
+        except Exception:
+            return []
+
+        entries = []
+        for doc, meta in zip(results.get("documents", []), results.get("metadatas", [])):
+            entries.append({"text": doc, "metadata": meta})
+        entries.sort(key=lambda x: x["metadata"].get("collected_ts", 0), reverse=True)
+        return entries
+
     # ---- News ---------------------------------------------------------------
 
     def upsert_news(

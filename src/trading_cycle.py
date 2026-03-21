@@ -40,8 +40,8 @@ async def _build_rag_context(
     pair_cfg, config: AppConfig, store: VectorStore
 ) -> tuple[str, str]:
     """RAGからニュースと振り返りコンテキストを取得する。"""
-    news_entries = store.get_recent_news(
-        pair=pair_cfg.symbol,
+    news_entries = store.get_recent_category_news(
+        categories=pair_cfg.news_categories,
         lookback_hours=config.rag.news_lookback_hours,
     )
     news_ctx = format_news_for_prompt(news_entries)

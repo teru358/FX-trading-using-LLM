@@ -140,7 +140,7 @@ rag:
 schedule:
   run_times:
     - "15:00"
-    - "21:00"
+    - "21:30"
   timezone: "Asia/Tokyo"
 
 notification:

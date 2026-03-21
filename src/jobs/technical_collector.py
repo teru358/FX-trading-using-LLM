@@ -18,6 +18,7 @@ from src.llm.client import LLMClient
 from src.llm.factory import create_llm_client
 from src.rag.prompt_formatter import format_news_for_prompt, format_reflections_for_prompt
 from src.rag.vector_store import VectorStore
+from src.trading.market_hours import is_market_open, market_status_label
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +41,9 @@ async def collect_technical(
     )
     _, summary = compute_indicators(price_data.df)
 
-    # RAGからコンテキストを構築（直前のニュース収集結果を含む）
-    news_entries = store.get_recent_news(
-        pair=pair_cfg.symbol,
+    # RAGからコンテキストを構築（直前のカテゴリ別ニュース分析結果を含む）
+    news_entries = store.get_recent_category_news(
+        categories=pair_cfg.news_categories,
         lookback_hours=config.rag.news_lookback_hours,
     )
     reflections = store.get_recent_reflections(
@@ -77,6 +78,10 @@ async def collect_all_technical(
     analysis_store: AnalysisStore,
 ) -> None:
     """全有効ペアのテクニカル分析を収集してストアに格納する。"""
+    if not is_market_open():
+        logger.info(f"Market {market_status_label()}. Skipping technical collection.")
+        return
+
     llm_price = create_llm_client(config, "price_analysis")
     pairs = config.enabled_pairs
     delay = config.news_collection.inter_pair_delay_seconds
@@ -86,7 +91,7 @@ async def collect_all_technical(
     )
     for i, pair_cfg in enumerate(pairs):
         try:
-            logger.info(f"[COLLECT] {pair_cfg.display_name}: starting OHLCV + technical analysis...")
+            logger.debug(f"[COLLECT] {pair_cfg.display_name}: starting OHLCV + technical analysis...")
             await collect_technical(pair_cfg, config, store, price_store, analysis_store, llm_price)
         except Exception as e:
             logger.error(f"[COLLECT] {pair_cfg.display_name}: technical analysis failed: {e}", exc_info=True)

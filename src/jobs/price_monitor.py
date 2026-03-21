@@ -125,6 +125,10 @@ async def monitor_open_positions(
 
 def run_price_monitor(config: AppConfig) -> None:
     """schedule ライブラリから呼び出す同期ラッパー。"""
+    if not config.price_monitor.enabled:
+        return
+    if not is_market_open():
+        return
     state_store = StateStore(config.state_dir)
     position_mgr = PositionManager(state_store, config.trading.initial_balance)
     asyncio.run(monitor_open_positions(config, position_mgr))

@@ -36,7 +36,7 @@ class _PrefixRichHandler:
 class _ActivityLogFilter(logging.Filter):
     """構造化ログプレフィックスのみを通すフィルタ。"""
 
-    _PREFIXES = ("[COLLECT]", "[NEWS]", "[SIGNAL]", "[CLOSE]", "[TRADE]", "[ORDER]", "[REFLECT]")
+    _PREFIXES = ("[COLLECT]", "[AGGREGATE]", "[SIGNAL]", "[CLOSE]", "[TRADE]", "[ORDER]", "[REFLECT]")
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()

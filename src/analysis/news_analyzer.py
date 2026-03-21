@@ -4,8 +4,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from src.analysis.rss_fetcher import fetch_rss_news
-from src.config import NewsSourcesConfig
+from src.analysis.rss_fetcher import FetchResult
 from src.llm.client import LLMClient
 from src.llm.response_parser import extract_json
 
@@ -21,38 +20,63 @@ def _to_float(val, default: float) -> float:
     except (TypeError, ValueError):
         return default
 
-# ── プロンプトテンプレート ──────────────────────────────────
+
+# ── カテゴリ別プロンプト ──────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are an expert FX analyst specializing in macroeconomic and geopolitical analysis.
-Analyze news headlines to produce a sentiment assessment for swing trading (3-10 day horizon).
+Analyze news headlines to produce a sentiment assessment for FX swing trading (3-10 day horizon).
 Be objective: weigh bullish and bearish factors carefully before assigning a score.
+Each headline includes its age (e.g. "2.3h ago") and source — give more weight to recent news from reliable sources.
 """
 
-RSS_PROMPT_TEMPLATE = """Below are recent news headlines and summaries relevant to {pair} ({base}/{quote}).
-Sources include FX news, global business news, and Japan-specific news.
+_CATEGORY_LABELS = {
+    "fx": "FX Market",
+    "global": "Global Economy",
+    "japan": "Japan / JPY",
+}
 
-=== Recent News ===
+_CATEGORY_FOCUS = {
+    "fx": (
+        "Focus on direct FX market developments: currency pair movements, "
+        "central bank policies, interest rate expectations, and currency flow dynamics.\n"
+        "Score: positive = risk-on / bullish risk currencies, negative = risk-off / defensive."
+    ),
+    "global": (
+        "Focus on how global macroeconomic and geopolitical events affect "
+        "risk appetite, safe-haven flows, and broad currency market direction.\n"
+        "Score: positive = risk-on / positive economic outlook, negative = risk-off / uncertainty."
+    ),
+    "japan": (
+        "Focus on Japan-specific factors: BOJ monetary policy, Japanese economic data, "
+        "trade dynamics, and geopolitical risks affecting Japan.\n"
+        "Score: positive = bullish JPY (stronger yen), negative = bearish JPY (weaker yen)."
+    ),
+}
+
+CATEGORY_PROMPT_TEMPLATE = """Below are recent news headlines from {category_label} sources.
+Each item shows [age] [source] title: summary.
+Sources: {sources_list}
+
+=== Recent {category_label} News ({news_count} items, {fresh_count} with timestamp) ===
 {news_text}
 
 === Task ===
-Based on the above, assess the {base}/{quote} swing trading outlook (3-10 day horizon).
-Consider: central bank policy, economic data, geopolitical risks, Japan-specific factors (for JPY pairs), risk sentiment.
+Assess the {category_label} sentiment outlook for FX swing trading (3-10 day horizon).
+{category_focus}
+Weight more recent news more heavily in your assessment.
 
 Return ONLY valid JSON (no markdown fences):
 {{
-  "sentiment_score": <float -1.0 to 1.0, positive means bullish {base}/{quote}>,
+  "sentiment_score": <float -1.0 to 1.0>,
   "confidence": <float 0.0 to 1.0>,
-  "time_horizon": "short|medium",
   "key_themes": ["theme1", "theme2"],
   "bullish_factors": ["factor1"],
   "bearish_factors": ["factor1"],
-  "geopolitical_risks": ["risk1"],
-  "japan_factors": ["factor1"],
   "summary": "<one sentence>"
 }}"""
 
 
-# ── データクラス ────────────────────────────────────────────
+# ── データクラス ────────────────────────────────────────────────
 
 @dataclass
 class NewsSentiment:
@@ -68,63 +92,76 @@ class NewsSentiment:
     summary: str = ""
     sources: list[str] = field(default_factory=list)
     news_count: int = 0
+    fresh_count: int = 0
+    feeds_ok: int = 0
+    feeds_failed: int = 0
     fetched_at: datetime = field(default_factory=datetime.now)
 
 
-# ── ヘルパー ────────────────────────────────────────────────
+# ── ヘルパー ────────────────────────────────────────────────────
 
-def _neutral_sentiment(symbol: str, pair: str, reason: str = "") -> NewsSentiment:
+def _neutral_sentiment(category: str, reason: str = "") -> NewsSentiment:
     return NewsSentiment(
-        pair=symbol,
+        pair=category,
         sentiment_score=0.0,
         confidence=0.1,
-        summary=reason or f"News analysis unavailable for {pair}. Neutral stance assumed.",
+        summary=reason or f"News analysis unavailable for {category}. Neutral stance assumed.",
     )
 
 
-def _build_sentiment(symbol: str, pair: str, data: dict, sources: list[str], news_count: int = 0) -> NewsSentiment:
+def _build_sentiment(
+    category: str, data: dict,
+    sources: list[str], fetch_result: FetchResult,
+) -> NewsSentiment:
     sentiment = NewsSentiment(
-        pair=symbol,
+        pair=category,
         sentiment_score=max(-1.0, min(1.0, _to_float(data.get("sentiment_score"), 0.0))),
         confidence=max(0.0, min(1.0, _to_float(data.get("confidence"), 0.5))),
         key_themes=data.get("key_themes", []),
-        time_horizon=data.get("time_horizon", "medium"),
         bullish_factors=data.get("bullish_factors", []),
         bearish_factors=data.get("bearish_factors", []),
-        geopolitical_risks=data.get("geopolitical_risks", []),
-        japan_factors=data.get("japan_factors", []),
         summary=data.get("summary", ""),
         sources=sources,
-        news_count=news_count,
+        news_count=fetch_result.news_count,
+        fresh_count=fetch_result.fresh_count,
+        feeds_ok=fetch_result.feeds_ok,
+        feeds_failed=fetch_result.feeds_failed,
         fetched_at=datetime.now(),
     )
+    label = _CATEGORY_LABELS.get(category, category)
     logger.info(
-        f"[NEWS] {pair}: score={sentiment.sentiment_score:+.2f} "
+        f"[NEWS] {label}: score={sentiment.sentiment_score:+.2f} "
         f"conf={sentiment.confidence:.2f} | {sentiment.summary}"
     )
     return sentiment
 
 
-# ── 公開関数 ────────────────────────────────────────────────
+# ── 公開関数 ────────────────────────────────────────────────────
 
-async def analyze_news_sentiment(
-    pair_cfg,
+async def analyze_category_sentiment(
+    category: str,
+    fetch_result: FetchResult,
     llm: LLMClient,
     temperature: float = 0.3,
-    news_sources: NewsSourcesConfig | None = None,
 ) -> NewsSentiment:
-    """RSSニュースを取得し、LLMでセンチメント分析する。"""
-    pair = pair_cfg.display_name
-    base = pair_cfg.base_currency
-    quote = pair_cfg.quote_currency
+    """カテゴリのニュースをLLMでセンチメント分析する。"""
+    label = _CATEGORY_LABELS.get(category, category)
 
-    news_text, news_count = fetch_rss_news(base, quote, news_sources=news_sources)
-    if not news_text or news_text.startswith("No relevant news"):
-        logger.info(f"[NEWS] {pair}: No RSS news found. Returning neutral.")
-        return _neutral_sentiment(pair_cfg.symbol, pair, "No relevant news available.")
+    if not fetch_result.items:
+        logger.info(f"[NEWS] {label}: No items. Returning neutral.")
+        return _neutral_sentiment(category, "No relevant news available.")
 
-    user_prompt = RSS_PROMPT_TEMPLATE.format(
-        pair=pair, base=base, quote=quote, news_text=news_text,
+    # ソース一覧を生成
+    unique_sources = sorted(set(item.source for item in fetch_result.items))
+
+    news_text = fetch_result.format_for_llm()
+    user_prompt = CATEGORY_PROMPT_TEMPLATE.format(
+        category_label=label,
+        news_text=news_text,
+        news_count=fetch_result.news_count,
+        fresh_count=fetch_result.fresh_count,
+        sources_list=", ".join(unique_sources),
+        category_focus=_CATEGORY_FOCUS.get(category, ""),
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -132,13 +169,16 @@ async def analyze_news_sentiment(
     ]
 
     try:
-        logger.info(f"[NEWS] Calling LLM for {pair}...")
+        logger.info(f"[NEWS] Calling LLM for {label}...")
         response_text = await llm.chat(messages, temperature=temperature)
-        logger.debug(f"[NEWS] {pair}: LLM response length: {len(response_text)} chars")
+        logger.debug(f"[NEWS] {label}: LLM response length: {len(response_text)} chars")
 
         data = extract_json(response_text)
-        return _build_sentiment(pair_cfg.symbol, pair, data, sources=["RSS"], news_count=news_count)
+        return _build_sentiment(
+            category, data,
+            sources=unique_sources, fetch_result=fetch_result,
+        )
 
     except Exception as e:
-        logger.warning(f"[NEWS] {pair}: Analysis failed: {e}. Returning neutral sentiment.")
-        return _neutral_sentiment(pair_cfg.symbol, pair, f"Analysis failed: {e}")
+        logger.warning(f"[NEWS] {label}: Analysis failed: {e}. Returning neutral sentiment.")
+        return _neutral_sentiment(category, f"Analysis failed: {e}")

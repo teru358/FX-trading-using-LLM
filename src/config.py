@@ -25,6 +25,14 @@ class PairConfig:
     def currencies(self) -> tuple[str, str]:
         return (self.base_currency, self.quote_currency)
 
+    @property
+    def news_categories(self) -> list[str]:
+        """通貨ペアに関連するニュースカテゴリを返す。"""
+        cats = ["fx", "global"]
+        if "JPY" in (self.base_currency, self.quote_currency):
+            cats.append("japan")
+        return cats
+
 
 @dataclass
 class OllamaBaseConfig:
@@ -56,6 +64,7 @@ class NewsCollectionConfig:
     interval_minutes: int = 30
     timezone: str = "Asia/Tokyo"
     inter_pair_delay_seconds: int = 60
+    news_freshness_hours: float = 24.0   # この時間以上古い記事は除外
 
 
 @dataclass
@@ -252,7 +261,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
 
     s = raw.get("schedule", {})
     schedule = ScheduleConfig(
-        run_times=s.get("run_times", ["07:00", "20:00"]),
+        run_times=s.get("run_times", ["07:00", "20:30"]),
         timezone=s.get("timezone", "Asia/Tokyo"),
     )
 
@@ -270,6 +279,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         interval_minutes=nc.get("interval_minutes", 30),
         timezone=nc.get("timezone", "Asia/Tokyo"),
         inter_pair_delay_seconds=nc.get("inter_pair_delay_seconds", 60),
+        news_freshness_hours=nc.get("news_freshness_hours", 24.0),
     )
 
     _default_ns = NewsSourcesConfig()
