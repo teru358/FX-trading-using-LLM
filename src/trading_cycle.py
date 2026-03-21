@@ -30,6 +30,7 @@ from src.notifications.notifier import (
 from src.reporting.reporter import print_run_summary
 from src.signals.signal_combiner import combine_signals
 from src.trading.live_broker import create_broker
+from src.trading.market_hours import is_market_open, market_status_label
 from src.trading.position_manager import PositionManager
 
 logger = logging.getLogger(__name__)
@@ -181,10 +182,8 @@ async def trading_cycle(
         f"reflect={type(llm_reflect).__name__}({llm_reflect.model_name})"
     )
 
-    # 土日は市場が閉まっているためスキップ
-    if run_start.weekday() >= 5:  # 5=Saturday, 6=Sunday
-        day_name = "Saturday" if run_start.weekday() == 5 else "Sunday"
-        logger.info(f"Market closed ({day_name}). Skipping trading cycle.")
+    if not is_market_open(run_start):
+        logger.info(f"Market {market_status_label(run_start)}. Skipping trading cycle.")
         return
 
     # Phase 1: SL/TP確認・クローズ

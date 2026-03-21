@@ -16,6 +16,7 @@ from src.config import AppConfig
 from src.data.price_fetcher import fetch_current_price
 from src.notifications.notifier import OrderClosedEvent, PriceAlertEvent, create_notifier
 from src.persistence.state_store import StateStore
+from src.trading.market_hours import is_market_open
 from src.trading.position_manager import PositionManager
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,9 @@ async def monitor_open_positions(
     """オープンポジションを確認し、急変動があれば通知・緊急損切りを実行する。"""
     cfg = config.price_monitor
     if not cfg.enabled:
+        return
+
+    if not is_market_open():
         return
 
     account = position_mgr.get_account_state()
