@@ -39,7 +39,7 @@
 └──────────────────────────────────────────────────────────────┘
 
 ┌──────────────────────────────────────────────────────────────┐
-│  取引判定ループ（15:00 / 21:00 JST ※土日はスキップ）         │
+│  取引判定ループ（15:00 / 21:30 JST ※土日はスキップ）         │
 │                                                              │
 │  Phase 1: 既存ポジションの SL/TP 到達確認・クローズ          │
 │  Phase 2: オープンポジションの振り返り生成 → ChromaDB 蓄積   │
@@ -72,6 +72,7 @@ finance/
 │   ├── llm/
 │   │   ├── client.py               # LLMClient ABC（全プロバイダー共通インターフェース）
 │   │   ├── factory.py              # ロール別ファクトリ（news/price/reflection → 各クライアント）
+│   │   ├── response_parser.py      # LLMレスポンスJSON抽出（<think>タグ除去対応）
 │   │   ├── ollama_client.py        # Ollama HTTP クライアント
 │   │   ├── gemini_client.py        # Google Gemini API クライアント
 │   │   ├── openai_client.py        # OpenAI API クライアント
@@ -90,7 +91,8 @@ finance/
 │   │   └── indicator_formatter.py  # LLMプロンプト用フォーマッタ
 │   ├── jobs/
 │   │   ├── news_collector.py       # RSSニュース収集・センチメント分析・RAG格納
-│   │   └── technical_collector.py  # OHLCV取得・テクニカル分析・スナップショット保存
+│   │   ├── technical_collector.py  # OHLCV取得・テクニカル分析・スナップショット保存
+│   │   └── price_monitor.py        # オープンポジション価格監視・急変動通知・緊急損切り
 │   ├── signals/
 │   │   └── signal_combiner.py      # テクニカル×ニュース シグナル統合
 │   ├── trading/
@@ -98,6 +100,7 @@ finance/
 │   │   ├── paper_broker.py         # ペーパートレード実装
 │   │   ├── paper_trader.py         # 模擬注文・SL/TP判定
 │   │   ├── live_broker.py          # OANDA本取引（スタブ）+ ファクトリ
+│   │   ├── market_hours.py         # FX市場開閉判定（NY時間基準・DST自動対応）
 │   │   └── position_manager.py     # ポジション・残高・PnL管理
 │   ├── rag/
 │   │   ├── vector_store.py         # ChromaDB ラッパー（ニュース・振り返り）
@@ -180,23 +183,39 @@ llm:
     max_retries: 2
     max_concurrent: 2              # 同時分析数上限（VRAM保護）
 
+  # 各ロールに provider と model を個別指定可能
+  news_analysis:
+    provider: "ollama"
+    temperature: 0.3
+    model: "phi4:14b"              # ロール別にモデルを指定
+  price_analysis:
+    provider: "ollama"
+    temperature: 0.1
+    model: "mistral-nemo:12b"
+  reflection:
+    provider: "ollama"
+    temperature: 0.3
+    model: "deepseek-r1:14b"
+```
+
+デフォルト構成ではすべて `provider: "ollama"`（完全ローカル動作・APIキー不要）。
+
+`model:` を省略すると各プロバイダーのデフォルトモデルが使用されます。Ollama の場合は `llama3.1:8b`（`src/config.py` の `_DEFAULT_OLLAMA_MODEL` で定義）。
+
+プロバイダーをロールごとに混在させることも可能です:
+
+```yaml
   news_analysis:
     provider: "gemini"             # ニュース分析は Gemini
     temperature: 0.3
-    # model: ""                    # 省略時 = gemini セクションのデフォルトモデル
   price_analysis:
-    provider: "ollama"             # 価格分析はローカル Ollama
+    provider: "ollama"             # 価格分析はローカル
     temperature: 0.1
-    model: "qwen2.5:7b"            # デフォルト（llama3.1:8b）以外のモデルを指定する場合
+    model: "mistral-nemo:12b"
   reflection:
     provider: "claude"             # 振り返りは Claude
     temperature: 0.3
-    # model: ""                    # 省略時 = claude セクションのデフォルトモデル
 ```
-
-すべて `provider: "ollama"` にすれば完全ローカル動作（APIキー不要）。
-
-`model:` を省略すると各プロバイダーのデフォルトモデルが使用されます。Ollama の場合は `llama3.1:8b`（`src/config.py` の `_DEFAULT_OLLAMA_MODEL` で定義）。
 
 ### プロバイダー別の詳細設定
 
@@ -271,7 +290,7 @@ news_collection:
 schedule:
   run_times:
     - "15:00"
-    - "21:00"
+    - "21:30"
   timezone: "Asia/Tokyo"
 ```
 
