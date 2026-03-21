@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import logging.handlers
+import re
 from pathlib import Path
 
 
@@ -17,20 +18,43 @@ _PREFIX_STYLES: dict[str, str] = {
     "[AGGREGATE]": "dim cyan",
 }
 
+_MODEL_RE = re.compile(r"(\w+Client\()([^)]+)(\))")
+
 
 class _PrefixRichHandler:
-    """RichHandler に差し込む Mixin — プレフィックスを着色する。"""
+    """RichHandler に差し込む Mixin — プレフィックス着色 + モデル名着色。"""
 
     def render_message(self, record: logging.LogRecord, message: str):  # type: ignore[override]
         from rich.text import Text
 
+        prefix_match = None
         for prefix, style in _PREFIX_STYLES.items():
             if message.startswith(prefix):
-                text = Text()
-                text.append(prefix, style=style)
-                text.append(message[len(prefix):])
-                return text
-        return super().render_message(record, message)  # type: ignore[misc]
+                prefix_match = (prefix, style)
+                break
+
+        has_model = _MODEL_RE.search(message)
+        if not prefix_match and not has_model:
+            return super().render_message(record, message)  # type: ignore[misc]
+
+        text = Text()
+        rest = message
+
+        if prefix_match:
+            pfx, style = prefix_match
+            text.append(pfx, style=style)
+            rest = message[len(pfx):]
+
+        last = 0
+        for m in _MODEL_RE.finditer(rest):
+            text.append(rest[last : m.start()])
+            text.append(m.group(1))                       # "OllamaClient("
+            text.append(m.group(2), style="green")        # "phi4:14b"
+            text.append(m.group(3))                       # ")"
+            last = m.end()
+        text.append(rest[last:])
+
+        return text
 
 
 class _ActivityLogFilter(logging.Filter):

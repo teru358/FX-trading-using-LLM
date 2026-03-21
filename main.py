@@ -150,6 +150,7 @@ _HELP = """\
   [cyan]run trade[/cyan]           — 取引サイクルを今すぐ実行
   [cyan]run mon[/cyan]             — 価格監視を今すぐ実行
   [cyan]close <pair>[/cyan]        — ポジションを手動決済  例: close USDJPY=X
+  [cyan]edit[/cyan]   (e)          — user_notes.md を vim で編集
   [cyan]help[/cyan]   (h)          — このヘルプを表示
   [cyan]quit[/cyan]   (q)          — 終了"""
 
@@ -202,6 +203,12 @@ def _run_commands(config, store, price_store, analysis_store) -> None:
                         _console.print(
                             f"[red]不明: {sub!r}[/red]  使い方: run news | tech | trade | mon"
                         )
+            elif cmd in ("e", "edit"):
+                import subprocess
+                notes = config.user_notes_path
+                _console.print(f"[cyan]vim で {notes.name} を開きます...[/cyan]")
+                subprocess.call(["vim", str(notes)])
+                _console.print("[green]編集完了[/green]")
             elif cmd == "close":
                 if not args:
                     _console.print("[red]使い方: close <pair>  例: close USDJPY=X[/red]")
