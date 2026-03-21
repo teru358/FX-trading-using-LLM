@@ -62,10 +62,19 @@ async def collect_category(
         freshness_hours=config.news_collection.news_freshness_hours,
     )
 
+    # 前回のタイトルハッシュと比較して new/known を算出
+    _, last_fingerprint, prev_hashes = store.get_last_analysis_state(category)
+    current_hashes = fetch_result.title_hashes
+    current_fingerprint = fetch_result.articles_fingerprint
+    new_count = len(current_hashes - prev_hashes) if prev_hashes else len(current_hashes)
+    known_count = len(current_hashes & prev_hashes) if prev_hashes else 0
+
     if fetch_result.items:
+        undated_count = fetch_result.news_count - fetch_result.recent_count
+        undated_part = f" undated={undated_count}" if undated_count > 0 else ""
         logger.info(
             f"[NEWS] {label}: fetched {fetch_result.news_count} items "
-            f"(fresh={fetch_result.fresh_count} stale={fetch_result.stale_count}) "
+            f"(new={new_count} known={known_count} recent={fetch_result.recent_count}{undated_part}) "
             f"from {fetch_result.feeds_ok}/{fetch_result.total_feeds} feeds\n"
             + fetch_result.format_titles_log()
         )
@@ -75,10 +84,8 @@ async def collect_category(
             f"(feeds OK={fetch_result.feeds_ok} failed={fetch_result.feeds_failed})"
         )
 
-    # 前回分析以降に新規記事がなければスキップ
-    last_ts = store.get_last_collected_ts(category)
-    newest_ts = fetch_result.newest_published_ts
-    if last_ts is not None and newest_ts is not None and newest_ts <= last_ts:
+    # 前回分析時と記事セットが同じであればスキップ
+    if last_fingerprint is not None and current_fingerprint == last_fingerprint:
         logger.info(f"[NEWS] {label}: no new articles since last analysis, skipping LLM")
         return
 
@@ -90,9 +97,11 @@ async def collect_category(
         temperature=config.llm.news_analysis.temperature,
     )
 
+    collect_undated = news.news_count - news.recent_count
+    collect_undated_part = f"+{collect_undated}?" if collect_undated > 0 else ""
     logger.info(
         f"[COLLECT] {label}: news done | "
-        f"items={news.news_count} (fresh={news.fresh_count}) "
+        f"items={news.news_count} (recent={news.recent_count}{collect_undated_part}) "
         f"feeds={news.feeds_ok}/{news.feeds_ok + news.feeds_failed} "
         f"score={news.sentiment_score:+.2f} conf={news.confidence:.2f} | {news.summary}"
     )
@@ -116,6 +125,9 @@ async def collect_category(
         summary=news.summary,
         news_count=news.news_count,
         collected_at=datetime.now(),
+        newest_article_ts=fetch_result.newest_published_ts,
+        articles_fingerprint=fetch_result.articles_fingerprint,
+        article_title_hashes=fetch_result.title_hashes_csv,
     )
     logger.debug(f"[COLLECT] {label}: stored to RAG | id={entry_id}")
 

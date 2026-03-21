@@ -49,6 +49,9 @@ class VectorStore:
         summary: str,
         news_count: int,
         collected_at: datetime,
+        newest_article_ts: float | None = None,
+        articles_fingerprint: str = "",
+        article_title_hashes: str = "",
     ) -> None:
         """カテゴリ別ニュース分析結果を格納する。"""
         self._news.upsert(
@@ -64,21 +67,41 @@ class VectorStore:
                 "news_count": news_count,
                 "collected_at": collected_at.isoformat(),
                 "collected_ts": collected_at.timestamp(),
+                "newest_article_ts": newest_article_ts if newest_article_ts is not None else -1.0,
+                "articles_fingerprint": articles_fingerprint,
+                "article_title_hashes": article_title_hashes,
             }],
         )
         logger.debug(f"Upserted category news {entry_id} ({category})")
 
-    def get_last_collected_ts(self, category: str) -> float | None:
-        """カテゴリの最終収集タイムスタンプを返す。"""
+    def get_last_newest_article_ts(self, category: str) -> float | None:
+        """前回収集時の最新記事タイムスタンプを返す（日時不明記事のみだった場合は None）。"""
+        ts, _, _ = self.get_last_analysis_state(category)
+        return ts
+
+    def get_last_analysis_state(self, category: str) -> tuple[float | None, str | None, frozenset[str]]:
+        """前回収集時の (newest_article_ts, articles_fingerprint, title_hashes) を返す。"""
         try:
             results = self._news.get(
                 where={"category": {"$eq": category}},
                 include=["metadatas"],
             )
         except Exception:
-            return None
-        timestamps = [m.get("collected_ts", 0) for m in results.get("metadatas", [])]
-        return max(timestamps) if timestamps else None
+            return None, None, frozenset()
+        entries = sorted(
+            results.get("metadatas", []),
+            key=lambda m: m.get("collected_ts", 0),
+            reverse=True,
+        )
+        if not entries:
+            return None, None, frozenset()
+        latest = entries[0]
+        val = latest.get("newest_article_ts", -1.0)
+        ts = val if val > 0 else None
+        fingerprint = latest.get("articles_fingerprint") or None
+        hashes_csv = latest.get("article_title_hashes", "")
+        title_hashes = frozenset(hashes_csv.split(",")) if hashes_csv else frozenset()
+        return ts, fingerprint, title_hashes
 
     def get_recent_category_news(
         self,

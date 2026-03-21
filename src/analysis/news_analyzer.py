@@ -57,7 +57,7 @@ CATEGORY_PROMPT_TEMPLATE = """Below are recent news headlines from {category_lab
 Each item shows [age] [source] title: summary.
 Sources: {sources_list}
 
-=== Recent {category_label} News ({news_count} items, {fresh_count} with timestamp) ===
+=== Recent {category_label} News ({news_count} items, {recent_count} with timestamp) ===
 {news_text}
 
 === Task ===
@@ -92,7 +92,7 @@ class NewsSentiment:
     summary: str = ""
     sources: list[str] = field(default_factory=list)
     news_count: int = 0
-    fresh_count: int = 0
+    recent_count: int = 0
     feeds_ok: int = 0
     feeds_failed: int = 0
     fetched_at: datetime = field(default_factory=datetime.now)
@@ -123,7 +123,7 @@ def _build_sentiment(
         summary=data.get("summary", ""),
         sources=sources,
         news_count=fetch_result.news_count,
-        fresh_count=fetch_result.fresh_count,
+        recent_count=fetch_result.recent_count,
         feeds_ok=fetch_result.feeds_ok,
         feeds_failed=fetch_result.feeds_failed,
         fetched_at=datetime.now(),
@@ -159,7 +159,7 @@ async def analyze_category_sentiment(
         category_label=label,
         news_text=news_text,
         news_count=fetch_result.news_count,
-        fresh_count=fetch_result.fresh_count,
+        recent_count=fetch_result.recent_count,
         sources_list=", ".join(unique_sources),
         category_focus=_CATEGORY_FOCUS.get(category, ""),
     )

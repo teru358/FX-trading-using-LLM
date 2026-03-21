@@ -76,9 +76,10 @@ async def collect_all_technical(
     store: VectorStore,
     price_store: PriceStore,
     analysis_store: AnalysisStore,
+    force: bool = False,
 ) -> None:
     """全有効ペアのテクニカル分析を収集してストアに格納する。"""
-    if not is_market_open():
+    if not force and not is_market_open():
         logger.info(f"Market {market_status_label()}. Skipping technical collection.")
         return
 
@@ -106,6 +107,7 @@ def run_technical_collection(
     store: VectorStore,
     price_store: PriceStore,
     analysis_store: AnalysisStore,
+    force: bool = False,
 ) -> None:
     """schedule ライブラリから呼び出す同期ラッパー。"""
-    asyncio.run(collect_all_technical(config, store, price_store, analysis_store))
+    asyncio.run(collect_all_technical(config, store, price_store, analysis_store, force=force))

@@ -24,3 +24,4 @@ logs/
 *.bak
 *.tmp
 
+clear_data.py

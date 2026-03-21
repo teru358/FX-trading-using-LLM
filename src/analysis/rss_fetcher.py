@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -73,8 +74,7 @@ class FetchResult:
     total_feeds: int = 0
     feeds_ok: int = 0
     feeds_failed: int = 0
-    fresh_count: int = 0    # freshness_hours 以内の件数
-    stale_count: int = 0    # freshness_hours より古い（日時不明含む）
+    recent_count: int = 0   # 発行日時が freshness_hours 以内の件数
 
     @property
     def news_count(self) -> int:
@@ -85,6 +85,25 @@ class FetchResult:
         """最新記事のUNIXタイムスタンプ（日時不明記事のみの場合は None）。"""
         timestamps = [item.published.timestamp() for item in self.items if item.published]
         return max(timestamps) if timestamps else None
+
+    @property
+    def articles_fingerprint(self) -> str:
+        """記事タイトルセットのMD5ハッシュ（日時不明記事を含む新着検出用）。"""
+        titles = sorted(item.title for item in self.items)
+        return hashlib.md5("\n".join(titles).encode()).hexdigest()[:8]
+
+    @property
+    def title_hashes(self) -> frozenset[str]:
+        """各記事タイトルの短縮ハッシュセット（新規/既知判定用）。"""
+        return frozenset(
+            hashlib.md5(item.title.encode()).hexdigest()[:8]
+            for item in self.items
+        )
+
+    @property
+    def title_hashes_csv(self) -> str:
+        """タイトルハッシュのカンマ区切り文字列（メタデータ保存用）。"""
+        return ",".join(sorted(self.title_hashes))
 
     def format_for_llm(self) -> str:
         """LLMプロンプト用にフォーマットする（日時情報付き）。"""
@@ -218,9 +237,7 @@ def _fetch_from_feeds(
 
     for item in result.items:
         if item.age_hours is not None:
-            result.fresh_count += 1
-        else:
-            result.stale_count += 1
+            result.recent_count += 1
 
     return result
 

@@ -224,6 +224,8 @@ def main() -> None:
     if not startup_checks(config):
         sys.exit(1)
 
+    is_fresh_start = not config.prices_db_path.exists()
+
     store = VectorStore(config.rag_db_path)
     price_store = PriceStore(config.prices_db_path)
     analysis_store = AnalysisStore(config.prices_db_path)
@@ -296,10 +298,11 @@ def main() -> None:
         )
 
     # 起動直後にニュース収集+テクニカル分析を1回実行
+    # prices.db が存在しない場合（初回起動）は市場時間を無視して強制実行
     _console.print(Rule("[dim]Initial collection[/dim]", style="dim"))
     with _job_lock:
         run_news_collection(config, store)
-        run_technical_collection(config, store, price_store, analysis_store)
+        run_technical_collection(config, store, price_store, analysis_store, force=is_fresh_start)
 
     # スケジューラをバックグラウンドスレッドで起動
     scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True, name="scheduler")
