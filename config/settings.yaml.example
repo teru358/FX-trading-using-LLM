@@ -1,0 +1,166 @@
+# ============================================================
+# LLM設定 — ニュース分析 / 価格分析 / 振り返り生成を個別に設定
+#
+# provider:
+#   "ollama"  — ローカル Ollama（デフォルト、API KEY不要）
+#   "gemini"  — Google Gemini API  （GEMINI_API_KEY 必須）
+#   "openai"  — OpenAI API         （OPENAI_API_KEY 必須）
+#   "claude"  — Anthropic Claude   （ANTHROPIC_API_KEY 必須）
+#
+# model: 空文字 "" = 各プロバイダーセクションのデフォルトモデルを使用
+#        明示的に指定する場合は例: model: "gemini-2.5-pro-preview"
+# ============================================================
+llm:
+  # Ollama 接続設定（model 指定は各ロールで行う）
+  ollama:
+    base_url: "http://localhost:11434"
+    timeout_seconds: 120
+    max_retries: 2
+    max_concurrent: 2              # 同時分析数上限（VRAM保護）
+
+  # model 未指定時は config.py の _DEFAULT_OLLAMA_MODEL（llama3.1:8b）を使用
+  news_analysis:
+    provider: "ollama"
+    temperature: 0.3
+    model: ""
+  price_analysis:
+    provider: "ollama"
+    temperature: 0.1
+    model: ""
+  reflection:
+    provider: "ollama"
+    temperature: 0.3
+    model: ""
+
+# Gemini API 設定（provider: "gemini" のときに参照）
+gemini:
+  model: "gemini-2.0-flash"        # gemini-2.5-pro-preview / gemini-1.5-flash なども可
+  timeout_seconds: 60
+  max_retries: 2
+
+# OpenAI API 設定（provider: "openai" のときに参照）
+openai:
+  model: "gpt-4o-mini"             # gpt-4o / o3-mini なども可
+  timeout_seconds: 60
+  max_retries: 2
+
+# Anthropic Claude 設定（provider: "claude" のときに参照）
+claude:
+  model: "claude-haiku-4-5-20251001"  # claude-sonnet-4-6 / claude-opus-4-6 なども可
+  timeout_seconds: 60
+  max_retries: 2
+  max_tokens: 4096
+
+trading:
+  initial_balance: 10000.0
+  risk_per_trade: 0.02
+  signal_confidence_threshold: 0.55
+  max_concurrent_positions: 3
+  lookback_days: 90
+  ohlcv_interval: "1h"             # yfinance の足種（1h足で毎時:00のテクニカル分析に対応）
+  news_weight: 0.40
+  price_weight: 0.60
+  signal_deadband: 0.15            # BUY/SELL判定のスコア閾値（±）
+  min_lot_size: 1000.0             # 最小ロットサイズ
+  lot_unit: 1000.0                 # ロット切り捨て単位
+  trading_mode: "paper"            # "paper"（シミュレーション）| "live"（本取引: OANDA API必須）
+
+pairs:
+  - symbol: "USDJPY=X"
+    display_name: "USD/JPY"
+    pip_value: 0.01
+    base_currency: "USD"
+    quote_currency: "JPY"
+    enabled: true
+  - symbol: "EURUSD=X"
+    display_name: "EUR/USD"
+    pip_value: 0.0001
+    base_currency: "EUR"
+    quote_currency: "USD"
+    enabled: true
+  - symbol: "GBPUSD=X"
+    display_name: "GBP/USD"
+    pip_value: 0.0001
+    base_currency: "GBP"
+    quote_currency: "USD"
+    enabled: false
+
+news_collection:
+  interval_minutes: 15             # この間隔でtimezoneに揃えた時刻を自動生成
+  timezone: "Asia/Tokyo"
+  inter_pair_delay_seconds: 10     # ペア間の待機（Ollama VRAM保護）
+
+news_sources:
+  feeds_fx:
+    - "https://feeds.feedburner.com/forexlive/all"
+    - "https://www.fxstreet.com/rss/news"
+    - "https://www.investing.com/rss/news_285.rss"
+  feeds_global:
+    - "https://feeds.reuters.com/reuters/businessNews"
+    - "https://feeds.bbci.co.uk/news/business/rss.xml"
+    - "https://feeds.apnews.com/rss/business"
+    - "https://www.ft.com/rss/home/uk"
+    - "https://finance.yahoo.com/news/rssindex"
+    - "https://www.investing.com/rss/news_14.rss"
+  feeds_japan:
+    - "https://www3.nhk.or.jp/nhkworld/en/news/rss.xml"
+    - "https://japantoday.com/feed"
+    - "https://www.japantimes.co.jp/feed/"
+    - "https://asia.nikkei.com/rss/feed/nar"
+    - "https://www.nikkei.com/news/category/?rss=true&bn=20"
+  jpy_keywords:
+    # 英語
+    - "boj"
+    - "bank of japan"
+    - "nippon ginko"
+    - "japan"
+    - "japanese"
+    - "yen"
+    - "jpy"
+    - "ueda"
+    # 日本語
+    - "日銀"
+    - "円安"
+    - "円高"
+    - "金利"
+    - "為替"
+    - "利上げ"
+    - "利下げ"
+    - "植田"
+    - "円"
+
+rag:
+  db_path: "data/rag"
+  embedding_model: "nomic-embed-text"
+  news_lookback_hours: 24
+  retrieval_top_k: 5
+  reflection_lookback_count: 3
+  analysis_lookback_hours: 8       # 取引判定時に集約するテクニカル分析の時間幅（最大32スナップショット）
+
+schedule:
+  run_times:
+    - "15:00"
+    - "21:00"
+  timezone: "Asia/Tokyo"
+
+notification:
+  notifier: "none"                 # "telegram" | "discord" | "none"
+  notify_on_order_open: true       # 注文発注時に通知
+  notify_on_order_close: true      # 決済時に通知（SL/TP到達・緊急損切り含む）
+  notify_on_signal_skipped: false  # シグナルが出たが既存ポジションでスキップされた場合
+  notify_on_price_alert: true      # 価格急変動（損失方向）を検知した場合
+
+price_monitor:
+  enabled: true
+  interval_minutes: 5              # 監視間隔（分）
+  alert_threshold_pct: 0.003       # 損失 0.3% で最初の通知
+  alert_step_pct: 0.002            # 追加 0.2% ごとに再通知（スパム防止）
+  emergency_close_pct: 0.008       # 損失 0.8% で緊急損切り（0 = 無効）
+  enable_emergency_close: false    # 緊急損切りを有効にするか（false = 通知のみ）
+
+logging:
+  level: "INFO"
+  file: "logs/finance.log"
+  activity_log_file: "logs/activity.log"  # [COLLECT][NEWS][SIGNAL][CLOSE][TRADE][ORDER][REFLECT] 専用
+  max_bytes: 10485760
+  backup_count: 5

@@ -1,0 +1,26 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Secrets
+CLAUDE.md
+.env
+config/settings.yaml
+
+# State and logs
+data/state/
+data/rag/
+prices.db
+logs/
+
+# Backups
+*.bak
+*.tmp
+
