@@ -11,6 +11,19 @@ BASE_DIR = Path(__file__).parent.parent
 # Ollama のデフォルトモデル（llm.<role>.model が空の場合に使用）
 _DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
 
+_SIZE_UNITS = {"b": 1, "kb": 1024, "mb": 1024**2, "gb": 1024**3}
+
+
+def _parse_bytes(value: int | str) -> int:
+    """'10MB' / '512kb' などの文字列、または整数をバイト数に変換する。"""
+    if isinstance(value, int):
+        return value
+    s = str(value).strip()
+    for suffix, mult in sorted(_SIZE_UNITS.items(), key=lambda x: -len(x[0])):
+        if s.lower().endswith(suffix):
+            return int(float(s[: -len(suffix)]) * mult)
+    return int(s)
+
 
 @dataclass
 class PairConfig:
@@ -279,7 +292,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         level=lg.get("level", "INFO"),
         file=lg.get("file", "logs/finance.log"),
         activity_log_file=lg.get("activity_log_file", "logs/activity.log"),
-        max_bytes=lg.get("max_bytes", 10_485_760),
+        max_bytes=_parse_bytes(lg.get("max_bytes", "10MB")),
         backup_count=lg.get("backup_count", 5),
     )
 

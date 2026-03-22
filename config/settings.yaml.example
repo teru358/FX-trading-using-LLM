@@ -163,5 +163,5 @@ logging:
   level: "INFO"
   file: "logs/finance.log"
   activity_log_file: "logs/activity.log"  # [COLLECT][NEWS][SIGNAL][CLOSE][TRADE][ORDER][REFLECT] 専用
-  max_bytes: 10485760
+  max_bytes: 10MB
   backup_count: 5
