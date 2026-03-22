@@ -315,6 +315,15 @@ def main() -> None:
     scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True, name="scheduler")
     scheduler_thread.start()
 
+    # REST API サーバー（有効時のみ）
+    if config.api.enabled:
+        from src.api.server import start_api_server
+        start_api_server(config, store, _job_lock)
+        _console.print(
+            f"[dim green]REST API running on "
+            f"{config.api.host}:{config.api.port}[/dim green]"
+        )
+
     _console.print(Rule("[dim cyan]Scheduler running[/dim cyan]", style="dim cyan"))
 
     # メインスレッド: コマンドループ

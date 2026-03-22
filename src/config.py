@@ -177,6 +177,14 @@ class LLMConfig:
 
 
 @dataclass
+class ApiConfig:
+    """REST API サーバー設定。"""
+    enabled: bool = False
+    host: str = "0.0.0.0"
+    port: int = 8811
+
+
+@dataclass
 class LoggingConfig:
     level: str = "INFO"
     file: str = "logs/finance.log"
@@ -196,6 +204,7 @@ class AppConfig:
     rag: RagConfig
     notifier: NotifierConfig
     price_monitor: PriceMonitorConfig = field(default_factory=PriceMonitorConfig)
+    api: ApiConfig = field(default_factory=ApiConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
     openai: OpenAIConfig = field(default_factory=OpenAIConfig)
@@ -316,6 +325,13 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         notify_on_price_alert=n.get("notify_on_price_alert", True),
     )
 
+    api_raw = raw.get("api", {})
+    api_cfg = ApiConfig(
+        enabled=api_raw.get("enabled", False),
+        host=api_raw.get("host", "0.0.0.0"),
+        port=api_raw.get("port", 8811),
+    )
+
     pm = raw.get("price_monitor", {})
     price_monitor = PriceMonitorConfig(
         enabled=pm.get("enabled", True),
@@ -382,6 +398,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         rag=rag,
         notifier=notifier,
         price_monitor=price_monitor,
+        api=api_cfg,
         llm=llm_cfg,
         gemini=gemini,
         openai=openai_cfg,

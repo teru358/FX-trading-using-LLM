@@ -26,19 +26,35 @@
 
 ### 情報収集ループ（15分間隔・タイムゾーン基準の固定時刻）
 
-1. RSS フィード取得（FX専門・世界情勢・日本情勢）
-   - LLM でセンチメント分析
+1. RSS フィード取得 → LLM センチメント分析 → ChromaDB 蓄積
+   - カテゴリ別に独立して実行: **FX専門**（fx） / **世界情勢**（global） / **日本情勢**（japan）
+   - 取得制限: 1フィードあたり最大5件、カテゴリ合計最大30件
+   - 取得テキスト: タイトル + サマリー先頭300文字（全文不要）
+   - MD5フィンガープリントで前回と記事セットを比較 → 変化なければLLM呼び出しをスキップ
+   - **バッチ分析**: カテゴリ内の全記事を1回のLLM呼び出しで一括分析（記事ごとの個別呼び出しではない）
+   - LLM出力: `sentiment_score`(-1.0〜+1.0) / `confidence` / `key_themes` / `bullish_factors` / `bearish_factors` / `summary`
    - nomic-embed-text でベクトル化 → ChromaDB に蓄積
 2. yfinance で OHLCV 取得 → SQLite にキャッシュ（差分取得）
-3. テクニカル指標計算（SMA/EMA/RSI/MACD/BB/ATR/ADX/一目均衡表）
-4. LLM でテクニカル分析
-   - SQLite にスナップショットとして蓄積（48時間で自動削除）
+   - 期間: `lookback_days`（デフォルト90日）、足種: `ohlcv_interval`（デフォルト1h）
+   - SQLiteキャッシュの末尾から差分追記するため毎回全量取得しない
+3. テクニカル指標計算（pandas-ta + 一目均衡表 手計算）
+   - pandas-ta: SMA(20/50/200), EMA(12/26), RSI(14), MACD(12-26-9), Bollinger Bands(20,2σ), ATR(14), ADX(14)
+   - 一目均衡表は手計算: 転換線(9)・基準線(26)・先行スパンA/B・遅行スパン
+   - 一目総合判定: 4条件（雲の上下・TKクロス・雲の色・遅行線位置）の合致数で5段階評価
+   - トレンド方向: SMA整列（`価格 > SMA20 > SMA50` → uptrend 等）
+   - スウィング高値/安値: 直近30本から局所高値・安値を検出
+4. LLM でテクニカル分析 → スナップショット保存（SQLite・48時間で自動削除）
+   - プロンプト入力: 直近20本のOHLCV + 全指標 + 一目均衡表 + ニュースセンチメント(RAG) + 振り返り教訓(RAG) + user_notes.md
+   - LLM出力: `direction_bias`(long/short/neutral) / `bias_score`(-1.0〜+1.0) / `confidence` / `entry_zone` / `stop_loss` / `take_profit` / `risk_reward_ratio` / `reasoning_summary`
+   - `temperature: 0.1`（低め）で一貫性重視、`extract_json()` で `<think>` タグ除去後にJSON抽出
 
 ### 取引判定ループ（15:00 / 21:30 JST / 土日スキップ）
 
 1. **Phase 1**: 既存ポジションの SL/TP 到達確認・クローズ
 2. **Phase 2**: オープンポジションの振り返り生成 → ChromaDB 蓄積
 3. **Phase 3**: テクニカルスナップショットを時間加重集約（直近8h）
+   - 重み: `1/(1+経過時間[h])` — 直近ほど重く評価（1h前→0.50、3h前→0.25）
+   - `bias_score` / `confidence` を加重平均、SL/TP/エントリーゾーンは最新スナップショットの値を使用
    - スナップショット未蓄積時は LLM 即時分析にフォールバック
 4. **Phase 4**: RAG からニュースセンチメントを集約
    - シグナル統合（テクニカル60% + ニュース40%）
@@ -99,6 +115,8 @@ finance/
 │   │   ├── vector_store.py         # ChromaDB ラッパー（ニュース・振り返り）
 │   │   ├── embedder.py             # nomic-embed-text ベクトル化
 │   │   └── prompt_formatter.py     # RAGデータのプロンプト整形
+│   ├── api/
+│   │   └── server.py               # REST API サーバー（FastAPI + uvicorn）
 │   ├── notifications/
 │   │   ├── notifier.py             # 通知アダプター（Discord/Telegram/None）
 │   │   ├── discord_notifier.py     # Discord Webhook
@@ -136,9 +154,9 @@ ollama pull nomic-embed-text
 # 依存パッケージのインストール
 uv sync
 
-# オンラインLLMを使う場合は .env を作成
+# オンラインLLMを使う場合や REST API を有効化する場合は .env を作成
 cp .env.example .env
-# .env に GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY を設定
+# .env に GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / API_SECRET_KEY を設定
 ```
 
 ### 実行
@@ -309,6 +327,68 @@ notification:
   notify_on_order_open: true
   notify_on_order_close: true
   notify_on_signal_skipped: false
+```
+
+### REST API
+
+```yaml
+api:
+  enabled: false              # true で REST API サーバーを起動
+  host: "0.0.0.0"             # リッスンアドレス
+  port: 8811                  # リッスンポート
+  # 認証: .env の API_SECRET_KEY を設定（X-API-Key ヘッダーで送信）
+```
+
+---
+
+## REST API
+
+`api.enabled: true` を設定すると FastAPI + uvicorn によるREST APIサーバーが起動します。
+外部ツール・スクリプトからシステム状態の確認や緊急操作が可能になります。
+Discord/Telegram通知（プッシュ型・イベント駆動）とは独立した、プル型の操作インターフェースです。
+
+### セットアップ
+
+```bash
+# .env に認証キーを設定
+echo "API_SECRET_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32))")" >> .env
+```
+
+```yaml
+# config/settings.yaml
+api:
+  enabled: true
+  port: 8811
+```
+
+すべてのリクエストで `X-API-Key` ヘッダーが必要です。
+
+### エンドポイント
+
+| メソッド | パス | 内容 |
+|---|---|---|
+| `GET` | `/health` | 起動確認・スケジューラ状態（ジョブ数・次回実行時刻） |
+| `GET` | `/status` | 残高・PnL・勝率・オープンポジション（含み損益付き） |
+| `GET` | `/news/latest` | カテゴリ別（fx/global/japan）の最新ニュースセンチメント |
+| `POST` | `/close/{pair}` | ポジションを即時決済 |
+
+### 利用例
+
+```bash
+KEY="your_api_secret_key"
+HOST="http://localhost:8811"
+
+# 死活確認
+curl -H "X-API-Key: $KEY" $HOST/health
+
+# ポジション・残高確認
+curl -H "X-API-Key: $KEY" $HOST/status
+
+# ニュースセンチメント確認
+curl -H "X-API-Key: $KEY" $HOST/news/latest
+
+# 緊急決済（USDJPY=X をクローズ）
+curl -X POST -H "X-API-Key: $KEY" "$HOST/close/USDJPY%3DX"
 ```
 
 ---
