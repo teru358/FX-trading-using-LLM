@@ -304,6 +304,11 @@ def main() -> None:
             run_price_monitor, config
         )
 
+    # REST API サーバー（有効時のみ — Initial collection 前に起動）
+    if config.api.enabled:
+        from src.api.server import start_api_server
+        start_api_server(config, store, _job_lock)
+
     # 起動直後にニュース収集+テクニカル分析を1回実行
     # prices.db が存在しない場合（初回起動）は市場時間を無視して強制実行
     _console.print(Rule("[dim]Initial collection[/dim]", style="dim"))
@@ -314,15 +319,6 @@ def main() -> None:
     # スケジューラをバックグラウンドスレッドで起動
     scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True, name="scheduler")
     scheduler_thread.start()
-
-    # REST API サーバー（有効時のみ）
-    if config.api.enabled:
-        from src.api.server import start_api_server
-        start_api_server(config, store, _job_lock)
-        _console.print(
-            f"[dim green]REST API running on "
-            f"{config.api.host}:{config.api.port}[/dim green]"
-        )
 
     _console.print(Rule("[dim cyan]Scheduler running[/dim cyan]", style="dim cyan"))
 

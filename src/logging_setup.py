@@ -60,11 +60,22 @@ class _PrefixRichHandler:
 class _ActivityLogFilter(logging.Filter):
     """構造化ログプレフィックスのみを通すフィルタ。"""
 
-    _PREFIXES = ("[COLLECT]", "[AGGREGATE]", "[SIGNAL]", "[CLOSE]", "[TRADE]", "[ORDER]", "[REFLECT]")
+    _PREFIXES = ("[COLLECT]", "[AGGREGATE]", "[SIGNAL]", "[CLOSE]", "[TRADE]", "[ORDER]", "[REFLECT]", "[API]")
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
         return any(msg.startswith(p) for p in self._PREFIXES)
+
+
+class _ApiAccessPrefixFilter(logging.Filter):
+    """uvicorn.access のログメッセージに [API] プレフィックスを付与する。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if not msg.startswith("[API]"):
+            record.msg = "[API] " + msg
+            record.args = ()
+        return True
 
 
 def setup_logging(cfg, base_dir: Path) -> None:
@@ -103,6 +114,9 @@ def setup_logging(cfg, base_dir: Path) -> None:
     af.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
     af.addFilter(_ActivityLogFilter())
     root.addHandler(af)
+
+    # uvicorn アクセスログに [API] プレフィックスを付与 → activity.log に流す
+    logging.getLogger("uvicorn.access").addFilter(_ApiAccessPrefixFilter())
 
     # ターミナル（RichHandler — プレフィックス着色付き）
     _ColorRichHandler = type("_ColorRichHandler", (_PrefixRichHandler, RichHandler), {})

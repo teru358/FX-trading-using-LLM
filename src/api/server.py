@@ -206,6 +206,20 @@ def close_position(pair: str) -> dict[str, Any]:
 
 # ── サーバー起動 ─────────────────────────────────────────────────
 
+# uvicorn のログ設定:
+#   uvicorn / uvicorn.error は WARNING のみ（起動ノイズを抑制）
+#   uvicorn.access は INFO + propagate=True → 既存の finance.log に流す
+_UVICORN_LOG_CONFIG: dict = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "loggers": {
+        "uvicorn":        {"level": "WARNING", "propagate": True},
+        "uvicorn.error":  {"level": "WARNING", "propagate": False},
+        "uvicorn.access": {"level": "INFO",    "propagate": True},
+    },
+}
+
+
 def start_api_server(
     config: AppConfig,
     store: VectorStore,
@@ -223,12 +237,12 @@ def start_api_server(
 
         uvicorn.run(
             app,
-            host=config.api.host,
+            host="0.0.0.0",
             port=config.api.port,
-            log_level="warning",
+            log_config=_UVICORN_LOG_CONFIG,
         )
 
     thread = threading.Thread(target=_run, daemon=True, name="api-server")
     thread.start()
-    logger.info(f"REST API server started on {config.api.host}:{config.api.port}")
+    logger.info(f"REST API server started on 0.0.0.0:{config.api.port}")
     return thread

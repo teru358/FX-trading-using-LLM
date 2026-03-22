@@ -180,7 +180,6 @@ class LLMConfig:
 class ApiConfig:
     """REST API サーバー設定。"""
     enabled: bool = False
-    host: str = "0.0.0.0"
     port: int = 8811
 
 
@@ -328,7 +327,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     api_raw = raw.get("api", {})
     api_cfg = ApiConfig(
         enabled=api_raw.get("enabled", False),
-        host=api_raw.get("host", "0.0.0.0"),
         port=api_raw.get("port", 8811),
     )
 

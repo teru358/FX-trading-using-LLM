@@ -334,7 +334,6 @@ notification:
 ```yaml
 api:
   enabled: false              # true で REST API サーバーを起動
-  host: "0.0.0.0"             # リッスンアドレス
   port: 8811                  # リッスンポート
   # 認証: .env の API_SECRET_KEY を設定（X-API-Key ヘッダーで送信）
 ```
@@ -358,7 +357,7 @@ echo "API_SECRET_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(32
 # config/settings.yaml
 api:
   enabled: true
-  port: 8811
+  port: 8811   # リッスンポート（0.0.0.0 固定）
 ```
 
 すべてのリクエストで `X-API-Key` ヘッダーが必要です。
