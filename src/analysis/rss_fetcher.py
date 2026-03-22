@@ -176,6 +176,7 @@ def _fetch_from_feeds(
     freshness_hours: float,
     max_per_feed: int,
     max_total: int,
+    summary_max_chars: int = 600,
 ) -> FetchResult:
     """フィードリストからニュースを取得する共通ロジック。
 
@@ -198,7 +199,7 @@ def _fetch_from_feeds(
                     break
 
                 title = item.get("title", "").strip()
-                body = item.get("summary", "")[:300].strip()
+                body = item.get("summary", "")[:summary_max_chars].strip()
                 if not title:
                     continue
 
@@ -267,12 +268,13 @@ def fetch_category_news(
     freshness_hours: float = _DEFAULT_FRESHNESS_HOURS,
     max_per_feed: int = _MAX_PER_FEED,
     max_total: int = _MAX_TOTAL,
+    summary_max_chars: int = 600,
 ) -> FetchResult:
     """カテゴリ単位でRSSフィードからニュースを取得する。
 
     keywords=None でキーワードフィルタを無効化（FX専門フィード向け）。
     """
-    return _fetch_from_feeds(feeds, keywords, freshness_hours, max_per_feed, max_total)
+    return _fetch_from_feeds(feeds, keywords, freshness_hours, max_per_feed, max_total, summary_max_chars)
 
 
 def fetch_rss_news(

@@ -89,6 +89,7 @@ news_collection:
   interval_minutes: 15             # この間隔でtimezoneに揃えた時刻を自動生成
   timezone: "Asia/Tokyo"
   inter_pair_delay_seconds: 10     # ペア間の待機（Ollama VRAM保護）
+  summary_max_chars: 600           # RSS summary の切り捨て文字数（LLM context に合わせて調整）
 
 news_sources:
   feeds_fx:

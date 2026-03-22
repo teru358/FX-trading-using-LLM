@@ -60,6 +60,7 @@ async def collect_category(
         feeds=feeds,
         keywords=keywords,
         freshness_hours=config.news_collection.news_freshness_hours,
+        summary_max_chars=config.news_collection.summary_max_chars,
     )
 
     # 前回のタイトルハッシュと比較して new/known を算出

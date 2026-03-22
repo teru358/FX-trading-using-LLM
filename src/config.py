@@ -65,6 +65,7 @@ class NewsCollectionConfig:
     timezone: str = "Asia/Tokyo"
     inter_pair_delay_seconds: int = 60
     news_freshness_hours: float = 24.0   # この時間以上古い記事は除外
+    summary_max_chars: int = 600         # RSS summary の切り捨て文字数
 
 
 @dataclass
@@ -288,6 +289,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         timezone=nc.get("timezone", "Asia/Tokyo"),
         inter_pair_delay_seconds=nc.get("inter_pair_delay_seconds", 60),
         news_freshness_hours=nc.get("news_freshness_hours", 24.0),
+        summary_max_chars=nc.get("summary_max_chars", 600),
     )
 
     _default_ns = NewsSourcesConfig()
