@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 from pathlib import Path
 
 from rich import box
@@ -7,13 +8,28 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from src.config import AppConfig, _DEFAULT_OLLAMA_MODEL
+from src.config import AppConfig, InstrumentConfig, _DEFAULT_OLLAMA_MODEL
+
+_SYMBOL_CHECK_TIMEOUT = 10  # 全シンボルの並列フェッチ最大待機秒数
+
+
+def _check_one_symbol(inst: InstrumentConfig) -> tuple[bool, str]:
+    """yfinance で最小フェッチを試み (成功フラグ, モードラベル) を返す。"""
+    import yfinance as yf
+
+    mode_label = "trade" if inst.is_tradeable else (inst.mode if inst.mode != "trade" else inst.asset_type)
+    try:
+        df = yf.Ticker(inst.symbol).history(period="2d", interval="1d")
+        return not df.empty, mode_label
+    except Exception:
+        return False, mode_label
+
 
 _console = Console()
 
 
 def startup_checks(config: AppConfig) -> bool:
-    """起動時チェック（APIキー・Ollamaモデル・ディレクトリ）を実行して結果を表示する。"""
+    """起動時チェック（Ollamaモデル・シンボル疎通・ディレクトリ）を実行して結果を表示する。"""
     checks: list[tuple[str, str, bool]] = []
     ok = True
 
@@ -49,6 +65,37 @@ def startup_checks(config: AppConfig) -> bool:
     except Exception:
         checks.append((f"Ollama ({config.llm.ollama.base_url})", "[red]UNREACHABLE[/red]", False))
         ok = False
+
+    # シンボル疎通チェック（並列フェッチ）
+    instruments = config.enabled_instruments
+    if instruments:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(instruments)) as pool:
+            future_to_inst = {pool.submit(_check_one_symbol, inst): inst for inst in instruments}
+            done, not_done = concurrent.futures.wait(future_to_inst, timeout=_SYMBOL_CHECK_TIMEOUT)
+
+        sym_results: dict[str, tuple[bool, str]] = {}
+        for future in done:
+            inst = future_to_inst[future]
+            try:
+                sym_ok, mode_label = future.result()
+            except Exception:
+                sym_ok, mode_label = False, "trade" if inst.is_tradeable else inst.asset_type
+            sym_results[inst.symbol] = (sym_ok, mode_label)
+        for future in not_done:
+            inst = future_to_inst[future]
+            sym_results[inst.symbol] = (False, "trade" if inst.is_tradeable else inst.asset_type)
+            future.cancel()
+
+        for inst in instruments:
+            sym_ok, mode_label = sym_results.get(inst.symbol, (False, "?"))
+            if sym_ok:
+                status = f"[green]OK[/green]  ({mode_label})"
+                checks.append((f"Symbol: {inst.display_name}", status, True))
+            elif inst.is_tradeable:
+                checks.append((f"Symbol: {inst.display_name}", f"[red]NOT FOUND[/red]  ({mode_label})", False))
+                ok = False
+            else:
+                checks.append((f"Symbol: {inst.display_name}", f"[yellow]WARN[/yellow]  ({mode_label})", True))
 
     # ディレクトリ作成
     config.state_dir.mkdir(parents=True, exist_ok=True)
