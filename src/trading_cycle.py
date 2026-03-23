@@ -293,3 +293,84 @@ def run_trading_cycle(
     state_store = StateStore(config.state_dir)
     position_mgr = PositionManager(state_store, config.trading.initial_balance)
     asyncio.run(trading_cycle(config, position_mgr, store, price_store, analysis_store))
+
+
+async def _summarize_pair(
+    pair_cfg,
+    config: AppConfig,
+    position_mgr: PositionManager,
+    store: VectorStore,
+    analysis_store: AnalysisStore,
+):
+    """保存済み分析スナップショットとニュースからシグナルを算出する（新規取得なし）。"""
+    try:
+        price = analysis_store.aggregate(
+            pair_cfg.symbol,
+            hours=config.rag.analysis_lookback_hours,
+        )
+        if price is None:
+            logger.warning(f"{pair_cfg.display_name}: 保存済みスナップショットなし、スキップ")
+            return None
+
+        news = aggregate_news_sentiment(pair_cfg, store, config)
+        current_price = fetch_current_price(pair_cfg.symbol)
+
+        account = position_mgr.get_account_state()
+        return combine_signals(
+            news=news,
+            price=price,
+            current_price=current_price,
+            pair_cfg=pair_cfg,
+            account_balance=account.balance,
+            risk_per_trade=config.trading.risk_per_trade,
+            confidence_threshold=config.trading.signal_confidence_threshold,
+            news_weight=config.trading.news_weight,
+            price_weight=config.trading.price_weight,
+            signal_deadband=config.trading.signal_deadband,
+            min_lot_size=config.trading.min_lot_size,
+            lot_unit=config.trading.lot_unit,
+        )
+    except Exception as e:
+        logger.error(f"Failed to summarize {pair_cfg.display_name}: {e}", exc_info=True)
+        return None
+
+
+async def _analysis_summary(
+    config: AppConfig,
+    position_mgr: PositionManager,
+    store: VectorStore,
+    analysis_store: AnalysisStore,
+) -> None:
+    """保存済みの最新分析結果を集約して総合分析サマリーを表示する（新規取得なし）。"""
+    run_start = datetime.now(ZoneInfo(config.schedule.timezone))
+    logger.info(f"=== Analysis summary: {run_start.strftime('%Y-%m-%d %H:%M %Z')} ===")
+
+    results = await asyncio.gather(
+        *[_summarize_pair(p, config, position_mgr, store, analysis_store)
+          for p in config.tradeable_instruments],
+        return_exceptions=True,
+    )
+
+    signals = [r for r in results if r is not None and not isinstance(r, Exception)]
+    if not signals:
+        logger.warning("表示できるシグナルがありません。先に run tech でテクニカル分析を実行してください。")
+
+    account_state = position_mgr.get_account_state()
+    print_run_summary(
+        signals=signals,
+        executed_orders=[],
+        closed_this_run=[],
+        account_state=account_state,
+        run_start=run_start.replace(tzinfo=None),
+    )
+
+
+def run_analysis_summary(
+    config: AppConfig,
+    store: VectorStore,
+    analysis_store: AnalysisStore,
+) -> None:
+    """CLIから呼び出す同期ラッパー。"""
+    state_store = StateStore(config.state_dir)
+    position_mgr = PositionManager(state_store, config.trading.initial_balance)
+    asyncio.run(_analysis_summary(config, position_mgr, store, analysis_store))

@@ -19,7 +19,7 @@ from src.notifications.notifier import OrderClosedEvent, create_notifier
 from src.persistence.state_store import StateStore
 from src.rag.vector_store import VectorStore
 from src.trading.position_manager import PositionManager
-from src.trading_cycle import run_trading_cycle
+from src.trading_cycle import run_analysis_summary
 
 _console = Console()
 
@@ -28,7 +28,7 @@ _HELP = """\
   [cyan]status[/cyan]  (s)         — 残高とオープンポジションを表示
   [cyan]run news[/cyan]            — ニュース収集を今すぐ実行
   [cyan]run tech[/cyan]            — テクニカル分析を今すぐ実行
-  [cyan]run trade[/cyan]           — 取引サイクルを今すぐ実行
+  [cyan]run analyze[/cyan]         — 総合分析を今すぐ表示（保存済みデータを使用）
   [cyan]run mon[/cyan]             — 価格監視を今すぐ実行
   [cyan]close <pair>[/cyan]        — ポジションを手動決済  例: close USDJPY=X
   [cyan]notify[/cyan]  (n)         — 通知テストメッセージを送信
@@ -189,7 +189,7 @@ def run_commands(
                 _cmd_status(config)
             elif cmd == "run":
                 if not args:
-                    _console.print("[red]使い方: run news | tech | trade | mon[/red]")
+                    _console.print("[red]使い方: run news | tech | analyze | mon[/red]")
                     continue
                 sub = args[0].lower()
                 with job_lock:
@@ -199,15 +199,15 @@ def run_commands(
                     elif sub in ("tech", "t", "technical"):
                         _console.print("[cyan]テクニカル分析を実行中...[/cyan]")
                         run_technical_collection(config, store, price_store, analysis_store)
-                    elif sub in ("trade", "trading"):
-                        _console.print("[cyan]取引サイクルを実行中...[/cyan]")
-                        run_trading_cycle(config, store, price_store, analysis_store)
+                    elif sub in ("analyze", "a", "analysis"):
+                        _console.print("[cyan]総合分析を表示中...[/cyan]")
+                        run_analysis_summary(config, store, analysis_store)
                     elif sub in ("mon", "monitor"):
                         _console.print("[cyan]価格監視を実行中...[/cyan]")
                         run_price_monitor(config)
                     else:
                         _console.print(
-                            f"[red]不明: {sub!r}[/red]  使い方: run news | tech | trade | mon"
+                            f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | mon"
                         )
             elif cmd in ("n", "notify"):
                 _cmd_notify(config)
