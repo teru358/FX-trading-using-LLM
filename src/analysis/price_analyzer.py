@@ -37,6 +37,8 @@ USER_PROMPT_TEMPLATE = """{formatted_data}
 
 {reflection_context}
 
+{previous_analysis}
+
 {user_context}
 
 Based on ALL of the above, provide your swing trading analysis for {pair}.
@@ -52,7 +54,8 @@ Consider:
    - Kumo acts as dynamic support/resistance zone for SL/TP placement
 6. News sentiment and macroeconomic context from the RAG knowledge base
 7. Lessons learned from previous trading reflections
-8. Risk/reward ratio (minimum 2:1 required)
+8. Compare with previous analysis: note any shift in direction or confidence since the last cycle
+9. Risk/reward ratio (minimum 2:1 required)
 
 After your reasoning, output ONLY this JSON block (no markdown fences):
 {{
@@ -103,6 +106,7 @@ async def analyze_price_action(
     temperature: float = 0.1,
     news_context: str = "",
     reflection_context: str = "",
+    previous_analysis: str = "",
     user_notes_path: Path | None = None,
 ) -> PriceAnalysis:
     formatted_data = format_for_llm(price_data, summary)
@@ -119,6 +123,7 @@ async def analyze_price_action(
         pair=pair_cfg.display_name,
         news_context=news_context or "=== News Context ===\nNo news data available yet.",
         reflection_context=reflection_context or "=== Reflections ===\nNo previous reflections yet.",
+        previous_analysis=previous_analysis or "=== Previous Analysis ===\nNo previous analysis available.",
         user_context=user_context,
     )
 

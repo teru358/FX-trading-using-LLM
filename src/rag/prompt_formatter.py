@@ -1,5 +1,22 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.data.analysis_store import _TechnicalSnapshot
+
+
+def format_previous_analysis_for_prompt(snapshot: "_TechnicalSnapshot | None") -> str:
+    """前回のテクニカル分析スナップショットを1行サマリーに整形する。"""
+    if snapshot is None:
+        return ""
+    ts = snapshot.analyzed_at.strftime("%Y-%m-%d %H:%M") if snapshot.analyzed_at else "?"
+    return (
+        f"=== Previous Analysis ===\n"
+        f"[{ts}] direction={snapshot.direction_bias}, "
+        f"bias={snapshot.bias_score:+.2f}, confidence={snapshot.confidence:.2f}"
+    )
+
 
 def format_reflections_for_prompt(reflections: list[dict]) -> str:
     """振り返りリストをOllamaプロンプト用テキストに整形する。"""

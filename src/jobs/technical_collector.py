@@ -16,7 +16,11 @@ from src.data.price_fetcher import fetch_ohlcv
 from src.data.price_store import PriceStore
 from src.llm.client import LLMClient
 from src.llm.factory import create_llm_client
-from src.rag.prompt_formatter import format_news_for_prompt, format_reflections_for_prompt
+from src.rag.prompt_formatter import (
+    format_news_for_prompt,
+    format_previous_analysis_for_prompt,
+    format_reflections_for_prompt,
+)
 from src.rag.vector_store import VectorStore
 from src.trading.market_hours import is_market_open, market_status_label
 
@@ -53,6 +57,10 @@ async def collect_technical(
     news_ctx = format_news_for_prompt(news_entries)
     refl_ctx = format_reflections_for_prompt(reflections)
 
+    # 前回分析スナップショット（直近1件）
+    prev_snapshots = analysis_store.get_recent_snapshots(pair_cfg.symbol, hours=8)
+    prev_ctx = format_previous_analysis_for_prompt(prev_snapshots[0] if prev_snapshots else None)
+
     price_analysis = await analyze_price_action(
         pair_cfg=pair_cfg,
         price_data=price_data,
@@ -61,6 +69,7 @@ async def collect_technical(
         temperature=config.llm.price_analysis.temperature,
         news_context=news_ctx,
         reflection_context=refl_ctx,
+        previous_analysis=prev_ctx,
         user_notes_path=config.user_notes_path,
     )
     analysis_store.upsert_snapshot(price_analysis)
