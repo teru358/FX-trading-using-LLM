@@ -110,6 +110,19 @@ news_collection:
   summary_max_chars: 600           # RSS summary の切り捨て文字数（LLM context に合わせて調整）
 
 news_sources:
+  # ── Feedly API（有効にすると RSS の代わりに Feedly カテゴリから取得） ──
+  feedly:
+    enabled: false
+    # アクセストークン: feedly.com/i/developer で取得
+    # settings.yaml への直接記載 または .env の FEEDLY_ACCESS_TOKEN どちらでも可
+    access_token: ""
+    # カテゴリの Stream ID: GET https://cloud.feedly.com/v3/categories で確認
+    # 例: "user/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/category/FX"
+    streams_fx: []
+    streams_global: []
+    streams_japan: []
+    count: 20             # 1ストリームあたりの取得件数上限
+
   feeds_fx:
     - "https://feeds.feedburner.com/forexlive/all"
     - "https://www.fxstreet.com/rss/news"

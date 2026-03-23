@@ -11,7 +11,7 @@
 | 取引モード | ペーパートレード（模擬） / OANDA本取引（スタブ） |
 | 取引スタイル | スウィング（数日〜数週間） |
 | 価格データ | yfinance（Yahoo Finance・無料） |
-| ニュース取得 | RSS（FX専門・世界情勢・日本情勢） |
+| ニュース取得 | RSS（FX専門・世界情勢・日本情勢）/ Feedly API（オプション） |
 | 分析エンジン | LLM（Ollama / Gemini / OpenAI / Claude — 分析種別ごとに個別設定可） |
 | ベクトル化 | Ollama `nomic-embed-text`（ローカル） |
 | RAGストア | ChromaDB（ローカルファイルDB） |
@@ -26,8 +26,9 @@
 
 ### 情報収集ループ（15分間隔・タイムゾーン基準の固定時刻）
 
-1. RSS フィード取得 → LLM センチメント分析 → ChromaDB 蓄積
+1. ニュース取得 → LLM センチメント分析 → ChromaDB 蓄積
    - カテゴリ別に独立して実行: **FX専門**（fx） / **世界情勢**（global） / **日本情勢**（japan）
+   - 取得元: RSS フィード（デフォルト）または Feedly API（`feedly.enabled: true` で切り替え、カテゴリ単位で選択可能）
    - 取得制限: 1フィードあたり最大5件、カテゴリ合計最大30件
    - 取得テキスト: タイトル + サマリー先頭300文字（全文不要）
    - MD5フィンガープリントで前回と記事セットを比較 → 変化なければLLM呼び出しをスキップ
@@ -94,6 +95,7 @@ finance/
 │   │   ├── news_analyzer.py        # RSS → LLM ニュースセンチメント分析
 │   │   ├── news_aggregator.py      # RAG ニュース集約（取引判定時）
 │   │   ├── rss_fetcher.py          # RSS フィード取得・フィルタリング
+│   │   ├── feedly_fetcher.py       # Feedly API ニュース取得（rss_fetcher と同一インターフェース）
 │   │   ├── price_analyzer.py       # テクニカル指標 → LLM 価格分析
 │   │   └── reflector.py            # 振り返り生成・RAG蓄積
 │   ├── data/
@@ -160,7 +162,10 @@ uv sync
 
 # オンラインLLMを使う場合や REST API を有効化する場合は .env を作成
 cp .env.example .env
-# .env に GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY / API_SECRET_KEY を設定
+# .env に以下のキーを必要に応じて設定
+# GEMINI_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY  — オンラインLLM使用時
+# API_SECRET_KEY                                        — REST API 有効時
+# FEEDLY_ACCESS_TOKEN                                   — Feedly API 使用時
 ```
 
 ### 実行
@@ -176,6 +181,23 @@ uv run python main.py
 - **ディレクトリ**: データ・RAG・ログディレクトリの自動作成
 
 チェック後、ニュース収集を1回実行し、その後スケジュールに従って動作します。
+
+### CLIコマンド
+
+起動後、プロンプト（`>`）からコマンドを入力できます。
+
+| コマンド | 略記 | 内容 |
+|---|---|---|
+| `status` | `s` | 残高・オープンポジション（含み損益付き）を表示 |
+| `run news` | `run n` | ニュース収集を今すぐ実行 |
+| `run tech` | `run t` | テクニカル分析を今すぐ実行 |
+| `run analyze` | `run a` | 総合分析を今すぐ表示（保存済みデータのみ・新規取得なし） |
+| `run mon` | | 価格監視を今すぐ実行 |
+| `close <pair>` | | ポジションを手動決済  例: `close USDJPY=X` |
+| `notify` | `n` | 通知テストメッセージを送信 |
+| `edit` | `e` | `user_notes.md` を vim で編集 |
+| `help` | `h` | コマンド一覧を表示 |
+| `quit` | `q` | 終了 |
 
 ---
 
@@ -407,6 +429,7 @@ api:
 | `GET` | `/health` | 起動確認・スケジューラ状態（ジョブ数・次回実行時刻） |
 | `GET` | `/status` | 残高・PnL・勝率・オープンポジション（含み損益付き） |
 | `GET` | `/news/latest` | カテゴリ別（fx/global/japan）の最新ニュースセンチメント |
+| `GET` | `/analyze` | 保存済みスナップショット＋ニュースから全ペアの総合シグナルを返す（新規LLM取得なし） |
 | `POST` | `/close/{pair}` | ポジションを即時決済 |
 
 ### 利用例
@@ -424,13 +447,18 @@ curl -H "X-API-Key: $KEY" $HOST/status
 # ニュースセンチメント確認
 curl -H "X-API-Key: $KEY" $HOST/news/latest
 
+# 総合シグナル確認（保存済みデータ使用・新規取得なし）
+curl -H "X-API-Key: $KEY" $HOST/analyze
+
 # 緊急決済（USDJPY=X をクローズ）
 curl -X POST -H "X-API-Key: $KEY" "$HOST/close/USDJPY%3DX"
 ```
 
 ---
 
-## ニュースソース（RSS）
+## ニュースソース
+
+### RSS フィード（デフォルト）
 
 | カテゴリ | ソース |
 |---|---|
@@ -439,6 +467,31 @@ curl -X POST -H "X-API-Key: $KEY" "$HOST/close/USDJPY%3DX"
 | 日本情勢・株価 | NHK World, Japan Today, Japan Times, Nikkei Asia, 日本経済新聞（マーケット） |
 
 JPYを含む通貨ペアでは日本情勢・株価フィードが自動的に追加されます。
+
+### Feedly API（オプション）
+
+Feedly の Personal Access Token を設定すると、RSS の代わりに Feedly のカテゴリ（整理済みフィード）からニュースを取得できます。RSS と Feedly はカテゴリ単位で切り替え可能です。
+
+```yaml
+# config/settings.yaml
+news_sources:
+  feedly:
+    enabled: true
+    access_token: ""          # settings.yaml に直接記載、または .env の FEEDLY_ACCESS_TOKEN
+    streams_fx:               # カテゴリの Stream ID（GET /v3/categories で確認）
+      - "user/xxx.../category/FX"
+    streams_global:
+      - "user/xxx.../category/Global"
+    streams_japan: []         # 空リストの場合そのカテゴリは RSS にフォールバック
+    count: 20                 # 1ストリームあたりの取得件数上限
+```
+
+Stream ID の取得方法:
+
+```bash
+curl -H "Authorization: Bearer <access_token>" https://cloud.feedly.com/v3/categories
+# → 各カテゴリの "id" フィールドが Stream ID
+```
 
 ---
 

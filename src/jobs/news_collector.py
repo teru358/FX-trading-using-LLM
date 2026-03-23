@@ -11,6 +11,7 @@ import asyncio
 import logging
 from datetime import datetime
 
+from src.analysis.feedly_fetcher import fetch_feedly_category
 from src.analysis.news_analyzer import NewsSentiment, analyze_category_sentiment
 from src.analysis.rss_fetcher import fetch_category_news
 from src.config import AppConfig
@@ -56,12 +57,24 @@ async def collect_category(
     """1カテゴリのニュースを収集・分析してRAGに格納する。"""
     label = _CATEGORY_LABELS.get(category, category)
 
-    fetch_result = fetch_category_news(
-        feeds=feeds,
-        keywords=keywords,
-        freshness_hours=config.news_collection.news_freshness_hours,
-        summary_max_chars=config.news_collection.summary_max_chars,
-    )
+    feedly = config.news_sources.feedly
+    feedly_streams = feedly.streams_for(category)
+    if feedly.enabled and feedly.access_token and feedly_streams:
+        logger.debug(f"[NEWS] {label}: Feedly API を使用 ({len(feedly_streams)} streams)")
+        fetch_result = fetch_feedly_category(
+            stream_ids=feedly_streams,
+            access_token=feedly.access_token,
+            freshness_hours=config.news_collection.news_freshness_hours,
+            count=feedly.count,
+            summary_max_chars=config.news_collection.summary_max_chars,
+        )
+    else:
+        fetch_result = fetch_category_news(
+            feeds=feeds,
+            keywords=keywords,
+            freshness_hours=config.news_collection.news_freshness_hours,
+            summary_max_chars=config.news_collection.summary_max_chars,
+        )
 
     # 前回のタイトルハッシュと比較して new/known を算出
     _, last_fingerprint, prev_hashes = store.get_last_analysis_state(category)

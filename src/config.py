@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -116,6 +117,34 @@ class NewsCollectionConfig:
 
 
 @dataclass
+class FeedlyConfig:
+    """Feedly API 設定。
+
+    access_token は settings.yaml への直接記載か、
+    .env の FEEDLY_ACCESS_TOKEN から読み込む（load_config で解決）。
+
+    Stream ID の確認:
+      GET https://cloud.feedly.com/v3/categories
+      Authorization: Bearer <access_token>
+      → 各カテゴリの "id" フィールド（例: "user/xxx/category/FX"）
+    """
+    enabled: bool = False
+    access_token: str = ""
+    streams_fx: list[str] = field(default_factory=list)
+    streams_global: list[str] = field(default_factory=list)
+    streams_japan: list[str] = field(default_factory=list)
+    count: int = 20  # 1ストリームあたりの取得件数上限
+
+    def streams_for(self, category: str) -> list[str]:
+        """カテゴリ名から対応するストリームIDリストを返す。"""
+        return {
+            "fx": self.streams_fx,
+            "global": self.streams_global,
+            "japan": self.streams_japan,
+        }.get(category, [])
+
+
+@dataclass
 class NewsSourcesConfig:
     feeds_fx: list[str] = field(default_factory=lambda: [
         "https://feeds.feedburner.com/forexlive/all",
@@ -141,6 +170,7 @@ class NewsSourcesConfig:
         # 日本語
         "日銀", "円安", "円高", "金利", "為替", "利上げ", "利下げ", "植田", "円",
     ])
+    feedly: FeedlyConfig = field(default_factory=FeedlyConfig)
 
 
 @dataclass
@@ -360,11 +390,23 @@ def load_config(config_path: Path | None = None) -> AppConfig:
 
     _default_ns = NewsSourcesConfig()
     ns = raw.get("news_sources", {})
+    fd = ns.get("feedly", {})
+    # access_token: settings.yaml の値 → .env の FEEDLY_ACCESS_TOKEN の順で解決
+    feedly_token = fd.get("access_token", "") or os.environ.get("FEEDLY_ACCESS_TOKEN", "")
+    feedly_cfg = FeedlyConfig(
+        enabled=fd.get("enabled", False),
+        access_token=feedly_token,
+        streams_fx=fd.get("streams_fx", []),
+        streams_global=fd.get("streams_global", []),
+        streams_japan=fd.get("streams_japan", []),
+        count=fd.get("count", 20),
+    )
     news_sources = NewsSourcesConfig(
         feeds_fx=ns.get("feeds_fx", _default_ns.feeds_fx),
         feeds_global=ns.get("feeds_global", _default_ns.feeds_global),
         feeds_japan=ns.get("feeds_japan", _default_ns.feeds_japan),
         jpy_keywords=ns.get("jpy_keywords", _default_ns.jpy_keywords),
+        feedly=feedly_cfg,
     )
 
     r = raw.get("rag", {})

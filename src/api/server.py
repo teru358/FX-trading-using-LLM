@@ -17,6 +17,7 @@ from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.security import APIKeyHeader
 
 from src.config import AppConfig
+from src.data.analysis_store import AnalysisStore
 from src.data.price_fetcher import fetch_current_price
 from src.notifications.notifier import OrderClosedEvent, create_notifier
 from src.persistence.state_store import StateStore
@@ -33,6 +34,7 @@ _started_at: datetime | None = None
 # ── 共有オブジェクト（start_api_server で注入） ──────────────────
 _config: AppConfig | None = None
 _store: VectorStore | None = None
+_analysis_store: AnalysisStore | None = None
 _job_lock: threading.Lock | None = None
 
 app = FastAPI(title="FX Trading Bot API", docs_url=None, redoc_url=None)
@@ -144,6 +146,54 @@ def news_latest() -> dict[str, Any]:
     return {"categories": result}
 
 
+# ── GET /analyze ─────────────────────────────────────────────────
+
+@app.get("/analyze", dependencies=[Depends(_verify_api_key)])
+def analyze() -> dict[str, Any]:
+    """保存済みスナップショット＋ニュースから総合シグナルを返す（新規LLM取得なし）。"""
+    assert _config is not None and _store is not None and _analysis_store is not None
+
+    from src.trading_cycle import _summarize_pair
+
+    state_store = StateStore(_config.state_dir)
+    pm = PositionManager(state_store, _config.trading.initial_balance)
+
+    async def _gather():
+        results = await asyncio.gather(
+            *[_summarize_pair(p, _config, pm, _store, _analysis_store)
+              for p in _config.tradeable_instruments],
+            return_exceptions=True,
+        )
+        return [r for r in results if r is not None and not isinstance(r, Exception)]
+
+    signals = asyncio.run(_gather())
+
+    if not signals:
+        return {"signals": [], "message": "No snapshots available. Run 'run tech' first."}
+
+    output = []
+    for sig in signals:
+        output.append({
+            "pair": sig.pair,
+            "action": sig.action,
+            "predicted_direction": sig.predicted_direction,
+            "combined_score": round(sig.combined_score, 4),
+            "confidence": round(sig.confidence, 4),
+            "entry_price": sig.entry_price,
+            "stop_loss": sig.stop_loss,
+            "take_profit": sig.take_profit,
+            "position_size": sig.position_size,
+            "signal_reason": sig.signal_reason,
+            "news_score": round(sig.news.sentiment_score, 4),
+            "news_confidence": round(sig.news.confidence, 4),
+            "price_score": round(sig.price.bias_score, 4),
+            "price_confidence": round(sig.price.confidence, 4),
+            "generated_at": sig.generated_at.isoformat(),
+        })
+
+    return {"signals": output}
+
+
 # ── POST /close/{pair} ───────────────────────────────────────────
 
 @app.post("/close/{pair}", dependencies=[Depends(_verify_api_key)])
@@ -223,12 +273,14 @@ _UVICORN_LOG_CONFIG: dict = {
 def start_api_server(
     config: AppConfig,
     store: VectorStore,
+    analysis_store: AnalysisStore,
     job_lock: threading.Lock,
 ) -> threading.Thread:
     """バックグラウンドスレッドで uvicorn を起動する。"""
-    global _config, _store, _job_lock, _started_at
+    global _config, _store, _analysis_store, _job_lock, _started_at
     _config = config
     _store = store
+    _analysis_store = analysis_store
     _job_lock = job_lock
     _started_at = datetime.now()
 
