@@ -236,7 +236,7 @@ class LoggingConfig:
     level: str = "INFO"
     file: str = "logs/finance.log"
     activity_log_file: str = "logs/activity.log"
-    max_bytes: int = 10_485_760
+    rotate_timing: str = "10MB"   # サイズ: 10MB / 時間: 6H / 1D / midnight / W0〜W6
     backup_count: int = 5
 
 
@@ -345,7 +345,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         level=lg.get("level", "INFO"),
         file=lg.get("file", "logs/finance.log"),
         activity_log_file=lg.get("activity_log_file", "logs/activity.log"),
-        max_bytes=_parse_bytes(lg.get("max_bytes", "10MB")),
+        rotate_timing=str(lg.get("rotate_timing") or lg.get("max_bytes", "10MB")),
         backup_count=lg.get("backup_count", 5),
     )
 

@@ -5,6 +5,36 @@ import logging.handlers
 import re
 from pathlib import Path
 
+_SIZE_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)\s*(B|KB|MB|GB)$", re.IGNORECASE)
+_INTERVAL_RE = re.compile(r"^([0-9]+)\s*(H|D)$", re.IGNORECASE)
+_SIZE_UNITS = {"b": 1, "kb": 1024, "mb": 1024**2, "gb": 1024**3}
+
+
+def _make_rotating_handler(path: Path, cfg) -> logging.Handler:
+    """rotate_timing を解析してサイズ or 時間ベースのローテーションハンドラを返す。"""
+    timing = cfg.rotate_timing.strip()
+
+    m = _SIZE_RE.match(timing)
+    if m:
+        num, unit = float(m.group(1)), m.group(2).lower()
+        max_bytes = int(num * _SIZE_UNITS[unit])
+        return logging.handlers.RotatingFileHandler(
+            path, maxBytes=max_bytes, backupCount=cfg.backup_count, encoding="utf-8",
+        )
+
+    m = _INTERVAL_RE.match(timing)
+    if m:
+        interval, unit = int(m.group(1)), m.group(2).lower()
+        when = "h" if unit == "h" else "d"
+        return logging.handlers.TimedRotatingFileHandler(
+            path, when=when, interval=interval, backupCount=cfg.backup_count, encoding="utf-8",
+        )
+
+    # midnight / W0〜W6 はそのまま when に渡す
+    return logging.handlers.TimedRotatingFileHandler(
+        path, when=timing.lower(), backupCount=cfg.backup_count, encoding="utf-8",
+    )
+
 
 _PREFIX_STYLES: dict[str, str] = {
     "[COLLECT]":   "cyan",
@@ -97,9 +127,7 @@ def setup_logging(cfg, base_dir: Path) -> None:
     )
 
     # メインログ（全ログ・DEBUG以上）
-    fh = logging.handlers.RotatingFileHandler(
-        log_file, maxBytes=cfg.max_bytes, backupCount=cfg.backup_count, encoding="utf-8",
-    )
+    fh = _make_rotating_handler(log_file, cfg)
     fh.setLevel(logging.DEBUG)
     fh.setFormatter(fmt)
     root.addHandler(fh)
@@ -107,9 +135,7 @@ def setup_logging(cfg, base_dir: Path) -> None:
     # アクティビティログ（構造化プレフィックスのみ）
     activity_file = base_dir / cfg.activity_log_file
     activity_file.parent.mkdir(parents=True, exist_ok=True)
-    af = logging.handlers.RotatingFileHandler(
-        activity_file, maxBytes=cfg.max_bytes, backupCount=cfg.backup_count, encoding="utf-8",
-    )
+    af = _make_rotating_handler(activity_file, cfg)
     af.setLevel(logging.INFO)
     af.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
     af.addFilter(_ActivityLogFilter())

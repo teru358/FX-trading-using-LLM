@@ -166,7 +166,7 @@ notification:
   notifier: "none"                 # "telegram" | "discord" | "none"
   notify_on_order_open: true       # 注文発注時に通知
   notify_on_order_close: true      # 決済時に通知（SL/TP到達・緊急損切り含む）
-  notify_on_signal_skipped: false  # シグナルが出たが既存ポジションでスキップされた場合
+  notify_on_signal_skipped: true   # スキップ（既存ポジション）/ 保留（hold）時に通知（判断理由付き）
   notify_on_price_alert: true      # 価格急変動（損失方向）を検知した場合
 
 price_monitor:
@@ -181,5 +181,5 @@ logging:
   level: "INFO"
   file: "logs/finance.log"
   activity_log_file: "logs/activity.log"  # [COLLECT][NEWS][SIGNAL][CLOSE][TRADE][ORDER][REFLECT] 専用
-  max_bytes: 10MB
+  rotate_timing: "10MB"   # サイズ: 10MB / 512KB など。時間: 6H（毎6時間）/ 1D（毎日）/ midnight（日次0時）/ W0（月曜）
   backup_count: 5
