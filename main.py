@@ -68,7 +68,9 @@ def main() -> None:
     sched_table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
     sched_table.add_column("Label", style="dim")
     sched_table.add_column("Value", style="bold white")
-    sched_table.add_row("Pairs",           ", ".join(p.display_name for p in config.enabled_pairs))
+    trade_names = [f"[bold]{i.display_name}[/bold]" for i in config.tradeable_instruments]
+    watch_names = [f"[dim]{i.display_name}[/dim]" for i in config.watch_only_instruments]
+    sched_table.add_row("Instruments",     ", ".join(trade_names + watch_names))
     sched_table.add_row(
         "News collection",
         f"every [cyan]{interval}[/cyan] min  ([cyan]{news_tz}[/cyan] aligned)",

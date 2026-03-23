@@ -3,14 +3,14 @@ from __future__ import annotations
 import logging
 
 from src.analysis.news_analyzer import NewsSentiment
-from src.config import AppConfig, PairConfig
+from src.config import AppConfig, InstrumentConfig
 from src.rag.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
 
 def aggregate_news_sentiment(
-    pair_cfg: PairConfig,
+    pair_cfg: InstrumentConfig,
     store: VectorStore,
     config: AppConfig,
 ) -> NewsSentiment:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from src.config import InstrumentConfig
     from src.data.analysis_store import _TechnicalSnapshot
 
 
@@ -16,6 +17,28 @@ def format_previous_analysis_for_prompt(snapshot: "_TechnicalSnapshot | None") -
         f"[{ts}] direction={snapshot.direction_bias}, "
         f"bias={snapshot.bias_score:+.2f}, confidence={snapshot.confidence:.2f}"
     )
+
+
+def format_macro_context_for_prompt(
+    snapshots: list["_TechnicalSnapshot"],
+    instruments: list["InstrumentConfig"],
+) -> str:
+    """監視専用銘柄（指数・参照FX等）のスナップショットをマクロコンテキストに整形する。"""
+    if not snapshots:
+        return ""
+    name_map = {i.symbol: i.display_name for i in instruments}
+    lines = [
+        "=== Macro Reference Instruments ===",
+        "Note: Rising equity indices generally indicate risk-on sentiment.",
+    ]
+    for snap in snapshots:
+        ts = snap.analyzed_at.strftime("%Y-%m-%d %H:%M") if snap.analyzed_at else "?"
+        name = name_map.get(snap.symbol, snap.symbol)
+        lines.append(
+            f"[{ts}] {name:16s} direction={snap.direction_bias}, "
+            f"bias={snap.bias_score:+.2f}, confidence={snap.confidence:.2f}"
+        )
+    return "\n".join(lines)
 
 
 def format_reflections_for_prompt(reflections: list[dict]) -> str:

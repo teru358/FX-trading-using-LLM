@@ -26,25 +26,59 @@ def _parse_bytes(value: int | str) -> int:
 
 
 @dataclass
-class PairConfig:
+class InstrumentConfig:
+    """FX通貨ペア・株価指数など全銘柄の統一設定。
+
+    asset_type:
+      "fx"    — FX通貨ペア（pip_value / base_currency / quote_currency を使用）
+      "index" — 株価指数（currency を使用）
+
+    mode:
+      "trade" — テクニカル収集 + 取引シグナル生成・発注（fx のみ有効）
+      "watch" — テクニカル収集のみ（参照銘柄）
+    """
     symbol: str
     display_name: str
-    pip_value: float
-    base_currency: str
-    quote_currency: str
+    asset_type: str = "fx"          # "fx" | "index"
+    mode: str = "trade"             # "trade" | "watch"
     enabled: bool = True
+    # FX 専用
+    pip_value: float = 0.0
+    base_currency: str = ""
+    quote_currency: str = ""
+    # 非FX 用
+    currency: str = ""
+
+    @property
+    def is_tradeable(self) -> bool:
+        return self.mode == "trade" and self.asset_type == "fx"
 
     @property
     def currencies(self) -> tuple[str, str]:
         return (self.base_currency, self.quote_currency)
 
     @property
+    def related_currencies(self) -> list[str]:
+        """この銘柄に関連する通貨コード。"""
+        if self.asset_type == "fx":
+            return [c for c in (self.base_currency, self.quote_currency) if c]
+        return [self.currency] if self.currency else []
+
+    @property
     def news_categories(self) -> list[str]:
-        """通貨ペアに関連するニュースカテゴリを返す。"""
-        cats = ["fx", "global"]
-        if "JPY" in (self.base_currency, self.quote_currency):
+        """銘柄タイプに応じたニュースカテゴリを返す。"""
+        cats = ["global"]
+        if self.asset_type == "fx":
+            cats.append("fx")
+        elif self.asset_type == "index":
+            cats.append("equity")
+        if "JPY" in self.related_currencies:
             cats.append("japan")
         return cats
+
+
+# 後方互換エイリアス
+PairConfig = InstrumentConfig
 
 
 @dataclass
@@ -209,7 +243,7 @@ class LoggingConfig:
 @dataclass
 class AppConfig:
     trading: TradingConfig
-    pairs: list[PairConfig]
+    instruments: list[InstrumentConfig]
     schedule: ScheduleConfig
     logging: LoggingConfig
     news_collection: NewsCollectionConfig
@@ -240,8 +274,24 @@ class AppConfig:
         return BASE_DIR / "config" / "user_notes.md"
 
     @property
-    def enabled_pairs(self) -> list[PairConfig]:
-        return [p for p in self.pairs if p.enabled]
+    def enabled_instruments(self) -> list[InstrumentConfig]:
+        """有効な全銘柄。"""
+        return [i for i in self.instruments if i.enabled]
+
+    @property
+    def tradeable_instruments(self) -> list[InstrumentConfig]:
+        """取引対象の銘柄（mode=trade かつ asset_type=fx）。"""
+        return [i for i in self.enabled_instruments if i.is_tradeable]
+
+    @property
+    def watch_only_instruments(self) -> list[InstrumentConfig]:
+        """監視専用の銘柄（指数・参照FXペア等）。"""
+        return [i for i in self.enabled_instruments if not i.is_tradeable]
+
+    @property
+    def enabled_pairs(self) -> list[InstrumentConfig]:
+        """後方互換: tradeable_instruments のエイリアス。"""
+        return self.tradeable_instruments
 
 
 def load_config(config_path: Path | None = None) -> AppConfig:
@@ -269,16 +319,19 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         trading_mode=t.get("trading_mode", "paper"),
     )
 
-    pairs = [
-        PairConfig(
+    instruments = [
+        InstrumentConfig(
             symbol=p["symbol"],
             display_name=p["display_name"],
-            pip_value=p["pip_value"],
+            asset_type=(at := p.get("asset_type", "fx")),
+            mode=p.get("mode", "trade" if at == "fx" else "watch"),
+            enabled=p.get("enabled", True),
+            pip_value=p.get("pip_value", 0.0),
             base_currency=p.get("base_currency", ""),
             quote_currency=p.get("quote_currency", ""),
-            enabled=p.get("enabled", True),
+            currency=p.get("currency", ""),
         )
-        for p in raw.get("pairs", [])
+        for p in raw.get("instruments", raw.get("pairs", []))
     ]
 
     s = raw.get("schedule", {})
@@ -403,7 +456,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
 
     return AppConfig(
         trading=trading,
-        pairs=pairs,
+        instruments=instruments,
         schedule=schedule,
         logging=log_cfg,
         news_collection=news_collection,

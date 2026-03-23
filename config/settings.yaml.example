@@ -65,25 +65,43 @@ trading:
   lot_unit: 1000.0                 # ロット切り捨て単位
   trading_mode: "paper"            # "paper"（シミュレーション）| "live"（本取引: OANDA API必須）
 
-pairs:
+instruments:
+  # ── FX（取引対象: mode=trade） ──
   - symbol: "USDJPY=X"
     display_name: "USD/JPY"
+    asset_type: fx
+    mode: trade                  # trade = 監視+取引
     pip_value: 0.01
     base_currency: "USD"
     quote_currency: "JPY"
     enabled: true
   - symbol: "EURUSD=X"
     display_name: "EUR/USD"
+    asset_type: fx
+    mode: trade
     pip_value: 0.0001
     base_currency: "EUR"
     quote_currency: "USD"
     enabled: true
   - symbol: "GBPUSD=X"
     display_name: "GBP/USD"
+    asset_type: fx
+    mode: watch                  # watch = 監視のみ（参照FX）
     pip_value: 0.0001
     base_currency: "GBP"
     quote_currency: "USD"
     enabled: false
+  # ── 株価指数（監視専用） ──
+  - symbol: "^N225"
+    display_name: "Nikkei 225"
+    asset_type: index
+    currency: "JPY"              # 関連通貨（FX分析への紐付け用）
+    enabled: true
+  - symbol: "^GSPC"
+    display_name: "S&P 500"
+    asset_type: index
+    currency: "USD"
+    enabled: true
 
 news_collection:
   interval_minutes: 15             # この間隔でtimezoneに揃えた時刻を自動生成

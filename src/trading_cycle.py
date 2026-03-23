@@ -10,7 +10,7 @@ from functools import partial
 from src.analysis.news_aggregator import aggregate_news_sentiment
 from src.analysis.price_analyzer import analyze_price_action
 from src.analysis.reflector import generate_reflection, store_reflection
-from src.config import AppConfig
+from src.config import AppConfig, InstrumentConfig
 from src.data.indicators import compute_indicators
 from src.data.price_fetcher import fetch_current_price, fetch_ohlcv
 from src.data.analysis_store import AnalysisStore
@@ -130,7 +130,7 @@ async def _generate_cycle_reflections(
     for pos in position_mgr.get_account_state().open_positions:
         try:
             current_price = fetch_current_price(pos.pair)
-            pair_cfg = next((p for p in config.enabled_pairs if p.symbol == pos.pair), None)
+            pair_cfg = next((p for p in config.tradeable_instruments if p.symbol == pos.pair), None)
             if pair_cfg is None:
                 continue
 
@@ -225,7 +225,7 @@ async def trading_cycle(
             )
 
     results = await asyncio.gather(
-        *[bounded(p) for p in config.enabled_pairs],
+        *[bounded(p) for p in config.tradeable_instruments],
         return_exceptions=True,
     )
 
