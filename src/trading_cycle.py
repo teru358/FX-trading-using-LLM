@@ -251,6 +251,7 @@ async def trading_cycle(
                         position_size=sig.position_size,
                         confidence=sig.confidence,
                         signal_reason=sig.signal_reason,
+                        detail_reason=sig.detail_reason,
                     ))
             elif config.notifier.notify_on_signal_skipped:
                 await notifier.notify_signal_skipped(SignalSkippedEvent(
@@ -258,7 +259,17 @@ async def trading_cycle(
                     action=sig.action,
                     confidence=sig.confidence,
                     signal_reason=sig.signal_reason,
+                    detail_reason=sig.detail_reason,
                 ))
+        elif config.notifier.notify_on_signal_skipped:
+            await notifier.notify_signal_skipped(SignalSkippedEvent(
+                pair=sig.pair,
+                action="hold",
+                confidence=sig.confidence,
+                signal_reason=sig.signal_reason,
+                detail_reason=sig.detail_reason,
+                predicted_direction=sig.predicted_direction,
+            ))
 
     # Phase 5: レポート
     account_state = position_mgr.get_account_state()

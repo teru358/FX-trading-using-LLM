@@ -20,6 +20,7 @@ class OrderOpenedEvent:
     position_size: float
     confidence: float
     signal_reason: str
+    detail_reason: str = ""   # ニュース/テクニカル内訳
 
 
 @dataclass
@@ -35,11 +36,13 @@ class OrderClosedEvent:
 
 @dataclass
 class SignalSkippedEvent:
-    """シグナルが出たが既存ポジション等でスキップされた場合。"""
+    """シグナルが出たがスキップ/保留された場合（hold含む）。"""
     pair: str
-    action: str           # "buy" | "sell"
+    action: str           # "buy" | "sell" | "hold"
     confidence: float
     signal_reason: str
+    detail_reason: str = ""           # ニュース/テクニカル内訳
+    predicted_direction: str = ""     # hold時の方向予測
 
 
 @dataclass
@@ -75,9 +78,12 @@ class NotifierAdapter(ABC):
             f"SL: {event.stop_loss:.5f}  ({sl_pips:.5f})\n"
             f"TP: {event.take_profit:.5f}  (+{tp_pips:.5f})\n"
             f"サイズ: {event.position_size:,.0f}\n"
-            f"確信度: {event.confidence:.0%}\n"
-            f"根拠: {event.signal_reason}"
+            f"確信度: {event.confidence:.0%}"
         )
+        if event.detail_reason:
+            msg += f"\n─────────────\n{event.detail_reason}"
+        else:
+            msg += f"\n根拠: {event.signal_reason}"
         await self.send(msg)
 
     async def notify_order_closed(self, event: OrderClosedEvent) -> None:
@@ -117,12 +123,22 @@ class NotifierAdapter(ABC):
         await self.send(msg)
 
     async def notify_signal_skipped(self, event: SignalSkippedEvent) -> None:
-        direction_emoji = "📈" if event.action == "buy" else "📉"
-        msg = (
-            f"{direction_emoji} 【シグナル】{event.pair} — 既存ポジションのためスキップ\n"
-            f"方向: {event.action.upper()}  確信度: {event.confidence:.0%}\n"
-            f"根拠: {event.signal_reason}"
-        )
+        if event.action == "hold":
+            direction_label = event.predicted_direction or "neutral"
+            msg = (
+                f"⏸️ 【シグナル】{event.pair} — HOLD ({direction_label}寄り)\n"
+                f"確信度: {event.confidence:.0%}"
+            )
+        else:
+            direction_emoji = "📈" if event.action == "buy" else "📉"
+            msg = (
+                f"{direction_emoji} 【シグナル】{event.pair} — 既存ポジションのためスキップ\n"
+                f"方向: {event.action.upper()}  確信度: {event.confidence:.0%}"
+            )
+        if event.detail_reason:
+            msg += f"\n─────────────\n{event.detail_reason}"
+        else:
+            msg += f"\n根拠: {event.signal_reason}"
         await self.send(msg)
 
 

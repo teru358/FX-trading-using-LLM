@@ -175,7 +175,7 @@ class NotifierConfig:
     notifier: str = "none"
     notify_on_order_open: bool = True
     notify_on_order_close: bool = True
-    notify_on_signal_skipped: bool = False
+    notify_on_signal_skipped: bool = True
     notify_on_price_alert: bool = True    # 価格急変動通知
 
 

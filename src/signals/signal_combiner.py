@@ -22,6 +22,7 @@ class TradeSignal:
     take_profit: float
     position_size: float
     signal_reason: str
+    detail_reason: str          # 通知用: ニュース/テクニカル内訳 + 判定ロジック
     news: NewsSentiment
     price: PriceAnalysis
     generated_at: datetime
@@ -100,6 +101,15 @@ def combine_signals(
         lot_unit=lot_unit,
     )
 
+    # 通知用の詳細理由を構築
+    news_themes = ", ".join(news.key_themes[:3]) if news.key_themes else "N/A"
+    detail_lines = [
+        f"ニュース: {news.sentiment_score:+.2f} ({news.confidence:.0%}) — {news_themes}",
+        f"テクニカル: {price.bias_score:+.2f} ({price.confidence:.0%}) — {price.direction_bias}, RR={price.risk_reward_ratio:.1f}",
+        f"合成: {combined_score:+.3f} → {action.upper()} ({reason})",
+    ]
+    detail_reason = "\n".join(detail_lines)
+
     signal = TradeSignal(
         pair=pair_cfg.symbol,
         action=action,
@@ -111,6 +121,7 @@ def combine_signals(
         take_profit=take_profit,
         position_size=position_size,
         signal_reason=reason,
+        detail_reason=detail_reason,
         news=news,
         price=price,
         generated_at=datetime.now(),
