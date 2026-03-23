@@ -70,7 +70,7 @@ def _yf_fetch_range(symbol: str, start: datetime, interval: str) -> pd.DataFrame
     """start 以降のデータのみ yfinance から取得する（差分フェッチ用）。"""
     ticker = yf.Ticker(symbol)
     end = datetime.now() + timedelta(hours=2)  # 最新バーも取得するため余裕を持たせる
-    df = ticker.history(start=start.isoformat(), end=end.isoformat(), interval=interval)
+    df = ticker.history(start=start, end=end, interval=interval)
     if df.empty:
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
     df = df[["Open", "High", "Low", "Close", "Volume"]].copy()

@@ -59,7 +59,11 @@
 4. **Phase 4**: RAG からニュースセンチメントを集約
    - シグナル統合（テクニカル60% + ニュース40%）
    - BUY/SELL/HOLD 判定（HOLD時も方向予測を表示）
-5. **Phase 5**: ペーパー注文執行・レポート出力
+   - `detail_reason` にニュース/テクニカル内訳を生成（通知に付加）
+5. **Phase 5**: ペーパー注文執行・通知送信・レポート出力
+   - BUY/SELL → 注文執行 → 発注通知（判断理由付き）
+   - HOLD → スキップ通知（方向予測 + 判断理由）
+   - 既存ポジションによりスキップ → スキップ通知（判断理由付き）
 
 ---
 
@@ -76,7 +80,7 @@ finance/
 ├── src/
 │   ├── config.py                   # 設定ローダー・データクラス
 │   ├── logging_setup.py            # ログ設定（メイン・アクティビティ・ターミナル）
-│   ├── startup.py                  # 起動時チェック（Ollama・ディレクトリ）
+│   ├── startup.py                  # 起動時チェック（Ollama・シンボル疎通・ディレクトリ）
 │   ├── trading_cycle.py            # 取引サイクル（5フェーズ オーケストレータ）
 │   ├── llm/
 │   │   ├── client.py               # LLMClient ABC（全プロバイダー共通インターフェース）
@@ -165,7 +169,13 @@ cp .env.example .env
 uv run python main.py
 ```
 
-起動直後にニュース収集を1回実行し、その後スケジュールに従って動作します。
+起動時に以下のチェックを実行します:
+
+- **Ollamaモデル**: 設定された全モデル（ニュース/価格/振り返り/embedding）の存在確認
+- **シンボル疎通**: `enabled: true` の全銘柄を yfinance で並列チェック（`mode: trade` の失敗は起動ブロック、`watch`/`index` は警告のみ）
+- **ディレクトリ**: データ・RAG・ログディレクトリの自動作成
+
+チェック後、ニュース収集を1回実行し、その後スケジュールに従って動作します。
 
 ---
 
@@ -278,17 +288,34 @@ trading:
   trading_mode: "paper"             # "paper"（模擬）| "live"（OANDA本取引）
 ```
 
-### 通貨ペア
+### 銘柄設定（`instruments`）
+
+FX通貨ペアと株価指数を統一した `instruments` リストで管理します。
 
 ```yaml
-pairs:
+instruments:
+  # ── FX通貨ペア ──
   - symbol: "USDJPY=X"              # yfinance シンボル
     display_name: "USD/JPY"
+    asset_type: fx                  # "fx" | "index"
+    mode: trade                     # "trade"（取引）| "watch"（監視のみ）
     pip_value: 0.01
     base_currency: "USD"
     quote_currency: "JPY"
-    enabled: true                    # false で無効化
+    enabled: true                   # false で無効化（起動チェックもスキップ）
+
+  # ── 株価指数（監視専用） ──
+  - symbol: "^N225"
+    display_name: "Nikkei 225"
+    asset_type: index
+    currency: "JPY"                 # 関連通貨（ニュースカテゴリ紐付け用）
+    enabled: true
 ```
+
+| `mode` | 動作 |
+|---|---|
+| `trade` | OHLCV取得 + テクニカル分析 + シグナル生成 + 注文（`asset_type: fx` のみ） |
+| `watch` | OHLCV取得 + テクニカル分析のみ（参照銘柄） |
 
 ### スケジュール
 
@@ -324,10 +351,21 @@ rag:
 ```yaml
 notification:
   notifier: "none"                   # "telegram" | "discord" | "none"
-  notify_on_order_open: true
-  notify_on_order_close: true
-  notify_on_signal_skipped: false
+  notify_on_order_open: true         # 注文発注時（判断理由付き）
+  notify_on_order_close: true        # 決済時（TP/SL/緊急損切り）
+  notify_on_signal_skipped: true     # スキップ（既存ポジション）・HOLD（不参加）時
+  notify_on_price_alert: true        # 損失方向への価格急変動
 ```
+
+通知には**判断理由**（ニューススコア・テクニカルスコア内訳・合成スコア）が自動付加されます。
+
+| 通知種別 | トリガー | 内容 |
+|---|---|---|
+| 注文発注 | BUY/SELL シグナル → 注文執行 | エントリー/SL/TP/サイズ + 判断理由 |
+| 決済 | SL/TP到達 または 緊急損切り | PnL・残高 |
+| スキップ | シグナル発生だが既存ポジションあり | 方向・確信度 + 判断理由 |
+| HOLD | シグナルなし（不参加） | 方向予測（bullish/bearish/neutral 寄り）+ 判断理由 |
+| 価格急変動 | 損失 `alert_threshold_pct` 超過 | 損失率・SLまでの距離 |
 
 ### REST API
 
@@ -450,6 +488,19 @@ lot = max(min_lot_size, round(lot / lot_unit) * lot_unit)
 | 遅行スパン | 現在値を26期間過去に表示 | トレンド確認 |
 | TKクロス | 転換線が基準線を上抜け/下抜け | エントリーシグナル |
 | 雲（クモ） | SpanA と SpanB の間 | 動的サポート・レジスタンス |
+
+### ログローテーション
+
+```yaml
+logging:
+  level: "INFO"
+  file: "logs/finance.log"
+  activity_log_file: "logs/activity.log"
+  rotate_timing: "10MB"   # サイズ: 10MB / 512KB など
+                          # 時間間隔: 6H（毎6時間）/ 1D（毎日）
+                          # タイミング: midnight（日次0時）/ W0〜W6（曜日）
+  backup_count: 5
+```
 
 ---
 
