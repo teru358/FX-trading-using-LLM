@@ -233,19 +233,23 @@ class VectorStore:
         action: str,
         outcome_summary: str,
         lesson: str,
+        close_reason: str | None = None,
     ) -> None:
+        metadata: dict = {
+            "pair": pair,
+            "cycle_time": cycle_time.isoformat(),
+            "cycle_ts": cycle_time.timestamp(),
+            "action": action,
+            "outcome_summary": outcome_summary,
+            "lesson": lesson,
+        }
+        if close_reason is not None:
+            metadata["close_reason"] = close_reason
         self._reflections.upsert(
             ids=[entry_id],
             embeddings=[embedding],
             documents=[text],
-            metadatas=[{
-                "pair": pair,
-                "cycle_time": cycle_time.isoformat(),
-                "cycle_ts": cycle_time.timestamp(),
-                "action": action,
-                "outcome_summary": outcome_summary,
-                "lesson": lesson,
-            }],
+            metadatas=[metadata],
         )
         logger.debug(f"Upserted reflection {entry_id} for {pair}")
 

@@ -29,6 +29,7 @@ def execute_signal(signal: TradeSignal, position_mgr: PositionManager) -> Order 
         stop_loss=signal.stop_loss,
         take_profit=signal.take_profit,
         position_size=signal.position_size,
+        signal_reason=signal.signal_reason,
     )
     position_mgr.open_position(order)
     logger.info(

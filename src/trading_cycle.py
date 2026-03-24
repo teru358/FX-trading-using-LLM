@@ -9,7 +9,7 @@ from functools import partial
 
 from src.analysis.news_aggregator import aggregate_news_sentiment
 from src.analysis.price_analyzer import analyze_price_action
-from src.analysis.reflector import generate_reflection, store_reflection
+from src.analysis.reflector import generate_close_reflection, generate_reflection, store_reflection
 from src.config import AppConfig, InstrumentConfig
 from src.data.indicators import compute_indicators
 from src.data.price_fetcher import fetch_current_price, fetch_ohlcv
@@ -211,6 +211,36 @@ async def trading_cycle(
                     close_reason=closed.close_reason or "manual",
                     balance=account_after_close.balance,
                 ))
+
+    # Phase 1.5: 決済トレードの確定結果ベース振り返りをRAGに保存
+    if closed_this_run:
+        embed_fn = partial(
+            embed_text,
+            ollama_base_url=config.llm.ollama.base_url,
+            model=config.rag.embedding_model,
+        )
+        for closed_order in closed_this_run:
+            pair_cfg = next(
+                (p for p in config.tradeable_instruments if p.symbol == closed_order.pair),
+                None,
+            )
+            if pair_cfg is None:
+                continue
+            try:
+                reflection = await generate_close_reflection(
+                    pair_cfg=pair_cfg,
+                    order=closed_order,
+                    llm=llm_reflect,
+                    temperature=config.llm.reflection.temperature,
+                )
+                await store_reflection(
+                    reflection=reflection,
+                    store=store,
+                    embed_fn=embed_fn,
+                    close_reason=closed_order.close_reason,
+                )
+            except Exception as e:
+                logger.warning(f"[REFLECT/CLOSE] Failed for {closed_order.pair}: {e}")
 
     # Phase 2: 振り返り生成
     await _generate_cycle_reflections(config, position_mgr, store, llm_reflect)

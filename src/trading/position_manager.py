@@ -27,6 +27,7 @@ class Order:
     close_price: Optional[float] = None
     close_reason: Optional[str] = None  # "take_profit" | "stop_loss" | "manual"
     realized_pnl: Optional[float] = None
+    signal_reason: str = ""  # エントリー理由（決済時の振り返りに使用）
 
     @staticmethod
     def new(
@@ -36,6 +37,7 @@ class Order:
         stop_loss: float,
         take_profit: float,
         position_size: float,
+        signal_reason: str = "",
     ) -> "Order":
         return Order(
             order_id=str(uuid.uuid4()),
@@ -45,6 +47,7 @@ class Order:
             stop_loss=stop_loss,
             take_profit=take_profit,
             position_size=position_size,
+            signal_reason=signal_reason,
         )
 
     def to_dict(self) -> dict:
