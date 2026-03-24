@@ -128,8 +128,7 @@ class NewsCollectionConfig:
 class FeedlyConfig:
     """Feedly API 設定。
 
-    access_token は settings.yaml への直接記載か、
-    .env の FEEDLY_ACCESS_TOKEN から読み込む（load_config で解決）。
+    access_token は .env の FEEDLY_ACCESS_TOKEN から読み込む（load_config で解決）。
 
     Stream ID の確認:
       GET https://cloud.feedly.com/v3/categories
@@ -410,8 +409,8 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     _default_ns = NewsSourcesConfig()
     ns = raw.get("news_sources", {})
     fd = ns.get("feedly", {})
-    # access_token: settings.yaml の値 → .env の FEEDLY_ACCESS_TOKEN の順で解決
-    feedly_token = fd.get("access_token", "") or os.environ.get("FEEDLY_ACCESS_TOKEN", "")
+    # access_token: .env の FEEDLY_ACCESS_TOKEN から読み込む
+    feedly_token = os.environ.get("FEEDLY_ACCESS_TOKEN", "")
     feedly_cfg = FeedlyConfig(
         enabled=fd.get("enabled", False),
         access_token=feedly_token,
