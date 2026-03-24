@@ -539,7 +539,10 @@ def _build_ask_context(
         entries = store.get_recent_category_news([cat], lookback_hours=config.rag.news_lookback_hours)
         if entries:
             for e in entries[:3]:
-                lines.append(f"[{cat}] {e.title}: sentiment={e.sentiment_score:+.2f}")
+                meta = e.get("metadata", {})
+                summary = meta.get("summary") or e.get("text", "")[:80]
+                score = meta.get("sentiment_score", 0.0)
+                lines.append(f"[{cat}] {summary} (sentiment={score:+.2f})")
 
     # オープンポジション
     account = position_mgr.get_account_state()
