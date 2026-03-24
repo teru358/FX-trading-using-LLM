@@ -117,11 +117,11 @@ def status() -> dict[str, Any]:
     }
 
 
-# ── GET /news/latest ─────────────────────────────────────────────
+# ── GET /news ────────────────────────────────────────────────────
 
-@app.get("/news/latest", dependencies=[Depends(_verify_api_key)])
-def news_latest() -> dict[str, Any]:
-    """カテゴリ別の最新ニュースセンチメント。"""
+@app.get("/news", dependencies=[Depends(_verify_api_key)])
+def news() -> dict[str, Any]:
+    """カテゴリ別の最新ニュースセンチメント（run news と同等）。"""
     assert _store is not None and _config is not None
 
     result: dict[str, Any] = {}
@@ -143,7 +143,46 @@ def news_latest() -> dict[str, Any]:
         else:
             result[category] = None
 
-    return {"categories": result}
+    return {"lookback_hours": _config.rag.news_lookback_hours, "categories": result}
+
+
+# ── GET /tech ────────────────────────────────────────────────────
+
+@app.get("/tech", dependencies=[Depends(_verify_api_key)])
+def tech() -> dict[str, Any]:
+    """銘柄別の最新テクニカルスナップショット（run tech と同等）。"""
+    assert _config is not None and _analysis_store is not None
+
+    all_instruments = _config.watch_only_instruments + _config.tradeable_instruments
+    snapshots = []
+    for inst in all_instruments:
+        snaps = _analysis_store.get_recent_snapshots(
+            inst.symbol, hours=_config.rag.analysis_lookback_hours
+        )
+        if snaps:
+            s = snaps[0]
+            snapshots.append({
+                "symbol":            s.symbol,
+                "display_name":      inst.display_name,
+                "analyzed_at":       s.analyzed_at.isoformat() if s.analyzed_at else None,
+                "direction_bias":    s.direction_bias,
+                "bias_score":        s.bias_score,
+                "confidence":        s.confidence,
+                "entry_zone_low":    s.entry_zone_low,
+                "entry_zone_high":   s.entry_zone_high,
+                "stop_loss":         s.stop_loss,
+                "take_profit":       s.take_profit,
+                "risk_reward_ratio": s.risk_reward_ratio,
+                "reasoning_summary": s.reasoning_summary,
+            })
+        else:
+            snapshots.append({
+                "symbol":       inst.symbol,
+                "display_name": inst.display_name,
+                "analyzed_at":  None,
+            })
+
+    return {"lookback_hours": _config.rag.analysis_lookback_hours, "snapshots": snapshots}
 
 
 # ── GET /analyze ─────────────────────────────────────────────────

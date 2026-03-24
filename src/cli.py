@@ -12,24 +12,20 @@ from rich.table import Table
 
 from src.config import AppConfig
 from src.data.price_fetcher import fetch_current_price
-from src.jobs.news_collector import run_news_collection
-from src.jobs.price_monitor import run_price_monitor
-from src.jobs.technical_collector import run_technical_collection
 from src.notifications.notifier import OrderClosedEvent, create_notifier
 from src.persistence.state_store import StateStore
 from src.rag.vector_store import VectorStore
 from src.trading.position_manager import PositionManager
-from src.trading_cycle import run_analysis_summary
+from src.trading_cycle import run_analysis_summary, run_news_view, run_tech_view
 
 _console = Console()
 
 _HELP = """\
 [bold cyan]コマンド一覧[/bold cyan]
   [cyan]status[/cyan]  (s)         — 残高とオープンポジションを表示
-  [cyan]run news[/cyan]            — ニュース収集を今すぐ実行
-  [cyan]run tech[/cyan]            — テクニカル分析を今すぐ実行
-  [cyan]run analyze[/cyan]         — 総合分析を今すぐ表示（保存済みデータを使用）
-  [cyan]run mon[/cyan]             — 価格監視を今すぐ実行
+  [cyan]run news[/cyan]            — 最新ニュースセンチメントを表示（保存済みデータ）
+  [cyan]run tech[/cyan]            — 最新テクニカルスナップショットを表示（保存済みデータ）
+  [cyan]run analyze[/cyan]         — 総合分析シグナルを表示（保存済みデータ）
   [cyan]close <pair>[/cyan]        — ポジションを手動決済  例: close USDJPY=X
   [cyan]notify[/cyan]  (n)         — 通知テストメッセージを送信
   [cyan]edit[/cyan]   (e)          — user_notes.md を vim で編集
@@ -157,7 +153,6 @@ def _cmd_edit(config: AppConfig) -> None:
 def run_commands(
     config: AppConfig,
     store: VectorStore,
-    price_store,
     analysis_store,
     stop_event: threading.Event,
     job_lock: threading.Lock,
@@ -194,20 +189,17 @@ def run_commands(
                 sub = args[0].lower()
                 with job_lock:
                     if sub in ("news", "n"):
-                        _console.print("[cyan]ニュース収集を実行中...[/cyan]")
-                        run_news_collection(config, store)
+                        _console.print("[cyan]最新ニュースセンチメントを表示中...[/cyan]")
+                        run_news_view(config, store)
                     elif sub in ("tech", "t", "technical"):
-                        _console.print("[cyan]テクニカル分析を実行中...[/cyan]")
-                        run_technical_collection(config, store, price_store, analysis_store)
+                        _console.print("[cyan]最新テクニカルスナップショットを表示中...[/cyan]")
+                        run_tech_view(config, analysis_store)
                     elif sub in ("analyze", "a", "analysis"):
                         _console.print("[cyan]総合分析を表示中...[/cyan]")
                         run_analysis_summary(config, store, analysis_store)
-                    elif sub in ("mon", "monitor"):
-                        _console.print("[cyan]価格監視を実行中...[/cyan]")
-                        run_price_monitor(config)
                     else:
                         _console.print(
-                            f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | mon"
+                            f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze"
                         )
             elif cmd in ("n", "notify"):
                 _cmd_notify(config)

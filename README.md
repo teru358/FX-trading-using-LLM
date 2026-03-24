@@ -428,8 +428,9 @@ api:
 |---|---|---|
 | `GET` | `/health` | 起動確認・スケジューラ状態（ジョブ数・次回実行時刻） |
 | `GET` | `/status` | 残高・PnL・勝率・オープンポジション（含み損益付き） |
-| `GET` | `/news/latest` | カテゴリ別（fx/global/japan）の最新ニュースセンチメント |
-| `GET` | `/analyze` | 保存済みスナップショット＋ニュースから全ペアの総合シグナルを返す（新規LLM取得なし） |
+| `GET` | `/news` | カテゴリ別（fx/global/japan）の最新ニュースセンチメント（`run news` と同等） |
+| `GET` | `/tech` | 銘柄別の最新テクニカルスナップショット（`run tech` と同等） |
+| `GET` | `/analyze` | 保存済みデータからの総合シグナル（`run analyze` と同等） |
 | `POST` | `/close/{pair}` | ポジションを即時決済 |
 
 ### 利用例
@@ -445,9 +446,12 @@ curl -H "X-API-Key: $KEY" $HOST/health
 curl -H "X-API-Key: $KEY" $HOST/status
 
 # ニュースセンチメント確認
-curl -H "X-API-Key: $KEY" $HOST/news/latest
+curl -H "X-API-Key: $KEY" $HOST/news
 
-# 総合シグナル確認（保存済みデータ使用・新規取得なし）
+# テクニカルスナップショット確認
+curl -H "X-API-Key: $KEY" $HOST/tech
+
+# 総合シグナル確認
 curl -H "X-API-Key: $KEY" $HOST/analyze
 
 # 緊急決済（USDJPY=X をクローズ）

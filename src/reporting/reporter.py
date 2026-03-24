@@ -13,6 +13,8 @@ from rich import box
 from src.signals.signal_combiner import TradeSignal
 from src.trading.position_manager import AccountState, Order
 
+_CATEGORY_LABELS = {"fx": "FX Market", "global": "Global Economy", "japan": "Japan / JPY"}
+
 console = Console()
 
 
@@ -194,6 +196,134 @@ def print_run_summary(
         expand=False,
         padding=(0, 2),
     ))
+    console.print()
+
+
+def print_news_summary(entries_by_category: dict[str, list[dict]], lookback_hours: int) -> None:
+    """カテゴリ別最新ニュースセンチメントを表示する（保存済みデータのみ）。"""
+    console.print()
+    console.print(Rule(
+        f"[bold cyan]News Sentiment[/bold cyan]  [dim]直近 {lookback_hours}h[/dim]",
+        style="cyan",
+    ))
+
+    tbl = Table(
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold bright_white on grey23",
+        border_style="grey50",
+        padding=(0, 1),
+        expand=False,
+    )
+    tbl.add_column("Category",  width=16)
+    tbl.add_column("Collected", width=16, style="dim")
+    tbl.add_column("Score",     width=7,  justify="right")
+    tbl.add_column("Conf",      width=5,  justify="right")
+    tbl.add_column("Items",     width=5,  justify="right")
+    tbl.add_column("Themes",    width=32, style="dim")
+    tbl.add_column("Summary",   min_width=30)
+
+    any_data = False
+    for cat in ("fx", "global", "japan"):
+        label = _CATEGORY_LABELS.get(cat, cat)
+        entries = entries_by_category.get(cat, [])
+        if not entries:
+            tbl.add_row(label, "[dim]データなし[/dim]", "-", "-", "-", "-", "[dim]-[/dim]")
+            continue
+        any_data = True
+        meta = entries[0]["metadata"]
+        score    = float(meta.get("sentiment_score", 0.0))
+        conf     = float(meta.get("confidence", 0.0))
+        themes   = (meta.get("key_themes", "") or "")[:32]
+        summary  = (meta.get("summary", "") or "")[:60]
+        n_count  = int(meta.get("news_count", 0))
+        col_at   = (meta.get("collected_at", "") or "")[:16]
+        tbl.add_row(
+            label,
+            col_at,
+            _score_text(score),
+            f"{conf:.2f}",
+            str(n_count),
+            themes,
+            f"[dim]{summary}[/dim]",
+        )
+
+    console.print(tbl)
+    if not any_data:
+        console.print(
+            "[dim yellow]ニュースデータがありません。"
+            "スケジューラーによる自動収集をお待ちください。[/dim yellow]"
+        )
+    console.print()
+
+
+def print_tech_summary(
+    snapshots_by_symbol: dict[str, list],
+    display_names: dict[str, str],
+    lookback_hours: int,
+) -> None:
+    """銘柄別最新テクニカルスナップショットを表示する（保存済みデータのみ）。"""
+    console.print()
+    console.print(Rule(
+        f"[bold cyan]Technical Snapshots[/bold cyan]  [dim]直近 {lookback_hours}h[/dim]",
+        style="cyan",
+    ))
+
+    tbl = Table(
+        box=box.ROUNDED,
+        show_header=True,
+        header_style="bold bright_white on grey23",
+        border_style="grey50",
+        padding=(0, 1),
+        expand=False,
+    )
+    tbl.add_column("Pair",       width=10)
+    tbl.add_column("Analyzed",   width=16, style="dim")
+    tbl.add_column("Direction",  width=14)
+    tbl.add_column("Score",      width=7,  justify="right")
+    tbl.add_column("Conf",       width=5,  justify="right")
+    tbl.add_column("Entry Zone", width=22, justify="right")
+    tbl.add_column("SL",         width=10, justify="right")
+    tbl.add_column("TP",         width=10, justify="right")
+    tbl.add_column("RR",         width=5,  justify="right")
+    tbl.add_column("Summary",    min_width=25, style="dim")
+
+    any_data = False
+    for symbol, snaps in snapshots_by_symbol.items():
+        name = display_names.get(symbol, symbol)
+        if not snaps:
+            tbl.add_row(name, "[dim]データなし[/dim]", *(["-"] * 8))
+            continue
+        any_data = True
+        s = snaps[0]
+        analyzed = s.analyzed_at.strftime("%m-%d %H:%M") if s.analyzed_at else "-"
+        rr_str   = f"{s.risk_reward_ratio:.1f}" if s.risk_reward_ratio else "-"
+        entry_str = (
+            f"{s.entry_zone_low:.5f}–{s.entry_zone_high:.5f}"
+            if s.entry_zone_low and s.entry_zone_high else "-"
+        )
+        sl_str = f"{s.stop_loss:.5f}"  if s.stop_loss  else "-"
+        tp_str = f"{s.take_profit:.5f}" if s.take_profit else "-"
+        summary = (s.reasoning_summary or "")[:40]
+        tbl.add_row(
+            name,
+            analyzed,
+            _ichi_text(s.direction_bias or "neutral"),
+            _score_text(s.bias_score or 0.0),
+            f"{s.confidence:.2f}" if s.confidence else "-",
+            entry_str,
+            sl_str,
+            tp_str,
+            rr_str,
+            summary,
+        )
+
+    console.print(tbl)
+    if not any_data:
+        console.print(
+            "[dim yellow]テクニカルデータがありません。"
+            "スケジューラーによる自動収集をお待ちください。[/dim yellow]"
+        )
     console.print()
 
 

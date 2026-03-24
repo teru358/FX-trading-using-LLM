@@ -27,7 +27,7 @@ from src.notifications.notifier import (
     SignalSkippedEvent,
     create_notifier,
 )
-from src.reporting.reporter import print_run_summary
+from src.reporting.reporter import print_news_summary, print_run_summary, print_tech_summary
 from src.signals.signal_combiner import combine_signals
 from src.trading.live_broker import create_broker
 from src.trading.market_hours import is_market_open, market_status_label
@@ -363,6 +363,28 @@ async def _analysis_summary(
         account_state=account_state,
         run_start=run_start.replace(tzinfo=None),
     )
+
+
+def run_news_view(config: AppConfig, store: VectorStore) -> None:
+    """CLIから呼び出す: 保存済みニュースセンチメントを表示する（新規取得なし）。"""
+    entries_by_category = {
+        cat: store.get_recent_category_news([cat], lookback_hours=config.rag.news_lookback_hours)
+        for cat in ("fx", "global", "japan")
+    }
+    print_news_summary(entries_by_category, config.rag.news_lookback_hours)
+
+
+def run_tech_view(config: AppConfig, analysis_store: AnalysisStore) -> None:
+    """CLIから呼び出す: 保存済みテクニカルスナップショットを表示する（新規取得なし）。"""
+    all_instruments = config.watch_only_instruments + config.tradeable_instruments
+    snapshots_by_symbol = {
+        inst.symbol: analysis_store.get_recent_snapshots(
+            inst.symbol, hours=config.rag.analysis_lookback_hours
+        )
+        for inst in all_instruments
+    }
+    display_names = {inst.symbol: inst.display_name for inst in all_instruments}
+    print_tech_summary(snapshots_by_symbol, display_names, config.rag.analysis_lookback_hours)
 
 
 def run_analysis_summary(

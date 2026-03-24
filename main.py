@@ -140,7 +140,7 @@ def main() -> None:
     _console.print(Rule("[dim cyan]Scheduler running[/dim cyan]", style="dim cyan"))
 
     # メインスレッド: コマンドループ
-    run_commands(config, store, price_store, analysis_store, _stop, _job_lock)
+    run_commands(config, store, analysis_store, _stop, _job_lock)
 
 
 if __name__ == "__main__":
