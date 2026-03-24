@@ -221,6 +221,48 @@ class NotifierConfig:
 
 
 @dataclass
+class IndicatorToggleConfig:
+    """テクニカル指標の有効/無効スイッチ。"""
+    moving_averages: bool = True
+    rsi: bool = True
+    macd: bool = True
+    bollinger_bands: bool = True
+    atr: bool = True
+    adx: bool = True
+    ichimoku: bool = True
+
+
+@dataclass
+class ChartPatternConfig:
+    """チャートパターン検出の有効/無効スイッチ。"""
+    # ローソク足パターン
+    hammer: bool = True
+    shooting_star: bool = True
+    engulfing: bool = True
+    doji: bool = True
+    morning_evening_star: bool = True
+    three_soldiers_crows: bool = True
+    pin_bar: bool = True
+    inside_bar: bool = True
+    # チャート形状
+    double_top_bottom: bool = False
+    head_shoulders: bool = False
+    triangle: bool = False
+    range_bound: bool = False
+    # ブレイクアウト系
+    bb_squeeze: bool = False
+    atr_contraction: bool = False
+    sr_breakout: bool = False
+
+
+@dataclass
+class AnalysisConfig:
+    """分析手法の有効/無効設定。"""
+    indicators: IndicatorToggleConfig = field(default_factory=IndicatorToggleConfig)
+    chart_patterns: ChartPatternConfig = field(default_factory=ChartPatternConfig)
+
+
+@dataclass
 class GeminiConfig:
     model: str = "gemini-2.0-flash"
     timeout_seconds: int = 60
@@ -294,6 +336,7 @@ class AppConfig:
     price_monitor: PriceMonitorConfig = field(default_factory=PriceMonitorConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
+    analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
     openai: OpenAIConfig = field(default_factory=OpenAIConfig)
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
@@ -517,6 +560,37 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         reflection=_role(lc.get("reflection", {}), 0.3),
     )
 
+    an = raw.get("analysis", {})
+    ind = an.get("indicators", {})
+    indicator_cfg = IndicatorToggleConfig(
+        moving_averages=ind.get("moving_averages", True),
+        rsi=ind.get("rsi", True),
+        macd=ind.get("macd", True),
+        bollinger_bands=ind.get("bollinger_bands", True),
+        atr=ind.get("atr", True),
+        adx=ind.get("adx", True),
+        ichimoku=ind.get("ichimoku", True),
+    )
+    cp = an.get("chart_patterns", {})
+    pattern_cfg = ChartPatternConfig(
+        hammer=cp.get("hammer", True),
+        shooting_star=cp.get("shooting_star", True),
+        engulfing=cp.get("engulfing", True),
+        doji=cp.get("doji", True),
+        morning_evening_star=cp.get("morning_evening_star", True),
+        three_soldiers_crows=cp.get("three_soldiers_crows", True),
+        pin_bar=cp.get("pin_bar", True),
+        inside_bar=cp.get("inside_bar", True),
+        double_top_bottom=cp.get("double_top_bottom", False),
+        head_shoulders=cp.get("head_shoulders", False),
+        triangle=cp.get("triangle", False),
+        range_bound=cp.get("range_bound", False),
+        bb_squeeze=cp.get("bb_squeeze", False),
+        atr_contraction=cp.get("atr_contraction", False),
+        sr_breakout=cp.get("sr_breakout", False),
+    )
+    analysis_cfg = AnalysisConfig(indicators=indicator_cfg, chart_patterns=pattern_cfg)
+
     return AppConfig(
         trading=trading,
         instruments=instruments,
@@ -532,4 +606,5 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         gemini=gemini,
         openai=openai_cfg,
         claude=claude_cfg,
+        analysis=analysis_cfg,
     )

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 import pandas as pd
 import pandas_ta as ta
 
 from src.data.price_fetcher import PriceData
+
+if TYPE_CHECKING:
+    from src.config import ChartPatternConfig, IndicatorToggleConfig
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +48,9 @@ class IndicatorSummary:
     recent_highs: list[float] = field(default_factory=list)
     recent_lows: list[float] = field(default_factory=list)
     trend_direction: str = "sideways"
+    # チャートパターン
+    chart_patterns: list[str] = field(default_factory=list)
+    pattern_bias: str = "neutral"  # "bullish" | "bearish" | "neutral"
 
 
 def _compute_ichimoku(df: pd.DataFrame) -> dict:
@@ -143,30 +150,40 @@ def _compute_ichimoku(df: pd.DataFrame) -> dict:
     }
 
 
-def compute_indicators(df: pd.DataFrame) -> tuple[pd.DataFrame, IndicatorSummary]:
+def compute_indicators(
+    df: pd.DataFrame,
+    indicator_cfg: IndicatorToggleConfig | None = None,
+    pattern_cfg: ChartPatternConfig | None = None,
+) -> tuple[pd.DataFrame, IndicatorSummary]:
     df = df.copy()
 
     # Moving averages
-    df.ta.sma(length=20, append=True)
-    df.ta.sma(length=50, append=True)
-    df.ta.sma(length=200, append=True)
-    df.ta.ema(length=12, append=True)
-    df.ta.ema(length=26, append=True)
+    if indicator_cfg is None or indicator_cfg.moving_averages:
+        df.ta.sma(length=20, append=True)
+        df.ta.sma(length=50, append=True)
+        df.ta.sma(length=200, append=True)
+        df.ta.ema(length=12, append=True)
+        df.ta.ema(length=26, append=True)
 
     # RSI
-    df.ta.rsi(length=14, append=True)
+    if indicator_cfg is None or indicator_cfg.rsi:
+        df.ta.rsi(length=14, append=True)
 
     # MACD
-    df.ta.macd(fast=12, slow=26, signal=9, append=True)
+    if indicator_cfg is None or indicator_cfg.macd:
+        df.ta.macd(fast=12, slow=26, signal=9, append=True)
 
     # Bollinger Bands
-    df.ta.bbands(length=20, std=2, append=True)
+    if indicator_cfg is None or indicator_cfg.bollinger_bands:
+        df.ta.bbands(length=20, std=2, append=True)
 
     # ATR
-    df.ta.atr(length=14, append=True)
+    if indicator_cfg is None or indicator_cfg.atr:
+        df.ta.atr(length=14, append=True)
 
     # ADX
-    df.ta.adx(length=14, append=True)
+    if indicator_cfg is None or indicator_cfg.adx:
+        df.ta.adx(length=14, append=True)
 
     close = df["Close"]
 
@@ -212,7 +229,25 @@ def compute_indicators(df: pd.DataFrame) -> tuple[pd.DataFrame, IndicatorSummary
         bb_pct_b = (current_price - bb_lower) / (bb_upper - bb_lower)
 
     # 一目均衡表（52本以上のデータが必要）
-    ichi = _compute_ichimoku(df) if len(df) >= 52 else {}
+    use_ichimoku = (indicator_cfg is None or indicator_cfg.ichimoku)
+    ichi = _compute_ichimoku(df) if (use_ichimoku and len(df) >= 52) else {}
+
+    # チャートパターン検出
+    chart_patterns: list[str] = []
+    pattern_bias = "neutral"
+    if pattern_cfg is not None:
+        from src.data.candle_patterns import detect_patterns
+        atr_val = safe(["ATRr_14", "ATR_14", "ATR"])
+        pattern_result = detect_patterns(
+            df,
+            cfg=pattern_cfg,
+            atr=atr_val,
+            bb_upper=bb_upper,
+            bb_lower=bb_lower,
+            sma_20=sma_20,
+        )
+        chart_patterns = pattern_result.detected
+        pattern_bias = pattern_result.bias
 
     summary = IndicatorSummary(
         sma_20=sma_20,
@@ -244,11 +279,14 @@ def compute_indicators(df: pd.DataFrame) -> tuple[pd.DataFrame, IndicatorSummary
         recent_highs=highs[-5:],
         recent_lows=lows[-5:],
         trend_direction=trend,
+        chart_patterns=chart_patterns,
+        pattern_bias=pattern_bias,
     )
 
     logger.debug(
         f"Indicators: RSI={summary.rsi_14:.1f} MACD={summary.macd_histogram:+.4f} "
         f"ADX={summary.adx_14:.1f} trend={summary.trend_direction} "
-        f"ichimoku={summary.ichimoku_signal} price_vs_kumo={summary.price_vs_kumo}"
+        f"ichimoku={summary.ichimoku_signal} price_vs_kumo={summary.price_vs_kumo} "
+        f"patterns={summary.chart_patterns}"
     )
     return df, summary

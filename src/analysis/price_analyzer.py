@@ -54,11 +54,16 @@ Consider:
    - Price above Kumo = bullish bias; below = bearish; inside = consolidation
    - Bullish TK cross (Tenkan crosses above Kijun) = entry signal
    - Kumo acts as dynamic support/resistance zone for SL/TP placement
-6. News sentiment and macroeconomic context from the RAG knowledge base
-7. Lessons learned from previous trading reflections
-8. Compare with previous analysis: note any shift in direction or confidence since the last cycle
-9. Macro context: equity index trends as risk sentiment indicators, cross-currency correlation
-10. Risk/reward ratio (minimum 2:1 required)
+6. Chart Patterns (if detected): use as entry timing confirmation or early reversal warning
+   - Bullish patterns (hammer, morning_star, bullish_engulfing, etc.) support long bias
+   - Bearish patterns (shooting_star, evening_star, bearish_engulfing, etc.) support short bias
+   - Neutral patterns (doji, inside_bar, bb_squeeze) suggest indecision — wait for confirmation
+   - Require confluence with at least one other indicator before acting on patterns alone
+7. News sentiment and macroeconomic context from the RAG knowledge base
+8. Lessons learned from previous trading reflections
+9. Compare with previous analysis: note any shift in direction or confidence since the last cycle
+10. Macro context: equity index trends as risk sentiment indicators, cross-currency correlation
+11. Risk/reward ratio (minimum 2:1 required)
 
 After your reasoning, output ONLY this JSON block (no markdown fences):
 {{

@@ -31,6 +31,20 @@ Price vs Kumo: {summary.price_vs_kumo}
 TK Cross: {summary.tk_cross}
 Ichimoku Signal: {summary.ichimoku_signal}"""
 
+    pattern_block = ""
+    if summary.chart_patterns:
+        from src.data.candle_patterns import _BULLISH_PATTERNS, _BEARISH_PATTERNS
+        bullish = [p for p in summary.chart_patterns if p in _BULLISH_PATTERNS]
+        bearish = [p for p in summary.chart_patterns if p in _BEARISH_PATTERNS]
+        neutral = [p for p in summary.chart_patterns if p not in _BULLISH_PATTERNS and p not in _BEARISH_PATTERNS]
+        pattern_block = f"""
+=== Chart Patterns ===
+Detected: {', '.join(summary.chart_patterns)}
+  Bullish signals: {', '.join(bullish) if bullish else 'none'}
+  Bearish signals: {', '.join(bearish) if bearish else 'none'}
+  Neutral signals: {', '.join(neutral) if neutral else 'none'}
+  Pattern bias: {summary.pattern_bias}"""
+
     return f"""=== {price_data.symbol} Daily OHLCV (last 20 bars) ===
 Date,Open,High,Low,Close
 {ohlcv_block}
@@ -46,4 +60,4 @@ ATR(14): {summary.atr_14:.5f}
 ADX(14): {summary.adx_14:.1f}
 Recent Swing Highs: {summary.recent_highs}
 Recent Swing Lows: {summary.recent_lows}
-Trend Direction: {summary.trend_direction}{ichi_block}"""
+Trend Direction: {summary.trend_direction}{ichi_block}{pattern_block}"""

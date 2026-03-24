@@ -206,6 +206,40 @@ api:
   port: 8811                       # リッスンポート
   # 認証: .env の API_SECRET_KEY を設定（X-API-Key ヘッダーで送信）
 
+analysis:
+  # テクニカル指標の有効/無効
+  indicators:
+    moving_averages: true    # SMA(20/50/200) / EMA(12/26)
+    rsi: true
+    macd: true
+    bollinger_bands: true
+    atr: true
+    adx: true
+    ichimoku: true           # 一目均衡表
+
+  # チャートパターン検出
+  chart_patterns:
+    # ── ローソク足パターン ────────────────────────────
+    hammer: true              # ハンマー（下ヒゲ長・下降トレンド末）
+    shooting_star: true       # シューティングスター（上ヒゲ長・上昇トレンド末）
+    engulfing: true           # 包み足（強気/弱気エングルフィング）
+    doji: true                # 十字線（始値≒終値）
+    morning_evening_star: true  # モーニング/イブニングスター（3本）
+    three_soldiers_crows: true  # 三白兵/三黒烏（連続3本同方向）
+    pin_bar: true             # ピンバー（最長ヒゲ≥実体×3）
+    inside_bar: true          # インサイドバー（前足の範囲内に収まる）
+
+    # ── チャート形状パターン ──────────────────────────
+    double_top_bottom: false  # ダブルトップ/ダブルボトム
+    head_shoulders: false     # ヘッド＆ショルダー（通常/逆）
+    triangle: false           # 三角保ち合い（上昇/下降/対称）
+    range_bound: false        # レンジ相場検出
+
+    # ── ブレイクアウト系 ──────────────────────────────
+    bb_squeeze: false         # BBスクイーズ（ボラティリティ収縮）
+    atr_contraction: false    # ATR収縮（ブレイクアウト前兆）
+    sr_breakout: false        # サポート/レジスタンス・ブレイク
+
 logging:
   level: "INFO"
   file: "logs/finance.log"

@@ -48,7 +48,11 @@ async def _collect_one(
         interval=config.trading.ohlcv_interval,
         price_store=price_store,
     )
-    _, summary = compute_indicators(price_data.df)
+    _, summary = compute_indicators(
+        price_data.df,
+        indicator_cfg=config.analysis.indicators,
+        pattern_cfg=config.analysis.chart_patterns,
+    )
 
     # RAGからコンテキストを構築
     news_entries = store.get_recent_category_news(
