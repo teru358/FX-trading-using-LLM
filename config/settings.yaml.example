@@ -64,6 +64,14 @@ trading:
   min_lot_size: 1000.0             # 最小ロットサイズ
   lot_unit: 1000.0                 # ロット切り捨て単位
   trading_mode: "paper"            # "paper"（シミュレーション）| "live"（本取引: OANDA API必須）
+  # ポジション再評価（Phase 4a: Layer 1〜3）
+  position_review_enabled: false        # true で有効化
+  reversal_confidence_min: 0.70         # Layer 1: 反転シグナルの最低信頼度
+  reversal_score_threshold: 0.25        # Layer 1: 反転スコアの絶対値閾値
+  max_holding_days: 10                  # Layer 2: 最大保有日数
+  timeout_min_progress_pct: 0.30        # Layer 2: この進捗率未満でタイムアウト決済
+  profit_lock_min_progress_pct: 0.40    # Layer 3: TP方向への進捗率がこれ以上で利益ロック候補
+  profit_lock_score_floor: 0.15         # Layer 3: シグナルスコア絶対値がこれ未満で利益ロック
 
 instruments:
   # ── FX（取引対象: mode=trade） ──
@@ -104,9 +112,10 @@ instruments:
     enabled: true
 
 news_collection:
-  interval_minutes: 15             # この間隔でtimezoneに揃えた時刻を自動生成
+  interval_minutes: 15             # この間隔でtimezoneに揃えた時刻を自動生成（OHLCV+テクニカル分析も同時実行）
   timezone: "Asia/Tokyo"
   inter_pair_delay_seconds: 10     # ペア間の待機（Ollama VRAM保護）
+  news_freshness_hours: 24         # この時間以上古い記事は除外
   summary_max_chars: 600           # RSS summary の切り捨て文字数（LLM context に合わせて調整）
 
 news_sources:
@@ -124,7 +133,7 @@ news_sources:
     count: 20             # 1ストリームあたりの取得件数上限
 
   feeds_fx:
-    - "https://feeds.feedburner.com/forexlive/all"
+    - "https://www.forexlive.com/feed/news"
     - "https://www.fxstreet.com/rss/news"
     - "https://www.investing.com/rss/news_285.rss"
   feeds_global:
@@ -189,6 +198,15 @@ price_monitor:
   alert_step_pct: 0.002            # 追加 0.2% ごとに再通知（スパム防止）
   emergency_close_pct: 0.008       # 損失 0.8% で緊急損切り（0 = 無効）
   enable_emergency_close: false    # 緊急損切りを有効にするか（false = 通知のみ）
+  # トレーリングストップ（利益保護・Layer 4）
+  trailing_stop_enabled: false    # true で有効化
+  trailing_stop_activation_pct: 0.40   # TP距離の40%到達で発動開始
+  trailing_stop_distance_ratio: 1.0    # 元のSL距離と同比率でSLを追従（1.0 = 同じ幅）
+
+api:
+  enabled: false                   # true で REST API サーバーを起動
+  port: 8811                       # リッスンポート
+  # 認証: .env の API_SECRET_KEY を設定（X-API-Key ヘッダーで送信）
 
 logging:
   level: "INFO"

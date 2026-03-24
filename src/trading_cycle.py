@@ -32,6 +32,7 @@ from src.signals.signal_combiner import combine_signals
 from src.trading.live_broker import create_broker
 from src.trading.market_hours import is_market_open, market_status_label
 from src.trading.position_manager import PositionManager
+from src.trading.position_reviewer import review_open_positions
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +265,87 @@ async def trading_cycle(
     if errors:
         logger.warning(f"{len(errors)} pair(s) failed during analysis.")
 
-    # Phase 4: シグナル実行
+    # Phase 4a: ポジション再評価（Layer 1〜3）
+    reviewed_closed = []
+    if config.trading.position_review_enabled:
+        account_for_review = position_mgr.get_account_state()
+        if account_for_review.open_positions:
+            signals_by_pair = {s.pair: s for s in signals}
+            review_prices = {}
+            for pos in account_for_review.open_positions:
+                try:
+                    review_prices[pos.pair] = fetch_current_price(pos.pair)
+                except Exception as e:
+                    logger.warning(f"[REVIEW] Could not fetch price for {pos.pair}: {e}")
+
+            decisions = review_open_positions(
+                open_positions=account_for_review.open_positions,
+                signals_by_pair=signals_by_pair,
+                current_prices=review_prices,
+                reversal_confidence_min=config.trading.reversal_confidence_min,
+                reversal_score_threshold=config.trading.reversal_score_threshold,
+                max_holding_days=config.trading.max_holding_days,
+                timeout_min_progress_pct=config.trading.timeout_min_progress_pct,
+                profit_lock_min_progress_pct=config.trading.profit_lock_min_progress_pct,
+                profit_lock_score_floor=config.trading.profit_lock_score_floor,
+            )
+
+            for decision in decisions:
+                price = review_prices.get(decision.pair)
+                if price is None:
+                    continue
+                closed_order = position_mgr.close_position(
+                    decision.order_id, price, decision.close_reason,
+                )
+                if closed_order:
+                    reviewed_closed.append(closed_order)
+                    logger.info(
+                        f"[REVIEW] {decision.pair}: closed ({decision.close_reason}) — "
+                        f"{decision.detail}"
+                    )
+                    if config.notifier.notify_on_order_close:
+                        account_after = position_mgr.get_account_state()
+                        await notifier.notify_order_closed(OrderClosedEvent(
+                            pair=closed_order.pair,
+                            direction=closed_order.direction,
+                            entry_price=closed_order.entry_price,
+                            close_price=price,
+                            realized_pnl=closed_order.realized_pnl or 0.0,
+                            close_reason=decision.close_reason,
+                            balance=account_after.balance,
+                        ))
+
+            # Phase 4a 決済分の振り返りをRAGに保存
+            if reviewed_closed:
+                embed_fn = partial(
+                    embed_text,
+                    ollama_base_url=config.llm.ollama.base_url,
+                    model=config.rag.embedding_model,
+                )
+                for closed_order in reviewed_closed:
+                    pair_cfg = next(
+                        (p for p in config.tradeable_instruments if p.symbol == closed_order.pair),
+                        None,
+                    )
+                    if pair_cfg is None:
+                        continue
+                    try:
+                        reflection = await generate_close_reflection(
+                            pair_cfg=pair_cfg,
+                            order=closed_order,
+                            llm=llm_reflect,
+                            temperature=config.llm.reflection.temperature,
+                        )
+                        await store_reflection(
+                            reflection=reflection,
+                            store=store,
+                            embed_fn=embed_fn,
+                            close_reason=closed_order.close_reason,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[REFLECT/REVIEW] Failed for {closed_order.pair}: {e}")
+
+    # Phase 4b: 新規シグナル実行
     executed_orders = []
     for sig in signals:
         if sig.action != "hold":
@@ -302,11 +383,12 @@ async def trading_cycle(
             ))
 
     # Phase 5: レポート
+    all_closed = closed_this_run + reviewed_closed
     account_state = position_mgr.get_account_state()
     print_run_summary(
         signals=signals,
         executed_orders=executed_orders,
-        closed_this_run=closed_this_run,
+        closed_this_run=all_closed,
         account_state=account_state,
         run_start=run_start.replace(tzinfo=None),
     )

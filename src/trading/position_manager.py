@@ -155,6 +155,27 @@ class PositionManager:
             f"size={order.position_size:.0f}"
         )
 
+    def update_stop_loss(self, order_id: str, new_stop_loss: float) -> bool:
+        """オープンポジションのSLを更新する（トレーリングストップ用）。
+
+        SLは利益方向にのみ移動可能。損失方向への移動は無視される。
+        """
+        for pos in self._open:
+            if pos.order_id == order_id:
+                if pos.direction == "buy" and new_stop_loss <= pos.stop_loss:
+                    return False
+                if pos.direction == "sell" and new_stop_loss >= pos.stop_loss:
+                    return False
+                old_sl = pos.stop_loss
+                pos.stop_loss = new_stop_loss
+                self._save()
+                logger.info(
+                    f"[TRAIL] {pos.pair} {pos.direction.upper()} SL updated: "
+                    f"{old_sl:.5f} → {new_stop_loss:.5f}"
+                )
+                return True
+        return False
+
     def close_position(self, order_id: str, close_price: float, reason: str) -> Optional[Order]:
         for i, pos in enumerate(self._open):
             if pos.order_id == order_id:

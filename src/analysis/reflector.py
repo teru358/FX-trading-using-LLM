@@ -191,9 +191,13 @@ Return ONLY valid JSON:
 }}"""
 
 _CLOSE_REASON_LABELS = {
-    "take_profit": "TAKE PROFIT HIT ✓",
-    "stop_loss":   "STOP LOSS HIT ✗",
-    "manual":      "MANUAL CLOSE",
+    "take_profit":   "TAKE PROFIT HIT ✓",
+    "stop_loss":     "STOP LOSS HIT ✗",
+    "manual":        "MANUAL CLOSE",
+    "reversal":      "SIGNAL REVERSAL CLOSE",
+    "timeout":       "TIMEOUT CLOSE",
+    "profit_lock":   "PROFIT LOCK CLOSE ✓",
+    "emergency_stop": "EMERGENCY STOP ✗",
 }
 
 

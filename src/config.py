@@ -105,6 +105,14 @@ class TradingConfig:
     min_lot_size: float = 1000.0
     lot_unit: float = 1000.0
     trading_mode: str = "paper"
+    # ポジション再評価（Phase 4a）
+    position_review_enabled: bool = False
+    reversal_confidence_min: float = 0.70    # Layer 1: 反転シグナルの最低信頼度
+    reversal_score_threshold: float = 0.25   # Layer 1: 反転シグナルの最低スコア絶対値
+    max_holding_days: int = 10               # Layer 2: 最大保有日数
+    timeout_min_progress_pct: float = 0.30   # Layer 2: タイムアウト判定の最低進捗率
+    profit_lock_min_progress_pct: float = 0.40  # Layer 3: 利益ロック発動の最低進捗率
+    profit_lock_score_floor: float = 0.15    # Layer 3: この絶対値未満で利益ロック
 
 
 @dataclass
@@ -198,6 +206,10 @@ class PriceMonitorConfig:
     alert_step_pct: float = 0.002         # 追加 0.2% ごとに再通知（スパム防止）
     emergency_close_pct: float = 0.008    # 0.8% 損失で緊急損切り（0 = 無効）
     enable_emergency_close: bool = False  # 緊急損切り機能の有効/無効
+    # トレーリングストップ
+    trailing_stop_enabled: bool = False
+    trailing_stop_activation_pct: float = 0.40  # TP距離の40%到達で発動
+    trailing_stop_distance_ratio: float = 1.0   # 元のSL距離と同比率でSLを追従
 
 
 @dataclass
@@ -347,6 +359,13 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         min_lot_size=t.get("min_lot_size", 1000.0),
         lot_unit=t.get("lot_unit", 1000.0),
         trading_mode=t.get("trading_mode", "paper"),
+        position_review_enabled=t.get("position_review_enabled", False),
+        reversal_confidence_min=t.get("reversal_confidence_min", 0.70),
+        reversal_score_threshold=t.get("reversal_score_threshold", 0.25),
+        max_holding_days=t.get("max_holding_days", 10),
+        timeout_min_progress_pct=t.get("timeout_min_progress_pct", 0.30),
+        profit_lock_min_progress_pct=t.get("profit_lock_min_progress_pct", 0.40),
+        profit_lock_score_floor=t.get("profit_lock_score_floor", 0.15),
     )
 
     instruments = [
@@ -448,6 +467,9 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         alert_step_pct=pm.get("alert_step_pct", 0.002),
         emergency_close_pct=pm.get("emergency_close_pct", 0.008),
         enable_emergency_close=pm.get("enable_emergency_close", False),
+        trailing_stop_enabled=pm.get("trailing_stop_enabled", False),
+        trailing_stop_activation_pct=pm.get("trailing_stop_activation_pct", 0.40),
+        trailing_stop_distance_ratio=pm.get("trailing_stop_distance_ratio", 1.0),
     )
 
     g = raw.get("gemini", {})

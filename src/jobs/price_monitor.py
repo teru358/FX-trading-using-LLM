@@ -25,6 +25,43 @@ logger = logging.getLogger(__name__)
 _alert_state: dict[str, float] = {}
 
 
+def _apply_trailing_stop(
+    pos,
+    current: float,
+    cfg,
+    position_mgr: PositionManager,
+) -> None:
+    """トレーリングストップを適用する。
+
+    TP方向への到達率が activation_pct を超えたら、
+    現在価格から元のSL幅 * distance_ratio だけ離れた位置にSLを追従させる。
+    SLは利益方向にのみ移動する（update_stop_loss が保証）。
+    """
+    tp_distance = abs(pos.take_profit - pos.entry_price)
+    if tp_distance == 0:
+        return
+
+    if pos.direction == "buy":
+        progress = current - pos.entry_price
+    else:
+        progress = pos.entry_price - current
+
+    progress_pct = progress / tp_distance
+    if progress_pct < cfg.trailing_stop_activation_pct:
+        return
+
+    # 元のSL距離 × distance_ratio でトレール幅を計算
+    original_sl_distance = abs(pos.entry_price - pos.stop_loss)
+    trail_distance = original_sl_distance * cfg.trailing_stop_distance_ratio
+
+    if pos.direction == "buy":
+        new_sl = current - trail_distance
+    else:
+        new_sl = current + trail_distance
+
+    position_mgr.update_stop_loss(pos.order_id, round(new_sl, 5))
+
+
 def _adverse_move_pct(direction: str, entry: float, current: float) -> float:
     """損失方向への移動率を返す（正値 = 損失方向、負値 = 利益方向）。"""
     if direction == "buy":
@@ -54,6 +91,11 @@ async def monitor_open_positions(
     for pos in account.open_positions:
         try:
             current = fetch_current_price(pos.pair)
+
+            # ── トレーリングストップ ──────────────────────────────
+            if cfg.trailing_stop_enabled:
+                _apply_trailing_stop(pos, current, cfg, position_mgr)
+
             adverse_pct = _adverse_move_pct(pos.direction, pos.entry_price, current)
 
             if adverse_pct <= 0:

@@ -61,10 +61,44 @@
    - シグナル統合（テクニカル60% + ニュース40%）
    - BUY/SELL/HOLD 判定（HOLD時も方向予測を表示）
    - `detail_reason` にニュース/テクニカル内訳を生成（通知に付加）
+4a. **Phase 4a**（オプション）: ポジション再評価（Layer 1〜3）
+   - **Layer 1**（シグナル反転）: 新シグナルと既存ポジション方向が逆で、新シグナルの信頼度が高い → 早期決済
+   - **Layer 2**（タイムアウト）: 保有期間がmax_holding_daysを超えた上、TP方向への進捗が不足 → 損失決済
+   - **Layer 3**（利益ロック）: 含み益がある程度進捗した上、シグナル強度が減衰 → 利益確定
 5. **Phase 5**: ペーパー注文執行・通知送信・レポート出力
    - BUY/SELL → 注文執行 → 発注通知（判断理由付き）
    - HOLD → スキップ通知（方向予測 + 判断理由）
    - 既存ポジションによりスキップ → スキップ通知（判断理由付き）
+
+### ポジション管理（4層リスク制御）
+
+ポジションの管理・リスク制御は4つのレイヤーで構成されています。
+
+| レイヤー | トリガー | 判定 | 結果 | 実装 |
+|---|---|---|---|---|
+| **Layer 1** | Phase 4a（取引判定時） | シグナルがポジション方向と反転 + 新信頼度 ≥ 0.70 | 反転信号の即時決済 | `position_reviewer.py` |
+| **Layer 2** | Phase 4a（取引判定時） | 保有日数 ≥ max_holding_days + TP進捗 < 30% | タイムアウト損失決済 | `position_reviewer.py` |
+| **Layer 3** | Phase 4a（取引判定時） | TP進捗 ≥ 40% + シグナル強度 < 0.15 | 利益ロック決済 | `position_reviewer.py` |
+| **Layer 4** | price_monitor（5分ごと） | TP進捗 ≥ 40% | SLをTP方向に追従（トレーリング） | `price_monitor.py` |
+
+- **Layer 1~3**: 取引判定ループ（15:00/21:30 JST）内で実行。Phase 3 で生成されたシグナルを既存ポジションに対して再評価し、早期決済すべきか判断。
+- **Layer 4**: 価格監視ジョブ（5分間隔）で常時実行。SL は利益方向にのみ移動（損失方向への移動は無視）し、含み益を保護。
+
+設定は `config/settings.yaml` の以下のセクションで制御:
+```yaml
+trading:
+  position_review_enabled: false              # Layer 1〜3 有効化
+  reversal_confidence_min: 0.70               # Layer 1 信頼度閾値
+  max_holding_days: 10                        # Layer 2 最大保有日数
+  timeout_min_progress_pct: 0.30              # Layer 2 最小進捗率
+  profit_lock_min_progress_pct: 0.40          # Layer 3 利益ロック進捗率
+  profit_lock_score_floor: 0.15               # Layer 3 シグナル強度フロア
+
+price_monitor:
+  trailing_stop_enabled: false                # Layer 4 有効化
+  trailing_stop_activation_pct: 0.40          # Layer 4 発動進捗率
+  trailing_stop_distance_ratio: 1.0           # Layer 4 SL追従比率
+```
 
 ---
 
@@ -107,7 +141,7 @@ finance/
 │   ├── jobs/
 │   │   ├── news_collector.py       # RSSニュース収集・センチメント分析・RAG格納
 │   │   ├── technical_collector.py  # OHLCV取得・テクニカル分析・スナップショット保存
-│   │   └── price_monitor.py        # オープンポジション価格監視・急変動通知・緊急損切り
+│   │   └── price_monitor.py        # オープンポジション価格監視・急変動通知・緊急損切り・トレーリングストップ（Layer 4）
 │   ├── signals/
 │   │   └── signal_combiner.py      # テクニカル×ニュース シグナル統合
 │   ├── trading/
@@ -116,7 +150,8 @@ finance/
 │   │   ├── paper_trader.py         # 模擬注文・SL/TP判定
 │   │   ├── live_broker.py          # OANDA本取引（スタブ）+ ファクトリ
 │   │   ├── market_hours.py         # FX市場開閉判定（NY時間基準・DST自動対応）
-│   │   └── position_manager.py     # ポジション・残高・PnL管理
+│   │   ├── position_manager.py     # ポジション・残高・PnL管理
+│   │   └── position_reviewer.py    # ポジション再評価（Layer 1〜3）
 │   ├── rag/
 │   │   ├── vector_store.py         # ChromaDB ラッパー（ニュース・振り返り）
 │   │   ├── embedder.py             # nomic-embed-text ベクトル化
