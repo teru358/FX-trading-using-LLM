@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from functools import partial
 
 from src.analysis.news_aggregator import aggregate_news_sentiment
-from src.analysis.price_analyzer import analyze_price_action
+from src.analysis.price_analyzer import analyze_price_action, chat_with_context
 from src.analysis.reflector import generate_close_reflection, generate_reflection, store_reflection
 from src.config import AppConfig, InstrumentConfig
 from src.data.indicators import compute_indicators
@@ -508,3 +508,77 @@ def run_analysis_summary(
     state_store = StateStore(config.state_dir)
     position_mgr = PositionManager(state_store, config.trading.initial_balance)
     asyncio.run(_analysis_summary(config, position_mgr, store, analysis_store))
+
+
+def _build_ask_context(
+    config: AppConfig,
+    store: VectorStore,
+    analysis_store: AnalysisStore,
+    position_mgr: PositionManager,
+) -> str:
+    """askコマンド用コンテキスト文字列を構築する。"""
+    lines: list[str] = []
+
+    # テクニカルスナップショット（全銘柄）
+    all_instruments = config.watch_only_instruments + config.tradeable_instruments
+    lines.append("=== Technical Snapshots ===")
+    for inst in all_instruments:
+        snaps = analysis_store.get_recent_snapshots(inst.symbol, hours=config.rag.analysis_lookback_hours)
+        if snaps:
+            s = snaps[0]
+            lines.append(
+                f"{inst.display_name}: bias={s.bias_score:+.2f} conf={s.confidence:.2f} "
+                f"dir={s.direction_bias} RR={s.risk_reward_ratio:.1f} | {s.reasoning_summary}"
+            )
+        else:
+            lines.append(f"{inst.display_name}: no snapshot")
+
+    # ニュースコンテキスト（FX・global・japan）
+    lines.append("\n=== News Context ===")
+    for cat in ("fx", "global", "japan"):
+        entries = store.get_recent_category_news([cat], lookback_hours=config.rag.news_lookback_hours)
+        if entries:
+            for e in entries[:3]:
+                lines.append(f"[{cat}] {e.title}: sentiment={e.sentiment_score:+.2f}")
+
+    # オープンポジション
+    account = position_mgr.get_account_state()
+    lines.append("\n=== Open Positions ===")
+    if account.open_positions:
+        for pos in account.open_positions:
+            lines.append(
+                f"{pos.pair} {pos.direction.upper()} entry={pos.entry_price:.5f} "
+                f"SL={pos.stop_loss:.5f} TP={pos.take_profit:.5f}"
+            )
+    else:
+        lines.append("No open positions.")
+
+    return "\n".join(lines)
+
+
+async def _run_ask(
+    user_message: str,
+    config: AppConfig,
+    store: VectorStore,
+    analysis_store: AnalysisStore,
+) -> str:
+    state_store = StateStore(config.state_dir)
+    position_mgr = PositionManager(state_store, config.trading.initial_balance)
+    context = _build_ask_context(config, store, analysis_store, position_mgr)
+    llm = create_llm_client(config, "price_analysis")
+    return await chat_with_context(
+        user_message=user_message,
+        context=context,
+        llm=llm,
+        temperature=config.llm.price_analysis.temperature,
+    )
+
+
+def run_ask(
+    user_message: str,
+    config: AppConfig,
+    store: VectorStore,
+    analysis_store: AnalysisStore,
+) -> str:
+    """CLIから呼び出す同期ラッパー。"""
+    return asyncio.run(_run_ask(user_message, config, store, analysis_store))

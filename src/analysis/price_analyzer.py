@@ -15,6 +15,19 @@ from src.llm.response_parser import extract_json
 
 logger = logging.getLogger(__name__)
 
+ASK_SYSTEM_PROMPT = """You are an expert FX swing trader and technical analyst with 20 years of experience.
+The user will ask questions or share observations about the FX market.
+Answer concisely and practically based on the provided analysis context.
+Always respond in Japanese.
+"""
+
+ASK_USER_PROMPT_TEMPLATE = """{context}
+
+=== User's Question / Comment ===
+{user_message}
+
+上記のコンテキストをもとに、簡潔かつ実践的に日本語で回答してください。"""
+
 
 def _to_float(val, default: float) -> float:
     """LLMレスポンスの値を float に変換する。空文字・None・変換不能な場合はデフォルト値を返す。"""
@@ -183,3 +196,26 @@ async def analyze_price_action(
         f"conf={confidence:.2f} RR={rr:.1f}"
     )
     return analysis
+
+
+async def chat_with_context(
+    user_message: str,
+    context: str,
+    llm: LLMClient,
+    temperature: float = 0.3,
+) -> str:
+    """ユーザーのコメント・質問にコンテキスト付きで自然言語回答する。"""
+    user_prompt = ASK_USER_PROMPT_TEMPLATE.format(
+        context=context,
+        user_message=user_message,
+    )
+    messages = [
+        {"role": "system", "content": ASK_SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+    logger.info(f"[ASK] LLM呼び出し中 ({len(user_message)} chars)...")
+    response = await llm.chat(messages, temperature=temperature)
+    # <think>ブロックを除去（deepseek-r1等のモデル対応）
+    import re
+    response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
+    return response

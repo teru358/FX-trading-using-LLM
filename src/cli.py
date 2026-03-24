@@ -16,7 +16,7 @@ from src.notifications.notifier import OrderClosedEvent, create_notifier
 from src.persistence.state_store import StateStore
 from src.rag.vector_store import VectorStore
 from src.trading.position_manager import PositionManager
-from src.trading_cycle import run_analysis_summary, run_news_view, run_tech_view
+from src.trading_cycle import run_analysis_summary, run_ask, run_news_view, run_tech_view
 
 _console = Console()
 
@@ -26,6 +26,7 @@ _HELP = """\
   [cyan]run news[/cyan]            — 最新ニュースセンチメントを表示（保存済みデータ）
   [cyan]run tech[/cyan]            — 最新テクニカルスナップショットを表示（保存済みデータ）
   [cyan]run analyze[/cyan]         — 総合分析シグナルを表示（保存済みデータ）
+  [cyan]ask <メッセージ>[/cyan]    — FX分析LLMへ質問・コメントを送信
   [cyan]close <pair>[/cyan]        — ポジションを手動決済  例: close USDJPY=X
   [cyan]notify[/cyan]  (n)         — 通知テストメッセージを送信
   [cyan]edit[/cyan]   (e)          — user_notes.md を vim で編集
@@ -201,6 +202,15 @@ def run_commands(
                         _console.print(
                             f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze"
                         )
+            elif cmd == "ask":
+                if not args:
+                    _console.print("[red]使い方: ask <メッセージ>  例: ask 今のUSDJPYはどう見る？[/red]")
+                    continue
+                user_message = " ".join(args)
+                _console.print("[cyan]LLMに問い合わせ中...[/cyan]")
+                with job_lock:
+                    response = run_ask(user_message, config, store, analysis_store)
+                _console.print(f"\n[bold]LLM回答:[/bold]\n{response}\n")
             elif cmd in ("n", "notify"):
                 _cmd_notify(config)
             elif cmd in ("e", "edit"):
