@@ -268,3 +268,28 @@ class VectorStore:
             entries.append({"text": doc, "metadata": meta})
         entries.sort(key=lambda x: x["metadata"].get("cycle_ts", 0), reverse=True)
         return entries[:limit]
+
+    # ---- Maintenance --------------------------------------------------------
+
+    def cleanup_old_news(self, max_age_hours: int = 48) -> int:
+        """指定時間より古いニュースエントリを削除する（リフレクションは対象外）。
+
+        Returns:
+            削除したエントリ数
+        """
+        cutoff_ts = (datetime.now() - timedelta(hours=max_age_hours)).timestamp()
+        try:
+            results = self._news.get(
+                where={"collected_ts": {"$lt": cutoff_ts}},
+                include=["metadatas"],
+            )
+        except Exception:
+            return 0
+
+        ids = results.get("ids", [])
+        if not ids:
+            return 0
+
+        self._news.delete(ids=ids)
+        logger.info(f"[VectorStore] cleanup: deleted {len(ids)} news entries older than {max_age_hours}h")
+        return len(ids)

@@ -77,7 +77,6 @@ async def _process_pair(
             interval=config.trading.ohlcv_interval,
             price_store=price_store,
         )
-        _, summary = compute_indicators(price_data.df)
 
         # 蓄積されたテクニカル分析スナップショットを時間加重集約
         price = analysis_store.aggregate(
@@ -88,6 +87,11 @@ async def _process_pair(
             logger.warning(
                 f"{pair_cfg.display_name}: no stored snapshots, "
                 "running immediate Ollama analysis as fallback..."
+            )
+            _, summary = compute_indicators(
+                price_data.df,
+                indicator_cfg=config.analysis.indicators,
+                pattern_cfg=config.analysis.chart_patterns,
             )
             news_ctx, refl_ctx = await _build_rag_context(pair_cfg, config, store)
             price = await analyze_price_action(

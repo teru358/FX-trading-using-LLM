@@ -38,14 +38,15 @@
 2. yfinance で OHLCV 取得 → SQLite にキャッシュ（差分取得）
    - 期間: `lookback_days`（デフォルト90日）、足種: `ohlcv_interval`（デフォルト1h）
    - SQLiteキャッシュの末尾から差分追記するため毎回全量取得しない
-3. テクニカル指標計算（pandas-ta + 一目均衡表 手計算）
+3. テクニカル指標計算（pandas-ta + 一目均衡表 手計算 + チャートパターン）
    - pandas-ta: SMA(20/50/200), EMA(12/26), RSI(14), MACD(12-26-9), Bollinger Bands(20,2σ), ATR(14), ADX(14)
    - 一目均衡表は手計算: 転換線(9)・基準線(26)・先行スパンA/B・遅行スパン
    - 一目総合判定: 4条件（雲の上下・TKクロス・雲の色・遅行線位置）の合致数で5段階評価
    - トレンド方向: SMA整列（`価格 > SMA20 > SMA50` → uptrend 等）
    - スウィング高値/安値: 直近30本から局所高値・安値を検出
+   - チャートパターン: ルールベースで15パターンを検出（ローソク足8 / チャート形状4 / ブレイクアウト3）
 4. LLM でテクニカル分析 → スナップショット保存（SQLite・48時間で自動削除）
-   - プロンプト入力: 直近20本のOHLCV + 全指標 + 一目均衡表 + ニュースセンチメント(RAG) + 振り返り教訓(RAG) + user_notes.md
+   - プロンプト入力: 全指標 + 一目均衡表 + チャートパターン + ニュースセンチメント(RAG) + 振り返り教訓(RAG) + user_notes.md
    - LLM出力: `direction_bias`(long/short/neutral) / `bias_score`(-1.0〜+1.0) / `confidence` / `entry_zone` / `stop_loss` / `take_profit` / `risk_reward_ratio` / `reasoning_summary`
    - `temperature: 0.1`（低め）で一貫性重視、`extract_json()` で `<think>` タグ除去後にJSON抽出
 
@@ -137,6 +138,7 @@ finance/
 │   │   ├── price_store.py          # SQLite OHLCVキャッシュ
 │   │   ├── analysis_store.py       # SQLite テクニカルスナップショット（48h自動削除）
 │   │   ├── indicators.py           # テクニカル指標（pandas-ta + 一目均衡表）
+│   │   ├── candle_patterns.py      # チャートパターン検出（ローソク足・形状・ブレイクアウト）
 │   │   └── indicator_formatter.py  # LLMプロンプト用フォーマッタ
 │   ├── jobs/
 │   │   ├── news_collector.py       # RSSニュース収集・センチメント分析・RAG格納
@@ -206,7 +208,10 @@ cp .env.example .env
 ### 実行
 
 ```bash
-uv run python main.py
+uv run python main.py                        # 通常起動
+uv run python main.py --skip-news            # 起動時のニュース取得をスキップ
+uv run python main.py --skip-tech            # 起動時のテクニカル収集をスキップ
+uv run python main.py --skip-news --skip-tech  # 両方スキップ（即時コマンド待機）
 ```
 
 起動時に以下のチェックを実行します:
@@ -215,7 +220,7 @@ uv run python main.py
 - **シンボル疎通**: `enabled: true` の全銘柄を yfinance で並列チェック（`mode: trade` の失敗は起動ブロック、`watch`/`index` は警告のみ）
 - **ディレクトリ**: データ・RAG・ログディレクトリの自動作成
 
-チェック後、ニュース収集を1回実行し、その後スケジュールに従って動作します。
+チェック後、ニュース収集とテクニカル収集を1回実行し（`--skip-*` で省略可）、その後スケジュールに従って動作します。
 
 ### CLIコマンド
 
@@ -227,6 +232,7 @@ uv run python main.py
 | `run news` | `run n` | ニュース収集を今すぐ実行 |
 | `run tech` | `run t` | テクニカル分析を今すぐ実行 |
 | `run analyze` | `run a` | 総合分析を今すぐ表示（保存済みデータのみ・新規取得なし） |
+| `ask <メッセージ>` | | FX分析LLMへ質問・コメントを送信。現在の分析コンテキスト（指標・ニュース・ポジション）をもとに回答 |
 | `run mon` | | 価格監視を今すぐ実行 |
 | `close <pair>` | | ポジションを手動決済  例: `close USDJPY=X` |
 | `notify` | `n` | 通知テストメッセージを送信 |
@@ -403,6 +409,41 @@ rag:
   analysis_lookback_hours: 8         # テクニカルスナップショットの集約時間幅
 ```
 
+ChromaDB のニュースエントリは **48時間以上経過したものを24時間ごとに自動削除**します（振り返りデータは対象外）。
+
+### 分析設定（指標・チャートパターントグル）
+
+```yaml
+analysis:
+  indicators:
+    moving_averages: true   # SMA/EMA
+    rsi: true
+    macd: true
+    bollinger_bands: true
+    atr: true
+    adx: true
+    ichimoku: true
+
+  chart_patterns:
+    # ローソク足パターン（デフォルト有効）
+    hammer: true
+    shooting_star: true
+    engulfing: true
+    doji: true
+    morning_evening_star: true
+    three_soldiers_crows: true
+    pin_bar: true
+    inside_bar: true
+    # チャート形状・ブレイクアウト（デフォルト無効）
+    double_top_bottom: false
+    head_shoulders: false
+    triangle: false
+    range_bound: false
+    bb_squeeze: false
+    atr_contraction: false
+    sr_breakout: false
+```
+
 ### 通知
 
 ```yaml
@@ -561,13 +602,25 @@ lot = max(min_lot_size, round(lot / lot_unit) * lot_unit)
 | 指標 | パラメータ | 用途 |
 |---|---|---|
 | SMA | 20 / 50 / 200日 | トレンド方向 |
-| EMA | 12 / 26日 | 短期モメンタム |
+| EMA | 12 / 26日 | MACD計算用（内部処理・プロンプト省略） |
 | RSI | 14日 | 過熱感 |
 | MACD | 12-26-9 | モメンタム転換 |
 | Bollinger Bands | 20日・2σ | 価格位置（%B） |
 | ATR | 14日 | ボラティリティ |
 | ADX | 14日 | トレンド強度 |
 | **一目均衡表** | 9 / 26 / 52日 | **トレンド・サポレジ・シグナルの統合判断** |
+
+### チャートパターン検出
+
+ルールベースで3カテゴリ・15パターンを検出し、LLMプロンプトにバイアス情報として付加します。
+
+| カテゴリ | パターン | デフォルト |
+|---|---|---|
+| ローソク足 | ハンマー・シューティングスター・エンガルフィング（陽/陰）・十字線・明けの明星/宵の明星・三白兵/三黒兵・ピンバー・インサイドバー | 有効 |
+| チャート形状 | ダブルトップ/ボトム・ヘッドアンドショルダー・三角保ち合い・レンジ相場 | 無効 |
+| ブレイクアウト | BBスクイーズ・ATR収縮・サポレジ抜け | 無効 |
+
+各パターンは `config/settings.yaml` の `analysis.chart_patterns` で個別に有効/無効を切り替え可能。
 
 ### 一目均衡表の判定ロジック
 
