@@ -21,7 +21,8 @@ from src.jobs.technical_collector import run_technical_collection
 from src.logging_setup import setup_logging
 from src.rag.vector_store import VectorStore
 from src.startup import startup_checks
-from src.trading_cycle import run_exit_check_cycle, run_trading_cycle
+from src.data.analysis_store import ForecastStore
+from src.trading_cycle import run_exit_check_cycle, run_forecast_cycle, run_trading_cycle
 
 _console = Console()
 _stop = threading.Event()
@@ -57,6 +58,7 @@ def main() -> None:
     store = VectorStore(config.rag_db_path)
     price_store = PriceStore(config.prices_db_path)
     analysis_store = AnalysisStore(config.prices_db_path)
+    forecast_store = ForecastStore(config.prices_db_path)
 
     tz = config.schedule.timezone
     news_tz = config.news_collection.timezone
@@ -89,6 +91,11 @@ def main() -> None:
         "Exit check",
         "every :00  (SL/TP + position review, no LLM)",
     )
+    forecast_interval = config.analysis.forecast_review_interval_hours
+    sched_table.add_row(
+        "Forecast cycle",
+        f"every [cyan]{forecast_interval}[/cyan]h  (signal verify + new forecast, no LLM)",
+    )
     sched_table.add_row("Trading cycles",  f"[cyan]{' / '.join(run_times)}[/cyan]  ({tz})")
     monitor_status = (
         f"every [cyan]{config.price_monitor.interval_minutes}[/cyan] min  "
@@ -116,12 +123,22 @@ def main() -> None:
     for t in news_times:
         schedule.every().day.at(t, news_tz).do(run_news_collection, config, store)
 
+    forecast_times = [
+        f"{h:02d}:00"
+        for h in range(0, 24, config.analysis.forecast_review_interval_hours)
+    ]
+
     for t in technical_times:
         schedule.every().day.at(t, news_tz).do(
             run_technical_collection, config, store, price_store, analysis_store
         )
         schedule.every().day.at(t, news_tz).do(
             run_exit_check_cycle, config, store, analysis_store
+        )
+
+    for t in forecast_times:
+        schedule.every().day.at(t, news_tz).do(
+            run_forecast_cycle, config, store, analysis_store, forecast_store
         )
 
     for t in run_times:

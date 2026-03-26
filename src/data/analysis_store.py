@@ -145,3 +145,89 @@ class AnalysisStore:
             if old:
                 session.commit()
                 logger.debug(f"Pruned {len(old)} old snapshots for {symbol}")
+
+
+# ── 予測サイクル用ストア ─────────────────────────────────────────────────────
+
+class _ForecastRecord(_Base):
+    """総合分析予測レコード（技術+ニュース合成シグナルを保存）。"""
+    __tablename__ = "forecasts"
+
+    id                  = Column(Integer, primary_key=True, autoincrement=True)
+    pair                = Column(String,  nullable=False, index=True)
+    forecast_ts         = Column(DateTime, nullable=False)
+    current_price       = Column(Float,   nullable=False)
+    predicted_direction = Column(String,  nullable=False)
+    combined_score      = Column(Float,   nullable=False)
+    confidence          = Column(Float,   nullable=False)
+    signal_reason       = Column(String)
+    stop_loss           = Column(Float)   # ATR proxy 算出用
+    reviewed            = Column(Integer, default=0)
+    # reviewed: 0=未検証 1=検証済み(有意) 2=判定不能(価格変動小)
+
+
+class ForecastStore:
+    """総合分析予測の保存・取得・クリーンアップ。"""
+
+    _PRUNE_OLDER_THAN_HOURS = 168  # 7日
+
+    def __init__(self, db_path) -> None:
+        self._engine = _get_engine(db_path)
+
+    def save_forecast(self, pair: str, signal) -> None:
+        """TradeSignal を予測レコードとして保存する。"""
+        with Session(self._engine) as session:
+            rec = _ForecastRecord(
+                pair=pair,
+                forecast_ts=datetime.now(),
+                current_price=signal.entry_price,
+                predicted_direction=signal.predicted_direction,
+                combined_score=signal.combined_score,
+                confidence=signal.confidence,
+                signal_reason=signal.signal_reason,
+                stop_loss=signal.stop_loss,
+                reviewed=0,
+            )
+            session.add(rec)
+            session.commit()
+        logger.info(
+            f"[FORECAST] Saved: {pair} {signal.predicted_direction} "
+            f"score={signal.combined_score:+.3f} conf={signal.confidence:.2f}"
+        )
+
+    def get_latest_unreviewed(self, pair: str) -> _ForecastRecord | None:
+        """最新の未検証予測を返す。"""
+        with Session(self._engine) as session:
+            stmt = (
+                select(_ForecastRecord)
+                .where(_ForecastRecord.pair == pair)
+                .where(_ForecastRecord.reviewed == 0)
+                .order_by(_ForecastRecord.forecast_ts.desc())
+                .limit(1)
+            )
+            result = session.execute(stmt).scalar_one_or_none()
+            if result is not None:
+                session.expunge(result)
+            return result
+
+    def mark_reviewed(self, record_id: int, status: int = 1) -> None:
+        """予測を検証済みにマークする（1=有意, 2=判定不能）。"""
+        with Session(self._engine) as session:
+            rec = session.get(_ForecastRecord, record_id)
+            if rec:
+                rec.reviewed = status
+                session.commit()
+
+    def prune_old(self) -> None:
+        """7日以上古いレコードを削除する。"""
+        cutoff = datetime.now() - timedelta(hours=self._PRUNE_OLDER_THAN_HOURS)
+        with Session(self._engine) as session:
+            old = session.execute(
+                select(_ForecastRecord)
+                .where(_ForecastRecord.forecast_ts < cutoff)
+            ).scalars().all()
+            for row in old:
+                session.delete(row)
+            if old:
+                session.commit()
+                logger.debug(f"Pruned {len(old)} old forecast records")

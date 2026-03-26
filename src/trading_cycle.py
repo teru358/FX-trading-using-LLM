@@ -531,6 +531,101 @@ def run_exit_check_cycle(
     asyncio.run(exit_check_cycle(config, position_mgr, store, analysis_store))
 
 
+async def forecast_cycle(
+    config: AppConfig,
+    position_mgr: PositionManager,
+    store: VectorStore,
+    analysis_store: AnalysisStore,
+    forecast_store,
+) -> None:
+    """予測サイクル（設定間隔ごと実行）。
+
+    LLM不使用。ノイズ対策 A+B+C+D を適用:
+      A: ATR proxy による有意性フィルター（小動きはスキップ）
+      B: 8h検証ウィンドウ（呼び出し間隔で制御）
+      C: 高確信度シグナルのみ予測生成
+      D: 事実文字列として RAG に蓄積（LLM解釈なし）
+    """
+    from src.analysis.forecaster import build_forecast_review
+
+    now = datetime.now(ZoneInfo(config.schedule.timezone))
+    logger.info(f"=== Forecast cycle: {now.strftime('%H:%M %Z')} ===")
+
+    embed_fn = partial(
+        embed_text,
+        ollama_base_url=config.llm.ollama.base_url,
+        model=config.rag.embedding_model,
+    )
+
+    for pair_cfg in config.tradeable_instruments:
+        try:
+            # Phase 1: 前回予測の検証（A+D）
+            prev = forecast_store.get_latest_unreviewed(pair_cfg.symbol)
+            if prev:
+                try:
+                    current_price = fetch_current_price(pair_cfg.symbol)
+                except Exception as e:
+                    logger.warning(f"[FORECAST] {pair_cfg.symbol}: price fetch failed — {e}")
+                    continue
+
+                review_text, lesson, significant = build_forecast_review(
+                    pair=pair_cfg.symbol,
+                    forecast=prev,
+                    current_price=current_price,
+                    review_ts=datetime.now(),
+                    significance_atr_ratio=config.analysis.forecast_significance_atr_ratio,
+                )
+                logger.info(f"[FORECAST] {pair_cfg.symbol}: {review_text}")
+
+                if significant:
+                    # D: LLM不使用、事実文字列をそのまま埋め込み・蓄積
+                    embedding = await embed_fn(review_text)
+                    store.upsert_reflection(
+                        entry_id=f"forecast_{pair_cfg.symbol}_{prev.id}",
+                        text=review_text,
+                        embedding=embedding,
+                        pair=pair_cfg.symbol,
+                        cycle_time=datetime.now(),
+                        action=prev.predicted_direction,
+                        outcome_summary=review_text,
+                        lesson=lesson,
+                    )
+
+                forecast_store.mark_reviewed(prev.id, status=1 if significant else 2)
+
+            # Phase 2: 新規予測生成（C: スコア閾値チェック、LLM不使用）
+            signal = await _summarize_pair(pair_cfg, config, position_mgr, store, analysis_store)
+            if signal is None:
+                continue
+
+            # C: deadband を超えた高確信度シグナルのみ予測対象
+            if abs(signal.combined_score) < config.analysis.forecast_min_combined_score:
+                logger.debug(
+                    f"[FORECAST] {pair_cfg.symbol}: skipped "
+                    f"(|score|={abs(signal.combined_score):.3f} < {config.analysis.forecast_min_combined_score})"
+                )
+                continue
+
+            forecast_store.save_forecast(pair_cfg.symbol, signal)
+
+        except Exception as e:
+            logger.warning(f"[FORECAST] {pair_cfg.symbol}: error — {e}", exc_info=True)
+
+    forecast_store.prune_old()
+
+
+def run_forecast_cycle(
+    config: AppConfig,
+    store: VectorStore,
+    analysis_store: AnalysisStore,
+    forecast_store,
+) -> None:
+    """scheduleライブラリから呼び出す同期ラッパー。"""
+    state_store = StateStore(config.state_dir)
+    position_mgr = PositionManager(state_store, config.trading.initial_balance)
+    asyncio.run(forecast_cycle(config, position_mgr, store, analysis_store, forecast_store))
+
+
 async def _summarize_pair(
     pair_cfg,
     config: AppConfig,

@@ -122,7 +122,7 @@ async def generate_reflection(
     logger.debug(f"[REFLECT] {pair_cfg.display_name}: confidence_assessment={conf_assess}")
 
     return Reflection(
-        entry_id=f"ref_{pair_cfg.symbol}_{previous_cycle_time.strftime('%Y%m%d%H%M')}",
+        entry_id=f"ref_{pair_cfg.symbol}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
         pair=pair_cfg.symbol,
         cycle_time=previous_cycle_time,
         action=previous_action,
