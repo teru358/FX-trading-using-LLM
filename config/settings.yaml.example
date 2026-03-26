@@ -122,9 +122,6 @@ news_sources:
   # ── Feedly API（有効にすると RSS の代わりに Feedly カテゴリから取得） ──
   feedly:
     enabled: false
-    # アクセストークン: .env の FEEDLY_ACCESS_TOKEN を設定
-    # カテゴリの Stream ID: GET https://cloud.feedly.com/v3/categories で確認
-    # 例: "user/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx/category/FX"
     streams_fx: []
     streams_global: []
     streams_japan: []

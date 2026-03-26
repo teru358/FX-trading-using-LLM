@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import sys
 import threading
 
@@ -40,6 +41,10 @@ def _scheduler_loop() -> None:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="FX Paper Trader")
+    parser.add_argument("--skip-news", action="store_true", help="起動時の初回ニュース取得をスキップ")
+    args = parser.parse_args()
+
     config = load_config()
     setup_logging(config.logging, BASE_DIR)
 
@@ -130,7 +135,10 @@ def main() -> None:
     # prices.db が存在しない場合（初回起動）は市場時間を無視して強制実行
     _console.print(Rule("[dim]Initial collection[/dim]", style="dim"))
     with _job_lock:
-        run_news_collection(config, store)
+        if args.skip_news:
+            _console.print("[dim]--skip-news: 初回ニュース取得をスキップ[/dim]")
+        else:
+            run_news_collection(config, store)
         run_technical_collection(config, store, price_store, analysis_store, force=is_fresh_start)
 
     # スケジューラをバックグラウンドスレッドで起動
