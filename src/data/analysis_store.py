@@ -231,3 +231,86 @@ class ForecastStore:
             if old:
                 session.commit()
                 logger.debug(f"Pruned {len(old)} old forecast records")
+
+
+# ── HOLD判断レビュー用ストア ──────────────────────────────────────────────────
+
+class _HoldDecisionRecord(_Base):
+    """HOLD判断記録（次取引サイクルで検証し、RAGに蓄積）。"""
+    __tablename__ = "hold_decisions"
+
+    id                  = Column(Integer, primary_key=True, autoincrement=True)
+    pair                = Column(String,  nullable=False, index=True)
+    decision_ts         = Column(DateTime, nullable=False)
+    current_price       = Column(Float,   nullable=False)
+    signal_score        = Column(Float,   nullable=False)  # combined_score
+    predicted_direction = Column(String,  nullable=False)
+    confidence          = Column(Float,   nullable=False)
+    signal_reason       = Column(String)
+    stop_loss           = Column(Float)   # ATR proxy 算出用
+    reviewed            = Column(Integer, default=0)
+
+
+class HoldDecisionStore:
+    """HOLD判断の保存・取得・クリーンアップ。"""
+
+    _PRUNE_OLDER_THAN_HOURS = 168  # 7日
+
+    def __init__(self, db_path) -> None:
+        self._engine = _get_engine(db_path)
+
+    def save_hold(self, pair: str, signal) -> None:
+        """TradeSignal（HOLD判断）を記録する。"""
+        with Session(self._engine) as session:
+            rec = _HoldDecisionRecord(
+                pair=pair,
+                decision_ts=datetime.now(),
+                current_price=signal.entry_price,
+                signal_score=signal.combined_score,
+                predicted_direction=signal.predicted_direction or "neutral",
+                confidence=signal.confidence,
+                signal_reason=signal.signal_reason,
+                stop_loss=signal.stop_loss,
+                reviewed=0,
+            )
+            session.add(rec)
+            session.commit()
+        logger.info(
+            f"[HOLD] Recorded: {pair} {signal.predicted_direction} "
+            f"score={signal.combined_score:+.3f} conf={signal.confidence:.2f}"
+        )
+
+    def get_unreviewed(self) -> list[_HoldDecisionRecord]:
+        """未検証のHOLD記録を古い順で返す。"""
+        with Session(self._engine) as session:
+            stmt = (
+                select(_HoldDecisionRecord)
+                .where(_HoldDecisionRecord.reviewed == 0)
+                .order_by(_HoldDecisionRecord.decision_ts.asc())
+            )
+            results = list(session.execute(stmt).scalars().all())
+            for r in results:
+                session.expunge(r)
+            return results
+
+    def mark_reviewed(self, record_id: int) -> None:
+        """HOLD記録を検証済みにマークする。"""
+        with Session(self._engine) as session:
+            rec = session.get(_HoldDecisionRecord, record_id)
+            if rec:
+                rec.reviewed = 1
+                session.commit()
+
+    def prune_old(self) -> None:
+        """7日以上古いレコードを削除する。"""
+        cutoff = datetime.now() - timedelta(hours=self._PRUNE_OLDER_THAN_HOURS)
+        with Session(self._engine) as session:
+            old = session.execute(
+                select(_HoldDecisionRecord)
+                .where(_HoldDecisionRecord.decision_ts < cutoff)
+            ).scalars().all()
+            for row in old:
+                session.delete(row)
+            if old:
+                session.commit()
+                logger.debug(f"Pruned {len(old)} old hold decision records")

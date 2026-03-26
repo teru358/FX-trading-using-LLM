@@ -1,3 +1,15 @@
+logging:
+  level: "INFO"
+  file: "logs/finance.log"
+  activity_log_file: "logs/activity.log"  # [COLLECT][NEWS][SIGNAL][CLOSE][TRADE][ORDER][REFLECT] 専用
+  rotate_timing: "10MB"  # サイズ: 10MB / 512KB など。時間: 6H（毎6時間）/ 1D（毎日）/ midnight（日次0時）/ W0（月曜）
+  backup_count: 5
+
+api:
+  enabled: false             # true で REST API サーバーを起動
+  port: 8811                 # リッスンポート
+  # 認証: .env の API_SECRET_KEY を設定（X-API-Key ヘッダーで送信）
+
 # ============================================================
 # LLM設定 — ニュース分析 / 価格分析 / 振り返り生成を個別に設定
 #
@@ -51,28 +63,6 @@ claude:
   max_retries: 2
   max_tokens: 4096
 
-trading:
-  initial_balance: 10000.0
-  risk_per_trade: 0.02
-  signal_confidence_threshold: 0.55
-  max_concurrent_positions: 3
-  lookback_days: 90
-  ohlcv_interval: "1h"             # yfinance の足種（1h足で毎時:00のテクニカル分析に対応）
-  news_weight: 0.40
-  price_weight: 0.60
-  signal_deadband: 0.15            # BUY/SELL判定のスコア閾値（±）
-  min_lot_size: 1000.0             # 最小ロットサイズ
-  lot_unit: 1000.0                 # ロット切り捨て単位
-  trading_mode: "paper"            # "paper"（シミュレーション）| "live"（本取引: OANDA API必須）
-  # ポジション再評価（Phase 4a: Layer 1〜3）
-  position_review_enabled: false        # true で有効化
-  reversal_confidence_min: 0.70         # Layer 1: 反転シグナルの最低信頼度
-  reversal_score_threshold: 0.25        # Layer 1: 反転スコアの絶対値閾値
-  max_holding_days: 10                  # Layer 2: 最大保有日数
-  timeout_min_progress_pct: 0.30        # Layer 2: この進捗率未満でタイムアウト決済
-  profit_lock_min_progress_pct: 0.40    # Layer 3: TP方向への進捗率がこれ以上で利益ロック候補
-  profit_lock_score_floor: 0.15         # Layer 3: シグナルスコア絶対値がこれ未満で利益ロック
-
 instruments:
   # ── FX（取引対象: mode=trade） ──
   - symbol: "USDJPY=X"
@@ -110,6 +100,86 @@ instruments:
     asset_type: index
     currency: "USD"
     enabled: true
+
+trading:
+  initial_balance: 10000.0
+  risk_per_trade: 0.02
+  signal_confidence_threshold: 0.55
+  max_concurrent_positions: 3
+  lookback_days: 90
+  ohlcv_interval: "1h"             # yfinance の足種（1h足で毎時:00のテクニカル分析に対応）
+  news_weight: 0.40
+  price_weight: 0.60
+  signal_deadband: 0.15            # BUY/SELL判定のスコア閾値（±）
+  min_lot_size: 1000.0             # 最小ロットサイズ
+  lot_unit: 1000.0                 # ロット切り捨て単位
+  trading_mode: "paper"            # "paper"（シミュレーション）| "live"（本取引: OANDA API必須）
+  # ポジション再評価（Phase 4a: Layer 1〜3）
+  position_review_enabled: false        # true で有効化
+  reversal_confidence_min: 0.70         # Layer 1: 反転シグナルの最低信頼度
+  reversal_score_threshold: 0.25        # Layer 1: 反転スコアの絶対値閾値
+  max_holding_days: 10                  # Layer 2: 最大保有日数
+  timeout_min_progress_pct: 0.30        # Layer 2: この進捗率未満でタイムアウト決済
+  profit_lock_min_progress_pct: 0.40    # Layer 3: TP方向への進捗率がこれ以上で利益ロック候補
+  profit_lock_score_floor: 0.15         # Layer 3: シグナルスコア絶対値がこれ未満で利益ロック
+
+price_monitor:
+  enabled: true
+  interval_minutes: 5              # Layer 4: 監視間隔（分）
+  alert_threshold_pct: 0.003       # 損失 0.3% で最初の通知
+  alert_step_pct: 0.002            # 追加 0.2% ごとに再通知（スパム防止）
+  emergency_close_pct: 0.008       # 損失 0.8% で緊急損切り（0 = 無効）
+  enable_emergency_close: false    # 緊急損切りを有効にするか（false = 通知のみ）
+  # トレーリングストップ（利益保護）
+  trailing_stop_enabled: false
+  trailing_stop_activation_pct: 0.40   # TP距離の40%到達で発動開始
+  trailing_stop_distance_ratio: 1.0    # 元のSL距離と同比率でSLを追従（1.0 = 同じ幅）
+
+schedule:
+  run_times:
+    - "15:00"
+    - "21:30"
+  timezone: "Asia/Tokyo"
+
+analysis:
+  # テクニカル指標の有効/無効
+  indicators:
+    moving_averages: true    # SMA(20/50/200) / EMA(12/26)
+    rsi: true
+    macd: true
+    bollinger_bands: true
+    atr: true
+    adx: true
+    ichimoku: true           # 一目均衡表
+
+  # チャートパターン検出
+  chart_patterns:
+    # ── ローソク足パターン ────────────────────────────
+    hammer: true              # ハンマー（下ヒゲ長・下降トレンド末）
+    shooting_star: true       # シューティングスター（上ヒゲ長・上昇トレンド末）
+    engulfing: true           # 包み足（強気/弱気エングルフィング）
+    doji: true                # 十字線（始値≒終値）
+    morning_evening_star: true  # モーニング/イブニングスター（3本）
+    three_soldiers_crows: true  # 三白兵/三黒烏（連続3本同方向）
+    pin_bar: true             # ピンバー（最長ヒゲ≥実体×3）
+    inside_bar: true          # インサイドバー（前足の範囲内に収まる）
+
+    # ── チャート形状パターン ──────────────────────────
+    double_top_bottom: false  # ダブルトップ/ダブルボトム
+    head_shoulders: false     # ヘッド＆ショルダー（通常/逆）
+    triangle: false           # 三角保ち合い（上昇/下降/対称）
+    range_bound: false        # レンジ相場検出
+
+    # ── ブレイクアウト系 ──────────────────────────────
+    bb_squeeze: false         # BBスクイーズ（ボラティリティ収縮）
+    atr_contraction: false    # ATR収縮（ブレイクアウト前兆）
+    sr_breakout: false        # サポート/レジスタンス・ブレイク
+
+  # 予測サイクル設定（技術+ニュース合成シグナルの定期検証）
+  forecast_review_interval_hours: 6    # B: 予測から検証までの時間（6h = 1セッション）
+  forecast_start_hour: 4               # 予測サイクル開始時刻オフセット（4 → 04:00/12:00/20:00 JST）
+  forecast_min_combined_score: 0.25    # C: この絶対値未満のシグナルは予測対象外（deadband回避）
+  forecast_significance_atr_ratio: 0.30  # A: ATR proxy の何倍以上動いたら有意とするか
 
 news_collection:
   interval_minutes: 15             # この間隔でtimezoneに揃えた時刻を自動生成（OHLCV+テクニカル分析も同時実行）
@@ -173,78 +243,9 @@ rag:
   reflection_lookback_count: 3
   analysis_lookback_hours: 8       # 取引判定時に集約するテクニカル分析の時間幅（最大32スナップショット）
 
-schedule:
-  run_times:
-    - "15:00"
-    - "21:30"
-  timezone: "Asia/Tokyo"
-
 notification:
   notifier: "none"                 # "telegram" | "discord" | "none"
   notify_on_order_open: true       # 注文発注時に通知
   notify_on_order_close: true      # 決済時に通知（SL/TP到達・緊急損切り含む）
   notify_on_signal_skipped: true   # スキップ（既存ポジション）/ 保留（hold）時に通知（判断理由付き）
   notify_on_price_alert: true      # 価格急変動（損失方向）を検知した場合
-
-price_monitor:
-  enabled: true
-  interval_minutes: 5              # 監視間隔（分）
-  alert_threshold_pct: 0.003       # 損失 0.3% で最初の通知
-  alert_step_pct: 0.002            # 追加 0.2% ごとに再通知（スパム防止）
-  emergency_close_pct: 0.008       # 損失 0.8% で緊急損切り（0 = 無効）
-  enable_emergency_close: false    # 緊急損切りを有効にするか（false = 通知のみ）
-  # トレーリングストップ（利益保護・Layer 4）
-  trailing_stop_enabled: false    # true で有効化
-  trailing_stop_activation_pct: 0.40   # TP距離の40%到達で発動開始
-  trailing_stop_distance_ratio: 1.0    # 元のSL距離と同比率でSLを追従（1.0 = 同じ幅）
-
-api:
-  enabled: false                   # true で REST API サーバーを起動
-  port: 8811                       # リッスンポート
-  # 認証: .env の API_SECRET_KEY を設定（X-API-Key ヘッダーで送信）
-
-analysis:
-  # テクニカル指標の有効/無効
-  indicators:
-    moving_averages: true    # SMA(20/50/200) / EMA(12/26)
-    rsi: true
-    macd: true
-    bollinger_bands: true
-    atr: true
-    adx: true
-    ichimoku: true           # 一目均衡表
-
-  # チャートパターン検出
-  chart_patterns:
-    # ── ローソク足パターン ────────────────────────────
-    hammer: true              # ハンマー（下ヒゲ長・下降トレンド末）
-    shooting_star: true       # シューティングスター（上ヒゲ長・上昇トレンド末）
-    engulfing: true           # 包み足（強気/弱気エングルフィング）
-    doji: true                # 十字線（始値≒終値）
-    morning_evening_star: true  # モーニング/イブニングスター（3本）
-    three_soldiers_crows: true  # 三白兵/三黒烏（連続3本同方向）
-    pin_bar: true             # ピンバー（最長ヒゲ≥実体×3）
-    inside_bar: true          # インサイドバー（前足の範囲内に収まる）
-
-    # ── チャート形状パターン ──────────────────────────
-    double_top_bottom: false  # ダブルトップ/ダブルボトム
-    head_shoulders: false     # ヘッド＆ショルダー（通常/逆）
-    triangle: false           # 三角保ち合い（上昇/下降/対称）
-    range_bound: false        # レンジ相場検出
-
-    # ── ブレイクアウト系 ──────────────────────────────
-    bb_squeeze: false         # BBスクイーズ（ボラティリティ収縮）
-    atr_contraction: false    # ATR収縮（ブレイクアウト前兆）
-    sr_breakout: false        # サポート/レジスタンス・ブレイク
-
-  # 予測サイクル設定（技術+ニュース合成シグナルの定期検証）
-  forecast_review_interval_hours: 8    # B: 予測から検証までの時間（8h = 1セッション）
-  forecast_min_combined_score: 0.25    # C: この絶対値未満のシグナルは予測対象外（deadband回避）
-  forecast_significance_atr_ratio: 0.30  # A: ATR proxy の何倍以上動いたら有意とするか
-
-logging:
-  level: "INFO"
-  file: "logs/finance.log"
-  activity_log_file: "logs/activity.log"  # [COLLECT][NEWS][SIGNAL][CLOSE][TRADE][ORDER][REFLECT] 専用
-  rotate_timing: "10MB"   # サイズ: 10MB / 512KB など。時間: 6H（毎6時間）/ 1D（毎日）/ midnight（日次0時）/ W0（月曜）
-  backup_count: 5

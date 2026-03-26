@@ -13,7 +13,7 @@ from src.analysis.reflector import generate_close_reflection, generate_reflectio
 from src.config import AppConfig, InstrumentConfig
 from src.data.indicators import compute_indicators
 from src.data.price_fetcher import fetch_current_price, fetch_ohlcv
-from src.data.analysis_store import AnalysisStore
+from src.data.analysis_store import AnalysisStore, HoldDecisionStore
 from src.data.price_store import PriceStore
 from src.llm.client import LLMClient
 from src.llm.factory import create_llm_client
@@ -165,12 +165,65 @@ async def _generate_cycle_reflections(
             logger.warning(f"Reflection failed for {pos.pair}: {e}")
 
 
+async def _review_hold_decisions(
+    config: AppConfig,
+    hold_store: HoldDecisionStore,
+    store: VectorStore,
+) -> None:
+    """前回HOLDした判断を検証してRAGに蓄積する（LLM不使用）。"""
+    from src.analysis.forecaster import build_hold_review
+
+    unreviewed = hold_store.get_unreviewed()
+    if not unreviewed:
+        return
+
+    logger.info(f"[HOLD REVIEW] Reviewing {len(unreviewed)} hold decision(s)")
+    embed_fn = partial(
+        embed_text,
+        ollama_base_url=config.llm.ollama.base_url,
+        model=config.rag.embedding_model,
+    )
+
+    for hold in unreviewed:
+        try:
+            current_price = fetch_current_price(hold.pair)
+            review_text, lesson, worth_storing = build_hold_review(
+                pair=hold.pair,
+                hold=hold,
+                current_price=current_price,
+                review_ts=datetime.now(),
+                significance_atr_ratio=config.analysis.forecast_significance_atr_ratio,
+            )
+            logger.info(f"[HOLD REVIEW] {hold.pair}: {review_text}")
+
+            if worth_storing:
+                embedding = await embed_fn(review_text)
+                store.upsert_reflection(
+                    entry_id=f"hold_{hold.pair}_{hold.id}",
+                    text=review_text,
+                    embedding=embedding,
+                    pair=hold.pair,
+                    cycle_time=datetime.now(),
+                    action=hold.predicted_direction,
+                    outcome_summary=review_text,
+                    lesson=lesson,
+                )
+                logger.info(f"[HOLD REVIEW] {hold.pair}: stored to RAG")
+
+            hold_store.mark_reviewed(hold.id)
+        except Exception as e:
+            logger.warning(f"[HOLD REVIEW] {hold.pair}: error — {e}")
+
+    hold_store.prune_old()
+
+
 async def trading_cycle(
     config: AppConfig,
     position_mgr: PositionManager,
     store: VectorStore,
     price_store: PriceStore,
     analysis_store: AnalysisStore,
+    hold_store: HoldDecisionStore,
 ) -> None:
     """取引サイクルの全5フェーズを実行する。"""
     run_start = datetime.now(ZoneInfo(config.schedule.timezone))
@@ -249,6 +302,9 @@ async def trading_cycle(
 
     # Phase 2: 振り返り生成
     await _generate_cycle_reflections(config, position_mgr, store, llm_reflect)
+
+    # Phase 2.5: HOLD判断レビュー（前回HOLDの方向性を事実で検証）
+    await _review_hold_decisions(config, hold_store, store)
 
     # Phase 3: 各ペアを並列分析（蓄積済みスナップショットを集約）
     semaphore = asyncio.Semaphore(config.llm.ollama.max_concurrent)
@@ -376,15 +432,18 @@ async def trading_cycle(
                     signal_reason=sig.signal_reason,
                     detail_reason=sig.detail_reason,
                 ))
-        elif config.notifier.notify_on_signal_skipped:
-            await notifier.notify_signal_skipped(SignalSkippedEvent(
-                pair=sig.pair,
-                action="hold",
-                confidence=sig.confidence,
-                signal_reason=sig.signal_reason,
-                detail_reason=sig.detail_reason,
-                predicted_direction=sig.predicted_direction,
-            ))
+        else:
+            # sig.action == "hold": シグナル弱く見送り → 次サイクルで結果を検証
+            if config.notifier.notify_on_signal_skipped:
+                await notifier.notify_signal_skipped(SignalSkippedEvent(
+                    pair=sig.pair,
+                    action="hold",
+                    confidence=sig.confidence,
+                    signal_reason=sig.signal_reason,
+                    detail_reason=sig.detail_reason,
+                    predicted_direction=sig.predicted_direction,
+                ))
+            hold_store.save_hold(sig.pair, sig)
 
     # Phase 5: レポート
     all_closed = closed_this_run + reviewed_closed
@@ -404,11 +463,12 @@ def run_trading_cycle(
     store: VectorStore,
     price_store: PriceStore,
     analysis_store: AnalysisStore,
+    hold_store: HoldDecisionStore,
 ) -> None:
     """scheduleライブラリから呼び出す同期ラッパー。"""
     state_store = StateStore(config.state_dir)
     position_mgr = PositionManager(state_store, config.trading.initial_balance)
-    asyncio.run(trading_cycle(config, position_mgr, store, price_store, analysis_store))
+    asyncio.run(trading_cycle(config, position_mgr, store, price_store, analysis_store, hold_store))
 
 
 async def exit_check_cycle(

@@ -21,7 +21,7 @@ from src.jobs.technical_collector import run_technical_collection
 from src.logging_setup import setup_logging
 from src.rag.vector_store import VectorStore
 from src.startup import startup_checks
-from src.data.analysis_store import ForecastStore
+from src.data.analysis_store import ForecastStore, HoldDecisionStore
 from src.trading_cycle import run_exit_check_cycle, run_forecast_cycle, run_trading_cycle
 
 _console = Console()
@@ -59,6 +59,7 @@ def main() -> None:
     price_store = PriceStore(config.prices_db_path)
     analysis_store = AnalysisStore(config.prices_db_path)
     forecast_store = ForecastStore(config.prices_db_path)
+    hold_store = HoldDecisionStore(config.prices_db_path)
 
     tz = config.schedule.timezone
     news_tz = config.news_collection.timezone
@@ -92,9 +93,17 @@ def main() -> None:
         "every :00  (SL/TP + position review, no LLM)",
     )
     forecast_interval = config.analysis.forecast_review_interval_hours
+    forecast_start = config.analysis.forecast_start_hour
+    _fcast_offset = forecast_start
+    _fcast_interval = forecast_interval
+    forecast_times = [
+        f"{(_fcast_offset + h) % 24:02d}:00"
+        for h in range(0, 24, _fcast_interval)
+    ]
     sched_table.add_row(
         "Forecast cycle",
-        f"every [cyan]{forecast_interval}[/cyan]h  (signal verify + new forecast, no LLM)",
+        f"every [cyan]{forecast_interval}[/cyan]h offset=[cyan]{forecast_start:02d}:00[/cyan]  "
+        f"({' / '.join(forecast_times)})  (signal verify + new forecast, no LLM)",
     )
     sched_table.add_row("Trading cycles",  f"[cyan]{' / '.join(run_times)}[/cyan]  ({tz})")
     monitor_status = (
@@ -123,11 +132,6 @@ def main() -> None:
     for t in news_times:
         schedule.every().day.at(t, news_tz).do(run_news_collection, config, store)
 
-    forecast_times = [
-        f"{h:02d}:00"
-        for h in range(0, 24, config.analysis.forecast_review_interval_hours)
-    ]
-
     for t in technical_times:
         schedule.every().day.at(t, news_tz).do(
             run_technical_collection, config, store, price_store, analysis_store
@@ -143,7 +147,7 @@ def main() -> None:
 
     for t in run_times:
         schedule.every().day.at(t, tz).do(
-            run_trading_cycle, config, store, price_store, analysis_store
+            run_trading_cycle, config, store, price_store, analysis_store, hold_store
         )
 
     if config.price_monitor.enabled:
