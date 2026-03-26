@@ -467,7 +467,7 @@ def run_trading_cycle(
 ) -> None:
     """scheduleライブラリから呼び出す同期ラッパー。"""
     state_store = StateStore(config.state_dir)
-    position_mgr = PositionManager(state_store, config.trading.initial_balance)
+    position_mgr = PositionManager(state_store, config.trading.initial_balance, context="TradingCycle")
     asyncio.run(trading_cycle(config, position_mgr, store, price_store, analysis_store, hold_store))
 
 
@@ -587,7 +587,7 @@ def run_exit_check_cycle(
 ) -> None:
     """scheduleライブラリから呼び出す同期ラッパー。"""
     state_store = StateStore(config.state_dir)
-    position_mgr = PositionManager(state_store, config.trading.initial_balance)
+    position_mgr = PositionManager(state_store, config.trading.initial_balance, context="ExitCheck")
     asyncio.run(exit_check_cycle(config, position_mgr, store, analysis_store))
 
 
@@ -682,7 +682,7 @@ def run_forecast_cycle(
 ) -> None:
     """scheduleライブラリから呼び出す同期ラッパー。"""
     state_store = StateStore(config.state_dir)
-    position_mgr = PositionManager(state_store, config.trading.initial_balance)
+    position_mgr = PositionManager(state_store, config.trading.initial_balance, context="ForecastCycle")
     asyncio.run(forecast_cycle(config, position_mgr, store, analysis_store, forecast_store))
 
 
@@ -785,7 +785,7 @@ def run_analysis_summary(
 ) -> None:
     """CLIから呼び出す同期ラッパー。"""
     state_store = StateStore(config.state_dir)
-    position_mgr = PositionManager(state_store, config.trading.initial_balance)
+    position_mgr = PositionManager(state_store, config.trading.initial_balance, context="AnalysisSummary")
     asyncio.run(_analysis_summary(config, position_mgr, store, analysis_store))
 
 
@@ -845,7 +845,7 @@ async def _run_ask(
     analysis_store: AnalysisStore,
 ) -> str:
     state_store = StateStore(config.state_dir)
-    position_mgr = PositionManager(state_store, config.trading.initial_balance)
+    position_mgr = PositionManager(state_store, config.trading.initial_balance, context="Ask")
     context = _build_ask_context(config, store, analysis_store, position_mgr)
     llm = create_llm_client(config, "price_analysis")
     return await chat_with_context(

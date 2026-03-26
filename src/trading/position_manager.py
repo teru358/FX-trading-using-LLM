@@ -108,9 +108,10 @@ class AccountState:
 
 
 class PositionManager:
-    def __init__(self, state_store: StateStore, initial_balance: float) -> None:
+    def __init__(self, state_store: StateStore, initial_balance: float, context: str = "PositionManager") -> None:
         self._store = state_store
         self._initial_balance = initial_balance
+        self._context = context
         self._load()
 
     def _load(self) -> None:
@@ -122,7 +123,7 @@ class PositionManager:
         raw_trades = self._store.load_trades_raw()
         self._closed: list[Order] = [Order.from_dict(t) for t in raw_trades]
         logger.info(
-            f"State loaded: balance=${self._balance:.2f}, "
+            f"[{self._context}] balance=${self._balance:.2f}, "
             f"open={len(self._open)}, closed={len(self._closed)}"
         )
 

@@ -172,5 +172,7 @@ def run_price_monitor(config: AppConfig) -> None:
     if not is_market_open():
         return
     state_store = StateStore(config.state_dir)
-    position_mgr = PositionManager(state_store, config.trading.initial_balance)
+    position_mgr = PositionManager(state_store, config.trading.initial_balance, context="PriceMonitor")
+    if not position_mgr.get_account_state().open_positions:
+        return
     asyncio.run(monitor_open_positions(config, position_mgr))
