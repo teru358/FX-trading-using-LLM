@@ -43,6 +43,7 @@ def _scheduler_loop() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="FX Paper Trader")
     parser.add_argument("--skip-news", action="store_true", help="起動時の初回ニュース取得をスキップ")
+    parser.add_argument("--skip-tech", action="store_true", help="起動時の初回テクニカル収集をスキップ")
     args = parser.parse_args()
 
     config = load_config()
@@ -139,7 +140,10 @@ def main() -> None:
             _console.print("[dim]--skip-news: 初回ニュース取得をスキップ[/dim]")
         else:
             run_news_collection(config, store)
-        run_technical_collection(config, store, price_store, analysis_store, force=is_fresh_start)
+        if args.skip_tech:
+            _console.print("[dim]--skip-tech: 初回テクニカル収集をスキップ[/dim]")
+        else:
+            run_technical_collection(config, store, price_store, analysis_store, force=is_fresh_start)
 
     # スケジューラをバックグラウンドスレッドで起動
     scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True, name="scheduler")
