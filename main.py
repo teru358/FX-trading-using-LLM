@@ -21,7 +21,7 @@ from src.jobs.technical_collector import run_technical_collection
 from src.logging_setup import setup_logging
 from src.rag.vector_store import VectorStore
 from src.startup import startup_checks
-from src.trading_cycle import run_trading_cycle
+from src.trading_cycle import run_exit_check_cycle, run_trading_cycle
 
 _console = Console()
 _stop = threading.Event()
@@ -85,6 +85,10 @@ def main() -> None:
         "Technical analysis",
         f"every :00  (interval=[cyan]{config.trading.ohlcv_interval}[/cyan])",
     )
+    sched_table.add_row(
+        "Exit check",
+        "every :00  (SL/TP + position review, no LLM)",
+    )
     sched_table.add_row("Trading cycles",  f"[cyan]{' / '.join(run_times)}[/cyan]  ({tz})")
     monitor_status = (
         f"every [cyan]{config.price_monitor.interval_minutes}[/cyan] min  "
@@ -115,6 +119,9 @@ def main() -> None:
     for t in technical_times:
         schedule.every().day.at(t, news_tz).do(
             run_technical_collection, config, store, price_store, analysis_store
+        )
+        schedule.every().day.at(t, news_tz).do(
+            run_exit_check_cycle, config, store, analysis_store
         )
 
     for t in run_times:
