@@ -163,7 +163,9 @@ class _ForecastRecord(_Base):
     signal_reason       = Column(String)
     stop_loss           = Column(Float)   # ATR proxy 算出用
     reviewed            = Column(Integer, default=0)
-    # reviewed: 0=未検証 1=検証済み(有意) 2=判定不能(価格変動小)
+    # reviewed: 0=未検証 1=検証済(少なくとも1回) 3=skip(score不足)
+    latest_review_ts    = Column(DateTime, nullable=True)   # 最終検証時刻
+    latest_price_delta  = Column(Float,    nullable=True)   # 最終検証時の価格変化量
 
 
 class ForecastStore:
@@ -215,29 +217,14 @@ class ForecastStore:
             f"[FORECAST] {pair}: skip — score={signal.combined_score:+.3f} (score_below_threshold)"
         )
 
-    def get_latest_unreviewed(self, pair: str) -> _ForecastRecord | None:
-        """最新の未検証予測を返す。"""
-        with Session(self._engine) as session:
-            stmt = (
-                select(_ForecastRecord)
-                .where(_ForecastRecord.pair == pair)
-                .where(_ForecastRecord.reviewed == 0)
-                .order_by(_ForecastRecord.forecast_ts.desc())
-                .limit(1)
-            )
-            result = session.execute(stmt).scalar_one_or_none()
-            if result is not None:
-                session.expunge(result)
-            return result
-
-    def get_unreviewed_since(self, pair: str, hours: int = 24) -> list[_ForecastRecord]:
-        """直近N時間の未検証予測を古い順に返す（skip=3 は除外）。"""
+    def get_recent_forecasts(self, pair: str, hours: int = 24) -> list[_ForecastRecord]:
+        """直近N時間の予測レコードを古い順に返す（skip=3 は除外）。"""
         cutoff = datetime.now() - timedelta(hours=hours)
         with Session(self._engine) as session:
             stmt = (
                 select(_ForecastRecord)
                 .where(_ForecastRecord.pair == pair)
-                .where(_ForecastRecord.reviewed == 0)
+                .where(_ForecastRecord.reviewed != 3)
                 .where(_ForecastRecord.forecast_ts >= cutoff)
                 .order_by(_ForecastRecord.forecast_ts.asc())
             )
@@ -247,7 +234,7 @@ class ForecastStore:
             return list(results)
 
     def get_recent_all(self, pair: str, hours: int = 24) -> list[_ForecastRecord]:
-        """直近N時間の予測を検証済み・未検証問わず古い順に返す。"""
+        """直近N時間の全レコード（skip含む）を古い順に返す。run forecast 表示用。"""
         cutoff = datetime.now() - timedelta(hours=hours)
         with Session(self._engine) as session:
             stmt = (
@@ -261,12 +248,14 @@ class ForecastStore:
                 session.expunge(r)
             return list(results)
 
-    def mark_reviewed(self, record_id: int, status: int = 1) -> None:
-        """予測を検証済みにマークする（1=有意, 2=判定不能）。"""
+    def update_review(self, record_id: int, delta: float) -> None:
+        """最新の検証結果（価格変化量）を上書き更新する。毎サイクル呼び出し。"""
         with Session(self._engine) as session:
             rec = session.get(_ForecastRecord, record_id)
             if rec:
-                rec.reviewed = status
+                rec.reviewed = 1
+                rec.latest_review_ts = datetime.now()
+                rec.latest_price_delta = delta
                 session.commit()
 
     def prune_old(self) -> None:

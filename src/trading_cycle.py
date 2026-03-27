@@ -611,7 +611,7 @@ async def forecast_cycle(
       C: 高確信度シグナルのみ予測生成
       D: 事実文字列として RAG に蓄積（LLM解釈なし）
     """
-    from src.analysis.forecaster import build_forecast_review, build_forecast_review_summary
+    from src.analysis.forecaster import build_forecast_review_summary
 
     now = datetime.now(ZoneInfo(config.schedule.timezone))
     logger.info(f"=== Forecast cycle: {now.strftime('%H:%M %Z')} ===")
@@ -624,48 +624,44 @@ async def forecast_cycle(
 
     for pair_cfg in config.tradeable_instruments:
         try:
-            # Phase 1: 直近24hの未検証予測を一括検証（A+D）
-            unreviewed = forecast_store.get_unreviewed_since(pair_cfg.symbol, hours=24)
-            if unreviewed:
+            # Phase 1: 直近24hの全予測を毎サイクル更新検証（D）
+            recent_forecasts = forecast_store.get_recent_forecasts(pair_cfg.symbol, hours=24)
+            if recent_forecasts:
                 try:
                     current_price = fetch_current_price(pair_cfg.symbol)
                 except Exception as e:
                     logger.warning(f"[FORECAST] {pair_cfg.symbol}: price fetch failed — {e}")
                     continue
 
+                review_ts = datetime.now()
+
+                # 各予測のdeltaを更新
+                for fc in recent_forecasts:
+                    delta = current_price - fc.current_price
+                    forecast_store.update_review(fc.id, delta)
+
+                # 24h集計サマリーをRAGに上書きupsert（D）
                 summary_text, lesson, has_significant = build_forecast_review_summary(
                     pair=pair_cfg.symbol,
-                    forecasts=unreviewed,
+                    forecasts=recent_forecasts,
                     current_price=current_price,
-                    review_ts=datetime.now(),
+                    review_ts=review_ts,
                     significance_atr_ratio=config.analysis.forecast_significance_atr_ratio,
                 )
                 logger.info(f"[FORECAST] {pair_cfg.symbol}: {summary_text}")
 
                 if has_significant:
-                    # D: LLM不使用、集計サマリーをそのまま埋め込み・蓄積
                     embedding = await embed_fn(summary_text)
-                    oldest_id = unreviewed[0].id
                     store.upsert_reflection(
-                        entry_id=f"forecast_summary_{pair_cfg.symbol}_{oldest_id}",
+                        entry_id=f"forecast_summary_{pair_cfg.symbol}_{now.strftime('%Y-%m-%d')}",
                         text=summary_text,
                         embedding=embedding,
                         pair=pair_cfg.symbol,
-                        cycle_time=datetime.now(),
-                        action=unreviewed[-1].predicted_direction,
+                        cycle_time=review_ts,
+                        action=recent_forecasts[-1].predicted_direction,
                         outcome_summary=summary_text,
                         lesson=lesson,
                     )
-
-                for fc in unreviewed:
-                    _, _, sig = build_forecast_review(
-                        pair=pair_cfg.symbol,
-                        forecast=fc,
-                        current_price=current_price,
-                        review_ts=datetime.now(),
-                        significance_atr_ratio=config.analysis.forecast_significance_atr_ratio,
-                    )
-                    forecast_store.mark_reviewed(fc.id, status=1 if sig else 2)
 
             # Phase 2: 新規予測生成（C: スコア閾値チェック、LLM不使用）
             signal = await _summarize_pair(pair_cfg, config, position_mgr, store, analysis_store)
@@ -684,6 +680,7 @@ async def forecast_cycle(
             logger.warning(f"[FORECAST] {pair_cfg.symbol}: error — {e}", exc_info=True)
 
     forecast_store.prune_old()
+    logger.info("=== Forecast cycle complete ===")
 
 
 def run_forecast_view(config: AppConfig, forecast_store, pair_filter: str | None = None) -> None:
@@ -693,13 +690,6 @@ def run_forecast_view(config: AppConfig, forecast_store, pair_filter: str | None
     from rich.table import Table
 
     console = Console()
-    # reviewed: 0=未検証 1=検証済(有意) 2=判定不能 3=skip(score不足)
-    _STATUS_LABEL = {
-        0: "[dim]… 未検証[/dim]",
-        1: "[green]✓ 検証済(有意)[/green]",
-        2: "[yellow]– 判定不能[/yellow]",
-        3: "[dim]– skip(score不足)[/dim]",
-    }
 
     targets = [p for p in config.tradeable_instruments if pair_filter is None or p.symbol == pair_filter]
     if not targets:
@@ -716,35 +706,74 @@ def run_forecast_view(config: AppConfig, forecast_store, pair_filter: str | None
             continue
 
         tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1))
-        tbl.add_column("時刻", style="dim")
+        tbl.add_column("生成時刻", style="dim")
         tbl.add_column("方向", justify="center")
         tbl.add_column("score", justify="right")
         tbl.add_column("conf", justify="right")
-        tbl.add_column("状態")
+        tbl.add_column("最終検証時刻", style="dim")
+        tbl.add_column("delta", justify="right")
 
         for r in records:
             direction_color = "green" if r.predicted_direction == "bullish" else ("red" if r.predicted_direction == "bearish" else "dim")
             score_color = "green" if r.combined_score > 0 else ("red" if r.combined_score < 0 else "dim")
-            tbl.add_row(
-                r.forecast_ts.strftime("%m-%d %H:%M"),
-                f"[{direction_color}]{r.predicted_direction}[/{direction_color}]",
-                f"[{score_color}]{r.combined_score:+.3f}[/{score_color}]",
-                f"{r.confidence:.2f}",
-                _STATUS_LABEL.get(r.reviewed, "?"),
-            )
+
+            if r.reviewed == 3:
+                # skipレコード
+                tbl.add_row(
+                    r.forecast_ts.strftime("%m-%d %H:%M"),
+                    f"[{direction_color}]{r.predicted_direction}[/{direction_color}]",
+                    f"[{score_color}]{r.combined_score:+.3f}[/{score_color}]",
+                    f"{r.confidence:.2f}",
+                    "[dim]–[/dim]",
+                    "[dim]skip(score不足)[/dim]",
+                )
+            elif r.reviewed == 0 or r.latest_review_ts is None:
+                # 未検証
+                tbl.add_row(
+                    r.forecast_ts.strftime("%m-%d %H:%M"),
+                    f"[{direction_color}]{r.predicted_direction}[/{direction_color}]",
+                    f"[{score_color}]{r.combined_score:+.3f}[/{score_color}]",
+                    f"{r.confidence:.2f}",
+                    "[dim]未検証[/dim]",
+                    "[dim]–[/dim]",
+                )
+            else:
+                # 検証済: deltaの色はbullish+正 or bearish+負なら緑、それ以外は赤
+                delta = r.latest_price_delta or 0.0
+                direction_match = (
+                    (r.predicted_direction == "bullish" and delta > 0) or
+                    (r.predicted_direction == "bearish" and delta < 0)
+                )
+                delta_color = "green" if direction_match else "red"
+                tbl.add_row(
+                    r.forecast_ts.strftime("%m-%d %H:%M"),
+                    f"[{direction_color}]{r.predicted_direction}[/{direction_color}]",
+                    f"[{score_color}]{r.combined_score:+.3f}[/{score_color}]",
+                    f"{r.confidence:.2f}",
+                    r.latest_review_ts.strftime("%m-%d %H:%M"),
+                    f"[{delta_color}]{delta:+.5f}[/{delta_color}]",
+                )
 
         console.print(tbl)
 
         forecast_records = [r for r in records if r.reviewed != 3]
-        reviewed = [r for r in forecast_records if r.reviewed != 0]
-        correct = [r for r in forecast_records if r.reviewed == 1]
-        unreviewed = [r for r in forecast_records if r.reviewed == 0]
+        reviewed_records = [r for r in forecast_records if r.reviewed == 1]
+        unreviewed_records = [r for r in forecast_records if r.reviewed == 0]
         skipped = [r for r in records if r.reviewed == 3]
-        accuracy = len(correct) / len(reviewed) * 100 if reviewed else 0.0
-        console.print(
-            f"  正解率: [bold]{accuracy:.0f}%[/bold] "
-            f"({len(correct)}/{len(reviewed)} 検証済) | 未検証: {len(unreviewed)}件 | skip: {len(skipped)}件"
-        )
+
+        if reviewed_records:
+            deltas = [r.latest_price_delta for r in reviewed_records if r.latest_price_delta is not None]
+            avg_delta = sum(deltas) / len(deltas) if deltas else 0.0
+            direction_counts: dict[str, int] = {}
+            for r in reviewed_records:
+                direction_counts[r.predicted_direction] = direction_counts.get(r.predicted_direction, 0) + 1
+            dir_summary = " ".join(f"{d}×{c}" for d, c in direction_counts.items())
+            console.print(
+                f"  avg_delta=[bold]{avg_delta:+.5f}[/bold] | {dir_summary} | "
+                f"未検証: {len(unreviewed_records)}件 | skip: {len(skipped)}件"
+            )
+        else:
+            console.print(f"  未検証: {len(unreviewed_records)}件 | skip: {len(skipped)}件")
 
 
 def run_forecast_cycle(

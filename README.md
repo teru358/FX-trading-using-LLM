@@ -50,6 +50,33 @@
    - LLM出力: `direction_bias`(long/short/neutral) / `bias_score`(-1.0〜+1.0) / `confidence` / `entry_zone` / `stop_loss` / `take_profit` / `risk_reward_ratio` / `reasoning_summary`
    - `temperature: 0.1`（低め）で一貫性重視、`extract_json()` で `<think>` タグ除去後にJSON抽出
 
+### 予測サイクル（設定間隔ごと・デフォルト8時間）
+
+LLM不使用。蓄積済みスナップショットからシグナルを生成し、予測精度を継続的に検証・RAGに蓄積します。
+
+1. **Phase 1**: 直近24hの全予測を毎サイクル更新検証
+   - 現在価格との差分（`latest_price_delta`）を各予測レコードに上書き保存
+   - 有意な変動（ATR proxy × `forecast_significance_atr_ratio` 以上）があれば集計サマリーをRAGにupsert（日次上書き）
+2. **Phase 2**: 新規予測生成
+   - `analysis_store` に蓄積済みのテクニカルスナップショットからシグナルを合成（LLM呼び出しなし）
+   - スナップショット未蓄積（`no_snapshot`）→ `[FORECAST] skip` ログのみ（DBレコードなし）
+   - `|combined_score| < forecast_min_combined_score` → `reviewed=3` のスキップレコードを保存
+   - 閾値超え → `reviewed=0` の予測レコードを保存
+
+ノイズ対策フィルター:
+- **A**: ATR proxy による有意性フィルター（小動きはRAG蓄積をスキップ）
+- **B**: 検証ウィンドウを `forecast_review_interval_hours` で制御
+- **C**: `forecast_min_combined_score` 未満のシグナルは予測対象外（deadband回避）
+- **D**: RAGには事実文字列として蓄積（LLM解釈なし）
+
+予測レコードの状態（`reviewed` 列）:
+
+| 値 | 意味 |
+|---|---|
+| `0` | 未検証（最新サイクルで更新待ち） |
+| `1` | 検証済（少なくとも1回更新済み） |
+| `3` | skip（スコア閾値未満） |
+
 ### 取引判定ループ（15:00 / 21:30 JST / 土日スキップ）
 
 1. **Phase 1**: 既存ポジションの SL/TP 到達確認・クローズ
@@ -136,7 +163,7 @@ finance/
 │   ├── data/
 │   │   ├── price_fetcher.py        # yfinance OHLCV取得（差分フェッチ対応）
 │   │   ├── price_store.py          # SQLite OHLCVキャッシュ
-│   │   ├── analysis_store.py       # SQLite テクニカルスナップショット（48h自動削除）
+│   │   ├── analysis_store.py       # SQLite テクニカルスナップショット（48h自動削除）+ 予測レコード（ForecastStore/HoldDecisionStore）
 │   │   ├── indicators.py           # テクニカル指標（pandas-ta + 一目均衡表）
 │   │   ├── candle_patterns.py      # チャートパターン検出（ローソク足・形状・ブレイクアウト）
 │   │   └── indicator_formatter.py  # LLMプロンプト用フォーマッタ
@@ -232,6 +259,7 @@ uv run python main.py --skip-news --skip-tech  # 両方スキップ（即時コ�
 | `run news` | `run n` | ニュース収集を今すぐ実行 |
 | `run tech` | `run t` | テクニカル分析を今すぐ実行 |
 | `run analyze` | `run a` | 総合分析を今すぐ表示（保存済みデータのみ・新規取得なし） |
+| `run forecast [pair]` | `run f` | 直近24hの予測サイクルデータを表示  例: `run forecast EURUSD=X` |
 | `ask <メッセージ>` | | FX分析LLMへ質問・コメントを送信。現在の分析コンテキスト（指標・ニュース・ポジション）をもとに回答 |
 | `run mon` | | 価格監視を今すぐ実行 |
 | `close <pair>` | | ポジションを手動決済  例: `close USDJPY=X` |
@@ -422,6 +450,12 @@ analysis:
     atr: true
     adx: true
     ichimoku: true
+
+  # 予測サイクル設定
+  forecast_review_interval_hours: 6    # B: 実行間隔（時間）— 例: 6h = 1セッション
+  forecast_start_hour: 2               # 開始時刻オフセット（2 → 02:00/10:00/18:00 JST）
+  forecast_min_combined_score: 0.25    # C: この絶対値未満のシグナルは予測対象外（deadband回避）
+  forecast_significance_atr_ratio: 0.30  # A: ATR proxy の何倍以上動いたら有意とするか
 
   chart_patterns:
     # ローソク足パターン（デフォルト有効）
@@ -661,6 +695,8 @@ logging:
 | `[TRADE]` | 注文実行・決済・残高更新 |
 | `[ORDER]` | 注文詳細・シグナル理由 |
 | `[REFLECT]` | 振り返り結果・方向性正誤・教訓 |
+| `[FORECAST]` | 予測サイクル（新規予測保存・検証更新・スキップ） |
+| `[EXIT]` | ポジション再評価による早期決済（Layer 1〜3） |
 
 | 出力先 | 内容 |
 |---|---|
@@ -674,7 +710,7 @@ logging:
 
 | ファイル | 内容 |
 |---|---|
-| `data/prices.db` | SQLite — OHLCVキャッシュ + テクニカルスナップショット |
+| `data/prices.db` | SQLite — OHLCVキャッシュ + テクニカルスナップショット + 予測レコード（`forecasts` / `hold_decisions`） |
 | `data/state/positions.json` | 現在のオープンポジション・残高 |
 | `data/state/trades.json` | クローズ済み取引履歴 |
 | `data/rag/` | ChromaDB（ニュース・振り返りベクトルDB） |
