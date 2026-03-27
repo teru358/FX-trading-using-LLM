@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -37,6 +38,49 @@ def _to_float(val, default: float) -> float:
         return float(val)
     except (TypeError, ValueError):
         return default
+
+
+def _validate_sl_tp(analysis: "PriceAnalysis") -> str | None:
+    """SL/TPが発注方向と矛盾していないか検証する。問題なければNone、矛盾があればエラーメッセージを返す。"""
+    direction = analysis.direction_bias
+    if direction == "neutral":
+        return None
+    entry_low, entry_high = analysis.entry_zone
+    sl = analysis.stop_loss
+    tp = analysis.take_profit
+    if direction == "long":
+        if sl >= entry_low:
+            return f"LONG requires stop_loss < entry_zone[0]={entry_low:.5f}, got stop_loss={sl:.5f}"
+        if tp <= entry_high:
+            return f"LONG requires take_profit > entry_zone[1]={entry_high:.5f}, got take_profit={tp:.5f}"
+    elif direction == "short":
+        if sl <= entry_high:
+            return f"SHORT requires stop_loss > entry_zone[1]={entry_high:.5f}, got stop_loss={sl:.5f}"
+        if tp >= entry_low:
+            return f"SHORT requires take_profit < entry_zone[0]={entry_low:.5f}, got take_profit={tp:.5f}"
+    return None
+
+
+def _build_feedback(error: str, analysis: "PriceAnalysis") -> str:
+    """バリデーション失敗時にLLMへ返すフィードバックメッセージを生成する。"""
+    direction = analysis.direction_bias
+    entry_low, entry_high = analysis.entry_zone
+    if direction == "long":
+        sl_rule = f"must be BELOW entry_zone[0] ({entry_low:.5f})"
+        tp_rule = f"must be ABOVE entry_zone[1] ({entry_high:.5f})"
+    else:
+        sl_rule = f"must be ABOVE entry_zone[1] ({entry_high:.5f})"
+        tp_rule = f"must be BELOW entry_zone[0] ({entry_low:.5f})"
+    return (
+        f"Your previous answer had an error in SL/TP values.\n\n"
+        f"direction_bias: {direction}\n"
+        f"entry_zone: [{entry_low:.5f}, {entry_high:.5f}]\n"
+        f"stop_loss: {analysis.stop_loss:.5f}  <- {sl_rule}\n"
+        f"take_profit: {analysis.take_profit:.5f}  <- {tp_rule}\n\n"
+        f"Error: {error}\n\n"
+        f"Please correct stop_loss and take_profit and output the full JSON again."
+    )
+
 
 SYSTEM_PROMPT = """You are an expert FX swing trader and technical analyst with 20 years of experience.
 Analyze price data and technical indicators to produce a swing trading recommendation (3-10 day horizon).
@@ -77,6 +121,8 @@ Consider:
 9. Compare with previous analysis: note any shift in direction or confidence since the last cycle
 10. Macro context: equity index trends as risk sentiment indicators, cross-currency correlation
 11. Risk/reward ratio (minimum 2:1 required)
+    - For LONG:  stop_loss < entry_zone[0], take_profit > entry_zone[1]
+    - For SHORT: stop_loss > entry_zone[1], take_profit < entry_zone[0]
 
 After your reasoning, output ONLY this JSON block (no markdown fences):
 {{
@@ -84,8 +130,8 @@ After your reasoning, output ONLY this JSON block (no markdown fences):
   "bias_score": <float -1.0 to 1.0>,
   "confidence": <float 0.0 to 1.0>,
   "entry_zone": [<low_price>, <high_price>],
-  "stop_loss": <price>,
-  "take_profit": <price>,
+  "stop_loss": <price>,   // long: below entry_zone[0] | short: above entry_zone[1]
+  "take_profit": <price>, // long: above entry_zone[1] | short: below entry_zone[0]
   "risk_reward_ratio": <float>,
   "reasoning_summary": "<one sentence summary incorporating news and reflection insights>"
 }}"""
@@ -168,47 +214,69 @@ async def analyze_price_action(
         {"role": "user", "content": user_prompt},
     ]
 
-    logger.info(f"Calling LLM for {pair_cfg.display_name}...")
-    response_text = await llm.chat(messages, temperature=temperature)
-    logger.debug(f"LLM response length: {len(response_text)} chars")
+    MAX_RETRIES = 2
+    last_error: str | None = None
 
-    try:
-        data = extract_json(response_text)
-    except (ValueError, json.JSONDecodeError) as e:
-        logger.error(f"Failed to parse Ollama JSON for {pair_cfg.display_name}: {e}")
-        raise
+    for attempt in range(MAX_RETRIES):
+        logger.info(f"Calling LLM for {pair_cfg.display_name}... (attempt {attempt + 1}/{MAX_RETRIES})")
+        response_text = await llm.chat(messages, temperature=temperature)
+        logger.debug(f"LLM response length: {len(response_text)} chars")
 
-    direction = data.get("direction_bias", "neutral")
-    bias_score = _to_float(data.get("bias_score"), 0.0)
-    confidence = _to_float(data.get("confidence"), 0.5)
-    entry_zone_raw = data.get("entry_zone", [summary.current_price, summary.current_price])
-    if not isinstance(entry_zone_raw, (list, tuple)) or len(entry_zone_raw) < 2:
-        entry_zone_raw = [summary.current_price, summary.current_price]
-    stop_loss = _to_float(data.get("stop_loss"), summary.current_price * 0.99)
-    take_profit = _to_float(data.get("take_profit"), summary.current_price * 1.02)
-    rr = _to_float(data.get("risk_reward_ratio"), 2.0)
+        try:
+            data = extract_json(response_text)
+        except (ValueError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to parse Ollama JSON for {pair_cfg.display_name}: {e}")
+            raise
 
-    analysis = PriceAnalysis(
-        pair=pair_cfg.symbol,
-        direction_bias=direction,
-        bias_score=max(-1.0, min(1.0, bias_score)),
-        confidence=max(0.0, min(1.0, confidence)),
-        entry_zone=(
-            _to_float(entry_zone_raw[0], summary.current_price),
-            _to_float(entry_zone_raw[1], summary.current_price),
-        ),
-        stop_loss=stop_loss,
-        take_profit=take_profit,
-        risk_reward_ratio=rr,
-        reasoning_summary=data.get("reasoning_summary", ""),
-        analyzed_at=datetime.now(),
+        direction = data.get("direction_bias", "neutral")
+        bias_score = _to_float(data.get("bias_score"), 0.0)
+        confidence = _to_float(data.get("confidence"), 0.5)
+        entry_zone_raw = data.get("entry_zone", [summary.current_price, summary.current_price])
+        if not isinstance(entry_zone_raw, (list, tuple)) or len(entry_zone_raw) < 2:
+            entry_zone_raw = [summary.current_price, summary.current_price]
+        if direction == "short":
+            stop_loss = _to_float(data.get("stop_loss"), summary.current_price * 1.01)
+            take_profit = _to_float(data.get("take_profit"), summary.current_price * 0.98)
+        else:
+            stop_loss = _to_float(data.get("stop_loss"), summary.current_price * 0.99)
+            take_profit = _to_float(data.get("take_profit"), summary.current_price * 1.02)
+        rr = _to_float(data.get("risk_reward_ratio"), 2.0)
+
+        analysis = PriceAnalysis(
+            pair=pair_cfg.symbol,
+            direction_bias=direction,
+            bias_score=max(-1.0, min(1.0, bias_score)),
+            confidence=max(0.0, min(1.0, confidence)),
+            entry_zone=(
+                _to_float(entry_zone_raw[0], summary.current_price),
+                _to_float(entry_zone_raw[1], summary.current_price),
+            ),
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            risk_reward_ratio=rr,
+            reasoning_summary=data.get("reasoning_summary", ""),
+            analyzed_at=datetime.now(),
+        )
+
+        logger.info(
+            f"[PRICE] {pair_cfg.display_name}: {direction} bias={bias_score:+.2f} "
+            f"conf={confidence:.2f} RR={rr:.1f}"
+        )
+
+        validation_error = _validate_sl_tp(analysis)
+        if validation_error is None:
+            return analysis
+
+        last_error = validation_error
+        logger.warning(
+            f"[PRICE] {pair_cfg.display_name}: SL/TP validation failed (attempt {attempt + 1}): {validation_error}"
+        )
+        messages.append({"role": "assistant", "content": response_text})
+        messages.append({"role": "user", "content": _build_feedback(validation_error, analysis)})
+
+    raise ValueError(
+        f"[PRICE] {pair_cfg.display_name}: SL/TP validation failed after {MAX_RETRIES} attempts. Last error: {last_error}"
     )
-
-    logger.info(
-        f"[PRICE] {pair_cfg.display_name}: {direction} bias={bias_score:+.2f} "
-        f"conf={confidence:.2f} RR={rr:.1f}"
-    )
-    return analysis
 
 
 async def chat_with_context(
