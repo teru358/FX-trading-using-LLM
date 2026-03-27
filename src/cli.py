@@ -16,7 +16,7 @@ from src.notifications.notifier import OrderClosedEvent, create_notifier
 from src.persistence.state_store import StateStore
 from src.rag.vector_store import VectorStore
 from src.trading.position_manager import PositionManager
-from src.trading_cycle import run_analysis_summary, run_ask, run_forecast_view, run_news_view, run_tech_view
+from src.trading_cycle import run_analysis_summary, run_ask, run_forecast_view, run_news_view, run_tech_view, run_trading_cycle
 
 _console = Console()
 
@@ -27,6 +27,7 @@ _HELP = """\
   [cyan]run tech[/cyan]            — 最新テクニカルスナップショットを表示（保存済みデータ）
   [cyan]run analyze[/cyan]         — 総合分析シグナルを表示（保存済みデータ）
   [cyan]run forecast[/cyan]        — 直近24hの予測サイクルデータを表示  例: run forecast EURUSD=X
+  [cyan]run trade[/cyan]           — 取引判定ループを今すぐ実行（動作確認用）
   [cyan]ask <メッセージ>[/cyan]    — FX分析LLMへ質問・コメントを送信
   [cyan]close <pair>[/cyan]        — ポジションを手動決済  例: close USDJPY=X
   [cyan]notify[/cyan]  (n)         — 通知テストメッセージを送信
@@ -159,6 +160,8 @@ def run_commands(
     stop_event: threading.Event,
     job_lock: threading.Lock,
     forecast_store=None,
+    price_store=None,
+    hold_store=None,
 ) -> None:
     _console.print("[dim]コマンド入力モード — [cyan]help[/cyan] で一覧表示[/dim]\n")
     while not stop_event.is_set():
@@ -206,9 +209,15 @@ def run_commands(
                         else:
                             pair_filter = args[1] if len(args) > 1 else None
                             run_forecast_view(config, forecast_store, pair_filter)
+                    elif sub in ("trade", "tr"):
+                        if price_store is None or hold_store is None:
+                            _console.print("[red]price_store / hold_store が利用できません[/red]")
+                        else:
+                            _console.print("[cyan]取引判定ループを実行中...[/cyan]")
+                            run_trading_cycle(config, store, price_store, analysis_store, hold_store)
                     else:
                         _console.print(
-                            f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | forecast"
+                            f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | forecast | trade"
                         )
             elif cmd == "ask":
                 if not args:

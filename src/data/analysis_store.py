@@ -103,27 +103,31 @@ class AnalysisStore:
         agg_bias = w_bias / total_w
         agg_conf = min(0.9, w_conf / total_w)
 
-        # 直近スナップショットの価格水準を採用
-        latest = snapshots[0]
         direction = (
             "long"    if agg_bias > 0.1  else
             "short"   if agg_bias < -0.1 else
             "neutral"
         )
 
+        # SL/TP は集約方向に一致する最新スナップショットを採用。
+        # 一致するものがなければ最新スナップショットを使用する（安全ネットは signal_combiner 側に別途実装）。
+        latest = snapshots[0]
+        ref = next((s for s in snapshots if s.direction_bias == direction), latest)
+
         logger.info(
             f"[AGGREGATE] {symbol}: {len(snapshots)} snapshots | "
             f"bias={agg_bias:+.2f} conf={agg_conf:.2f} dir={direction}"
+            + ("" if ref is latest else f" (SL/TP from direction-matched snapshot)")
         )
         return PriceAnalysis(
             pair=symbol,
             direction_bias=direction,
             bias_score=max(-1.0, min(1.0, agg_bias)),
             confidence=agg_conf,
-            entry_zone=(latest.entry_zone_low or 0.0, latest.entry_zone_high or 0.0),
-            stop_loss=latest.stop_loss or 0.0,
-            take_profit=latest.take_profit or 0.0,
-            risk_reward_ratio=latest.risk_reward_ratio or 2.0,
+            entry_zone=(ref.entry_zone_low or 0.0, ref.entry_zone_high or 0.0),
+            stop_loss=ref.stop_loss or 0.0,
+            take_profit=ref.take_profit or 0.0,
+            risk_reward_ratio=ref.risk_reward_ratio or 2.0,
             reasoning_summary=(
                 f"Aggregated {len(snapshots)} snapshots over {hours}h "
                 f"(weighted bias={agg_bias:+.2f}, latest: {latest.reasoning_summary or ''})"

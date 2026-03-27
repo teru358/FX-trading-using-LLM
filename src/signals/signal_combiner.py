@@ -90,6 +90,21 @@ def combine_signals(
     stop_loss = price.stop_loss
     take_profit = price.take_profit
 
+    # 安全ネット: action と SL/TP の方向が逆転している場合はスワップして修正する。
+    # （aggregate() で方向不一致スナップショットの SL/TP が混入した場合の最終防御）
+    if action == "sell" and stop_loss < entry_price < take_profit:
+        stop_loss, take_profit = take_profit, stop_loss
+        logger.warning(
+            f"[SIGNAL] {pair_cfg.symbol}: SL/TP direction mismatch for SELL — swapped "
+            f"(SL={stop_loss:.5f} TP={take_profit:.5f})"
+        )
+    elif action == "buy" and take_profit < entry_price < stop_loss:
+        stop_loss, take_profit = take_profit, stop_loss
+        logger.warning(
+            f"[SIGNAL] {pair_cfg.symbol}: SL/TP direction mismatch for BUY — swapped "
+            f"(SL={stop_loss:.5f} TP={take_profit:.5f})"
+        )
+
     # Position sizing: risk_amount / pips_at_risk
     position_size = _calculate_position_size(
         balance=account_balance,
