@@ -105,18 +105,31 @@ class PriceAnalysis:
     analyzed_at: datetime
 
 
-def load_user_notes(notes_path: Path) -> str:
-    """user_notes.md を読み込み、HTMLコメント・見出し・区切り線を除いた有効テキストを返す。空なら空文字を返す。"""
+def load_user_notes(notes_path: Path, section: str = "price") -> str:
+    """user_notes.md の指定セクション (price/news/reflect) のテキストを返す。
+
+    ## price / ## news / ## reflect の見出しでセクションを分割する。
+    見出しがない場合はファイル全体を "price" として扱う（後方互換）。
+    空または有効テキストなしの場合は空文字を返す。
+    """
     if not notes_path.exists():
         return ""
     text = notes_path.read_text(encoding="utf-8")
-    # HTMLコメント（複数行含む）を除去
     text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
-    lines = [
-        l for l in text.splitlines()
-        if l.strip() and not l.strip().startswith("#") and l.strip() != "---"
-    ]
-    return "\n".join(lines).strip()
+
+    def _clean(raw: str) -> str:
+        lines = [l for l in raw.splitlines() if l.strip() and not l.strip().startswith("#") and l.strip() != "---"]
+        return "\n".join(lines).strip()
+
+    parts = re.split(r"^##\s+(price|news|reflect)\s*$", text, flags=re.MULTILINE | re.IGNORECASE)
+    if len(parts) == 1:
+        # セクション見出しなし → 全体を "price" 扱い（後方互換）
+        return _clean(parts[0]) if section.lower() == "price" else ""
+
+    for i in range(1, len(parts), 2):
+        if parts[i].lower() == section.lower():
+            return _clean(parts[i + 1] if i + 1 < len(parts) else "")
+    return ""
 
 
 async def analyze_price_action(

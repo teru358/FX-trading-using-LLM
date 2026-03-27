@@ -64,7 +64,7 @@ Sources: {sources_list}
 Assess the {category_label} sentiment outlook for FX swing trading (3-10 day horizon).
 {category_focus}
 Weight more recent news more heavily in your assessment.
-
+{user_context}
 Return ONLY valid JSON (no markdown fences):
 {{
   "sentiment_score": <float -1.0 to 1.0>,
@@ -143,6 +143,7 @@ async def analyze_category_sentiment(
     fetch_result: FetchResult,
     llm: LLMClient,
     temperature: float = 0.3,
+    user_notes: str = "",
 ) -> NewsSentiment:
     """カテゴリのニュースをLLMでセンチメント分析する。"""
     label = _CATEGORY_LABELS.get(category, category)
@@ -154,6 +155,10 @@ async def analyze_category_sentiment(
     # ソース一覧を生成
     unique_sources = sorted(set(item.source for item in fetch_result.items))
 
+    user_context = f"=== User's Perspective ===\n{user_notes}" if user_notes else ""
+    if user_notes:
+        logger.info(f"[NEWS] {label}: user_notes injected ({len(user_notes)} chars)")
+
     news_text = fetch_result.format_for_llm()
     user_prompt = CATEGORY_PROMPT_TEMPLATE.format(
         category_label=label,
@@ -162,6 +167,7 @@ async def analyze_category_sentiment(
         recent_count=fetch_result.recent_count,
         sources_list=", ".join(unique_sources),
         category_focus=_CATEGORY_FOCUS.get(category, ""),
+        user_context=user_context,
     )
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},

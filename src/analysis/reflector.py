@@ -39,7 +39,7 @@ Write a brief trading journal reflection. Evaluate:
 1. Was the directional call correct?
 2. What did the analysis get right or wrong?
 3. What should be done differently next time?
-
+{user_context}
 Return ONLY valid JSON:
 {{
   "outcome_summary": "<one sentence: what happened vs expectation>",
@@ -73,11 +73,14 @@ async def generate_reflection(
     current_price: float,
     llm: LLMClient,
     temperature: float = 0.3,
+    user_notes: str = "",
 ) -> Reflection:
     """LLMで振り返りを生成する。"""
     elapsed_hours = (datetime.now() - previous_cycle_time).total_seconds() / 3600
     price_change = current_price - previous_entry_price
     price_change_pct = (price_change / previous_entry_price) * 100
+
+    user_context = f"=== User's Perspective ===\n{user_notes}" if user_notes else ""
 
     prompt = _REFLECTION_PROMPT.format(
         pair=pair_cfg.display_name,
@@ -91,6 +94,7 @@ async def generate_reflection(
         price_change=price_change,
         price_change_pct=price_change_pct,
         elapsed_hours=elapsed_hours,
+        user_context=user_context,
     )
 
     messages = [{"role": "user", "content": prompt}]
@@ -181,7 +185,7 @@ Evaluate this completed trade. Assess:
 1. Was the directional call correct? (take_profit = yes, stop_loss = no)
 2. Was the SL/TP placement appropriate given what actually happened?
 3. What is the ONE most actionable lesson for future {pair} trades?
-
+{user_context}
 Return ONLY valid JSON:
 {{
   "outcome_summary": "<one sentence: what happened and the key reason>",
@@ -206,6 +210,7 @@ async def generate_close_reflection(
     order: "Order",
     llm: LLMClient,
     temperature: float = 0.1,
+    user_notes: str = "",
 ) -> Reflection:
     """決済済み Order から確定結果ベースの振り返りを生成する。"""
     close_price = order.close_price or order.entry_price
@@ -225,6 +230,7 @@ async def generate_close_reflection(
 
     signal_reason = order.signal_reason or "Not recorded."
     close_reason_label = _CLOSE_REASON_LABELS.get(close_reason, close_reason.upper())
+    user_context = f"=== User's Perspective ===\n{user_notes}" if user_notes else ""
 
     prompt = _CLOSE_REFLECTION_PROMPT.format(
         pair=pair_cfg.display_name,
@@ -241,6 +247,7 @@ async def generate_close_reflection(
         duration_hours=duration_hours,
         achieved_rr=achieved_rr,
         signal_reason=signal_reason,
+        user_context=user_context,
     )
 
     messages = [{"role": "user", "content": prompt}]

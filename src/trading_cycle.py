@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 from functools import partial
 
 from src.analysis.news_aggregator import aggregate_news_sentiment
-from src.analysis.price_analyzer import analyze_price_action, chat_with_context
+from src.analysis.price_analyzer import analyze_price_action, chat_with_context, load_user_notes
 from src.analysis.reflector import generate_close_reflection, generate_reflection, store_reflection
 from src.config import AppConfig, InstrumentConfig
 from src.data.indicators import compute_indicators
@@ -150,6 +150,7 @@ async def _generate_cycle_reflections(
                 current_price=current_price,
                 llm=llm,
                 temperature=config.llm.reflection.temperature,
+                user_notes=load_user_notes(config.user_notes_path, "reflect"),
             )
             embed_fn = partial(
                 embed_text,
@@ -290,6 +291,7 @@ async def trading_cycle(
                     order=closed_order,
                     llm=llm_reflect,
                     temperature=config.llm.reflection.temperature,
+                    user_notes=load_user_notes(config.user_notes_path, "reflect"),
                 )
                 await store_reflection(
                     reflection=reflection,
@@ -395,6 +397,7 @@ async def trading_cycle(
                             order=closed_order,
                             llm=llm_reflect,
                             temperature=config.llm.reflection.temperature,
+                            user_notes=load_user_notes(config.user_notes_path, "reflect"),
                         )
                         await store_reflection(
                             reflection=reflection,

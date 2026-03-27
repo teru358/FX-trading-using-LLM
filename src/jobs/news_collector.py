@@ -13,6 +13,7 @@ from datetime import datetime, timedelta
 
 from src.analysis.feedly_fetcher import fetch_feedly_category
 from src.analysis.news_analyzer import NewsSentiment, analyze_category_sentiment
+from src.analysis.price_analyzer import load_user_notes
 from src.analysis.rss_fetcher import fetch_category_news
 from src.config import AppConfig
 from src.llm.factory import create_llm_client
@@ -113,6 +114,7 @@ async def collect_category(
         fetch_result=fetch_result,
         llm=llm,
         temperature=config.llm.news_analysis.temperature,
+        user_notes=load_user_notes(config.user_notes_path, "news"),
     )
 
     collect_undated = news.news_count - news.recent_count
