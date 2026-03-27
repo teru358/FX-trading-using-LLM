@@ -171,7 +171,8 @@ def main() -> None:
     # REST API サーバー（有効時のみ — Initial collection 前に起動）
     if config.api.enabled:
         from src.api.server import start_api_server
-        start_api_server(config, store, analysis_store, _job_lock)
+        start_api_server(config, store, analysis_store, _job_lock,
+                         price_store, hold_store, forecast_store)
 
     # 起動直後にニュース収集+テクニカル分析を1回実行
     # prices.db が存在しない場合（初回起動）は市場時間を無視して強制実行

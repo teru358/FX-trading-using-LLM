@@ -19,6 +19,7 @@ data/state/
 data/rag/
 prices.db
 logs/
+docs/
 
 # Backups
 *.bak

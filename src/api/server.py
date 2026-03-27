@@ -11,14 +11,17 @@ import logging
 import os
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Security
 from fastapi.security import APIKeyHeader
+from pydantic import BaseModel
 
-from src.config import AppConfig
+from src.config import AppConfig, BASE_DIR
 from src.data.analysis_store import AnalysisStore
 from src.data.price_fetcher import fetch_current_price
+from src.data.price_store import PriceStore
 from src.notifications.notifier import OrderClosedEvent, create_notifier
 from src.persistence.state_store import StateStore
 from src.rag.vector_store import VectorStore
@@ -36,6 +39,9 @@ _config: AppConfig | None = None
 _store: VectorStore | None = None
 _analysis_store: AnalysisStore | None = None
 _job_lock: threading.Lock | None = None
+_price_store: PriceStore | None = None
+_hold_store = None        # HoldDecisionStore
+_forecast_store = None    # ForecastStore
 
 app = FastAPI(title="FX Trading Bot API", docs_url=None, redoc_url=None)
 
@@ -233,6 +239,215 @@ def analyze() -> dict[str, Any]:
     return {"signals": output}
 
 
+# ── GET /forecast ─────────────────────────────────────────────────
+
+@app.get("/forecast", dependencies=[Depends(_verify_api_key)])
+def forecast(pair: str | None = None, hours: int = 24) -> dict[str, Any]:
+    """直近N時間の予測サイクルレコードを返す（skip含む全レコード）。"""
+    assert _config is not None and _forecast_store is not None
+
+    instruments = _config.tradeable_instruments
+    if pair:
+        instruments = [i for i in instruments if i.symbol.upper() == pair.upper()]
+
+    result: dict[str, Any] = {}
+    for inst in instruments:
+        records = _forecast_store.get_recent_all(inst.symbol, hours=hours)
+        result[inst.symbol] = [
+            {
+                "id":                  r.id,
+                "forecast_ts":         r.forecast_ts.isoformat(),
+                "current_price":       r.current_price,
+                "predicted_direction": r.predicted_direction,
+                "combined_score":      r.combined_score,
+                "confidence":          r.confidence,
+                "signal_reason":       r.signal_reason,
+                "reviewed":            r.reviewed,
+                "latest_review_ts":    r.latest_review_ts.isoformat() if r.latest_review_ts else None,
+                "latest_price_delta":  r.latest_price_delta,
+            }
+            for r in records
+        ]
+
+    return {"hours": hours, "forecasts": result}
+
+
+# ── GET /logs ─────────────────────────────────────────────────────
+
+_LOG_LINES_MAX = 500
+
+@app.get("/logs", dependencies=[Depends(_verify_api_key)])
+def logs(lines: int = 100) -> dict[str, Any]:
+    """activity.log の末尾N行を返す（最大500行）。"""
+    assert _config is not None
+
+    lines = min(max(1, lines), _LOG_LINES_MAX)
+    log_path: Path = BASE_DIR / _config.logging.activity_log_file
+
+    if not log_path.exists():
+        return {"lines": [], "total_lines": 0, "returned": 0}
+
+    with open(log_path, encoding="utf-8") as f:
+        all_lines = f.readlines()
+
+    tail = all_lines[-lines:]
+    return {
+        "lines":       [l.rstrip("\n") for l in tail],
+        "total_lines": len(all_lines),
+        "returned":    len(tail),
+    }
+
+
+# ── GET /schedule ─────────────────────────────────────────────────
+
+@app.get("/schedule", dependencies=[Depends(_verify_api_key)])
+def schedule_info() -> dict[str, Any]:
+    """スケジュール済みジョブの次回実行時刻一覧を返す。"""
+    import schedule as sched_mod
+
+    jobs = sched_mod.get_jobs()
+    job_list = []
+    for j in jobs:
+        job_list.append({
+            "name":     getattr(j.job_func, "__name__", str(j.job_func)),
+            "next_run": j.next_run.isoformat() if j.next_run else None,
+            "last_run": j.last_run.isoformat() if j.last_run else None,
+        })
+
+    next_run = min((j.next_run for j in jobs if j.next_run), default=None)
+    return {
+        "jobs_count": len(jobs),
+        "next_run":   next_run.isoformat() if next_run else None,
+        "jobs":       job_list,
+    }
+
+
+# ── POST /run/trade ───────────────────────────────────────────────
+
+@app.post("/run/trade", dependencies=[Depends(_verify_api_key)])
+def run_trade() -> dict[str, Any]:
+    """取引判定ループを手動実行する（同期・job_lock取得）。実行後の最新状態を返す。"""
+    assert _config is not None and _job_lock is not None
+    assert _store is not None and _analysis_store is not None
+    assert _price_store is not None and _hold_store is not None
+
+    from src.trading_cycle import run_trading_cycle as _run_trading_cycle
+
+    started_at = datetime.now()
+    with _job_lock:
+        _run_trading_cycle(_config, _store, _price_store, _analysis_store, _hold_store)
+    elapsed = (datetime.now() - started_at).total_seconds()
+
+    # 実行後の最新状態を取得
+    state_store = StateStore(_config.state_dir)
+    pm = PositionManager(state_store, _config.trading.initial_balance)
+    account = pm.get_account_state()
+
+    positions = []
+    for pos in account.open_positions:
+        entry: dict[str, Any] = {
+            "pair":          pos.pair,
+            "direction":     pos.direction,
+            "entry_price":   pos.entry_price,
+            "stop_loss":     pos.stop_loss,
+            "take_profit":   pos.take_profit,
+            "position_size": pos.position_size,
+            "opened_at":     pos.opened_at.isoformat(),
+        }
+        try:
+            current = fetch_current_price(pos.pair)
+            mult = 1 if pos.direction == "buy" else -1
+            entry["current_price"] = current
+            entry["unrealized_pnl"] = round(
+                (current - pos.entry_price) * pos.position_size * mult, 2
+            )
+        except Exception:
+            entry["current_price"] = None
+            entry["unrealized_pnl"] = None
+        positions.append(entry)
+
+    pnl = account.balance - account.initial_balance
+    return {
+        "status":          "completed",
+        "elapsed_seconds": round(elapsed, 1),
+        "executed_at":     started_at.isoformat(),
+        "balance":         account.balance,
+        "pnl":             round(pnl, 2),
+        "pnl_pct":         round(pnl / account.initial_balance * 100, 2),
+        "total_trades":    account.total_trades,
+        "open_positions":  positions,
+    }
+
+
+# ── POST /run/news （コメントアウト：将来有効化用） ──────────────
+#
+# @app.post("/run/news", dependencies=[Depends(_verify_api_key)])
+# def run_news() -> dict[str, Any]:
+#     """ニュース収集を手動実行する（同期・job_lock取得）。"""
+#     assert _config is not None and _job_lock is not None and _store is not None
+#
+#     from src.jobs.news_collector import run_news_collection
+#
+#     started_at = datetime.now()
+#     with _job_lock:
+#         run_news_collection(_config, _store)
+#     elapsed = (datetime.now() - started_at).total_seconds()
+#
+#     return {"status": "completed", "elapsed_seconds": round(elapsed, 1),
+#             "executed_at": started_at.isoformat()}
+
+
+# ── POST /run/tech （コメントアウト：将来有効化用） ──────────────
+#
+# @app.post("/run/tech", dependencies=[Depends(_verify_api_key)])
+# def run_tech() -> dict[str, Any]:
+#     """テクニカル収集を手動実行する（同期・job_lock取得）。"""
+#     assert _config is not None and _job_lock is not None
+#     assert _store is not None and _price_store is not None and _analysis_store is not None
+#
+#     from src.jobs.technical_collector import run_technical_collection
+#
+#     started_at = datetime.now()
+#     with _job_lock:
+#         run_technical_collection(_config, _store, _price_store, _analysis_store)
+#     elapsed = (datetime.now() - started_at).total_seconds()
+#
+#     return {"status": "completed", "elapsed_seconds": round(elapsed, 1),
+#             "executed_at": started_at.isoformat()}
+
+
+# ── POST /ask ─────────────────────────────────────────────────────
+
+class _AskRequest(BaseModel):
+    message: str
+
+
+@app.post("/ask", dependencies=[Depends(_verify_api_key)])
+def ask(body: _AskRequest) -> dict[str, Any]:
+    """FX分析LLMへ質問する（同期・LLM呼び出しあり）。UIはローディング表示を推奨。"""
+    assert _config is not None and _store is not None and _analysis_store is not None
+
+    message = body.message.strip()
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    from src.trading_cycle import run_ask as _run_ask
+
+    started_at = datetime.now()
+    try:
+        response = _run_ask(message, _config, _store, _analysis_store)
+    except Exception as e:
+        logger.error(f"[API] /ask failed: {e}", exc_info=True)
+        raise HTTPException(status_code=504, detail=f"LLM error: {e}")
+    elapsed = (datetime.now() - started_at).total_seconds()
+
+    return {
+        "message":         message,
+        "response":        response,
+        "elapsed_seconds": round(elapsed, 1),
+    }
+
+
 # ── POST /close/{pair} ───────────────────────────────────────────
 
 @app.post("/close/{pair}", dependencies=[Depends(_verify_api_key)])
@@ -283,13 +498,13 @@ def close_position(pair: str) -> dict[str, Any]:
             logger.warning(f"[API] Close notification failed: {e}")
 
     return {
-        "closed": True,
-        "pair": closed.pair,
-        "direction": closed.direction,
-        "entry_price": closed.entry_price,
-        "close_price": current,
+        "closed":       True,
+        "pair":         closed.pair,
+        "direction":    closed.direction,
+        "entry_price":  closed.entry_price,
+        "close_price":  current,
         "realized_pnl": round(closed.realized_pnl or 0.0, 2),
-        "balance": round(pm.get_account_state().balance, 2),
+        "balance":      round(pm.get_account_state().balance, 2),
     }
 
 
@@ -314,13 +529,20 @@ def start_api_server(
     store: VectorStore,
     analysis_store: AnalysisStore,
     job_lock: threading.Lock,
+    price_store: PriceStore,
+    hold_store,        # HoldDecisionStore
+    forecast_store,    # ForecastStore
 ) -> threading.Thread:
     """バックグラウンドスレッドで uvicorn を起動する。"""
     global _config, _store, _analysis_store, _job_lock, _started_at
+    global _price_store, _hold_store, _forecast_store
     _config = config
     _store = store
     _analysis_store = analysis_store
     _job_lock = job_lock
+    _price_store = price_store
+    _hold_store = hold_store
+    _forecast_store = forecast_store
     _started_at = datetime.now()
 
     def _run() -> None:
