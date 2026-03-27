@@ -210,6 +210,37 @@ class ForecastStore:
                 session.expunge(result)
             return result
 
+    def get_unreviewed_since(self, pair: str, hours: int = 24) -> list[_ForecastRecord]:
+        """直近N時間の未検証予測を古い順に返す。"""
+        cutoff = datetime.now() - timedelta(hours=hours)
+        with Session(self._engine) as session:
+            stmt = (
+                select(_ForecastRecord)
+                .where(_ForecastRecord.pair == pair)
+                .where(_ForecastRecord.reviewed == 0)
+                .where(_ForecastRecord.forecast_ts >= cutoff)
+                .order_by(_ForecastRecord.forecast_ts.asc())
+            )
+            results = session.execute(stmt).scalars().all()
+            for r in results:
+                session.expunge(r)
+            return list(results)
+
+    def get_recent_all(self, pair: str, hours: int = 24) -> list[_ForecastRecord]:
+        """直近N時間の予測を検証済み・未検証問わず古い順に返す。"""
+        cutoff = datetime.now() - timedelta(hours=hours)
+        with Session(self._engine) as session:
+            stmt = (
+                select(_ForecastRecord)
+                .where(_ForecastRecord.pair == pair)
+                .where(_ForecastRecord.forecast_ts >= cutoff)
+                .order_by(_ForecastRecord.forecast_ts.asc())
+            )
+            results = session.execute(stmt).scalars().all()
+            for r in results:
+                session.expunge(r)
+            return list(results)
+
     def mark_reviewed(self, record_id: int, status: int = 1) -> None:
         """予測を検証済みにマークする（1=有意, 2=判定不能）。"""
         with Session(self._engine) as session:

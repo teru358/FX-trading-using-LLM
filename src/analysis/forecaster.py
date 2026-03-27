@@ -79,6 +79,93 @@ def build_forecast_review(
     return review_text, lesson, significant
 
 
+def build_forecast_review_summary(
+    pair: str,
+    forecasts: list[_ForecastRecord],
+    current_price: float,
+    review_ts: datetime,
+    significance_atr_ratio: float = 0.30,
+) -> tuple[str, str, bool]:
+    """直近24hの複数予測を一括検証し、集計サマリーと有意性フラグを返す。
+
+    Args:
+        pair: 通貨ペアシンボル
+        forecasts: 検証対象の予測レコードリスト（古い順）
+        current_price: 現在価格
+        review_ts: 検証時刻
+        significance_atr_ratio: ATR proxy に対する有意性閾値の比率
+
+    Returns:
+        (summary_text, lesson, has_significant)
+        has_significant=False の場合は有意な動きがなく RAG に蓄積しない
+    """
+    if not forecasts:
+        return "", "", False
+
+    results = []
+    for fc in forecasts:
+        _, lesson, significant = build_forecast_review(
+            pair=pair,
+            forecast=fc,
+            current_price=current_price,
+            review_ts=review_ts,
+            significance_atr_ratio=significance_atr_ratio,
+        )
+        delta = current_price - fc.current_price
+        actual_direction = "bullish" if delta > 0 else ("bearish" if delta < 0 else "neutral")
+        correct = fc.predicted_direction == actual_direction
+        results.append({
+            "fc": fc,
+            "correct": correct,
+            "significant": significant,
+            "actual_direction": actual_direction,
+            "delta": delta,
+            "lesson": lesson,
+        })
+
+    total = len(results)
+    significant_results = [r for r in results if r["significant"]]
+    correct_significant = [r for r in significant_results if r["correct"]]
+    incorrect_significant = [r for r in significant_results if not r["correct"]]
+    inconclusive = [r for r in results if not r["significant"]]
+
+    has_significant = len(significant_results) > 0
+    accuracy_pct = len(correct_significant) / len(significant_results) * 100 if significant_results else 0.0
+
+    avg_score = sum(r["fc"].combined_score for r in results) / total
+    avg_conf = sum(r["fc"].confidence for r in results) / total
+
+    direction_counts: dict[str, int] = {}
+    for r in results:
+        d = r["fc"].predicted_direction
+        direction_counts[d] = direction_counts.get(d, 0) + 1
+    dir_summary = " ".join(f"{d}×{c}" for d, c in direction_counts.items())
+
+    oldest_ts = forecasts[0].forecast_ts
+    newest_ts = forecasts[-1].forecast_ts
+
+    summary_text = (
+        f"[Forecast Summary {pair} "
+        f"{oldest_ts.strftime('%m-%d %H:%M')}→{review_ts.strftime('%m-%d %H:%M')}] "
+        f"Reviewed: {total} | Correct: {len(correct_significant)} | "
+        f"Incorrect: {len(incorrect_significant)} | Inconclusive: {len(inconclusive)} | "
+        f"Directions: {dir_summary} | "
+        f"avg_score={avg_score:+.3f} avg_conf={avg_conf:.2f} | "
+        f"Accuracy: {accuracy_pct:.0f}% (significant only)"
+    )
+
+    if correct_significant:
+        lesson_parts = [f"CORRECT: {r['fc'].predicted_direction} (score={r['fc'].combined_score:+.3f} actual={r['actual_direction']})" for r in correct_significant]
+    else:
+        lesson_parts = []
+    if incorrect_significant:
+        lesson_parts += [f"INCORRECT: {r['fc'].predicted_direction} (score={r['fc'].combined_score:+.3f} actual={r['actual_direction']})" for r in incorrect_significant]
+
+    lesson = f"24h summary for {pair}: " + "; ".join(lesson_parts) if lesson_parts else f"24h summary for {pair}: no significant moves"
+
+    return summary_text, lesson, has_significant
+
+
 def build_hold_review(
     pair: str,
     hold: _HoldDecisionRecord,

@@ -611,7 +611,7 @@ async def forecast_cycle(
       C: 高確信度シグナルのみ予測生成
       D: 事実文字列として RAG に蓄積（LLM解釈なし）
     """
-    from src.analysis.forecaster import build_forecast_review
+    from src.analysis.forecaster import build_forecast_review, build_forecast_review_summary
 
     now = datetime.now(ZoneInfo(config.schedule.timezone))
     logger.info(f"=== Forecast cycle: {now.strftime('%H:%M %Z')} ===")
@@ -624,39 +624,48 @@ async def forecast_cycle(
 
     for pair_cfg in config.tradeable_instruments:
         try:
-            # Phase 1: 前回予測の検証（A+D）
-            prev = forecast_store.get_latest_unreviewed(pair_cfg.symbol)
-            if prev:
+            # Phase 1: 直近24hの未検証予測を一括検証（A+D）
+            unreviewed = forecast_store.get_unreviewed_since(pair_cfg.symbol, hours=24)
+            if unreviewed:
                 try:
                     current_price = fetch_current_price(pair_cfg.symbol)
                 except Exception as e:
                     logger.warning(f"[FORECAST] {pair_cfg.symbol}: price fetch failed — {e}")
                     continue
 
-                review_text, lesson, significant = build_forecast_review(
+                summary_text, lesson, has_significant = build_forecast_review_summary(
                     pair=pair_cfg.symbol,
-                    forecast=prev,
+                    forecasts=unreviewed,
                     current_price=current_price,
                     review_ts=datetime.now(),
                     significance_atr_ratio=config.analysis.forecast_significance_atr_ratio,
                 )
-                logger.info(f"[FORECAST] {pair_cfg.symbol}: {review_text}")
+                logger.info(f"[FORECAST] {pair_cfg.symbol}: {summary_text}")
 
-                if significant:
-                    # D: LLM不使用、事実文字列をそのまま埋め込み・蓄積
-                    embedding = await embed_fn(review_text)
+                if has_significant:
+                    # D: LLM不使用、集計サマリーをそのまま埋め込み・蓄積
+                    embedding = await embed_fn(summary_text)
+                    oldest_id = unreviewed[0].id
                     store.upsert_reflection(
-                        entry_id=f"forecast_{pair_cfg.symbol}_{prev.id}",
-                        text=review_text,
+                        entry_id=f"forecast_summary_{pair_cfg.symbol}_{oldest_id}",
+                        text=summary_text,
                         embedding=embedding,
                         pair=pair_cfg.symbol,
                         cycle_time=datetime.now(),
-                        action=prev.predicted_direction,
-                        outcome_summary=review_text,
+                        action=unreviewed[-1].predicted_direction,
+                        outcome_summary=summary_text,
                         lesson=lesson,
                     )
 
-                forecast_store.mark_reviewed(prev.id, status=1 if significant else 2)
+                for fc in unreviewed:
+                    _, _, sig = build_forecast_review(
+                        pair=pair_cfg.symbol,
+                        forecast=fc,
+                        current_price=current_price,
+                        review_ts=datetime.now(),
+                        significance_atr_ratio=config.analysis.forecast_significance_atr_ratio,
+                    )
+                    forecast_store.mark_reviewed(fc.id, status=1 if sig else 2)
 
             # Phase 2: 新規予測生成（C: スコア閾値チェック、LLM不使用）
             signal = await _summarize_pair(pair_cfg, config, position_mgr, store, analysis_store)
@@ -677,6 +686,63 @@ async def forecast_cycle(
             logger.warning(f"[FORECAST] {pair_cfg.symbol}: error — {e}", exc_info=True)
 
     forecast_store.prune_old()
+
+
+def run_forecast_view(config: AppConfig, forecast_store, pair_filter: str | None = None) -> None:
+    """CLIから呼び出す: 直近24hの予測データをテーブル表示する（新規取得なし）。"""
+    from rich import box
+    from rich.console import Console
+    from rich.table import Table
+
+    console = Console()
+    _REVIEWED_LABEL = {0: "[dim]… 未検証[/dim]", 1: "[green]✓ 正解[/green]", 2: "[red]✗ 不正解[/red]"}
+    # reviewed=1 は有意かつ正解、reviewed=2 は有意かつ不正解 or 判定不能
+    # build_forecast_review_summary では sig=True→status=1/2、sig=False→status=2 として mark_reviewed
+    # ここでは 1=正解(有意) 2=不正解 or 判定不能 として表示
+    _STATUS_LABEL = {0: "[dim]… 未検証[/dim]", 1: "[green]✓ 検証済(有意)[/green]", 2: "[yellow]– 判定不能[/yellow]"}
+
+    targets = [p for p in config.tradeable_instruments if pair_filter is None or p.symbol == pair_filter]
+    if not targets:
+        console.print(f"[red]対象ペアが見つかりません: {pair_filter}[/red]")
+        return
+
+    console.print(f"\n[bold cyan]=== Forecast Data (直近24h) ===[/bold cyan]")
+
+    for inst in targets:
+        records = forecast_store.get_recent_all(inst.symbol, hours=24)
+        console.print(f"\n[bold]{inst.display_name}[/bold]")
+        if not records:
+            console.print("  [dim]データなし[/dim]")
+            continue
+
+        tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1))
+        tbl.add_column("時刻", style="dim")
+        tbl.add_column("方向", justify="center")
+        tbl.add_column("score", justify="right")
+        tbl.add_column("conf", justify="right")
+        tbl.add_column("状態")
+
+        for r in records:
+            direction_color = "green" if r.predicted_direction == "bullish" else ("red" if r.predicted_direction == "bearish" else "dim")
+            score_color = "green" if r.combined_score > 0 else ("red" if r.combined_score < 0 else "dim")
+            tbl.add_row(
+                r.forecast_ts.strftime("%m-%d %H:%M"),
+                f"[{direction_color}]{r.predicted_direction}[/{direction_color}]",
+                f"[{score_color}]{r.combined_score:+.3f}[/{score_color}]",
+                f"{r.confidence:.2f}",
+                _STATUS_LABEL.get(r.reviewed, "?"),
+            )
+
+        console.print(tbl)
+
+        reviewed = [r for r in records if r.reviewed != 0]
+        correct = [r for r in records if r.reviewed == 1]
+        unreviewed = [r for r in records if r.reviewed == 0]
+        accuracy = len(correct) / len(reviewed) * 100 if reviewed else 0.0
+        console.print(
+            f"  正解率: [bold]{accuracy:.0f}%[/bold] "
+            f"({len(correct)}/{len(reviewed)} 検証済) | 未検証: {len(unreviewed)}件"
+        )
 
 
 def run_forecast_cycle(
