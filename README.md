@@ -50,7 +50,7 @@
    - LLM出力: `direction_bias`(long/short/neutral) / `bias_score`(-1.0〜+1.0) / `confidence` / `entry_zone` / `stop_loss` / `take_profit` / `risk_reward_ratio` / `reasoning_summary`
    - `temperature: 0.1`（低め）で一貫性重視、`extract_json()` で `<think>` タグ除去後にJSON抽出
 
-### 予測サイクル（設定間隔ごと・デフォルト8時間）
+### 予測サイクル（設定間隔ごと・デフォルト6時間）
 
 LLM不使用。蓄積済みスナップショットからシグナルを生成し、予測精度を継続的に検証・RAGに蓄積します。
 

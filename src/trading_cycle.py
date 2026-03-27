@@ -614,6 +614,10 @@ async def forecast_cycle(
     from src.analysis.forecaster import build_forecast_review_summary
 
     now = datetime.now(ZoneInfo(config.schedule.timezone))
+
+    if not is_market_open(now):
+        return
+
     logger.info(f"=== Forecast cycle: {now.strftime('%H:%M %Z')} ===")
 
     embed_fn = partial(
