@@ -567,8 +567,10 @@ async def exit_check_cycle(
             decision.order_id, price, decision.close_reason,
         )
         if closed_order:
+            _LAYER_LABEL = {"reversal": "L1", "timeout": "L2", "profit_lock": "L3"}
+            layer = _LAYER_LABEL.get(decision.close_reason, decision.close_reason)
             logger.info(
-                f"[EXIT] {decision.pair}: closed ({decision.close_reason}) — {decision.detail}"
+                f"[EXIT] {decision.pair}: closed {layer}({decision.close_reason}) — {decision.detail}"
             )
             if config.notifier.notify_on_order_close:
                 account_after = position_mgr.get_account_state()
