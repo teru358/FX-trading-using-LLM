@@ -195,6 +195,26 @@ class ForecastStore:
             f"score={signal.combined_score:+.3f} conf={signal.confidence:.2f}"
         )
 
+    def save_forecast_skip(self, pair: str, signal) -> None:
+        """スコア不足でスキップした予測をレコードとして保存する（reviewed=3）。"""
+        with Session(self._engine) as session:
+            rec = _ForecastRecord(
+                pair=pair,
+                forecast_ts=datetime.now(),
+                current_price=signal.entry_price,
+                predicted_direction=signal.predicted_direction,
+                combined_score=signal.combined_score,
+                confidence=signal.confidence,
+                signal_reason=signal.signal_reason,
+                stop_loss=signal.stop_loss,
+                reviewed=3,
+            )
+            session.add(rec)
+            session.commit()
+        logger.info(
+            f"[FORECAST] {pair}: skip — score={signal.combined_score:+.3f} (score_below_threshold)"
+        )
+
     def get_latest_unreviewed(self, pair: str) -> _ForecastRecord | None:
         """最新の未検証予測を返す。"""
         with Session(self._engine) as session:
@@ -211,7 +231,7 @@ class ForecastStore:
             return result
 
     def get_unreviewed_since(self, pair: str, hours: int = 24) -> list[_ForecastRecord]:
-        """直近N時間の未検証予測を古い順に返す。"""
+        """直近N時間の未検証予測を古い順に返す（skip=3 は除外）。"""
         cutoff = datetime.now() - timedelta(hours=hours)
         with Session(self._engine) as session:
             stmt = (

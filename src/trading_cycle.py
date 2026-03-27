@@ -670,14 +670,12 @@ async def forecast_cycle(
             # Phase 2: 新規予測生成（C: スコア閾値チェック、LLM不使用）
             signal = await _summarize_pair(pair_cfg, config, position_mgr, store, analysis_store)
             if signal is None:
+                logger.info(f"[FORECAST] {pair_cfg.symbol}: skip — no_snapshot")
                 continue
 
             # C: deadband を超えた高確信度シグナルのみ予測対象
             if abs(signal.combined_score) < config.analysis.forecast_min_combined_score:
-                logger.debug(
-                    f"[FORECAST] {pair_cfg.symbol}: skipped "
-                    f"(|score|={abs(signal.combined_score):.3f} < {config.analysis.forecast_min_combined_score})"
-                )
+                forecast_store.save_forecast_skip(pair_cfg.symbol, signal)
                 continue
 
             forecast_store.save_forecast(pair_cfg.symbol, signal)
@@ -695,11 +693,13 @@ def run_forecast_view(config: AppConfig, forecast_store, pair_filter: str | None
     from rich.table import Table
 
     console = Console()
-    _REVIEWED_LABEL = {0: "[dim]… 未検証[/dim]", 1: "[green]✓ 正解[/green]", 2: "[red]✗ 不正解[/red]"}
-    # reviewed=1 は有意かつ正解、reviewed=2 は有意かつ不正解 or 判定不能
-    # build_forecast_review_summary では sig=True→status=1/2、sig=False→status=2 として mark_reviewed
-    # ここでは 1=正解(有意) 2=不正解 or 判定不能 として表示
-    _STATUS_LABEL = {0: "[dim]… 未検証[/dim]", 1: "[green]✓ 検証済(有意)[/green]", 2: "[yellow]– 判定不能[/yellow]"}
+    # reviewed: 0=未検証 1=検証済(有意) 2=判定不能 3=skip(score不足)
+    _STATUS_LABEL = {
+        0: "[dim]… 未検証[/dim]",
+        1: "[green]✓ 検証済(有意)[/green]",
+        2: "[yellow]– 判定不能[/yellow]",
+        3: "[dim]– skip(score不足)[/dim]",
+    }
 
     targets = [p for p in config.tradeable_instruments if pair_filter is None or p.symbol == pair_filter]
     if not targets:
@@ -735,13 +735,15 @@ def run_forecast_view(config: AppConfig, forecast_store, pair_filter: str | None
 
         console.print(tbl)
 
-        reviewed = [r for r in records if r.reviewed != 0]
-        correct = [r for r in records if r.reviewed == 1]
-        unreviewed = [r for r in records if r.reviewed == 0]
+        forecast_records = [r for r in records if r.reviewed != 3]
+        reviewed = [r for r in forecast_records if r.reviewed != 0]
+        correct = [r for r in forecast_records if r.reviewed == 1]
+        unreviewed = [r for r in forecast_records if r.reviewed == 0]
+        skipped = [r for r in records if r.reviewed == 3]
         accuracy = len(correct) / len(reviewed) * 100 if reviewed else 0.0
         console.print(
             f"  正解率: [bold]{accuracy:.0f}%[/bold] "
-            f"({len(correct)}/{len(reviewed)} 検証済) | 未検証: {len(unreviewed)}件"
+            f"({len(correct)}/{len(reviewed)} 検証済) | 未検証: {len(unreviewed)}件 | skip: {len(skipped)}件"
         )
 
 
