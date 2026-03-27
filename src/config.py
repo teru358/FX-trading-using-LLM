@@ -96,7 +96,6 @@ class TradingConfig:
     initial_balance: float = 10000.0
     risk_per_trade: float = 0.02
     signal_confidence_threshold: float = 0.55
-    max_concurrent_positions: int = 3
     lookback_days: int = 90
     ohlcv_interval: str = "1h"
     news_weight: float = 0.40
@@ -396,7 +395,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         initial_balance=t.get("initial_balance", 10000.0),
         risk_per_trade=t.get("risk_per_trade", 0.02),
         signal_confidence_threshold=t.get("signal_confidence_threshold", 0.55),
-        max_concurrent_positions=t.get("max_concurrent_positions", 3),
         lookback_days=t.get("lookback_days", 90),
         ohlcv_interval=t.get("ohlcv_interval", "1h"),
         news_weight=t.get("news_weight", 0.40),

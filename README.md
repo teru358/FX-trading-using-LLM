@@ -340,7 +340,6 @@ trading:
   initial_balance: 10000.0          # ペーパー口座の初期残高（USD）
   risk_per_trade: 0.02              # 1トレードあたりのリスク（残高の2%）
   signal_confidence_threshold: 0.55 # シグナル発動の最低信頼度
-  max_concurrent_positions: 3       # 最大同時ポジション数
   lookback_days: 90                 # 価格データの取得期間（日）
   ohlcv_interval: "1h"              # yfinance の足種
   news_weight: 0.40                 # シグナル統合のニュース比重
