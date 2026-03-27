@@ -26,7 +26,7 @@ _HELP = """\
   [cyan]run news[/cyan]            — 最新ニュースセンチメントを表示（保存済みデータ）
   [cyan]run tech[/cyan]            — 最新テクニカルスナップショットを表示（保存済みデータ）
   [cyan]run analyze[/cyan]         — 総合分析シグナルを表示（保存済みデータ）
-  [cyan]run forecast[/cyan] [pair] — 直近24hの予測サイクルデータを表示  例: run forecast EURUSD=X
+  [cyan]run forecast[/cyan]        — 直近24hの予測サイクルデータを表示  例: run forecast EURUSD=X
   [cyan]ask <メッセージ>[/cyan]    — FX分析LLMへ質問・コメントを送信
   [cyan]close <pair>[/cyan]        — ポジションを手動決済  例: close USDJPY=X
   [cyan]notify[/cyan]  (n)         — 通知テストメッセージを送信
