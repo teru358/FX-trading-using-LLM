@@ -6,6 +6,8 @@ import asyncio
 import subprocess
 import threading
 
+from prompt_toolkit import prompt as pt_prompt
+from prompt_toolkit.formatted_text import ANSI
 from rich import box
 from rich.console import Console
 from rich.table import Table
@@ -203,7 +205,7 @@ def run_commands(
     _console.print("[dim]コマンド入力モード — [cyan]help[/cyan] で一覧表示[/dim]\n")
     while not stop_event.is_set():
         try:
-            raw = input("> ").strip()
+            raw = pt_prompt("> ").strip()
         except (EOFError, KeyboardInterrupt):
             _console.print("\n[dim]終了します...[/dim]")
             stop_event.set()

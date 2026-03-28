@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 import yaml
 from dotenv import load_dotenv
+from prompt_toolkit import prompt as pt_prompt
 from rich.console import Console
 from rich.rule import Rule
 from rich.table import Table
@@ -489,7 +490,7 @@ def main() -> None:
     try:
         while True:
             try:
-                raw = input("> ").strip()
+                raw = pt_prompt("> ").strip()
             except (EOFError, KeyboardInterrupt):
                 _console.print("\n[dim]切断します...[/dim]")
                 break
