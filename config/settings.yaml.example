@@ -187,6 +187,48 @@ news_collection:
   news_freshness_hours: 24         # この時間以上古い記事は除外
   summary_max_chars: 600           # RSS summary の切り捨て文字数（LLM context に合わせて調整）
 
+keywords:
+  global:
+    # マクロ経済・金融（feeds_global の記事フィルタ）
+    - "forex"
+    - "fx"
+    - "currency"
+    - "central bank"
+    - "economy"
+    - "inflation"
+    - "rate"
+    - "geopolit"
+    - "oil"
+    - "gold"
+    - "bond"
+    - "yield"
+    - "trade war"
+    - "tariff"
+    - "dollar"
+    - "euro"
+    - "yen"
+    - "sterling"
+    - "fed"
+    - "ecb"
+    - "boe"
+    - "boj"
+  japan:
+    # feeds_japan の記事フィルタ（英語・日本語混在可）
+    - "boj"
+    - "bank of japan"
+    - "japan"
+    - "japanese"
+    - "yen"
+    - "jpy"
+    - "日銀"
+    - "円安"
+    - "円高"
+    - "金利"
+    - "為替"
+    - "利上げ"
+    - "利下げ"
+    - "円"
+
 news_sources:
   # ── Feedly API（有効にすると RSS の代わりに Feedly カテゴリから取得） ──
   feedly:
@@ -213,26 +255,6 @@ news_sources:
     - "https://www.japantimes.co.jp/feed/"
     - "https://asia.nikkei.com/rss/feed/nar"
     - "https://www.nikkei.com/news/category/?rss=true&bn=20"
-  jpy_keywords:
-    # 英語
-    - "boj"
-    - "bank of japan"
-    - "nippon ginko"
-    - "japan"
-    - "japanese"
-    - "yen"
-    - "jpy"
-    - "ueda"
-    # 日本語
-    - "日銀"
-    - "円安"
-    - "円高"
-    - "金利"
-    - "為替"
-    - "利上げ"
-    - "利下げ"
-    - "植田"
-    - "円"
 
 rag:
   db_path: "data/rag"

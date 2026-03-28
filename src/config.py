@@ -151,6 +151,21 @@ class FeedlyConfig:
 
 
 @dataclass
+class KeywordsConfig:
+    """カテゴリ別ニュースフィルタキーワード。"""
+    global_keywords: list[str] = field(default_factory=lambda: [
+        "forex", "fx", "currency", "central bank", "economy", "inflation",
+        "rate", "geopolit", "oil", "gold", "bond", "yield", "trade war",
+        "tariff", "dollar", "euro", "yen", "sterling", "fed", "ecb", "boe", "boj",
+    ])
+    japan_keywords: list[str] = field(default_factory=lambda: [
+        "boj", "bank of japan", "nippon ginko", "japan", "japanese",
+        "yen", "jpy", "ueda",
+        "日銀", "円安", "円高", "金利", "為替", "利上げ", "利下げ", "植田", "円",
+    ])
+
+
+@dataclass
 class NewsSourcesConfig:
     feeds_fx: list[str] = field(default_factory=lambda: [
         "https://feeds.feedburner.com/forexlive/all",
@@ -168,13 +183,6 @@ class NewsSourcesConfig:
         "https://japantoday.com/feed",
         "https://www.japantimes.co.jp/feed/",
         "https://asia.nikkei.com/rss/feed/nar",
-    ])
-    jpy_keywords: list[str] = field(default_factory=lambda: [
-        # 英語
-        "boj", "bank of japan", "nippon ginko", "japan", "japanese",
-        "yen", "jpy", "ueda",
-        # 日本語
-        "日銀", "円安", "円高", "金利", "為替", "利上げ", "利下げ", "植田", "円",
     ])
     feedly: FeedlyConfig = field(default_factory=FeedlyConfig)
 
@@ -343,6 +351,7 @@ class AppConfig:
     gemini: GeminiConfig = field(default_factory=GeminiConfig)
     openai: OpenAIConfig = field(default_factory=OpenAIConfig)
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
+    keywords: KeywordsConfig = field(default_factory=KeywordsConfig)
 
     @property
     def state_dir(self) -> Path:
@@ -451,6 +460,13 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         summary_max_chars=nc.get("summary_max_chars", 600),
     )
 
+    kw = raw.get("keywords", {})
+    _default_kw = KeywordsConfig()
+    keywords_cfg = KeywordsConfig(
+        global_keywords=kw.get("global", _default_kw.global_keywords),
+        japan_keywords=kw.get("japan", _default_kw.japan_keywords),
+    )
+
     _default_ns = NewsSourcesConfig()
     ns = raw.get("news_sources", {})
     fd = ns.get("feedly", {})
@@ -468,7 +484,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         feeds_fx=ns.get("feeds_fx", _default_ns.feeds_fx),
         feeds_global=ns.get("feeds_global", _default_ns.feeds_global),
         feeds_japan=ns.get("feeds_japan", _default_ns.feeds_japan),
-        jpy_keywords=ns.get("jpy_keywords", _default_ns.jpy_keywords),
         feedly=feedly_cfg,
     )
 
@@ -616,4 +631,5 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         openai=openai_cfg,
         claude=claude_cfg,
         analysis=analysis_cfg,
+        keywords=keywords_cfg,
     )

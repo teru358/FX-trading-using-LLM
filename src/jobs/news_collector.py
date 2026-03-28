@@ -23,11 +23,6 @@ from src.rag.vector_store import VectorStore
 logger = logging.getLogger(__name__)
 
 # カテゴリ別キーワード（None = フィルタなし、FX専門フィードなので全記事対象）
-_KEYWORDS_GLOBAL = frozenset({
-    "forex", "fx", "currency", "central bank", "economy", "inflation",
-    "rate", "geopolit", "oil", "gold", "bond", "yield", "trade war",
-    "tariff", "dollar", "euro", "yen", "sterling", "fed", "ecb", "boe", "boj",
-})
 
 _CATEGORY_LABELS = {"fx": "FX Market", "global": "Global Economy", "japan": "Japan / JPY"}
 
@@ -156,17 +151,12 @@ async def collect_all_news(config: AppConfig, store: VectorStore) -> None:
     """全カテゴリのニュースを収集・分析してストアに格納する。"""
     llm_news = create_llm_client(config, "news_analysis")
 
-    # japan カテゴリのキーワード: 設定の jpy_keywords + 経済系の拡張
-    japan_kw = frozenset(
-        kw.lower() for kw in config.news_sources.jpy_keywords
-    ) | frozenset({
-        "economy", "economic", "trade", "export", "fiscal",
-        "stock", "bond", "market", "tariff", "growth", "gdp",
-    })
+    global_kw = frozenset(kw.lower() for kw in config.keywords.global_keywords)
+    japan_kw = frozenset(kw.lower() for kw in config.keywords.japan_keywords)
 
     categories = [
         ("fx", config.news_sources.feeds_fx, None),
-        ("global", config.news_sources.feeds_global, _KEYWORDS_GLOBAL),
+        ("global", config.news_sources.feeds_global, global_kw),
         ("japan", config.news_sources.feeds_japan, japan_kw),
     ]
 

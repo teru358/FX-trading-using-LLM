@@ -30,6 +30,7 @@ _HELP = """\
   [cyan]run trade[/cyan]           — 取引判定ループを今すぐ実行（動作確認用）
   [cyan]ask <メッセージ>[/cyan]    — FX分析LLMへ質問・コメントを送信
   [cyan]close <pair>[/cyan]        — ポジションを手動決済  例: close USDJPY=X
+  [cyan]feeds[/cyan]               — RSSフィード疎通確認
   [cyan]notify[/cyan]  (n)         — 通知テストメッセージを送信
   [cyan]edit[/cyan]   (e)          — user_notes.md を vim で編集
   [cyan]help[/cyan]   (h)          — このヘルプを表示
@@ -144,6 +145,42 @@ def _cmd_notify(config: AppConfig) -> None:
     _console.print("[green]通知を送信しました[/green]")
 
 
+def _cmd_feeds(config: AppConfig) -> None:
+    from src.analysis.rss_fetcher import fetch_category_news, _feed_short_name
+    import feedparser
+
+    categories = [
+        ("FX",     config.news_sources.feeds_fx,     None),
+        ("Global", config.news_sources.feeds_global, frozenset(k.lower() for k in config.keywords.global_keywords)),
+        ("Japan",  config.news_sources.feeds_japan,  frozenset(k.lower() for k in config.keywords.japan_keywords)),
+    ]
+
+    _console.print()
+    for label, feeds, kw in categories:
+        tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1), title=f"[bold]{label}[/bold]")
+        tbl.add_column("フィード")
+        tbl.add_column("状態", justify="center")
+        tbl.add_column("件数", justify="right")
+        tbl.add_column("最新記事")
+
+        for feed_url in feeds:
+            short = _feed_short_name(feed_url)
+            try:
+                feed = feedparser.parse(feed_url)
+                count = len(feed.entries)
+                status = "[green]OK[/green]" if count > 0 else "[yellow]空[/yellow]"
+                latest = feed.entries[0].get("title", "—")[:60] if feed.entries else "—"
+            except Exception as e:
+                status = "[red]NG[/red]"
+                count = 0
+                latest = str(e)[:60]
+            tbl.add_row(short, status, str(count), latest)
+
+        result = fetch_category_news(feeds, kw, freshness_hours=24)
+        _console.print(tbl)
+        _console.print(f"  [dim]フィルタ通過: {result.news_count}件  feeds OK={result.feeds_ok}/{result.total_feeds}[/dim]\n")
+
+
 def _cmd_edit(config: AppConfig) -> None:
     notes = config.user_notes_path
     _console.print(f"[cyan]vim で {notes.name} を開きます...[/cyan]")
@@ -232,6 +269,8 @@ def run_commands(
                 _cmd_notify(config)
             elif cmd in ("e", "edit"):
                 _cmd_edit(config)
+            elif cmd == "feeds":
+                _cmd_feeds(config)
             elif cmd == "close":
                 if not args:
                     _console.print("[red]使い方: close <pair>  例: close USDJPY=X[/red]")

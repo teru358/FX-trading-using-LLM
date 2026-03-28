@@ -60,6 +60,7 @@ _HELP = """\
   [cyan]ask <メッセージ>[/cyan]         — FX分析LLMへ質問  例: ask USDJPYの見通しは？
   [cyan]close <pair>[/cyan]             — ポジションを手動決済  例: close USDJPY=X
   [cyan]logs[/cyan] [N]                 — activity.log の末尾N行（デフォルト50）
+  [cyan]feeds[/cyan]                    — RSSフィード疎通確認
   [cyan]health[/cyan]                   — プロセス死活確認
   [cyan]help[/cyan]   (h)               — このヘルプを表示
   [cyan]quit[/cyan]   (q)               — クライアントを終了（デーモンは継続稼働）"""
@@ -310,6 +311,52 @@ def _cmd_close(pair: str) -> None:
     )
 
 
+def _cmd_feeds() -> None:
+    """RSSフィード疎通確認（ローカル直接実行）。"""
+    import sys
+    sys.path.insert(0, str(_BASE_DIR))
+    from src.config import load_config
+    from src.analysis.rss_fetcher import fetch_category_news
+
+    config = load_config()
+    categories = [
+        ("FX",     config.news_sources.feeds_fx,     None),
+        ("Global", config.news_sources.feeds_global, frozenset(k.lower() for k in config.keywords.global_keywords)),
+        ("Japan",  config.news_sources.feeds_japan,  frozenset(k.lower() for k in config.keywords.japan_keywords)),
+    ]
+
+    _console.print()
+    for label, feeds, kw in categories:
+        tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1), title=f"[bold]{label}[/bold]")
+        tbl.add_column("フィード")
+        tbl.add_column("状態", justify="center")
+        tbl.add_column("件数", justify="right")
+        tbl.add_column("最新記事")
+
+        result = fetch_category_news(feeds, kw, freshness_hours=24, max_per_feed=3, max_total=len(feeds) * 3)
+
+        # フィードごとに結果を集計
+        from src.analysis.rss_fetcher import _feed_short_name
+        import feedparser
+        from datetime import datetime, timezone
+
+        for feed_url in feeds:
+            short = _feed_short_name(feed_url)
+            try:
+                feed = feedparser.parse(feed_url)
+                count = len(feed.entries)
+                status = "[green]OK[/green]" if count > 0 else "[yellow]空[/yellow]"
+                latest = feed.entries[0].get("title", "—")[:60] if feed.entries else "—"
+            except Exception as e:
+                status = "[red]NG[/red]"
+                count = 0
+                latest = str(e)[:60]
+            tbl.add_row(short, status, str(count), latest)
+
+        _console.print(tbl)
+        _console.print(f"  [dim]フィルタ通過: {result.news_count}件  feeds OK={result.feeds_ok}/{result.total_feeds}[/dim]\n")
+
+
 def _cmd_logs(lines: int = 50) -> None:
     data = _get("/logs", params={"lines": lines})
     if data is None:
@@ -409,6 +456,8 @@ def _dispatch(raw: str) -> bool:
     elif cmd == "logs":
         n = int(args[0]) if args and args[0].isdigit() else 50
         _cmd_logs(n)
+    elif cmd == "feeds":
+        _cmd_feeds()
     else:
         _console.print(f"[red]不明なコマンド: {cmd!r}[/red]  ([cyan]help[/cyan] で一覧)")
 
