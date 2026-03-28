@@ -52,19 +52,19 @@ _console = Console()
 
 _HELP = """\
 [bold cyan]コマンド一覧[/bold cyan]
-  [cyan]status[/cyan]  (s)              — 残高とオープンポジションを表示
-  [cyan]run news[/cyan]                 — 最新ニュースセンチメント
-  [cyan]run tech[/cyan]                 — 最新テクニカルスナップショット
-  [cyan]run analyze[/cyan]              — 総合分析シグナル
-  [cyan]run forecast[/cyan] [pair]      — 予測サイクルデータ  例: run forecast USDJPY=X
-  [cyan]run trade[/cyan]                — 取引判定ループを今すぐ実行
-  [cyan]ask <メッセージ>[/cyan]         — FX分析LLMへ質問  例: ask USDJPYの見通しは？
-  [cyan]close <pair>[/cyan]             — ポジションを手動決済  例: close USDJPY=X
-  [cyan]logs[/cyan] [N]                 — activity.log の末尾N行（デフォルト50）
-  [cyan]feeds[/cyan]                    — RSSフィード疎通確認
-  [cyan]health[/cyan]                   — プロセス死活確認
-  [cyan]help[/cyan]   (h)               — このヘルプを表示
-  [cyan]quit[/cyan]   (q)               — クライアントを終了（デーモンは継続稼働）"""
+  [cyan]status[/cyan]  (s)          — 残高とオープンポジションを表示
+  [cyan]run news[/cyan]             — 最新ニュースセンチメント
+  [cyan]run tech[/cyan]             — 最新テクニカルスナップショット
+  [cyan]run analyze[/cyan]          — 総合分析シグナル
+  [cyan]run forecast[/cyan] (pair)  — 予測サイクルデータ  例: run forecast USDJPY=X
+  [cyan]run trade[/cyan]            — 取引判定ループを今すぐ実行
+  [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問  例: ask USDJPYの見通しは？
+  [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
+  [cyan]logs[/cyan] (N)             — activity.log の末尾N行（デフォルト50）
+  [cyan]feeds[/cyan]                — RSSフィード疎通確認
+  [cyan]health[/cyan]               — プロセス死活確認
+  [cyan]help[/cyan]   (h)           — このヘルプを表示
+  [cyan]quit[/cyan]   (q)           — クライアントを終了（デーモンは継続稼働）"""
 
 
 # ── HTTP ヘルパー ────────────────────────────────────────────────

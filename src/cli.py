@@ -18,25 +18,27 @@ from src.notifications.notifier import OrderClosedEvent, create_notifier
 from src.persistence.state_store import StateStore
 from src.rag.vector_store import VectorStore
 from src.trading.position_manager import PositionManager
+from src.commands.compare_models import run_compare
 from src.trading_cycle import run_analysis_summary, run_ask, run_forecast_view, run_news_view, run_tech_view, run_trading_cycle
 
 _console = Console()
 
 _HELP = """\
 [bold cyan]コマンド一覧[/bold cyan]
-  [cyan]status[/cyan]  (s)         — 残高とオープンポジションを表示
-  [cyan]run news[/cyan]            — 最新ニュースセンチメントを表示（保存済みデータ）
-  [cyan]run tech[/cyan]            — 最新テクニカルスナップショットを表示（保存済みデータ）
-  [cyan]run analyze[/cyan]         — 総合分析シグナルを表示（保存済みデータ）
-  [cyan]run forecast[/cyan]        — 直近24hの予測サイクルデータを表示  例: run forecast EURUSD=X
-  [cyan]run trade[/cyan]           — 取引判定ループを今すぐ実行（動作確認用）
-  [cyan]ask <メッセージ>[/cyan]    — FX分析LLMへ質問・コメントを送信
-  [cyan]close <pair>[/cyan]        — ポジションを手動決済  例: close USDJPY=X
-  [cyan]feeds[/cyan]               — RSSフィード疎通確認
-  [cyan]notify[/cyan]  (n)         — 通知テストメッセージを送信
-  [cyan]edit[/cyan]   (e)          — user_notes.md を vim で編集
-  [cyan]help[/cyan]   (h)          — このヘルプを表示
-  [cyan]quit[/cyan]   (q)          — 終了"""
+  [cyan]status[/cyan]  (s)          — 残高とオープンポジションを表示
+  [cyan]run news[/cyan]             — 最新ニュースセンチメントを表示（保存済みデータ）
+  [cyan]run tech[/cyan]             — 最新テクニカルスナップショットを表示（保存済みデータ）
+  [cyan]run analyze[/cyan]          — 総合分析シグナルを表示（保存済みデータ）
+  [cyan]run forecast[/cyan] (pair)  — 直近24hの予測サイクルデータを表示  例: run forecast EURUSD=X
+  [cyan]run trade[/cyan]            — 取引判定ループを今すぐ実行（動作確認用）
+  [cyan]compare[/cyan]  (pair)      — 複数モデルで分析を比較  例: compare USDJPY=X
+  [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問・コメントを送信
+  [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
+  [cyan]feeds[/cyan]                — RSSフィード疎通確認
+  [cyan]notify[/cyan]  (n)          — 通知テストメッセージを送信
+  [cyan]edit[/cyan]   (e)           — user_notes.md を vim で編集
+  [cyan]help[/cyan]   (h)           — このヘルプを表示
+  [cyan]quit[/cyan]   (q)           — 終了"""
 
 
 # ── 個別コマンド ────────────────────────────────────────────────────────────
@@ -201,6 +203,7 @@ def run_commands(
     forecast_store=None,
     price_store=None,
     hold_store=None,
+    compare_analysis_store=None,
 ) -> None:
     _console.print("[dim]コマンド入力モード — [cyan]help[/cyan] で一覧表示[/dim]\n")
     while not stop_event.is_set():
@@ -258,6 +261,10 @@ def run_commands(
                         _console.print(
                             f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | forecast | trade"
                         )
+            elif cmd == "compare":
+                pair_arg = args[0] if args else None
+                _store = compare_analysis_store or analysis_store
+                run_compare(config, store, _store, pair_arg)
             elif cmd == "ask":
                 if not args:
                     _console.print("[red]使い方: ask <メッセージ>  例: ask 今のUSDJPYはどう見る？[/red]")

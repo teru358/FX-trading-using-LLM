@@ -133,7 +133,7 @@ After your reasoning, output ONLY this JSON block (no markdown fences):
   "stop_loss": <price>,   // long: below entry_zone[0] | short: above entry_zone[1]
   "take_profit": <price>, // long: above entry_zone[1] | short: below entry_zone[0]
   "risk_reward_ratio": <float>,
-  "reasoning_summary": "<one sentence summary incorporating news and reflection insights>"
+  "reasoning_summary": "<日本語1文：ニュース・振り返りを踏まえた分析根拠>"
 }}"""
 
 
