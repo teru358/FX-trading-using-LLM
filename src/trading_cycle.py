@@ -19,7 +19,7 @@ from src.llm.client import LLMClient
 from src.llm.factory import create_llm_client
 from src.persistence.state_store import StateStore
 from src.rag.embedder import embed_text
-from src.rag.prompt_formatter import format_news_for_prompt, format_reflections_for_prompt
+from src.rag.prompt_formatter import format_macro_context_for_prompt, format_news_for_prompt, format_reflections_for_prompt
 from src.rag.vector_store import VectorStore
 from src.notifications.notifier import (
     OrderClosedEvent,
@@ -56,6 +56,17 @@ async def _build_rag_context(
     return news_ctx, refl_ctx
 
 
+def _build_macro_context(config: AppConfig, analysis_store: AnalysisStore) -> str:
+    """watch_only 銘柄の直近スナップショットからマクロコンテキストを構築する。"""
+    watch_only = config.watch_only_instruments
+    macro_snapshots = []
+    for inst in watch_only:
+        snaps = analysis_store.get_recent_snapshots(inst.symbol, hours=8)
+        if snaps:
+            macro_snapshots.append(snaps[0])
+    return format_macro_context_for_prompt(macro_snapshots, watch_only)
+
+
 async def _process_pair(
     pair_cfg,
     config: AppConfig,
@@ -69,6 +80,7 @@ async def _process_pair(
 
     テクニカル分析は収集ジョブで蓄積済みのスナップショットを集約して使用する。
     スナップショットが存在しない場合（初回起動直後など）はOllama即時分析にフォールバック。
+    戻り値: (TradeSignal, macro_ctx_str)
     """
     try:
         price_data = fetch_ohlcv(
@@ -77,6 +89,8 @@ async def _process_pair(
             interval=config.trading.ohlcv_interval,
             price_store=price_store,
         )
+
+        macro_ctx = _build_macro_context(config, analysis_store)
 
         # 蓄積されたテクニカル分析スナップショットを時間加重集約
         price = analysis_store.aggregate(
@@ -102,6 +116,7 @@ async def _process_pair(
                 temperature=config.llm.price_analysis.temperature,
                 news_context=news_ctx,
                 reflection_context=refl_ctx,
+                macro_context=macro_ctx,
                 user_notes_path=config.user_notes_path,
             )
 
@@ -122,7 +137,7 @@ async def _process_pair(
             min_lot_size=config.trading.min_lot_size,
             lot_unit=config.trading.lot_unit,
         )
-        return signal
+        return signal, macro_ctx
     except Exception as e:
         logger.error(f"Failed to process {pair_cfg.display_name}: {e}", exc_info=True)
         return e
@@ -322,8 +337,10 @@ async def trading_cycle(
         return_exceptions=True,
     )
 
-    signals = [r for r in results if not isinstance(r, Exception)]
-    errors  = [r for r in results if isinstance(r, Exception)]
+    signals_with_macro = [r for r in results if not isinstance(r, Exception)]
+    errors             = [r for r in results if isinstance(r, Exception)]
+    signals    = [s for s, _ in signals_with_macro]
+    macro_ctxs = {s.pair: m for s, m in signals_with_macro}
     if errors:
         logger.warning(f"{len(errors)} pair(s) failed during analysis.")
 
@@ -412,7 +429,7 @@ async def trading_cycle(
     executed_orders = []
     for sig in signals:
         if sig.action != "hold":
-            order = broker.execute_signal(sig, position_mgr)
+            order = broker.execute_signal(sig, position_mgr, macro_context=macro_ctxs.get(sig.pair, ""))
             if order:
                 executed_orders.append(order)
                 if config.notifier.notify_on_order_open:
@@ -678,7 +695,8 @@ async def forecast_cycle(
                 forecast_store.save_forecast_skip(pair_cfg.symbol, signal)
                 continue
 
-            forecast_store.save_forecast(pair_cfg.symbol, signal)
+            macro_ctx = _build_macro_context(config, analysis_store)
+            forecast_store.save_forecast(pair_cfg.symbol, signal, macro_context=macro_ctx)
 
         except Exception as e:
             logger.warning(f"[FORECAST] {pair_cfg.symbol}: error — {e}", exc_info=True)

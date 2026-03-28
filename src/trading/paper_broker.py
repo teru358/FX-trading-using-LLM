@@ -13,8 +13,9 @@ class PaperBrokerAdapter(BrokerAdapter):
         self,
         signal: TradeSignal,
         position_mgr: PositionManager,
+        macro_context: str = "",
     ) -> Order | None:
-        return execute_signal(signal, position_mgr)
+        return execute_signal(signal, position_mgr, macro_context=macro_context)
 
     def check_and_close_positions(
         self,

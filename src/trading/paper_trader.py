@@ -8,7 +8,7 @@ from src.trading.position_manager import Order, PositionManager
 logger = logging.getLogger(__name__)
 
 
-def execute_signal(signal: TradeSignal, position_mgr: PositionManager) -> Order | None:
+def execute_signal(signal: TradeSignal, position_mgr: PositionManager, macro_context: str = "") -> Order | None:
     if signal.action == "hold":
         return None
 
@@ -30,6 +30,7 @@ def execute_signal(signal: TradeSignal, position_mgr: PositionManager) -> Order 
         take_profit=signal.take_profit,
         position_size=signal.position_size,
         signal_reason=signal.signal_reason,
+        macro_context_at_entry=macro_context,
     )
     position_mgr.open_position(order)
     logger.info(

@@ -180,11 +180,13 @@ Achieved R:R: {achieved_rr:.2f}
 === Why We Entered ===
 {signal_reason}
 
+{macro_context_section}
 === Task ===
 Evaluate this completed trade. Assess:
 1. Was the directional call correct? (take_profit = yes, stop_loss = no)
 2. Was the SL/TP placement appropriate given what actually happened?
-3. What is the ONE most actionable lesson for future {pair} trades?
+3. If macro context is available: did the macro instruments correctly indicate the direction? Which were most informative?
+4. What is the ONE most actionable lesson for future {pair} trades?
 {user_context}
 Return ONLY valid JSON:
 {{
@@ -211,6 +213,7 @@ async def generate_close_reflection(
     llm: LLMClient,
     temperature: float = 0.1,
     user_notes: str = "",
+    macro_context_at_entry: str = "",
 ) -> Reflection:
     """決済済み Order から確定結果ベースの振り返りを生成する。"""
     close_price = order.close_price or order.entry_price
@@ -231,6 +234,11 @@ async def generate_close_reflection(
     signal_reason = order.signal_reason or "Not recorded."
     close_reason_label = _CLOSE_REASON_LABELS.get(close_reason, close_reason.upper())
     user_context = f"=== User's Perspective ===\n{user_notes}" if user_notes else ""
+    macro_ctx = getattr(order, "macro_context_at_entry", "") or macro_context_at_entry or ""
+    macro_context_section = (
+        f"=== Macro Instruments at Entry ===\n{macro_ctx}\n"
+        if macro_ctx else ""
+    )
 
     prompt = _CLOSE_REFLECTION_PROMPT.format(
         pair=pair_cfg.display_name,
@@ -247,6 +255,7 @@ async def generate_close_reflection(
         duration_hours=duration_hours,
         achieved_rr=achieved_rr,
         signal_reason=signal_reason,
+        macro_context_section=macro_context_section,
         user_context=user_context,
     )
 

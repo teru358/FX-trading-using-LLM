@@ -170,6 +170,7 @@ class _ForecastRecord(_Base):
     # reviewed: 0=未検証 1=検証済(少なくとも1回) 3=skip(score不足)
     latest_review_ts    = Column(DateTime, nullable=True)   # 最終検証時刻
     latest_price_delta  = Column(Float,    nullable=True)   # 最終検証時の価格変化量
+    macro_context_at_forecast = Column(String, nullable=True)  # 予測時の監視銘柄スナップショット
 
 
 class ForecastStore:
@@ -180,7 +181,7 @@ class ForecastStore:
     def __init__(self, db_path) -> None:
         self._engine = _get_engine(db_path)
 
-    def save_forecast(self, pair: str, signal) -> None:
+    def save_forecast(self, pair: str, signal, macro_context: str = "") -> None:
         """TradeSignal を予測レコードとして保存する。"""
         with Session(self._engine) as session:
             rec = _ForecastRecord(
@@ -193,6 +194,7 @@ class ForecastStore:
                 signal_reason=signal.signal_reason,
                 stop_loss=signal.stop_loss,
                 reviewed=0,
+                macro_context_at_forecast=macro_context or None,
             )
             session.add(rec)
             session.commit()

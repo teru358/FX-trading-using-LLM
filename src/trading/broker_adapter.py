@@ -14,6 +14,7 @@ class BrokerAdapter(ABC):
         self,
         signal: TradeSignal,
         position_mgr: PositionManager,
+        macro_context: str = "",
     ) -> Order | None:
         """シグナルに基づき注文を発注する。ポジション済みの場合は None を返す。"""
         ...

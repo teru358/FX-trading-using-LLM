@@ -28,6 +28,7 @@ class Order:
     close_reason: Optional[str] = None  # "take_profit" | "stop_loss" | "manual"
     realized_pnl: Optional[float] = None
     signal_reason: str = ""  # エントリー理由（決済時の振り返りに使用）
+    macro_context_at_entry: str = ""  # エントリー時の監視銘柄スナップショット（振り返りに使用）
 
     @staticmethod
     def new(
@@ -38,6 +39,7 @@ class Order:
         take_profit: float,
         position_size: float,
         signal_reason: str = "",
+        macro_context_at_entry: str = "",
     ) -> "Order":
         return Order(
             order_id=str(uuid.uuid4()),
@@ -48,6 +50,7 @@ class Order:
             take_profit=take_profit,
             position_size=position_size,
             signal_reason=signal_reason,
+            macro_context_at_entry=macro_context_at_entry,
         )
 
     def to_dict(self) -> dict:
@@ -62,6 +65,7 @@ class Order:
         d["opened_at"] = datetime.fromisoformat(d["opened_at"])
         if d.get("closed_at"):
             d["closed_at"] = datetime.fromisoformat(d["closed_at"])
+        d.setdefault("macro_context_at_entry", "")
         return Order(**d)
 
 

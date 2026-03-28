@@ -75,6 +75,7 @@ class LiveBrokerAdapter(BrokerAdapter):
         self,
         signal: TradeSignal,
         position_mgr: PositionManager,
+        macro_context: str = "",
     ) -> Order | None:
         """OANDA Market Order を発注する。
 

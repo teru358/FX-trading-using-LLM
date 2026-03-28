@@ -61,6 +61,10 @@ def build_forecast_review(
     correct_mark = "✓" if correct else "✗"
     sig_label = "[significant]" if significant else "[inconclusive]"
 
+    macro_note = ""
+    if getattr(forecast, "macro_context_at_forecast", None):
+        macro_note = f" | macro_at_entry=[{forecast.macro_context_at_forecast[:120]}]"
+
     review_text = (
         f"[Forecast {pair} "
         f"{forecast.forecast_ts.strftime('%m-%d %H:%M')}→{review_ts.strftime('%m-%d %H:%M')}"
@@ -69,6 +73,7 @@ def build_forecast_review(
         f"conf={forecast.confidence:.2f} "
         f"→ actual {actual_direction} {delta:+.5f} "
         f"{correct_mark} {sig_label}"
+        f"{macro_note}"
     )
 
     lesson = (
