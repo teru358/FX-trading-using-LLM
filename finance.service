@@ -1,0 +1,18 @@
+[Unit]
+Description=FX Paper Trading Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=teru
+WorkingDirectory=/home/teru/project/finance
+ExecStart=/home/teru/.local/bin/uv run python main.py --daemon
+Restart=on-failure
+RestartSec=15s
+StandardOutput=append:/home/teru/project/finance/logs/daemon.log
+StandardError=append:/home/teru/project/finance/logs/daemon.log
+EnvironmentFile=/home/teru/project/finance/.env
+
+[Install]
+WantedBy=multi-user.target

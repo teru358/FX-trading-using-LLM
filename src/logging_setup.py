@@ -108,6 +108,13 @@ class _ApiAccessPrefixFilter(logging.Filter):
         return True
 
 
+class _ApiAccessTerminalFilter(logging.Filter):
+    """ターミナル出力から uvicorn アクセスログを除外する。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name != "uvicorn.access"
+
+
 def setup_logging(cfg, base_dir: Path) -> None:
     from rich.console import Console
     from rich.logging import RichHandler
@@ -158,4 +165,5 @@ def setup_logging(cfg, base_dir: Path) -> None:
         log_time_format="[%H:%M:%S]",
     )
     rh.setLevel(level)
+    rh.addFilter(_ApiAccessTerminalFilter())
     root.addHandler(rh)

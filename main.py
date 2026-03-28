@@ -46,6 +46,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="FX Paper Trader")
     parser.add_argument("--skip-news", action="store_true", help="起動時の初回ニュース取得をスキップ")
     parser.add_argument("--skip-tech", action="store_true", help="起動時の初回テクニカル収集をスキップ")
+    parser.add_argument("--daemon", action="store_true", help="デーモンモード: stdin CLIを起動せずREST APIのみで操作")
     args = parser.parse_args()
 
     config = load_config()
@@ -193,8 +194,16 @@ def main() -> None:
 
     _console.print(Rule("[dim cyan]Scheduler running[/dim cyan]", style="dim cyan"))
 
-    # メインスレッド: コマンドループ
-    run_commands(config, store, analysis_store, _stop, _job_lock, forecast_store, price_store, hold_store)
+    # メインスレッド: コマンドループ or デーモン待機
+    if args.daemon:
+        _console.print("[dim]daemonモード稼働中 — REST API で操作してください (Ctrl+C で終了)[/dim]")
+        try:
+            _stop.wait()
+        except KeyboardInterrupt:
+            _console.print("\n[dim]終了します...[/dim]")
+            _stop.set()
+    else:
+        run_commands(config, store, analysis_store, _stop, _job_lock, forecast_store, price_store, hold_store)
 
 
 if __name__ == "__main__":
