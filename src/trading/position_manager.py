@@ -182,16 +182,26 @@ class PositionManager:
         return False
 
     def close_position(self, order_id: str, close_price: float, reason: str) -> Optional[Order]:
+        from decimal import Decimal, ROUND_HALF_UP
         for i, pos in enumerate(self._open):
             if pos.order_id == order_id:
                 multiplier = 1 if pos.direction == "buy" else -1
-                pnl = (close_price - pos.entry_price) * pos.position_size * multiplier
+                # Use Decimal for precision; convert back to float for storage
+                pnl = float(
+                    (Decimal(str(close_price)) - Decimal(str(pos.entry_price)))
+                    * Decimal(str(pos.position_size))
+                    * Decimal(multiplier)
+                )
                 pos.status = "closed"
                 pos.closed_at = datetime.now()
                 pos.close_price = close_price
                 pos.close_reason = reason
                 pos.realized_pnl = pnl
-                self._balance += pnl
+                self._balance = float(
+                    (Decimal(str(self._balance)) + Decimal(str(pnl))).quantize(
+                        Decimal("0.01"), rounding=ROUND_HALF_UP
+                    )
+                )
                 self._open.pop(i)
                 self._closed.append(pos)
                 self._store.append_trade(pos.to_dict())
