@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from src.analysis.feedly_fetcher import fetch_feedly_category
 from src.analysis.news_analyzer import NewsSentiment, analyze_category_sentiment
@@ -25,10 +25,6 @@ logger = logging.getLogger(__name__)
 # カテゴリ別キーワード（None = フィルタなし、FX専門フィードなので全記事対象）
 
 _CATEGORY_LABELS = {"fx": "FX Market", "global": "Global Economy", "japan": "Japan / JPY"}
-
-_last_cleanup: datetime | None = None
-_CLEANUP_INTERVAL = timedelta(hours=24)
-_CLEANUP_MAX_AGE_HOURS = 48
 
 
 def _format_for_embedding(category: str, news: NewsSentiment) -> str:
@@ -177,13 +173,6 @@ async def collect_all_news(config: AppConfig, store: VectorStore) -> None:
             logger.debug(f"[COLLECT] waiting {delay}s before next category...")
             await asyncio.sleep(delay)
     logger.info("=== News collection complete ===")
-
-    # 古いニュースエントリのクリーンアップ（24時間に1回）
-    global _last_cleanup
-    now = datetime.now()
-    if _last_cleanup is None or now - _last_cleanup >= _CLEANUP_INTERVAL:
-        store.cleanup_old_news(max_age_hours=_CLEANUP_MAX_AGE_HOURS)
-        _last_cleanup = now
 
 
 def run_news_collection(config: AppConfig, store: VectorStore) -> None:

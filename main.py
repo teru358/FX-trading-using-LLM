@@ -134,6 +134,10 @@ def main() -> None:
         f"fixed total [cyan]{prompt_est.fixed_total}c[/cyan] (~[cyan]{prompt_est.fixed_tokens_est}tok[/cyan])  "
         f"[dim]+news/rag/reflect at runtime[/dim]",
     )
+    def _run_rag_cleanup() -> None:
+        """古いRAGエントリを削除する（24時間に1回）。"""
+        store.cleanup_old_news(max_age_hours=48)
+
     def _model(role_cfg) -> str:
         return role_cfg.model or _DEFAULT_OLLAMA_MODEL
     sched_table.add_row("LLM (news)",      _model(config.llm.news_analysis))
@@ -145,6 +149,9 @@ def main() -> None:
     # ジョブ登録
     for t in news_times:
         schedule.every().day.at(t, news_tz).do(run_news_collection, config, store)
+
+    # RAGクリーンアップ（毎日1回、ニュース収集の最初の時刻に実行）
+    schedule.every().day.at(news_times[0], news_tz).do(_run_rag_cleanup)
 
     for t in technical_times:
         schedule.every().day.at(t, news_tz).do(
