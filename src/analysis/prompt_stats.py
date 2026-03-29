@@ -144,7 +144,7 @@ def estimate_prompt_size(config: "AppConfig") -> PromptSizeEstimate:
         )
         pattern_chars = len(with_patterns) - classic_chars
 
-    # ── USER_PROMPT_TEMPLATE 骨格（可変部は空文字で埋める）────────────
+    # ── price_user.j2 骨格（可変部は空文字で埋める）────────────
     template_overhead = len(render_prompt(
         "price_user.j2",
         formatted_data="", pair="",

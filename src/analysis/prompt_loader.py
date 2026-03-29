@@ -9,6 +9,7 @@ _env = jinja2.Environment(
     loader=jinja2.FileSystemLoader(str(_PROMPTS_DIR)),
     keep_trailing_newline=True,
     autoescape=False,
+    undefined=jinja2.StrictUndefined,
 )
 
 
