@@ -4,6 +4,7 @@ import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 from typing import Optional
 
@@ -182,7 +183,6 @@ class PositionManager:
         return False
 
     def close_position(self, order_id: str, close_price: float, reason: str) -> Optional[Order]:
-        from decimal import Decimal, ROUND_HALF_UP
         for i, pos in enumerate(self._open):
             if pos.order_id == order_id:
                 multiplier = 1 if pos.direction == "buy" else -1
