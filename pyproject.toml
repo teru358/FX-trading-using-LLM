@@ -23,3 +23,14 @@ dependencies = [
     "uvicorn>=0.34.0",
     "prompt-toolkit>=3.0.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-mock>=3.15.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
