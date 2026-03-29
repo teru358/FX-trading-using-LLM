@@ -11,7 +11,12 @@ from src.trading.position_reviewer import review_open_positions
 
 def _make_signal(pair: str, predicted_direction: str,
                  confidence: float, combined_score: float) -> TradeSignal:
-    """テスト用 TradeSignal を組み立てるヘルパー。"""
+    """テスト用 TradeSignal を組み立てるヘルパー。
+
+    NOTE: `predicted_direction` は `combined_score` から自動導出されず手動指定する。
+    Layer 1 は `predicted_direction` フィールドを直接参照するため、
+    テストが検証したい方向と一致させること。
+    """
     from src.analysis.news_analyzer import NewsSentiment
     from src.analysis.price_analyzer import PriceAnalysis
 
@@ -53,6 +58,19 @@ def test_layer1_reversal_closes(buy_order):
     assert len(decisions) == 1
     assert decisions[0].close_reason == "reversal"
     assert decisions[0].order_id == buy_order.order_id
+
+
+def test_layer1_low_score_skips(buy_order):
+    """Layer1: confidence ≥ 0.70 でも |score| < reversal_score_threshold → 決済しない。"""
+    signal = _make_signal("USDJPY=X", "bearish", confidence=0.80, combined_score=-0.10)
+    decisions = review_open_positions(
+        open_positions=[buy_order],
+        signals_by_pair={"USDJPY=X": signal},
+        current_prices={"USDJPY=X": 150.5},
+        reversal_confidence_min=0.70,
+        reversal_score_threshold=0.25,
+    )
+    assert len(decisions) == 0
 
 
 def test_layer1_low_confidence_skips(buy_order):

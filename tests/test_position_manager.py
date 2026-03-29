@@ -64,3 +64,5 @@ def test_get_account_state(tmp_state_store, buy_order, sell_order):
     assert account.initial_balance == pytest.approx(100_000.0)
     assert len(account.open_positions) == 2
     assert account.total_trades == 0
+    directions = {p.direction for p in account.open_positions}
+    assert directions == {"buy", "sell"}
