@@ -273,57 +273,65 @@ def forecast(pair: str | None = None, hours: int = 24) -> dict[str, Any]:
 
 @app.get("/feeds", dependencies=[Depends(_verify_api_key)])
 def feeds() -> dict[str, Any]:
-    """RSSフィード疎通確認（カテゴリ別フィード状態）。"""
+    """RSSフィード疎通確認（カテゴリ別・フィード別の状態を返す）。"""
     import feedparser
+    from src.analysis.rss_fetcher import feed_short_name
 
     assert _config is not None
 
-    from src.analysis.rss_fetcher import fetch_category_news, feed_short_name
+    global_kw = frozenset(k.lower() for k in _config.keywords.global_keywords)
+    japan_kw = frozenset(k.lower() for k in _config.keywords.japan_keywords)
 
     categories_def = [
         ("FX",     _config.news_sources.feeds_fx,     None),
-        ("Global", _config.news_sources.feeds_global,
-         frozenset(k.lower() for k in _config.keywords.global_keywords)),
-        ("Japan",  _config.news_sources.feeds_japan,
-         frozenset(k.lower() for k in _config.keywords.japan_keywords)),
+        ("Global", _config.news_sources.feeds_global, global_kw),
+        ("Japan",  _config.news_sources.feeds_japan,  japan_kw),
     ]
 
     result: dict[str, Any] = {}
-    for label, feed_urls, kw in categories_def:
-        cat_result = fetch_category_news(
-            feed_urls, kw,
-            freshness_hours=24,
-            max_per_feed=3,
-            max_total=len(feed_urls) * 3,
-        )
-        feeds_info = []
+    for label, feed_urls, keywords in categories_def:
+        feed_results = []
+        feeds_ok = 0
+        filtered_count = 0
+
         for feed_url in feed_urls:
-            short = feed_short_name(feed_url)
+            name = feed_short_name(feed_url)
             try:
-                feed = feedparser.parse(feed_url)
-                count = len(feed.entries)
-                if count > 0:
-                    status = "ok"
-                    latest_title = feed.entries[0].get("title", "")[:60]
+                parsed = feedparser.parse(feed_url)
+                count = len(parsed.entries)
+                latest_title = parsed.entries[0].get("title", "") if parsed.entries else ""
+                status = "ok" if count > 0 else "empty"
+                feeds_ok += 1
+
+                # Count keyword-filtered entries (simplified: check title+summary contains keyword)
+                if keywords is None:
+                    # FX: no keyword filter, count up to 5 recent entries
+                    filtered_count += min(count, 5)
                 else:
-                    status = "empty"
-                    latest_title = ""
-            except Exception as e:
-                status = "failed"
+                    for entry in parsed.entries[:20]:
+                        title = entry.get("title", "")
+                        body = entry.get("summary", "")[:600]
+                        combined = (title + " " + body).lower()
+                        if any(kw in combined for kw in keywords):
+                            filtered_count += 1
+
+            except Exception:
                 count = 0
-                latest_title = str(e)[:60]
-            feeds_info.append({
-                "name":         short,
-                "status":       status,
-                "count":        count,
-                "latest_title": latest_title,
+                latest_title = ""
+                status = "failed"
+
+            feed_results.append({
+                "name": name,
+                "status": status,
+                "count": count,
+                "latest_title": latest_title[:80],
             })
 
         result[label] = {
-            "feeds":          feeds_info,
-            "filtered_count": cat_result.news_count,
-            "feeds_ok":       cat_result.feeds_ok,
-            "total_feeds":    cat_result.total_feeds,
+            "feeds": feed_results,
+            "filtered_count": filtered_count,
+            "feeds_ok": feeds_ok,
+            "total_feeds": len(feed_urls),
         }
 
     return {"categories": result}
