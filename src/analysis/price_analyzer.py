@@ -8,6 +8,7 @@ from datetime import datetime
 
 from pathlib import Path
 
+from src.analysis.prompt_loader import load_prompt, render_prompt
 from src.data.indicator_formatter import format_for_llm
 from src.data.indicators import IndicatorSummary
 from src.data.price_fetcher import PriceData
@@ -15,20 +16,6 @@ from src.llm.client import LLMClient
 from src.llm.response_parser import extract_json
 
 logger = logging.getLogger(__name__)
-
-ASK_SYSTEM_PROMPT = """You are an expert FX swing trader and technical analyst with 20 years of experience.
-The user will ask questions or share observations about the FX market.
-Answer concisely and practically based on the provided analysis context.
-Always respond in Japanese.
-"""
-
-ASK_USER_PROMPT_TEMPLATE = """{context}
-
-=== User's Question / Comment ===
-{user_message}
-
-上記のコンテキストをもとに、簡潔かつ実践的に日本語で回答してください。"""
-
 
 def _to_float(val, default: float) -> float:
     """LLMレスポンスの値を float に変換する。空文字・None・変換不能な場合はデフォルト値を返す。"""
@@ -80,61 +67,6 @@ def _build_feedback(error: str, analysis: "PriceAnalysis") -> str:
         f"Error: {error}\n\n"
         f"Please correct stop_loss and take_profit and output the full JSON again."
     )
-
-
-SYSTEM_PROMPT = """You are an expert FX swing trader and technical analyst with 20 years of experience.
-Analyze price data and technical indicators to produce a swing trading recommendation (3-10 day horizon).
-Think step by step through the analysis before providing your final JSON output.
-Be conservative: only recommend action when there is clear confluence of signals.
-"""
-
-USER_PROMPT_TEMPLATE = """{formatted_data}
-
-{news_context}
-
-{reflection_context}
-
-{previous_analysis}
-
-{macro_context}
-
-{user_context}
-
-Based on ALL of the above, provide your swing trading analysis for {pair}.
-
-Consider:
-1. Trend direction and strength (SMA alignment, ADX)
-2. Momentum (RSI, MACD histogram direction)
-3. Volatility and position within Bollinger Bands
-4. Key support/resistance from recent swing highs/lows
-5. Ichimoku Kinko Hyo: price vs Kumo, TK cross, Kumo color, overall Ichimoku signal
-   - Price above Kumo = bullish bias; below = bearish; inside = consolidation
-   - Bullish TK cross (Tenkan crosses above Kijun) = entry signal
-   - Kumo acts as dynamic support/resistance zone for SL/TP placement
-6. Chart Patterns (if detected): use as entry timing confirmation or early reversal warning
-   - Bullish patterns (hammer, morning_star, bullish_engulfing, etc.) support long bias
-   - Bearish patterns (shooting_star, evening_star, bearish_engulfing, etc.) support short bias
-   - Neutral patterns (doji, inside_bar, bb_squeeze) suggest indecision — wait for confirmation
-   - Require confluence with at least one other indicator before acting on patterns alone
-7. News sentiment and macroeconomic context from the RAG knowledge base
-8. Lessons learned from previous trading reflections
-9. Compare with previous analysis: note any shift in direction or confidence since the last cycle
-10. Macro context: equity index trends as risk sentiment indicators, cross-currency correlation
-11. Risk/reward ratio (minimum 2:1 required)
-    - For LONG:  stop_loss < entry_zone[0], take_profit > entry_zone[1]
-    - For SHORT: stop_loss > entry_zone[1], take_profit < entry_zone[0]
-
-After your reasoning, output ONLY this JSON block (no markdown fences):
-{{
-  "direction_bias": "long|short|neutral",
-  "bias_score": <float -1.0 to 1.0>,
-  "confidence": <float 0.0 to 1.0>,
-  "entry_zone": [<low_price>, <high_price>],
-  "stop_loss": <price>,   // long: below entry_zone[0] | short: above entry_zone[1]
-  "take_profit": <price>, // long: above entry_zone[1] | short: below entry_zone[0]
-  "risk_reward_ratio": <float>,
-  "reasoning_summary": "<日本語1文：ニュース・振り返りを踏まえた分析根拠>"
-}}"""
 
 
 @dataclass
@@ -199,7 +131,8 @@ async def analyze_price_action(
     else:
         user_context = ""
 
-    user_prompt = USER_PROMPT_TEMPLATE.format(
+    user_prompt = render_prompt(
+        "price_user.j2",
         formatted_data=formatted_data,
         pair=pair_cfg.display_name,
         news_context=news_context or "=== News Context ===\nNo news data available yet.",
@@ -210,7 +143,7 @@ async def analyze_price_action(
     )
 
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": load_prompt("price_system.txt")},
         {"role": "user", "content": user_prompt},
     ]
 
@@ -286,12 +219,13 @@ async def chat_with_context(
     temperature: float = 0.3,
 ) -> str:
     """ユーザーのコメント・質問にコンテキスト付きで自然言語回答する。"""
-    user_prompt = ASK_USER_PROMPT_TEMPLATE.format(
+    user_prompt = render_prompt(
+        "ask_user.j2",
         context=context,
         user_message=user_message,
     )
     messages = [
-        {"role": "system", "content": ASK_SYSTEM_PROMPT},
+        {"role": "system", "content": load_prompt("ask_system.txt")},
         {"role": "user", "content": user_prompt},
     ]
     logger.info(f"[ASK] LLM呼び出し中 ({len(user_message)} chars)...")

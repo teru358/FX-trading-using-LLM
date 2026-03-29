@@ -1,0 +1,47 @@
+{{ formatted_data }}
+
+{{ news_context }}
+
+{{ reflection_context }}
+
+{{ previous_analysis }}
+
+{{ macro_context }}
+
+{{ user_context }}
+
+Based on ALL of the above, provide your swing trading analysis for {{ pair }}.
+
+Consider:
+1. Trend direction and strength (SMA alignment, ADX)
+2. Momentum (RSI, MACD histogram direction)
+3. Volatility and position within Bollinger Bands
+4. Key support/resistance from recent swing highs/lows
+5. Ichimoku Kinko Hyo: price vs Kumo, TK cross, Kumo color, overall Ichimoku signal
+   - Price above Kumo = bullish bias; below = bearish; inside = consolidation
+   - Bullish TK cross (Tenkan crosses above Kijun) = entry signal
+   - Kumo acts as dynamic support/resistance zone for SL/TP placement
+6. Chart Patterns (if detected): use as entry timing confirmation or early reversal warning
+   - Bullish patterns (hammer, morning_star, bullish_engulfing, etc.) support long bias
+   - Bearish patterns (shooting_star, evening_star, bearish_engulfing, etc.) support short bias
+   - Neutral patterns (doji, inside_bar, bb_squeeze) suggest indecision — wait for confirmation
+   - Require confluence with at least one other indicator before acting on patterns alone
+7. News sentiment and macroeconomic context from the RAG knowledge base
+8. Lessons learned from previous trading reflections
+9. Compare with previous analysis: note any shift in direction or confidence since the last cycle
+10. Macro context: equity index trends as risk sentiment indicators, cross-currency correlation
+11. Risk/reward ratio (minimum 2:1 required)
+    - For LONG:  stop_loss < entry_zone[0], take_profit > entry_zone[1]
+    - For SHORT: stop_loss > entry_zone[1], take_profit < entry_zone[0]
+
+After your reasoning, output ONLY this JSON block (no markdown fences):
+{
+  "direction_bias": "long|short|neutral",
+  "bias_score": <float -1.0 to 1.0>,
+  "confidence": <float 0.0 to 1.0>,
+  "entry_zone": [<low_price>, <high_price>],
+  "stop_loss": <price>,   // long: below entry_zone[0] | short: above entry_zone[1]
+  "take_profit": <price>, // long: above entry_zone[1] | short: below entry_zone[0]
+  "risk_reward_ratio": <float>,
+  "reasoning_summary": "<日本語1文：ニュース・振り返りを踏まえた分析根拠>"
+}

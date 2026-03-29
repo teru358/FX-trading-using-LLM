@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from src.analysis.prompt_loader import load_prompt, render_prompt
 from src.analysis.rss_fetcher import FetchResult
 from src.llm.client import LLMClient
 from src.llm.response_parser import extract_json
@@ -22,12 +23,6 @@ def _to_float(val, default: float) -> float:
 
 
 # ── カテゴリ別プロンプト ──────────────────────────────────────────
-
-SYSTEM_PROMPT = """You are an expert FX analyst specializing in macroeconomic and geopolitical analysis.
-Analyze news headlines to produce a sentiment assessment for FX swing trading (3-10 day horizon).
-Be objective: weigh bullish and bearish factors carefully before assigning a score.
-Each headline includes its age (e.g. "2.3h ago") and source — give more weight to recent news from reliable sources.
-"""
 
 _CATEGORY_LABELS = {
     "fx": "FX Market",
@@ -52,29 +47,6 @@ _CATEGORY_FOCUS = {
         "Score: positive = bullish JPY (stronger yen), negative = bearish JPY (weaker yen)."
     ),
 }
-
-CATEGORY_PROMPT_TEMPLATE = """Below are recent news headlines from {category_label} sources.
-Each item shows [age] [source] title: summary.
-Sources: {sources_list}
-
-=== Recent {category_label} News ({news_count} items, {recent_count} with timestamp) ===
-{news_text}
-
-=== Task ===
-Assess the {category_label} sentiment outlook for FX swing trading (3-10 day horizon).
-{category_focus}
-Weight more recent news more heavily in your assessment.
-{user_context}
-Return ONLY valid JSON (no markdown fences):
-{{
-  "sentiment_score": <float -1.0 to 1.0>,
-  "confidence": <float 0.0 to 1.0>,
-  "key_themes": ["theme1", "theme2"],
-  "bullish_factors": ["factor1"],
-  "bearish_factors": ["factor1"],
-  "summary": "<one sentence>"
-}}"""
-
 
 # ── データクラス ────────────────────────────────────────────────
 
@@ -160,7 +132,8 @@ async def analyze_category_sentiment(
         logger.info(f"[NEWS] {label}: user_notes injected ({len(user_notes)} chars)")
 
     news_text = fetch_result.format_for_llm()
-    user_prompt = CATEGORY_PROMPT_TEMPLATE.format(
+    user_prompt = render_prompt(
+        "news_user.j2",
         category_label=label,
         news_text=news_text,
         news_count=fetch_result.news_count,
@@ -170,7 +143,7 @@ async def analyze_category_sentiment(
         user_context=user_context,
     )
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": load_prompt("news_system.txt")},
         {"role": "user", "content": user_prompt},
     ]
 

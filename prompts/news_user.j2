@@ -1,0 +1,21 @@
+Below are recent news headlines from {{ category_label }} sources.
+Each item shows [age] [source] title: summary.
+Sources: {{ sources_list }}
+
+=== Recent {{ category_label }} News ({{ news_count }} items, {{ recent_count }} with timestamp) ===
+{{ news_text }}
+
+=== Task ===
+Assess the {{ category_label }} sentiment outlook for FX swing trading (3-10 day horizon).
+{{ category_focus }}
+Weight more recent news more heavily in your assessment.
+{{ user_context }}
+Return ONLY valid JSON (no markdown fences):
+{
+  "sentiment_score": <float -1.0 to 1.0>,
+  "confidence": <float 0.0 to 1.0>,
+  "key_themes": ["theme1", "theme2"],
+  "bullish_factors": ["factor1"],
+  "bearish_factors": ["factor1"],
+  "summary": "<one sentence>"
+}
