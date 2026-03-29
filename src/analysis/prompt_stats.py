@@ -64,7 +64,7 @@ def estimate_prompt_size(config: "AppConfig") -> PromptSizeEstimate:
     """
     import pandas as pd
 
-    from src.analysis.price_analyzer import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+    from src.analysis.prompt_loader import render_prompt, load_prompt
     from src.data.indicator_formatter import format_for_llm
     from src.data.indicators import IndicatorSummary
     from src.data.price_fetcher import PriceData
@@ -145,14 +145,15 @@ def estimate_prompt_size(config: "AppConfig") -> PromptSizeEstimate:
         pattern_chars = len(with_patterns) - classic_chars
 
     # ── USER_PROMPT_TEMPLATE 骨格（可変部は空文字で埋める）────────────
-    template_overhead = len(USER_PROMPT_TEMPLATE.format(
+    template_overhead = len(render_prompt(
+        "price_user.j2",
         formatted_data="", pair="",
         news_context="", reflection_context="",
         previous_analysis="", macro_context="", user_context="",
     ))
 
     return PromptSizeEstimate(
-        system_chars=len(SYSTEM_PROMPT),
+        system_chars=len(load_prompt("price_system.txt")),
         template_overhead_chars=template_overhead,
         classic_chars=classic_chars,
         ichimoku_chars=ichi_chars,
