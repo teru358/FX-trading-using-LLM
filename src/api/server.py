@@ -85,7 +85,7 @@ def status() -> dict[str, Any]:
     """残高・ポジション一覧。"""
     assert _config is not None
     state_store = StateStore(_config.state_dir)
-    pm = PositionManager(state_store, _config.trading.initial_balance)
+    pm = PositionManager(state_store, _config.trading.initial_balance, context="API_Status")
     account = pm.get_account_state()
 
     positions = []
@@ -194,24 +194,21 @@ def tech() -> dict[str, Any]:
 # ── GET /analyze ─────────────────────────────────────────────────
 
 @app.get("/analyze", dependencies=[Depends(_verify_api_key)])
-def analyze() -> dict[str, Any]:
+async def analyze() -> dict[str, Any]:
     """保存済みスナップショット＋ニュースから総合シグナルを返す（新規LLM取得なし）。"""
     assert _config is not None and _store is not None and _analysis_store is not None
 
     from src.trading_cycle import _summarize_pair
 
     state_store = StateStore(_config.state_dir)
-    pm = PositionManager(state_store, _config.trading.initial_balance)
+    pm = PositionManager(state_store, _config.trading.initial_balance, context="API_Analyze")
 
-    async def _gather():
-        results = await asyncio.gather(
-            *[_summarize_pair(p, _config, pm, _store, _analysis_store)
-              for p in _config.tradeable_instruments],
-            return_exceptions=True,
-        )
-        return [r for r in results if r is not None and not isinstance(r, Exception)]
-
-    signals = asyncio.run(_gather())
+    results = await asyncio.gather(
+        *[_summarize_pair(p, _config, pm, _store, _analysis_store)
+          for p in _config.tradeable_instruments],
+        return_exceptions=True,
+    )
+    signals = [r for r in results if r is not None and not isinstance(r, Exception)]
 
     if not signals:
         return {"signals": [], "message": "No snapshots available. Run 'run tech' first."}
@@ -340,7 +337,7 @@ def run_trade() -> dict[str, Any]:
 
     # 実行後の最新状態を取得
     state_store = StateStore(_config.state_dir)
-    pm = PositionManager(state_store, _config.trading.initial_balance)
+    pm = PositionManager(state_store, _config.trading.initial_balance, context="API_RunTrade")
     account = pm.get_account_state()
 
     positions = []
@@ -451,12 +448,12 @@ def ask(body: _AskRequest) -> dict[str, Any]:
 # ── POST /close/{pair} ───────────────────────────────────────────
 
 @app.post("/close/{pair}", dependencies=[Depends(_verify_api_key)])
-def close_position(pair: str) -> dict[str, Any]:
+async def close_position(pair: str) -> dict[str, Any]:
     """ポジションを緊急決済する。"""
     assert _config is not None and _job_lock is not None
 
     state_store = StateStore(_config.state_dir)
-    pm = PositionManager(state_store, _config.trading.initial_balance)
+    pm = PositionManager(state_store, _config.trading.initial_balance, context="API_Close")
     account = pm.get_account_state()
 
     pos = next(
@@ -485,7 +482,7 @@ def close_position(pair: str) -> dict[str, Any]:
     if _config.notifier.notify_on_order_close:
         try:
             notifier = create_notifier(_config.notifier.notifier)
-            asyncio.run(notifier.notify_order_closed(OrderClosedEvent(
+            await notifier.notify_order_closed(OrderClosedEvent(
                 pair=closed.pair,
                 direction=closed.direction,
                 entry_price=closed.entry_price,
@@ -493,7 +490,7 @@ def close_position(pair: str) -> dict[str, Any]:
                 realized_pnl=closed.realized_pnl or 0.0,
                 close_reason="manual",
                 balance=pm.get_account_state().balance,
-            )))
+            ))
         except Exception as e:
             logger.warning(f"[API] Close notification failed: {e}")
 

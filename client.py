@@ -337,12 +337,12 @@ def _cmd_feeds() -> None:
         result = fetch_category_news(feeds, kw, freshness_hours=24, max_per_feed=3, max_total=len(feeds) * 3)
 
         # フィードごとに結果を集計
-        from src.analysis.rss_fetcher import _feed_short_name
+        from src.analysis.rss_fetcher import feed_short_name
         import feedparser
         from datetime import datetime, timezone
 
         for feed_url in feeds:
-            short = _feed_short_name(feed_url)
+            short = feed_short_name(feed_url)
             try:
                 feed = feedparser.parse(feed_url)
                 count = len(feed.entries)
@@ -396,6 +396,9 @@ def _start_log_poller(stop_event: threading.Event, interval: float = 3.0) -> Non
                     continue
 
                 new_count = total - last_count
+                if new_count <= 0:
+                    last_count = total
+                    continue
                 if new_count > 0:
                     new_lines = lines[-new_count:]
                     for line in new_lines:

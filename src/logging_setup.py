@@ -37,15 +37,19 @@ def _make_rotating_handler(path: Path, cfg) -> logging.Handler:
 
 
 _PREFIX_STYLES: dict[str, str] = {
-    "[COLLECT]":   "cyan",
-    "[NEWS]":      "blue",
-    "[PRICE]":     "cyan",
-    "[SIGNAL]":    "bold yellow",
-    "[CLOSE]":     "dark_orange",
-    "[TRADE]":     "bold green",
-    "[ORDER]":     "bright_green",
-    "[REFLECT]":   "magenta",
-    "[AGGREGATE]": "dim cyan",
+    "[COLLECT]":    "cyan",
+    "[NEWS]":       "blue",
+    "[PRICE]":      "cyan",
+    "[SIGNAL]":     "bold yellow",
+    "[CLOSE]":      "dark_orange",
+    "[TRADE]":      "bold green",
+    "[ORDER]":      "bright_green",
+    "[REFLECT]":    "magenta",
+    "[AGGREGATE]":  "dim cyan",
+    "[MONITOR]":    "bold red",
+    "[HOLD REVIEW]":"yellow",
+    "[FORECAST]":   "cyan",
+    "[EXIT]":       "bold red",
 }
 
 _MODEL_RE = re.compile(r"(\w+Client\()([^)]+)(\))")
@@ -90,7 +94,7 @@ class _PrefixRichHandler:
 class _ActivityLogFilter(logging.Filter):
     """構造化ログプレフィックスのみを通すフィルタ。"""
 
-    _PREFIXES = ("[COLLECT]", "[AGGREGATE]", "[SIGNAL]", "[CLOSE]", "[TRADE]", "[ORDER]", "[REFLECT]", "[API]", "[FORECAST]", "[EXIT]")
+    _PREFIXES = ("[COLLECT]", "[AGGREGATE]", "[SIGNAL]", "[CLOSE]", "[TRADE]", "[ORDER]", "[REFLECT]", "[API]", "[FORECAST]", "[EXIT]", "[NEWS]", "[MONITOR]", "[HOLD REVIEW]")
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()

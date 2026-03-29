@@ -45,7 +45,7 @@ _HELP = """\
 
 def _cmd_status(config: AppConfig) -> None:
     state_store = StateStore(config.state_dir)
-    pm = PositionManager(state_store, config.trading.initial_balance)
+    pm = PositionManager(state_store, config.trading.initial_balance, context="CLI_Status")
     account = pm.get_account_state()
 
     pnl = account.balance - account.initial_balance
@@ -98,7 +98,7 @@ def _cmd_status(config: AppConfig) -> None:
 def _cmd_close(config: AppConfig, pair_arg: str) -> None:
     async def _do() -> None:
         state_store = StateStore(config.state_dir)
-        pm = PositionManager(state_store, config.trading.initial_balance)
+        pm = PositionManager(state_store, config.trading.initial_balance, context="CLI_Close")
         account = pm.get_account_state()
 
         pos = next(
@@ -150,7 +150,7 @@ def _cmd_notify(config: AppConfig) -> None:
 
 
 def _cmd_feeds(config: AppConfig) -> None:
-    from src.analysis.rss_fetcher import fetch_category_news, _feed_short_name
+    from src.analysis.rss_fetcher import fetch_category_news, feed_short_name
     import feedparser
 
     categories = [
@@ -168,7 +168,7 @@ def _cmd_feeds(config: AppConfig) -> None:
         tbl.add_column("最新記事")
 
         for feed_url in feeds:
-            short = _feed_short_name(feed_url)
+            short = feed_short_name(feed_url)
             try:
                 feed = feedparser.parse(feed_url)
                 count = len(feed.entries)
@@ -203,7 +203,6 @@ def run_commands(
     forecast_store=None,
     price_store=None,
     hold_store=None,
-    compare_analysis_store=None,
 ) -> None:
     _console.print("[dim]コマンド入力モード — [cyan]help[/cyan] で一覧表示[/dim]\n")
     while not stop_event.is_set():
@@ -263,8 +262,7 @@ def run_commands(
                         )
             elif cmd == "compare":
                 pair_arg = args[0] if args else None
-                _store = compare_analysis_store or analysis_store
-                run_compare(config, store, _store, pair_arg)
+                run_compare(config, store, analysis_store, pair_arg)
             elif cmd == "ask":
                 if not args:
                     _console.print("[red]使い方: ask <メッセージ>  例: ask 今のUSDJPYはどう見る？[/red]")

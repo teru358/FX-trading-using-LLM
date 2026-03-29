@@ -150,7 +150,7 @@ def _parse_published(item) -> datetime | None:
     return None
 
 
-def _feed_short_name(url: str) -> str:
+def feed_short_name(url: str) -> str:
     """フィードURLから短縮名を生成する。"""
     try:
         from urllib.parse import urlparse
@@ -191,7 +191,7 @@ def _fetch_from_feeds(
         feed_count = 0
         try:
             feed = feedparser.parse(feed_url)
-            source_name = _feed_short_name(feed_url)
+            source_name = feed_short_name(feed_url)
             result.feeds_ok += 1
 
             for item in feed.entries[:20]:
@@ -290,7 +290,8 @@ def fetch_rss_news(
         feeds_fx = news_sources.feeds_fx
         feeds_global = news_sources.feeds_global
         feeds_japan = news_sources.feeds_japan
-        jpy_keywords = frozenset(kw.lower() for kw in news_sources.jpy_keywords)
+        raw_jpy = getattr(news_sources, "jpy_keywords", None)
+        jpy_keywords = frozenset(kw.lower() for kw in raw_jpy) if raw_jpy else _DEFAULT_JPY_KEYWORDS
     else:
         feeds_fx = feeds_global = feeds_japan = None
         jpy_keywords = _DEFAULT_JPY_KEYWORDS
