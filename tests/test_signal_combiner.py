@@ -52,6 +52,7 @@ def test_hold_confidence_too_low(bullish_news, bullish_price, pair_cfg):
     """スコアは閾値を超えていても confidence が低い → HOLD。"""
     # confidence_threshold を 0.99 に設定して必ず HOLD になるようにする
     sig = _call(bullish_news, bullish_price, pair_cfg, confidence_threshold=0.99)
+    assert sig.combined_score > 0.15  # score alone would trigger buy
     assert sig.action == "hold"
 
 
@@ -69,7 +70,7 @@ def test_conflict_penalty(pair_cfg):
     )
     sig = _call(news, price, pair_cfg)
     # conflict_penalty=0.5: raw = (0.6×0.4 + (-0.6)×0.6) = -0.12, × 0.5 = -0.06
-    assert abs(sig.combined_score) < 0.1
+    assert abs(sig.combined_score - (-0.06)) < 0.005
     assert "[NEWS/PRICE conflict]" in sig.signal_reason
 
 
