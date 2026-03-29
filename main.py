@@ -136,7 +136,9 @@ def main() -> None:
     )
     def _run_rag_cleanup() -> None:
         """古いRAGエントリを削除する（24時間に1回）。"""
-        store.cleanup_old_news(max_age_hours=48)
+        deleted = store.cleanup_old_news(max_age_hours=48)
+        if deleted > 0:
+            _console.print(f"[dim][RAG] cleanup: {deleted} entries deleted[/dim]")
 
     def _model(role_cfg) -> str:
         return role_cfg.model or _DEFAULT_OLLAMA_MODEL
