@@ -87,9 +87,10 @@ def fetch_ohlcv(
     OHLCVを取得する。price_store が渡された場合はキャッシュ優先で差分のみ取得する。
 
     フロー（price_store あり）:
-      1. DBの最新bar_timeを確認し、その次以降を yfinance で差分フェッチ → upsert
-      2. DBから必要期間をロード
-      3. データ不足なら yfinance でフルフェッチ → upsert してリターン
+      1. DBの最古bar_timeを確認し、required_start まで遡るバックフィルを実行（過去方向の補完）
+      2. DBの最新bar_timeを確認し、その次以降を yfinance で差分フェッチ → upsert（未来方向の補完）
+      3. DBから必要期間をロード
+      4. データ不足なら yfinance でフルフェッチ → upsert してリターン
     """
     logger.debug(f"Fetching OHLCV for {symbol}, period={period}, interval={interval}")
 
@@ -97,23 +98,39 @@ def fetch_ohlcv(
         days = _parse_period_days(period)
         required_start = datetime.now() - timedelta(days=days + 1)
 
-        latest = price_store.get_latest_date(symbol)  # datetime | None
-        if latest is None:
-            fetch_from = required_start
-        elif _is_intraday(interval):
-            fetch_from = latest + timedelta(hours=1)
-        else:
-            fetch_from = latest + timedelta(days=1)
-
-        # 差分フェッチ（未取得分が存在する場合のみ）
-        if fetch_from <= datetime.now():
+        # Step 1: 最新データから遡って過去方向の補完
+        # DBの最新バーを基点に必要期間を遡り、最古バーが不足していればバックフィルする
+        latest = price_store.get_latest_date(symbol)
+        hist_start = (
+            latest - timedelta(days=days + 1)
+            if latest is not None
+            else required_start  # DB空の場合は現在から遡る
+        )
+        earliest = price_store.get_earliest_date(symbol)
+        if earliest is None or earliest > hist_start + timedelta(hours=2):
             try:
-                new_df = _yf_fetch_range(symbol, fetch_from, interval)
-                if not new_df.empty:
-                    price_store.upsert_ohlcv(symbol, new_df)
-                    logger.info(f"Stored {len(new_df)} new bars for {symbol}")
+                hist_df = _yf_fetch_range(symbol, hist_start, interval)
+                if not hist_df.empty:
+                    price_store.upsert_ohlcv(symbol, hist_df)
+                    logger.info(
+                        f"Backfill: stored {len(hist_df)} bars for {symbol} "
+                        f"since {hist_start:%Y-%m-%d}"
+                    )
             except Exception as e:
-                logger.warning(f"Incremental fetch failed for {symbol}: {e}")
+                logger.warning(f"Historical backfill failed for {symbol}: {e}")
+
+        # Step 2: 差分フェッチ（最新バー以降の未取得分）
+        latest = price_store.get_latest_date(symbol)
+        if latest is not None:
+            fetch_from = latest + (timedelta(hours=1) if _is_intraday(interval) else timedelta(days=1))
+            if fetch_from <= datetime.now():
+                try:
+                    new_df = _yf_fetch_range(symbol, fetch_from, interval)
+                    if not new_df.empty:
+                        price_store.upsert_ohlcv(symbol, new_df)
+                        logger.info(f"Stored {len(new_df)} new bars for {symbol}")
+                except Exception as e:
+                    logger.warning(f"Incremental fetch failed for {symbol}: {e}")
 
         # DBからロード
         df = price_store.load_ohlcv(symbol, required_start, datetime.now())

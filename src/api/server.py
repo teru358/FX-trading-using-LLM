@@ -474,7 +474,7 @@ def run_trade() -> dict[str, Any]:
 #
 #     started_at = datetime.now()
 #     with _job_lock:
-#         run_technical_collection(_config, _store, _price_store, _analysis_store)
+#         run_technical_collection(_config, _store, _price_store, _analysis_store, force=True)
 #     elapsed = (datetime.now() - started_at).total_seconds()
 #
 #     return {"status": "completed", "elapsed_seconds": round(elapsed, 1),
