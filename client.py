@@ -313,49 +313,39 @@ def _cmd_close(pair: str) -> None:
 
 
 def _cmd_feeds() -> None:
-    """RSSフィード疎通確認（ローカル直接実行）。"""
-    import sys
-    sys.path.insert(0, str(_BASE_DIR))
-    from src.config import load_config
-    from src.analysis.rss_fetcher import fetch_category_news
+    """RSSフィード疎通確認（REST API経由）。"""
+    data = _get("/feeds")
+    if data is None:
+        return
 
-    config = load_config()
-    categories = [
-        ("FX",     config.news_sources.feeds_fx,     None),
-        ("Global", config.news_sources.feeds_global, frozenset(k.lower() for k in config.keywords.global_keywords)),
-        ("Japan",  config.news_sources.feeds_japan,  frozenset(k.lower() for k in config.keywords.japan_keywords)),
-    ]
+    _status_map = {
+        "ok":     "[green]OK[/green]",
+        "empty":  "[yellow]空[/yellow]",
+        "failed": "[red]NG[/red]",
+    }
 
     _console.print()
-    for label, feeds, kw in categories:
+    for label, cat in data.get("categories", {}).items():
         tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1), title=f"[bold]{label}[/bold]")
         tbl.add_column("フィード")
         tbl.add_column("状態", justify="center")
         tbl.add_column("件数", justify="right")
         tbl.add_column("最新記事")
 
-        result = fetch_category_news(feeds, kw, freshness_hours=24, max_per_feed=3, max_total=len(feeds) * 3)
-
-        # フィードごとに結果を集計
-        from src.analysis.rss_fetcher import feed_short_name
-        import feedparser
-        from datetime import datetime, timezone
-
-        for feed_url in feeds:
-            short = feed_short_name(feed_url)
-            try:
-                feed = feedparser.parse(feed_url)
-                count = len(feed.entries)
-                status = "[green]OK[/green]" if count > 0 else "[yellow]空[/yellow]"
-                latest = feed.entries[0].get("title", "—")[:60] if feed.entries else "—"
-            except Exception as e:
-                status = "[red]NG[/red]"
-                count = 0
-                latest = str(e)[:60]
-            tbl.add_row(short, status, str(count), latest)
+        for feed_info in cat.get("feeds", []):
+            status_display = _status_map.get(feed_info["status"], feed_info["status"])
+            tbl.add_row(
+                feed_info["name"],
+                status_display,
+                str(feed_info["count"]),
+                feed_info["latest_title"] or "—",
+            )
 
         _console.print(tbl)
-        _console.print(f"  [dim]フィルタ通過: {result.news_count}件  feeds OK={result.feeds_ok}/{result.total_feeds}[/dim]\n")
+        _console.print(
+            f"  [dim]フィルタ通過: {cat['filtered_count']}件"
+            f"  feeds OK={cat['feeds_ok']}/{cat['total_feeds']}[/dim]\n"
+        )
 
 
 def _cmd_logs(lines: int = 50) -> None:

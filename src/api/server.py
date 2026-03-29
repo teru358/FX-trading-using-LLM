@@ -269,6 +269,66 @@ def forecast(pair: str | None = None, hours: int = 24) -> dict[str, Any]:
     return {"hours": hours, "forecasts": result}
 
 
+# ── GET /feeds ────────────────────────────────────────────────────
+
+@app.get("/feeds", dependencies=[Depends(_verify_api_key)])
+def feeds() -> dict[str, Any]:
+    """RSSフィード疎通確認（カテゴリ別フィード状態）。"""
+    import feedparser
+
+    assert _config is not None
+
+    from src.analysis.rss_fetcher import fetch_category_news, feed_short_name
+
+    categories_def = [
+        ("FX",     _config.news_sources.feeds_fx,     None),
+        ("Global", _config.news_sources.feeds_global,
+         frozenset(k.lower() for k in _config.keywords.global_keywords)),
+        ("Japan",  _config.news_sources.feeds_japan,
+         frozenset(k.lower() for k in _config.keywords.japan_keywords)),
+    ]
+
+    result: dict[str, Any] = {}
+    for label, feed_urls, kw in categories_def:
+        cat_result = fetch_category_news(
+            feed_urls, kw,
+            freshness_hours=24,
+            max_per_feed=3,
+            max_total=len(feed_urls) * 3,
+        )
+        feeds_info = []
+        for feed_url in feed_urls:
+            short = feed_short_name(feed_url)
+            try:
+                feed = feedparser.parse(feed_url)
+                count = len(feed.entries)
+                if count > 0:
+                    status = "ok"
+                    latest_title = feed.entries[0].get("title", "")[:60]
+                else:
+                    status = "empty"
+                    latest_title = ""
+            except Exception as e:
+                status = "failed"
+                count = 0
+                latest_title = str(e)[:60]
+            feeds_info.append({
+                "name":         short,
+                "status":       status,
+                "count":        count,
+                "latest_title": latest_title,
+            })
+
+        result[label] = {
+            "feeds":          feeds_info,
+            "filtered_count": cat_result.news_count,
+            "feeds_ok":       cat_result.feeds_ok,
+            "total_feeds":    cat_result.total_feeds,
+        }
+
+    return {"categories": result}
+
+
 # ── GET /logs ─────────────────────────────────────────────────────
 
 _LOG_LINES_MAX = 500
