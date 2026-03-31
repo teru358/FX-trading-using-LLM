@@ -111,7 +111,7 @@ def main() -> None:
     )
     sched_table.add_row("Trading cycles",  f"[cyan]{' / '.join(run_times)}[/cyan]  ({tz})")
     monitor_status = (
-        f"every [cyan]{config.price_monitor.interval_minutes}[/cyan] min  "
+        f"every [cyan]{config.price_monitor.interval_minutes}[/cyan] min  :00 aligned  "
         f"(alert≥{config.price_monitor.alert_threshold_pct:.1%}"
         + (
             f"  emergency≥{config.price_monitor.emergency_close_pct:.1%}"
@@ -176,9 +176,14 @@ def main() -> None:
         )
 
     if config.price_monitor.enabled:
-        schedule.every(config.price_monitor.interval_minutes).minutes.do(
-            run_price_monitor, config, price_provider
-        )
+        monitor_interval = config.price_monitor.interval_minutes
+        monitor_times = [
+            f"{h:02d}:{m:02d}"
+            for h in range(24)
+            for m in range(0, 60, monitor_interval)
+        ]
+        for t in monitor_times:
+            schedule.every().day.at(t, tz).do(run_price_monitor, config, price_provider)
 
     # REST API サーバー（有効時のみ — Initial collection 前に起動）
     if config.api.enabled:
