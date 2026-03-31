@@ -16,7 +16,7 @@ from src.analysis.price_analyzer import analyze_price_action
 from src.config import AppConfig, InstrumentConfig
 from src.data.analysis_store import AnalysisStore
 from src.data.indicators import compute_indicators
-from src.data.price_fetcher import fetch_ohlcv
+from src.data.price_provider import PriceProvider
 from src.data.price_store import PriceStore
 from src.llm.client import LLMClient
 from src.llm.factory import create_llm_client
@@ -40,14 +40,24 @@ async def _collect_one(
     analysis_store: AnalysisStore,
     llm: LLMClient,
     macro_context: str = "",
+    price_provider: "PriceProvider | None" = None,
 ) -> None:
     """1銘柄のOHLCVを取得してテクニカル分析を実行し、スナップショットを保存する。"""
-    price_data = fetch_ohlcv(
-        inst.symbol,
-        period=f"{config.trading.lookback_days}d",
-        interval=config.trading.ohlcv_interval,
-        price_store=price_store,
-    )
+    if price_provider:
+        price_data = price_provider.get_ohlcv(
+            inst.symbol,
+            period=f"{config.trading.lookback_days}d",
+            interval=config.trading.ohlcv_interval,
+            price_store=price_store,
+        )
+    else:
+        from src.data.price_fetcher import fetch_ohlcv
+        price_data = fetch_ohlcv(
+            inst.symbol,
+            period=f"{config.trading.lookback_days}d",
+            interval=config.trading.ohlcv_interval,
+            price_store=price_store,
+        )
     _, summary = compute_indicators(
         price_data.df,
         indicator_cfg=config.analysis.indicators,
@@ -96,6 +106,7 @@ async def collect_all_technical(
     price_store: PriceStore,
     analysis_store: AnalysisStore,
     force: bool = False,
+    price_provider: "PriceProvider | None" = None,
 ) -> None:
     """全有効銘柄のテクニカル分析を2フェーズで収集してストアに格納する。"""
     if not force and not is_market_open():
@@ -120,7 +131,7 @@ async def collect_all_technical(
     for i, inst in enumerate(watch_only):
         try:
             logger.debug(f"[COLLECT] {inst.display_name}: starting OHLCV + technical analysis...")
-            await _collect_one(inst, config, store, price_store, analysis_store, llm_price)
+            await _collect_one(inst, config, store, price_store, analysis_store, llm_price, price_provider=price_provider)
         except Exception as e:
             logger.error(f"[COLLECT] {inst.display_name}: technical analysis failed: {e}", exc_info=True)
         if i < len(watch_only) - 1:
@@ -142,7 +153,7 @@ async def collect_all_technical(
     for i, inst in enumerate(tradeable):
         try:
             logger.debug(f"[COLLECT] {inst.display_name}: starting OHLCV + technical analysis...")
-            await _collect_one(inst, config, store, price_store, analysis_store, llm_price, macro_context=macro_ctx)
+            await _collect_one(inst, config, store, price_store, analysis_store, llm_price, macro_context=macro_ctx, price_provider=price_provider)
         except Exception as e:
             logger.error(f"[COLLECT] {inst.display_name}: technical analysis failed: {e}", exc_info=True)
         if i < len(tradeable) - 1:
@@ -157,6 +168,7 @@ def run_technical_collection(
     price_store: PriceStore,
     analysis_store: AnalysisStore,
     force: bool = False,
+    price_provider: "PriceProvider | None" = None,
 ) -> None:
     """schedule ライブラリから呼び出す同期ラッパー。"""
-    asyncio.run(collect_all_technical(config, store, price_store, analysis_store, force=force))
+    asyncio.run(collect_all_technical(config, store, price_store, analysis_store, force=force, price_provider=price_provider))

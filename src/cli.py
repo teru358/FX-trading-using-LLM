@@ -203,6 +203,7 @@ def run_commands(
     forecast_store=None,
     price_store=None,
     hold_store=None,
+    price_provider=None,
 ) -> None:
     _console.print("[dim]コマンド入力モード — [cyan]help[/cyan] で一覧表示[/dim]\n")
     while not stop_event.is_set():

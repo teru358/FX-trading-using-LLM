@@ -22,6 +22,7 @@ from src.logging_setup import setup_logging
 from src.rag.vector_store import VectorStore
 from src.startup import startup_checks
 from src.data.analysis_store import ForecastStore, HoldDecisionStore
+from src.data.price_provider import PriceProvider
 from src.trading_cycle import run_exit_check_cycle, run_forecast_cycle, run_trading_cycle
 from src.analysis.prompt_stats import estimate_prompt_size
 
@@ -62,6 +63,7 @@ def main() -> None:
     analysis_store = AnalysisStore(config.prices_db_path)
     forecast_store = ForecastStore(config.prices_db_path)
     hold_store = HoldDecisionStore(config.prices_db_path)
+    price_provider = PriceProvider(config)
 
     tz = config.schedule.timezone
     news_tz = config.news_collection.timezone
@@ -157,25 +159,25 @@ def main() -> None:
 
     for t in technical_times:
         schedule.every().day.at(t, news_tz).do(
-            run_technical_collection, config, store, price_store, analysis_store
+            run_technical_collection, config, store, price_store, analysis_store, price_provider=price_provider
         )
         schedule.every().day.at(t, news_tz).do(
-            run_exit_check_cycle, config, store, analysis_store
+            run_exit_check_cycle, config, store, analysis_store, price_provider=price_provider
         )
 
     for t in forecast_times:
         schedule.every().day.at(t, news_tz).do(
-            run_forecast_cycle, config, store, analysis_store, forecast_store
+            run_forecast_cycle, config, store, analysis_store, forecast_store, price_provider=price_provider
         )
 
     for t in run_times:
         schedule.every().day.at(t, tz).do(
-            run_trading_cycle, config, store, price_store, analysis_store, hold_store
+            run_trading_cycle, config, store, price_store, analysis_store, hold_store, price_provider=price_provider
         )
 
     if config.price_monitor.enabled:
         schedule.every(config.price_monitor.interval_minutes).minutes.do(
-            run_price_monitor, config
+            run_price_monitor, config, price_provider
         )
 
     # REST API サーバー（有効時のみ — Initial collection 前に起動）
@@ -195,7 +197,7 @@ def main() -> None:
         if args.skip_tech:
             _console.print("[dim]--skip-tech: 初回テクニカル収集をスキップ[/dim]")
         else:
-            run_technical_collection(config, store, price_store, analysis_store, force=is_fresh_start)
+            run_technical_collection(config, store, price_store, analysis_store, force=is_fresh_start, price_provider=price_provider)
 
     # スケジューラをバックグラウンドスレッドで起動
     scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True, name="scheduler")
@@ -212,7 +214,7 @@ def main() -> None:
             _console.print("\n[dim]終了します...[/dim]")
             _stop.set()
     else:
-        run_commands(config, store, analysis_store, _stop, _job_lock, forecast_store, price_store, hold_store)
+        run_commands(config, store, analysis_store, _stop, _job_lock, forecast_store, price_store, hold_store, price_provider=price_provider)
 
 
 if __name__ == "__main__":

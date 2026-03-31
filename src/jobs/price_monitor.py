@@ -13,7 +13,7 @@ import asyncio
 import logging
 
 from src.config import AppConfig
-from src.data.price_fetcher import fetch_current_price
+from src.data.price_provider import PriceProvider
 from src.notifications.notifier import OrderClosedEvent, PriceAlertEvent, create_notifier
 from src.persistence.state_store import StateStore
 from src.trading.market_hours import is_market_open
@@ -73,6 +73,7 @@ def _adverse_move_pct(direction: str, entry: float, current: float) -> float:
 async def monitor_open_positions(
     config: AppConfig,
     position_mgr: PositionManager,
+    price_provider: PriceProvider,
 ) -> None:
     """オープンポジションを確認し、急変動があれば通知・緊急損切りを実行する。"""
     cfg = config.price_monitor
@@ -90,7 +91,7 @@ async def monitor_open_positions(
 
     for pos in account.open_positions:
         try:
-            current = fetch_current_price(pos.pair).price
+            current = price_provider.get_current_price(pos.pair).price
 
             # ── トレーリングストップ ──────────────────────────────
             if cfg.trailing_stop_enabled:
@@ -165,7 +166,7 @@ async def monitor_open_positions(
             logger.warning(f"[MONITOR] {pos.pair}: price check failed: {e}")
 
 
-def run_price_monitor(config: AppConfig) -> None:
+def run_price_monitor(config: AppConfig, price_provider: PriceProvider) -> None:
     """schedule ライブラリから呼び出す同期ラッパー。"""
     if not config.price_monitor.enabled:
         return
@@ -175,4 +176,4 @@ def run_price_monitor(config: AppConfig) -> None:
     position_mgr = PositionManager(state_store, config.trading.initial_balance, context="PriceMonitor")
     if not position_mgr.get_account_state().open_positions:
         return
-    asyncio.run(monitor_open_positions(config, position_mgr))
+    asyncio.run(monitor_open_positions(config, position_mgr, price_provider))

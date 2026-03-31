@@ -13,6 +13,7 @@ from src.analysis.reflector import generate_close_reflection, generate_reflectio
 from src.config import AppConfig, InstrumentConfig
 from src.data.indicators import compute_indicators
 from src.data.price_fetcher import fetch_current_price, fetch_ohlcv
+from src.data.price_provider import PriceProvider
 from src.data.analysis_store import AnalysisStore, HoldDecisionStore
 from src.data.price_store import PriceStore
 from src.llm.client import LLMClient
@@ -35,6 +36,20 @@ from src.trading.position_manager import PositionManager
 from src.trading.position_reviewer import review_open_positions
 
 logger = logging.getLogger(__name__)
+
+
+def _get_price(symbol: str, price_provider: PriceProvider | None) -> float:
+    """price_provider経由で現在価格を取得する。Noneの場合は直接呼び出しにフォールバック。"""
+    if price_provider:
+        return price_provider.get_current_price(symbol).price
+    return fetch_current_price(symbol).price
+
+
+def _get_ohlcv(symbol: str, period: str, interval: str, price_store, price_provider: PriceProvider | None):
+    """price_provider経由でOHLCVを取得する。Noneの場合は直接呼び出しにフォールバック。"""
+    if price_provider:
+        return price_provider.get_ohlcv(symbol, period, interval, price_store)
+    return fetch_ohlcv(symbol, period, interval, price_store)
 
 
 async def _build_rag_context(
@@ -75,6 +90,7 @@ async def _process_pair(
     price_store: PriceStore,
     analysis_store: AnalysisStore,
     llm: LLMClient,
+    price_provider: PriceProvider | None = None,
 ):
     """1ペアの分析→シグナル生成。
 
@@ -83,11 +99,12 @@ async def _process_pair(
     戻り値: (TradeSignal, macro_ctx_str)
     """
     try:
-        price_data = fetch_ohlcv(
+        price_data = _get_ohlcv(
             pair_cfg.symbol,
             period=f"{config.trading.lookback_days}d",
             interval=config.trading.ohlcv_interval,
             price_store=price_store,
+            price_provider=price_provider,
         )
 
         macro_ctx = _build_macro_context(config, analysis_store)
@@ -145,11 +162,12 @@ async def _process_pair(
 
 async def _generate_cycle_reflections(
     config: AppConfig, position_mgr: PositionManager, store: VectorStore, llm: LLMClient,
+    price_provider: PriceProvider | None = None,
 ) -> None:
     """オープンポジションに対して振り返りを生成・RAGに蓄積する。"""
     for pos in position_mgr.get_account_state().open_positions:
         try:
-            current_price = fetch_current_price(pos.pair).price
+            current_price = _get_price(pos.pair, price_provider)
             pair_cfg = next((p for p in config.tradeable_instruments if p.symbol == pos.pair), None)
             if pair_cfg is None:
                 continue
@@ -185,6 +203,7 @@ async def _review_hold_decisions(
     config: AppConfig,
     hold_store: HoldDecisionStore,
     store: VectorStore,
+    price_provider: PriceProvider | None = None,
 ) -> None:
     """前回HOLDした判断を検証してRAGに蓄積する（LLM不使用）。"""
     from src.analysis.forecaster import build_hold_review
@@ -202,7 +221,7 @@ async def _review_hold_decisions(
 
     for hold in unreviewed:
         try:
-            current_price = fetch_current_price(hold.pair).price
+            current_price = _get_price(hold.pair, price_provider)
             review_text, lesson, worth_storing = build_hold_review(
                 pair=hold.pair,
                 hold=hold,
@@ -240,6 +259,7 @@ async def trading_cycle(
     price_store: PriceStore,
     analysis_store: AnalysisStore,
     hold_store: HoldDecisionStore,
+    price_provider: PriceProvider | None = None,
 ) -> None:
     """取引サイクルの全5フェーズを実行する。"""
     run_start = datetime.now(ZoneInfo(config.schedule.timezone))
@@ -267,7 +287,7 @@ async def trading_cycle(
         current_prices = {}
         for pos in account.open_positions:
             try:
-                current_prices[pos.pair] = fetch_current_price(pos.pair).price
+                current_prices[pos.pair] = _get_price(pos.pair, price_provider)
             except Exception as e:
                 logger.warning(f"Could not fetch price for {pos.pair}: {e}")
         closed_this_run = broker.check_and_close_positions(
@@ -318,10 +338,10 @@ async def trading_cycle(
                 logger.warning(f"[REFLECT/CLOSE] Failed for {closed_order.pair}: {e}")
 
     # Phase 2: 振り返り生成
-    await _generate_cycle_reflections(config, position_mgr, store, llm_reflect)
+    await _generate_cycle_reflections(config, position_mgr, store, llm_reflect, price_provider=price_provider)
 
     # Phase 2.5: HOLD判断レビュー（前回HOLDの方向性を事実で検証）
-    await _review_hold_decisions(config, hold_store, store)
+    await _review_hold_decisions(config, hold_store, store, price_provider=price_provider)
 
     # Phase 3: 各ペアを並列分析（蓄積済みスナップショットを集約）
     semaphore = asyncio.Semaphore(config.llm.ollama.max_concurrent)
@@ -329,7 +349,8 @@ async def trading_cycle(
     async def bounded(pair_cfg):
         async with semaphore:
             return await _process_pair(
-                pair_cfg, config, position_mgr, store, price_store, analysis_store, llm_price
+                pair_cfg, config, position_mgr, store, price_store, analysis_store, llm_price,
+                price_provider=price_provider,
             )
 
     results = await asyncio.gather(
@@ -353,7 +374,7 @@ async def trading_cycle(
             review_prices = {}
             for pos in account_for_review.open_positions:
                 try:
-                    review_prices[pos.pair] = fetch_current_price(pos.pair).price
+                    review_prices[pos.pair] = _get_price(pos.pair, price_provider)
                 except Exception as e:
                     logger.warning(f"[REVIEW] Could not fetch price for {pos.pair}: {e}")
 
@@ -484,11 +505,12 @@ def run_trading_cycle(
     price_store: PriceStore,
     analysis_store: AnalysisStore,
     hold_store: HoldDecisionStore,
+    price_provider: PriceProvider | None = None,
 ) -> None:
     """scheduleライブラリから呼び出す同期ラッパー。"""
     state_store = StateStore(config.state_dir)
     position_mgr = PositionManager(state_store, config.trading.initial_balance, context="TradingCycle")
-    asyncio.run(trading_cycle(config, position_mgr, store, price_store, analysis_store, hold_store))
+    asyncio.run(trading_cycle(config, position_mgr, store, price_store, analysis_store, hold_store, price_provider=price_provider))
 
 
 async def exit_check_cycle(
@@ -496,6 +518,7 @@ async def exit_check_cycle(
     position_mgr: PositionManager,
     store: VectorStore,
     analysis_store: AnalysisStore,
+    price_provider: PriceProvider | None = None,
 ) -> None:
     """出口専用軽量サイクル（毎時:00実行）。
 
@@ -524,7 +547,7 @@ async def exit_check_cycle(
     current_prices: dict[str, float] = {}
     for pos in account.open_positions:
         try:
-            current_prices[pos.pair] = fetch_current_price(pos.pair).price
+            current_prices[pos.pair] = _get_price(pos.pair, price_provider)
         except Exception as e:
             logger.warning(f"[EXIT] Could not fetch price for {pos.pair}: {e}")
 
@@ -556,7 +579,7 @@ async def exit_check_cycle(
     relevant_cfgs = [p for p in config.tradeable_instruments if p.symbol in open_pairs]
 
     sig_results = await asyncio.gather(
-        *[_summarize_pair(p, config, position_mgr, store, analysis_store) for p in relevant_cfgs],
+        *[_summarize_pair(p, config, position_mgr, store, analysis_store, price_provider=price_provider) for p in relevant_cfgs],
         return_exceptions=True,
     )
     signals_by_pair = {
@@ -606,11 +629,12 @@ def run_exit_check_cycle(
     config: AppConfig,
     store: VectorStore,
     analysis_store: AnalysisStore,
+    price_provider: PriceProvider | None = None,
 ) -> None:
     """scheduleライブラリから呼び出す同期ラッパー。"""
     state_store = StateStore(config.state_dir)
     position_mgr = PositionManager(state_store, config.trading.initial_balance, context="ExitCheck")
-    asyncio.run(exit_check_cycle(config, position_mgr, store, analysis_store))
+    asyncio.run(exit_check_cycle(config, position_mgr, store, analysis_store, price_provider=price_provider))
 
 
 async def forecast_cycle(
@@ -619,6 +643,7 @@ async def forecast_cycle(
     store: VectorStore,
     analysis_store: AnalysisStore,
     forecast_store,
+    price_provider: PriceProvider | None = None,
 ) -> None:
     """予測サイクル（設定間隔ごと実行）。
 
@@ -649,7 +674,7 @@ async def forecast_cycle(
             recent_forecasts = forecast_store.get_recent_forecasts(pair_cfg.symbol, hours=24)
             if recent_forecasts:
                 try:
-                    current_price = fetch_current_price(pair_cfg.symbol).price
+                    current_price = _get_price(pair_cfg.symbol, price_provider)
                 except Exception as e:
                     logger.warning(f"[FORECAST] {pair_cfg.symbol}: price fetch failed — {e}")
                     continue
@@ -685,7 +710,7 @@ async def forecast_cycle(
                     )
 
             # Phase 2: 新規予測生成（C: スコア閾値チェック、LLM不使用）
-            signal = await _summarize_pair(pair_cfg, config, position_mgr, store, analysis_store)
+            signal = await _summarize_pair(pair_cfg, config, position_mgr, store, analysis_store, price_provider=price_provider)
             if signal is None:
                 logger.info(f"[FORECAST] {pair_cfg.symbol}: skip — no_snapshot")
                 continue
@@ -803,11 +828,12 @@ def run_forecast_cycle(
     store: VectorStore,
     analysis_store: AnalysisStore,
     forecast_store,
+    price_provider: PriceProvider | None = None,
 ) -> None:
     """scheduleライブラリから呼び出す同期ラッパー。"""
     state_store = StateStore(config.state_dir)
     position_mgr = PositionManager(state_store, config.trading.initial_balance, context="ForecastCycle")
-    asyncio.run(forecast_cycle(config, position_mgr, store, analysis_store, forecast_store))
+    asyncio.run(forecast_cycle(config, position_mgr, store, analysis_store, forecast_store, price_provider=price_provider))
 
 
 async def _summarize_pair(
@@ -816,6 +842,7 @@ async def _summarize_pair(
     position_mgr: PositionManager,
     store: VectorStore,
     analysis_store: AnalysisStore,
+    price_provider: PriceProvider | None = None,
 ):
     """保存済み分析スナップショットとニュースからシグナルを算出する（新規取得なし）。"""
     try:
@@ -828,7 +855,7 @@ async def _summarize_pair(
             return None
 
         news = aggregate_news_sentiment(pair_cfg, store, config)
-        current_price = fetch_current_price(pair_cfg.symbol).price
+        current_price = _get_price(pair_cfg.symbol, price_provider)
 
         account = position_mgr.get_account_state()
         return combine_signals(
