@@ -143,7 +143,10 @@ async def collect_all_technical(
         snaps = analysis_store.get_recent_snapshots(inst.symbol, hours=8)
         if snaps:
             macro_snapshots.append(snaps[0])
-    macro_ctx = format_macro_context_for_prompt(macro_snapshots, watch_only)
+    macro_ctx = format_macro_context_for_prompt(
+        macro_snapshots, watch_only,
+        realtime_provider=config.price_provider.realtime_provider,
+    )
 
     # Phase 2: 取引対象FXペアを収集（マクロコンテキスト付き）
     if tradeable:

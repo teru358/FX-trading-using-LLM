@@ -79,7 +79,10 @@ def _build_macro_context(config: AppConfig, analysis_store: AnalysisStore) -> st
         snaps = analysis_store.get_recent_snapshots(inst.symbol, hours=8)
         if snaps:
             macro_snapshots.append(snaps[0])
-    return format_macro_context_for_prompt(macro_snapshots, watch_only)
+    return format_macro_context_for_prompt(
+        macro_snapshots, watch_only,
+        realtime_provider=config.price_provider.realtime_provider,
+    )
 
 
 async def _process_pair(
