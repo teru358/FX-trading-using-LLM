@@ -309,6 +309,33 @@ compare [pair]
 
 ---
 
+## 価格データプロバイダー
+
+デフォルトは yfinance（無料、15-20分遅延）。Twelve Data を有効にすると取引ペアのリアルタイム価格を取得できます。
+
+### 設定
+
+```yaml
+price_provider:
+  realtime_provider: "twelvedata"   # "yfinance"（デフォルト） | "twelvedata"
+  twelvedata:
+    daily_limit: 800
+    per_minute_limit: 8
+```
+
+環境変数: `TWELVEDATA_API_KEY`（[twelvedata.com](https://twelvedata.com) で無料アカウント登録後に取得）
+
+| 項目 | yfinance | Twelve Data |
+|---|---|---|
+| コスト | 無料 | 無料（800 req/日） |
+| FX遅延 | 15-20分 | リアルタイム |
+| Watch銘柄 | 対応 | yfinance固定 |
+| フォールバック | — | yfinance |
+
+起動時に推定リクエスト数と上限に対する余裕を表示します。Twelve Data が失敗した場合は自動的に yfinance にフォールバックします。
+
+---
+
 ## LLM プロバイダー設定
 
 3種類の分析（ニュース分析・価格分析・振り返り生成）それぞれに異なるLLMプロバイダーを設定できます。
