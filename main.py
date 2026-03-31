@@ -65,6 +65,17 @@ def main() -> None:
     hold_store = HoldDecisionStore(config.prices_db_path)
     price_provider = PriceProvider(config)
 
+    if config.price_provider.realtime_provider == "twelvedata":
+        import asyncio as _asyncio
+        if price_provider._td_fetcher:
+            _ok = _asyncio.run(price_provider._td_fetcher.probe())
+            if _ok:
+                _console.print("[green][OK][/green]  Twelve Data API: connected")
+            else:
+                _console.print("[yellow][WARN][/yellow] Twelve Data API: probe failed — yfinance fallback")
+        else:
+            _console.print("[yellow][WARN][/yellow] Twelve Data API: key not set — yfinance only")
+
     tz = config.schedule.timezone
     news_tz = config.news_collection.timezone
     interval = config.news_collection.interval_minutes
@@ -144,6 +155,7 @@ def main() -> None:
 
     def _model(role_cfg) -> str:
         return role_cfg.model or _DEFAULT_OLLAMA_MODEL
+    sched_table.add_row("Price provider", price_provider.status_line())
     sched_table.add_row("LLM (news)",      _model(config.llm.news_analysis))
     sched_table.add_row("LLM (price)",     _model(config.llm.price_analysis))
     sched_table.add_row("LLM (reflect)",   _model(config.llm.reflection))
