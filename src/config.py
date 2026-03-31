@@ -219,6 +219,20 @@ class PriceMonitorConfig:
 
 
 @dataclass
+class TwelveDataConfig:
+    """Twelve Data API 設定。"""
+    daily_limit: int = 800
+    per_minute_limit: int = 8
+
+
+@dataclass
+class PriceProviderConfig:
+    """価格データプロバイダー設定。"""
+    realtime_provider: str = "yfinance"  # "yfinance" | "twelvedata"
+    twelvedata: TwelveDataConfig = field(default_factory=TwelveDataConfig)
+
+
+@dataclass
 class NotifierConfig:
     notifier: str = "none"
     notify_on_order_open: bool = True
@@ -345,6 +359,7 @@ class AppConfig:
     rag: RagConfig
     notifier: NotifierConfig
     price_monitor: PriceMonitorConfig = field(default_factory=PriceMonitorConfig)
+    price_provider: PriceProviderConfig = field(default_factory=PriceProviderConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
@@ -531,6 +546,16 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         trailing_stop_distance_ratio=pm.get("trailing_stop_distance_ratio", 1.0),
     )
 
+    pp = raw.get("price_provider", {})
+    td = pp.get("twelvedata", {})
+    price_provider = PriceProviderConfig(
+        realtime_provider=pp.get("realtime_provider", "yfinance"),
+        twelvedata=TwelveDataConfig(
+            daily_limit=td.get("daily_limit", 800),
+            per_minute_limit=td.get("per_minute_limit", 8),
+        ),
+    )
+
     g = raw.get("gemini", {})
     gemini = GeminiConfig(
         model=g.get("model", "gemini-2.0-flash"),
@@ -625,6 +650,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         rag=rag,
         notifier=notifier,
         price_monitor=price_monitor,
+        price_provider=price_provider,
         api=api_cfg,
         llm=llm_cfg,
         gemini=gemini,
