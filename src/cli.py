@@ -72,7 +72,7 @@ def _cmd_status(config: AppConfig) -> None:
 
     for pos in account.open_positions:
         try:
-            current = fetch_current_price(pos.pair)
+            current = fetch_current_price(pos.pair).price
             mult = 1 if pos.direction == "buy" else -1
             upnl = (current - pos.entry_price) * pos.position_size * mult
             upnl_color = "green" if upnl >= 0 else "red"
@@ -114,7 +114,7 @@ def _cmd_close(config: AppConfig, pair_arg: str) -> None:
             return
 
         try:
-            current = fetch_current_price(pos.pair)
+            current = fetch_current_price(pos.pair).price
         except Exception as e:
             _console.print(f"[red]価格取得失敗: {e}[/red]")
             return

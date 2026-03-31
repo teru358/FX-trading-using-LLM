@@ -100,7 +100,7 @@ def status() -> dict[str, Any]:
             "opened_at": pos.opened_at.isoformat(),
         }
         try:
-            current = fetch_current_price(pos.pair)
+            current = fetch_current_price(pos.pair).price
             mult = 1 if pos.direction == "buy" else -1
             entry["current_price"] = current
             entry["unrealized_pnl"] = round(
@@ -420,7 +420,7 @@ def run_trade() -> dict[str, Any]:
             "opened_at":     pos.opened_at.isoformat(),
         }
         try:
-            current = fetch_current_price(pos.pair)
+            current = fetch_current_price(pos.pair).price
             mult = 1 if pos.direction == "buy" else -1
             entry["current_price"] = current
             entry["unrealized_pnl"] = round(
@@ -536,7 +536,7 @@ async def close_position(pair: str) -> dict[str, Any]:
         )
 
     try:
-        current = fetch_current_price(pos.pair)
+        current = fetch_current_price(pos.pair).price
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Price fetch failed: {e}")
 

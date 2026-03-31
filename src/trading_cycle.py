@@ -149,7 +149,7 @@ async def _generate_cycle_reflections(
     """オープンポジションに対して振り返りを生成・RAGに蓄積する。"""
     for pos in position_mgr.get_account_state().open_positions:
         try:
-            current_price = fetch_current_price(pos.pair)
+            current_price = fetch_current_price(pos.pair).price
             pair_cfg = next((p for p in config.tradeable_instruments if p.symbol == pos.pair), None)
             if pair_cfg is None:
                 continue
@@ -202,7 +202,7 @@ async def _review_hold_decisions(
 
     for hold in unreviewed:
         try:
-            current_price = fetch_current_price(hold.pair)
+            current_price = fetch_current_price(hold.pair).price
             review_text, lesson, worth_storing = build_hold_review(
                 pair=hold.pair,
                 hold=hold,
@@ -267,7 +267,7 @@ async def trading_cycle(
         current_prices = {}
         for pos in account.open_positions:
             try:
-                current_prices[pos.pair] = fetch_current_price(pos.pair)
+                current_prices[pos.pair] = fetch_current_price(pos.pair).price
             except Exception as e:
                 logger.warning(f"Could not fetch price for {pos.pair}: {e}")
         closed_this_run = broker.check_and_close_positions(
@@ -353,7 +353,7 @@ async def trading_cycle(
             review_prices = {}
             for pos in account_for_review.open_positions:
                 try:
-                    review_prices[pos.pair] = fetch_current_price(pos.pair)
+                    review_prices[pos.pair] = fetch_current_price(pos.pair).price
                 except Exception as e:
                     logger.warning(f"[REVIEW] Could not fetch price for {pos.pair}: {e}")
 
@@ -524,7 +524,7 @@ async def exit_check_cycle(
     current_prices: dict[str, float] = {}
     for pos in account.open_positions:
         try:
-            current_prices[pos.pair] = fetch_current_price(pos.pair)
+            current_prices[pos.pair] = fetch_current_price(pos.pair).price
         except Exception as e:
             logger.warning(f"[EXIT] Could not fetch price for {pos.pair}: {e}")
 
@@ -649,7 +649,7 @@ async def forecast_cycle(
             recent_forecasts = forecast_store.get_recent_forecasts(pair_cfg.symbol, hours=24)
             if recent_forecasts:
                 try:
-                    current_price = fetch_current_price(pair_cfg.symbol)
+                    current_price = fetch_current_price(pair_cfg.symbol).price
                 except Exception as e:
                     logger.warning(f"[FORECAST] {pair_cfg.symbol}: price fetch failed — {e}")
                     continue
@@ -828,7 +828,7 @@ async def _summarize_pair(
             return None
 
         news = aggregate_news_sentiment(pair_cfg, store, config)
-        current_price = fetch_current_price(pair_cfg.symbol)
+        current_price = fetch_current_price(pair_cfg.symbol).price
 
         account = position_mgr.get_account_state()
         return combine_signals(

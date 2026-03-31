@@ -23,6 +23,22 @@ class PriceData:
     fetched_at: datetime
 
 
+@dataclass
+class CurrentPrice:
+    """現在価格 + オプション付加情報（Twelve Data 等リアルタイムプロバイダー用）。"""
+    price: float
+    timestamp: datetime
+    percent_change: float | None = None
+    rolling_1d_change: float | None = None
+    rolling_7d_change: float | None = None
+    fifty_two_week_high: float | None = None
+    fifty_two_week_low: float | None = None
+    is_market_open: bool | None = None
+
+    def __float__(self) -> float:
+        return self.price
+
+
 def _parse_period_days(period: str) -> int:
     """'90d' → 90、'3mo' → 90 のように日数に変換する。"""
     if period.endswith("d"):
@@ -169,16 +185,16 @@ def fetch_ohlcv(
     wait=wait_exponential(multiplier=1, min=1, max=5),
     reraise=True,
 )
-def fetch_current_price(symbol: str) -> float:
+def fetch_current_price(symbol: str) -> CurrentPrice:
     ticker = yf.Ticker(symbol)
     try:
         price = ticker.fast_info["last_price"]
         if price and price > 0:
-            return float(price)
+            return CurrentPrice(price=float(price), timestamp=datetime.now())
     except Exception:
         pass
     # Fallback: use latest close from short history
     df = ticker.history(period="2d", interval="1d")
     if df.empty:
         raise ValueError(f"Cannot fetch current price for {symbol}")
-    return float(df["Close"].iloc[-1])
+    return CurrentPrice(price=float(df["Close"].iloc[-1]), timestamp=datetime.now())
