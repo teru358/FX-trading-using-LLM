@@ -19,4 +19,13 @@ def extract_json(text: str) -> dict:
         matches = list(re.finditer(r"\{.*\}", text, re.DOTALL))
     if not matches:
         raise ValueError(f"No JSON block found in LLM response. Response: {text[:500]}")
-    return json.loads(matches[-1].group())
+    raw = matches[-1].group()
+    # LLMが trailing comma を出力する場合の補正: ",}" → "}", ",]" → "]"
+    raw = re.sub(r",\s*([}\]])", r"\1", raw)
+    # LLMが NaN / Infinity / -Infinity を出力する場合の補正
+    raw = re.sub(r"\bNaN\b", "null", raw)
+    raw = re.sub(r"\b-?Infinity\b", "null", raw)
+    # LLMが値なし ("key": ,) を出力する場合の補正
+    raw = re.sub(r":\s*,", ": null,", raw)
+    raw = re.sub(r":\s*}", ": null}", raw)
+    return json.loads(raw)

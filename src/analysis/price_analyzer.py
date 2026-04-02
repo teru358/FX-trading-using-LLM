@@ -28,19 +28,35 @@ def _to_float(val, default: float) -> float:
 
 
 def _validate_sl_tp(analysis: "PriceAnalysis") -> str | None:
-    """SL/TPが発注方向と矛盾していないか検証する。問題なければNone、矛盾があればエラーメッセージを返す。"""
+    """SL/TPが発注方向と矛盾していないか検証する。
+    同値の場合は微小マージン（価格の0.01%）を自動付与して補正する。
+    問題なければNone、矛盾があればエラーメッセージを返す。
+    """
     direction = analysis.direction_bias
     if direction == "neutral":
         return None
     entry_low, entry_high = analysis.entry_zone
     sl = analysis.stop_loss
     tp = analysis.take_profit
+    margin = entry_high * 0.0001  # 0.01% の微小マージン
     if direction == "long":
+        if sl == entry_low:
+            analysis.stop_loss = sl = entry_low - margin
+            logger.debug(f"SL auto-adjusted: {sl:.5f} (margin applied for LONG)")
+        if tp == entry_high:
+            analysis.take_profit = tp = entry_high + margin
+            logger.debug(f"TP auto-adjusted: {tp:.5f} (margin applied for LONG)")
         if sl >= entry_low:
             return f"LONG requires stop_loss < entry_zone[0]={entry_low:.5f}, got stop_loss={sl:.5f}"
         if tp <= entry_high:
             return f"LONG requires take_profit > entry_zone[1]={entry_high:.5f}, got take_profit={tp:.5f}"
     elif direction == "short":
+        if sl == entry_high:
+            analysis.stop_loss = sl = entry_high + margin
+            logger.debug(f"SL auto-adjusted: {sl:.5f} (margin applied for SHORT)")
+        if tp == entry_low:
+            analysis.take_profit = tp = entry_low - margin
+            logger.debug(f"TP auto-adjusted: {tp:.5f} (margin applied for SHORT)")
         if sl <= entry_high:
             return f"SHORT requires stop_loss > entry_zone[1]={entry_high:.5f}, got stop_loss={sl:.5f}"
         if tp >= entry_low:
@@ -158,7 +174,17 @@ async def analyze_price_action(
         try:
             data = extract_json(response_text)
         except (ValueError, json.JSONDecodeError) as e:
-            logger.error(f"Failed to parse Ollama JSON for {pair_cfg.display_name}: {e}")
+            last_error = str(e)
+            logger.warning(
+                f"[PRICE] {pair_cfg.display_name}: JSON parse failed (attempt {attempt + 1}): {e}"
+            )
+            logger.debug(f"[PRICE] Raw response: {response_text[:500]}")
+            if attempt < MAX_RETRIES - 1:
+                messages.append({"role": "assistant", "content": response_text})
+                messages.append({"role": "user", "content":
+                    "Your response was not valid JSON. Please return ONLY a valid JSON object with no extra text."
+                })
+                continue
             raise
 
         direction = data.get("direction_bias", "neutral")
