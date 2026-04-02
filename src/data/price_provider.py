@@ -6,7 +6,6 @@ Watch銘柄は常にyfinanceを使用する。
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from datetime import datetime, date
@@ -74,7 +73,7 @@ class PriceProvider:
         """現在価格を取得する（同期）。Twelve Data有効時は非同期を同期ラップ。"""
         if self._use_twelvedata(symbol):
             try:
-                cp = asyncio.run(self._td_fetcher.fetch_current_price(symbol))
+                cp = self._td_fetcher.fetch_current_price(symbol)
                 self._increment_count()
                 return cp
             except Exception as e:
@@ -91,9 +90,7 @@ class PriceProvider:
         """OHLCV を取得する（同期）。"""
         if self._use_twelvedata(symbol):
             try:
-                price_data = asyncio.run(
-                    self._td_fetcher.fetch_ohlcv(symbol, period, interval, price_store)
-                )
+                price_data = self._td_fetcher.fetch_ohlcv(symbol, period, interval, price_store)
                 self._increment_count()
                 return price_data
             except Exception as e:

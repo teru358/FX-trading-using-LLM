@@ -1,6 +1,6 @@
 """twelvedata_fetcher のユニットテスト（API呼び出しはモック）。"""
 from datetime import datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -38,8 +38,7 @@ class TestTwelveDataFetcher:
         fetcher = TwelveDataFetcher(api_key="test_key_123")
         assert fetcher._api_key == "test_key_123"
 
-    @pytest.mark.asyncio
-    async def test_fetch_current_price_parses_quote(self):
+    def test_fetch_current_price_parses_quote(self):
         fetcher = TwelveDataFetcher(api_key="test_key")
         mock_response = {
             "symbol": "USD/JPY",
@@ -54,16 +53,15 @@ class TestTwelveDataFetcher:
             },
             "timestamp": 1711872000,
         }
-        with patch.object(fetcher, "_get_json", new_callable=AsyncMock, return_value=mock_response):
-            cp = await fetcher.fetch_current_price("USDJPY=X")
+        with patch.object(fetcher, "_get_json", return_value=mock_response):
+            cp = fetcher.fetch_current_price("USDJPY=X")
         assert cp.price == 149.85
         assert cp.percent_change == -0.23
         assert cp.fifty_two_week_high == 161.95
         assert cp.fifty_two_week_low == 133.08
         assert cp.is_market_open is True
 
-    @pytest.mark.asyncio
-    async def test_fetch_ohlcv_parses_time_series(self):
+    def test_fetch_ohlcv_parses_time_series(self):
         fetcher = TwelveDataFetcher(api_key="test_key")
         mock_response = {
             "meta": {"symbol": "USD/JPY", "interval": "1h"},
@@ -73,8 +71,8 @@ class TestTwelveDataFetcher:
             ],
             "status": "ok",
         }
-        with patch.object(fetcher, "_get_json", new_callable=AsyncMock, return_value=mock_response):
-            price_data = await fetcher.fetch_ohlcv("USDJPY=X", period="5d", interval="1h")
+        with patch.object(fetcher, "_get_json", return_value=mock_response):
+            price_data = fetcher.fetch_ohlcv("USDJPY=X", period="5d", interval="1h")
         assert price_data.symbol == "USDJPY=X"
         assert len(price_data.df) == 2
         assert price_data.current_price == 149.8

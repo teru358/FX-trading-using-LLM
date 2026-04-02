@@ -71,21 +71,21 @@ class TwelveDataFetcher:
         self._api_key = api_key
         self._timeout = timeout
 
-    async def _get_json(self, endpoint: str, params: dict) -> dict:
+    def _get_json(self, endpoint: str, params: dict) -> dict:
         """APIリクエストを発行して JSON を返す。"""
         params["apikey"] = self._api_key
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.get(f"{_BASE_URL}{endpoint}", params=params)
+        with httpx.Client(timeout=self._timeout) as client:
+            resp = client.get(f"{_BASE_URL}{endpoint}", params=params)
             resp.raise_for_status()
             data = resp.json()
         if "code" in data and data.get("status") == "error":
             raise ValueError(f"Twelve Data error: {data.get('message', data)}")
         return data
 
-    async def fetch_current_price(self, symbol: str) -> CurrentPrice:
+    def fetch_current_price(self, symbol: str) -> CurrentPrice:
         """quote エンドポイントから現在価格+付加情報を取得する。"""
         td_sym = _symbol_to_twelvedata(symbol)
-        data = await self._get_json("/quote", {"symbol": td_sym})
+        data = self._get_json("/quote", {"symbol": td_sym})
 
         price = float(data["close"])
         pct = float(data.get("percent_change", 0))
@@ -101,7 +101,7 @@ class TwelveDataFetcher:
             is_market_open=data.get("is_market_open"),
         )
 
-    async def fetch_ohlcv(
+    def fetch_ohlcv(
         self,
         symbol: str,
         period: str = "90d",
@@ -113,7 +113,7 @@ class TwelveDataFetcher:
         td_interval = _interval_to_twelvedata(interval)
         outputsize = _period_to_outputsize(period, interval)
 
-        data = await self._get_json("/time_series", {
+        data = self._get_json("/time_series", {
             "symbol": td_sym,
             "interval": td_interval,
             "outputsize": outputsize,
@@ -151,10 +151,10 @@ class TwelveDataFetcher:
             fetched_at=datetime.now(),
         )
 
-    async def probe(self) -> bool:
+    def probe(self) -> bool:
         """API接続確認。成功すればTrue。"""
         try:
-            await self._get_json("/quote", {"symbol": "USD/JPY"})
+            self._get_json("/quote", {"symbol": "USD/JPY"})
             return True
         except Exception as e:
             logger.warning(f"Twelve Data probe failed: {e}")
