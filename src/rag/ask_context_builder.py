@@ -119,3 +119,220 @@ def build_forecast_accuracy(forecasts_by_pair: dict[str, list], pairs: list[str]
         return "=== Forecast Accuracy ===\nNo forecast data available."
 
     return "\n".join(lines)
+
+
+class AskContextBuilder:
+    """askコマンド用のコンテキストを構築する。"""
+
+    def __init__(self, config, store, analysis_store, position_mgr,
+                 session_store=None, forecast_store=None) -> None:
+        self._config = config
+        self._store = store
+        self._analysis_store = analysis_store
+        self._position_mgr = position_mgr
+        self._session_store = session_store
+        self._forecast_store = forecast_store
+
+    async def build(self, user_message: str) -> dict[str, str]:
+        config = self._config
+        all_instruments = config.watch_only_instruments + config.tradeable_instruments
+        pairs = extract_pairs(user_message, all_instruments)
+
+        from src.rag.embedder import embed_text
+        query_embedding = await embed_text(
+            text=user_message,
+            ollama_base_url=config.llm.ollama.base_url,
+            model=config.rag.embedding_model,
+        )
+
+        semantic_results = await self._semantic_search(query_embedding, pairs)
+        technical = self._build_technical_snapshots(pairs)
+        news = self._build_news_context()
+        positions = self._build_positions()
+        trade_summary = self._build_trade_summary(pairs)
+        forecast_accuracy = self._build_forecast_accuracy(pairs)
+
+        return {
+            "open_positions": positions,
+            "semantic_results": semantic_results,
+            "trade_summary": trade_summary,
+            "forecast_accuracy": forecast_accuracy,
+            "technical_snapshots": technical,
+            "news_context": news,
+        }
+
+    async def _semantic_search(self, query_embedding: list[float], pairs: list[str]) -> str:
+        store = self._store
+        all_results: list[dict] = []
+
+        # News collection
+        try:
+            if pairs:
+                for pair in pairs:
+                    hits = store.query_news(
+                        query_embedding=query_embedding, pair=pair,
+                        top_k=5, lookback_hours=self._config.rag.news_lookback_hours,
+                    )
+                    for h in hits:
+                        h["source"] = "news"
+                        h["distance"] = h.get("distance", 0.5)
+                    all_results.extend(hits)
+            else:
+                for cat in ("fx", "global", "japan"):
+                    entries = store.get_recent_category_news(
+                        [cat], lookback_hours=self._config.rag.news_lookback_hours,
+                    )
+                    for e in entries[:3]:
+                        e["source"] = "news"
+                        e["distance"] = 0.5
+                        all_results.append(e)
+        except Exception as e:
+            logger.warning(f"[ASK] News search failed: {e}")
+
+        # Reflections collection
+        try:
+            refl_col = store._reflections
+            if refl_col.count() > 0:
+                where = None
+                if pairs and len(pairs) == 1:
+                    where = {"pair": {"$eq": pairs[0]}}
+                results = refl_col.query(
+                    query_embeddings=[query_embedding],
+                    n_results=min(3, refl_col.count()),
+                    where=where,
+                )
+                for i, doc in enumerate(results.get("documents", [[]])[0]):
+                    all_results.append({
+                        "text": doc,
+                        "metadata": results["metadatas"][0][i],
+                        "distance": results["distances"][0][i] if results.get("distances") else 0.5,
+                        "source": "reflection",
+                    })
+        except Exception as e:
+            logger.warning(f"[ASK] Reflection search failed: {e}")
+
+        # Directional collections (bullish + bearish)
+        for direction in ("bullish", "bearish"):
+            try:
+                col = store.directional._collection(direction)
+                if col.count() > 0:
+                    query_params = {
+                        "query_embeddings": [query_embedding],
+                        "n_results": min(3, col.count()),
+                    }
+                    if pairs and len(pairs) == 1:
+                        query_params["where"] = {"pair": {"$eq": pairs[0]}}
+                    results = col.query(**query_params)
+                    for i, doc in enumerate(results.get("documents", [[]])[0]):
+                        meta = results["metadatas"][0][i]
+                        all_results.append({
+                            "text": doc,
+                            "metadata": meta,
+                            "distance": results["distances"][0][i] if results.get("distances") else 0.5,
+                            "source": direction,
+                        })
+            except Exception as e:
+                logger.warning(f"[ASK] {direction} search failed: {e}")
+
+        ranked = merge_and_rank_results(all_results, max_results=10)
+
+        if not ranked:
+            return "=== Related Context ===\nNo related data found."
+
+        lines = ["=== Related Context (by relevance) ==="]
+        for r in ranked:
+            source = r.get("source", "unknown")
+            meta = r.get("metadata", {})
+            text = r.get("text", "")[:200]
+            session_type = meta.get("session_type", "")
+            tag = session_type if session_type else source
+            lines.append(f"[{tag}] {text}")
+
+        return "\n".join(lines)
+
+    def _build_technical_snapshots(self, pairs: list[str]) -> str:
+        config = self._config
+        all_instruments = config.watch_only_instruments + config.tradeable_instruments
+
+        if pairs:
+            instruments = [i for i in all_instruments if i.symbol in pairs]
+            instruments += config.watch_only_instruments
+            seen = set()
+            unique = []
+            for i in instruments:
+                if i.symbol not in seen:
+                    seen.add(i.symbol)
+                    unique.append(i)
+            instruments = unique
+        else:
+            instruments = all_instruments
+
+        lines = ["=== Technical Snapshots ==="]
+        for inst in instruments:
+            snaps = self._analysis_store.get_recent_snapshots(
+                inst.symbol, hours=config.rag.analysis_lookback_hours,
+            )
+            if snaps:
+                s = snaps[0]
+                lines.append(
+                    f"{inst.display_name}: bias={s.bias_score:+.2f} conf={s.confidence:.2f} "
+                    f"dir={s.direction_bias} RR={s.risk_reward_ratio:.1f} | {s.reasoning_summary}"
+                )
+            else:
+                lines.append(f"{inst.display_name}: no snapshot")
+        return "\n".join(lines)
+
+    def _build_news_context(self) -> str:
+        lines = ["=== News Context ==="]
+        for cat in ("fx", "global", "japan"):
+            entries = self._store.get_recent_category_news(
+                [cat], lookback_hours=self._config.rag.news_lookback_hours,
+            )
+            if entries:
+                for e in entries[:3]:
+                    meta = e.get("metadata", {})
+                    summary = meta.get("summary") or e.get("text", "")[:80]
+                    score = meta.get("sentiment_score", 0.0)
+                    lines.append(f"[{cat}] {summary} (sentiment={score:+.2f})")
+        return "\n".join(lines)
+
+    def _build_positions(self) -> str:
+        account = self._position_mgr.get_account_state()
+        lines = ["=== Open Positions ==="]
+        if account.open_positions:
+            for pos in account.open_positions:
+                lines.append(
+                    f"{pos.pair} {pos.direction.upper()} entry={pos.entry_price:.5f} "
+                    f"SL={pos.stop_loss:.5f} TP={pos.take_profit:.5f}"
+                )
+        else:
+            lines.append("No open positions.")
+        return "\n".join(lines)
+
+    def _build_trade_summary(self, pairs: list[str]) -> str:
+        if not self._session_store:
+            return ""
+        from sqlalchemy import select
+        from sqlalchemy.orm import Session as SASession
+        from src.data.session_store import _TradingSession
+
+        with SASession(self._session_store._engine) as sa_session:
+            stmt = select(_TradingSession).where(_TradingSession.outcome.isnot(None))
+            if pairs:
+                stmt = stmt.where(_TradingSession.pair.in_(pairs))
+            results = sa_session.execute(stmt).scalars().all()
+            for r in results:
+                sa_session.expunge(r)
+        return build_trade_summary(list(results), pairs)
+
+    def _build_forecast_accuracy(self, pairs: list[str]) -> str:
+        if not self._forecast_store:
+            return ""
+        config = self._config
+        target_pairs = pairs if pairs else [i.symbol for i in config.tradeable_instruments]
+        forecasts_by_pair: dict[str, list] = {}
+        for pair in target_pairs:
+            records = self._forecast_store.get_recent_forecasts(pair, hours=24)
+            if records:
+                forecasts_by_pair[pair] = records
+        return build_forecast_accuracy(forecasts_by_pair, pairs)
