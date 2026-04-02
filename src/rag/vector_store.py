@@ -6,6 +6,8 @@ from pathlib import Path
 
 import chromadb
 
+from src.rag.directional_store import DirectionalStore
+
 logger = logging.getLogger(__name__)
 
 # ChromaDB コレクション名
@@ -30,6 +32,7 @@ class VectorStore:
             name=_REFLECTION_COL,
             metadata={"hnsw:space": "cosine"},
         )
+        self.directional = DirectionalStore(db_path)
         logger.info(
             f"VectorStore ready at {db_path} "
             f"(news={self._news.count()}, reflections={self._reflections.count()})"

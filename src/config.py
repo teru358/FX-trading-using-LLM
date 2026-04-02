@@ -112,6 +112,16 @@ class TradingConfig:
     timeout_min_progress_pct: float = 0.30   # Layer 2: タイムアウト判定の最低進捗率
     profit_lock_min_progress_pct: float = 0.40  # Layer 3: 利益ロック発動の最低進捗率
     profit_lock_score_floor: float = 0.15    # Layer 3: この絶対値未満で利益ロック
+    # RAG方向別スコア補正
+    rag_adjustment_enabled: bool = True
+    rag_adjustment_max: float = 0.15
+    rag_adjustment_min_hits: int = 2
+    rag_adjustment_search_top_n: int = 5
+    rag_adjustment_same_weight: float = 0.10
+    rag_adjustment_opposite_weight: float = 0.10
+    rag_adjustment_trade_multiplier: float = 1.0
+    rag_adjustment_forecast_multiplier: float = 0.5
+    rag_adjustment_hold_multiplier: float = 0.3
 
 
 @dataclass
