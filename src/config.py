@@ -444,6 +444,16 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         timeout_min_progress_pct=t.get("timeout_min_progress_pct", 0.30),
         profit_lock_min_progress_pct=t.get("profit_lock_min_progress_pct", 0.40),
         profit_lock_score_floor=t.get("profit_lock_score_floor", 0.15),
+        # RAG方向別スコア補正
+        rag_adjustment_enabled=t.get("rag_adjustment_enabled", True),
+        rag_adjustment_max=t.get("rag_adjustment_max", 0.15),
+        rag_adjustment_min_hits=t.get("rag_adjustment_min_hits", 2),
+        rag_adjustment_search_top_n=t.get("rag_adjustment_search_top_n", 5),
+        rag_adjustment_same_weight=t.get("rag_adjustment_same_weight", 0.10),
+        rag_adjustment_opposite_weight=t.get("rag_adjustment_opposite_weight", 0.10),
+        rag_adjustment_trade_multiplier=t.get("rag_adjustment_trade_multiplier", 1.0),
+        rag_adjustment_forecast_multiplier=t.get("rag_adjustment_forecast_multiplier", 0.5),
+        rag_adjustment_hold_multiplier=t.get("rag_adjustment_hold_multiplier", 0.3),
     )
 
     instruments = [

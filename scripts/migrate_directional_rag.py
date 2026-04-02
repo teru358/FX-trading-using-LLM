@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import load_config
 from src.data.session_store import SessionStore
-from src.llm.embedder import embed_text
+from src.rag.embedder import embed_text
 from src.rag.vector_store import VectorStore
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
