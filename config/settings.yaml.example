@@ -121,6 +121,23 @@ trading:
   timeout_min_progress_pct: 0.30        # Layer 2: この進捗率未満でタイムアウト決済
   profit_lock_min_progress_pct: 0.40    # Layer 3: TP方向への進捗率がこれ以上で利益ロック候補
   profit_lock_score_floor: 0.15         # Layer 3: シグナルスコア絶対値がこれ未満で利益ロック
+  # RAG方向別スコア補正
+  rag_adjustment_enabled: true
+  rag_adjustment_max: 0.15
+  rag_adjustment_min_hits: 2
+  rag_adjustment_search_top_n: 5
+  rag_adjustment_same_weight: 0.10
+  rag_adjustment_opposite_weight: 0.10
+  rag_adjustment_trade_multiplier: 1.0
+  rag_adjustment_forecast_multiplier: 0.5
+  rag_adjustment_hold_multiplier: 0.3
+  # ATRベースSL/TP
+  sl_atr_mult_default: 1.5            # SL距離 = ATR(14) × この倍率
+  tp_atr_mult_default: 3.0            # TP距離 = ATR(14) × この倍率
+  sl_atr_mult_min: 0.5                # LLM動的更新の下限
+  sl_atr_mult_max: 3.0                # LLM動的更新の上限
+  tp_atr_mult_min: 1.0
+  tp_atr_mult_max: 6.0
 
 price_monitor:
   enabled: true
@@ -133,6 +150,15 @@ price_monitor:
   trailing_stop_enabled: false
   trailing_stop_activation_pct: 0.40   # TP距離の40%到達で発動開始
   trailing_stop_distance_ratio: 1.0    # 元のSL距離と同比率でSLを追従（1.0 = 同じ幅）
+
+# ── 価格データプロバイダー ──────────────────────────────────────────
+# yfinance: デフォルト（無料、15-20分遅延）
+# twelvedata: リアルタイムFX（無料枠800req/日、要TWELVEDATA_API_KEY）
+price_provider:
+  realtime_provider: "yfinance"        # "yfinance" | "twelvedata"
+  twelvedata:
+    daily_limit: 800
+    per_minute_limit: 8
 
 schedule:
   run_times:
