@@ -33,6 +33,7 @@ Consider:
 11. Risk/reward ratio (minimum 2:1 required)
     - For LONG:  stop_loss < entry_zone[0], take_profit > entry_zone[1]
     - For SHORT: stop_loss > entry_zone[1], take_profit < entry_zone[0]
+12. Identify key support (nearest level below entry) and resistance (nearest level above entry) from swing highs/lows, Ichimoku kumo edges, or Bollinger Bands
 
 After your reasoning, output ONLY this JSON block (no markdown fences):
 {
@@ -43,5 +44,7 @@ After your reasoning, output ONLY this JSON block (no markdown fences):
   "stop_loss": <price>,   // long: below entry_zone[0] | short: above entry_zone[1]
   "take_profit": <price>, // long: above entry_zone[1] | short: below entry_zone[0]
   "risk_reward_ratio": <float>,
+  "key_support": <nearest_support_price>,
+  "key_resistance": <nearest_resistance_price>,
   "reasoning_summary": "ニュースやテクニカル指標を踏まえた分析根拠を日本語1文で記述"
 }

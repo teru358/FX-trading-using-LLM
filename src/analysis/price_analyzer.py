@@ -97,6 +97,8 @@ class PriceAnalysis:
     risk_reward_ratio: float
     reasoning_summary: str
     analyzed_at: datetime
+    key_support: float | None = None
+    key_resistance: float | None = None
 
 
 def load_user_notes(notes_path: Path, section: str = "price") -> str:
@@ -200,6 +202,8 @@ async def analyze_price_action(
             stop_loss = _to_float(data.get("stop_loss"), summary.current_price * 0.99)
             take_profit = _to_float(data.get("take_profit"), summary.current_price * 1.02)
         rr = _to_float(data.get("risk_reward_ratio"), 2.0)
+        key_support = _to_float(data.get("key_support"), 0.0) or None
+        key_resistance = _to_float(data.get("key_resistance"), 0.0) or None
 
         analysis = PriceAnalysis(
             pair=pair_cfg.symbol,
@@ -215,6 +219,8 @@ async def analyze_price_action(
             risk_reward_ratio=rr,
             reasoning_summary=data.get("reasoning_summary", ""),
             analyzed_at=datetime.now(),
+            key_support=key_support,
+            key_resistance=key_resistance,
         )
 
         logger.info(
