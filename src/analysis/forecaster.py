@@ -19,6 +19,7 @@ def build_forecast_review(
     current_price: float,
     review_ts: datetime,
     significance_atr_ratio: float = 0.30,
+    atr_value: float | None = None,
 ) -> tuple[str, bool]:
     """予測と実際の結果を比較し、事実文字列と有意性フラグを返す。
 
@@ -28,6 +29,7 @@ def build_forecast_review(
         current_price: 現在価格
         review_ts: 検証時刻
         significance_atr_ratio: ATR proxy に対する有意性閾値の比率
+        atr_value: 本物のATR(14)値。指定時はSL距離ベースの代理値より優先。
 
     Returns:
         (review_text, is_significant)
@@ -44,13 +46,15 @@ def build_forecast_review(
 
     correct = (forecast.predicted_direction == actual_direction)
 
-    # A: ATR proxy による有意性判定（stop_loss が記録されている場合）
-    if forecast.stop_loss and forecast.stop_loss > 0 and forecast.current_price > 0:
+    # A: ATR による有意性判定（本物のATR優先、フォールバックでSL距離を代理値として使用）
+    if atr_value and atr_value > 0:
+        threshold = atr_value * significance_atr_ratio
+        significant = abs(delta) >= threshold
+    elif forecast.stop_loss and forecast.stop_loss > 0 and forecast.current_price > 0:
         atr_proxy = abs(forecast.current_price - forecast.stop_loss)
         threshold = atr_proxy * significance_atr_ratio
         significant = abs(delta) >= threshold
     else:
-        # フォールバック: 0.05% 以上の動きを有意とする
         significant = (
             abs(delta / forecast.current_price) >= 0.0005
             if forecast.current_price > 0
@@ -90,6 +94,7 @@ def build_forecast_review_summary(
     current_price: float,
     review_ts: datetime,
     significance_atr_ratio: float = 0.30,
+    atr_value: float | None = None,
 ) -> tuple[str, str, bool]:
     """直近24hの複数予測を一括検証し、集計サマリーと有意性フラグを返す。
 
@@ -99,6 +104,7 @@ def build_forecast_review_summary(
         current_price: 現在価格
         review_ts: 検証時刻
         significance_atr_ratio: ATR proxy に対する有意性閾値の比率
+        atr_value: 本物のATR(14)値。指定時はSL距離ベースの代理値より優先。
 
     Returns:
         (summary_text, lesson, has_significant)
@@ -115,6 +121,7 @@ def build_forecast_review_summary(
             current_price=current_price,
             review_ts=review_ts,
             significance_atr_ratio=significance_atr_ratio,
+            atr_value=atr_value,
         )
         delta = current_price - fc.current_price
         actual_direction = "bullish" if delta > 0 else ("bearish" if delta < 0 else "neutral")
@@ -177,6 +184,7 @@ def build_hold_review(
     current_price: float,
     review_ts: datetime,
     significance_atr_ratio: float = 0.30,
+    atr_value: float | None = None,
 ) -> tuple[str, str, bool]:
     """HOLD判断と実際の価格変動を比較し、事実文字列と蓄積要否フラグを返す。
 
@@ -186,6 +194,7 @@ def build_hold_review(
         current_price: 現在価格
         review_ts: 検証時刻
         significance_atr_ratio: ATR proxy に対する有意性閾値の比率
+        atr_value: 本物のATR(14)値。指定時はSL距離ベースの代理値より優先。
 
     Returns:
         (review_text, lesson, worth_storing)
@@ -201,8 +210,10 @@ def build_hold_review(
 
     direction_correct = (signal_bullish and price_went_up) or (signal_bearish and price_went_down)
 
-    # A: ATR proxy による有意性判定
-    if hold.stop_loss and hold.stop_loss > 0 and hold.current_price > 0:
+    # A: ATR による有意性判定（本物のATR優先）
+    if atr_value and atr_value > 0:
+        significant = abs(delta) >= atr_value * significance_atr_ratio
+    elif hold.stop_loss and hold.stop_loss > 0 and hold.current_price > 0:
         atr_proxy = abs(hold.current_price - hold.stop_loss)
         significant = abs(delta) >= atr_proxy * significance_atr_ratio
     else:

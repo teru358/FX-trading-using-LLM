@@ -183,7 +183,7 @@ def main() -> None:
     # 3. 予測サイクル（LLMなし）
     for t in forecast_times:
         schedule.every().day.at(t, news_tz).do(
-            run_forecast_cycle, config, store, analysis_store, forecast_store, price_provider=price_provider
+            run_forecast_cycle, config, store, analysis_store, forecast_store, price_provider=price_provider, price_store=price_store
         )
 
     # 4. ニュース収集（LLMあり・時間がかかる）

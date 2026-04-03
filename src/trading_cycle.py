@@ -208,6 +208,7 @@ async def _review_hold_decisions(
     hold_store: HoldDecisionStore,
     store: VectorStore,
     price_provider: PriceProvider | None = None,
+    price_store=None,
 ) -> None:
     """前回HOLDした判断を検証してRAGに蓄積する（LLM不使用）。"""
     from src.analysis.forecaster import build_hold_review
@@ -226,12 +227,31 @@ async def _review_hold_decisions(
     for hold in unreviewed:
         try:
             current_price = _get_price(hold.pair, price_provider)
+
+            # 本物のATR(14)を計算
+            hold_atr = None
+            if price_store:
+                try:
+                    from src.data.price_fetcher import fetch_ohlcv
+                    _pd = fetch_ohlcv(
+                        hold.pair, config.trading.lookback_days,
+                        config.trading.ohlcv_interval, price_store=price_store,
+                    )
+                    if _pd and len(_pd.df) >= 14:
+                        import pandas_ta as _pta
+                        _atr_s = _pta.atr(_pd.df["High"], _pd.df["Low"], _pd.df["Close"], length=14)
+                        if _atr_s is not None and not _atr_s.empty:
+                            hold_atr = float(_atr_s.iloc[-1])
+                except Exception:
+                    pass
+
             review_text, lesson, worth_storing = build_hold_review(
                 pair=hold.pair,
                 hold=hold,
                 current_price=current_price,
                 review_ts=datetime.now(),
                 significance_atr_ratio=config.analysis.forecast_significance_atr_ratio,
+                atr_value=hold_atr,
             )
             logger.info(f"[HOLD REVIEW] {hold.pair}: {review_text}")
 
@@ -451,7 +471,7 @@ async def trading_cycle(
     await _generate_cycle_reflections(config, position_mgr, store, llm_reflect, price_provider=price_provider)
 
     # Phase 2.5: HOLD判断レビュー（前回HOLDの方向性を事実で検証）
-    await _review_hold_decisions(config, hold_store, store, price_provider=price_provider)
+    await _review_hold_decisions(config, hold_store, store, price_provider=price_provider, price_store=price_store)
 
     # Phase 3: 各ペアを並列分析（蓄積済みスナップショットを集約）
     semaphore = asyncio.Semaphore(config.llm.ollama.max_concurrent)
@@ -1005,6 +1025,7 @@ async def forecast_cycle(
     analysis_store: AnalysisStore,
     forecast_store,
     price_provider: PriceProvider | None = None,
+    price_store=None,
 ) -> None:
     """予測サイクル（設定間隔ごと実行）。
 
@@ -1042,6 +1063,22 @@ async def forecast_cycle(
 
                 review_ts = datetime.now()
 
+                # 本物のATR(14)を計算（significanceフィルタ用）
+                pair_atr = None
+                try:
+                    from src.data.price_fetcher import fetch_ohlcv
+                    _pd = fetch_ohlcv(
+                        pair_cfg.symbol, config.trading.lookback_days,
+                        config.trading.ohlcv_interval, price_store=price_store,
+                    )
+                    if _pd and len(_pd.df) >= 14:
+                        import pandas_ta as _pta
+                        _atr_s = _pta.atr(_pd.df["High"], _pd.df["Low"], _pd.df["Close"], length=14)
+                        if _atr_s is not None and not _atr_s.empty:
+                            pair_atr = float(_atr_s.iloc[-1])
+                except Exception as e:
+                    logger.debug(f"[FORECAST] {pair_cfg.symbol}: ATR calc failed, using fallback — {e}")
+
                 # 各予測のdeltaを更新
                 for fc in recent_forecasts:
                     delta = current_price - fc.current_price
@@ -1054,6 +1091,7 @@ async def forecast_cycle(
                     current_price=current_price,
                     review_ts=review_ts,
                     significance_atr_ratio=config.analysis.forecast_significance_atr_ratio,
+                    atr_value=pair_atr,
                 )
                 logger.info(f"[FORECAST] {pair_cfg.symbol}: {summary_text}")
 
@@ -1070,6 +1108,7 @@ async def forecast_cycle(
                             current_price=current_price,
                             review_ts=review_ts,
                             significance_atr_ratio=config.analysis.forecast_significance_atr_ratio,
+                            atr_value=pair_atr,
                         )
                         if fc_significant:
                             fc_direction = fc.predicted_direction
@@ -1241,11 +1280,12 @@ def run_forecast_cycle(
     analysis_store: AnalysisStore,
     forecast_store,
     price_provider: PriceProvider | None = None,
+    price_store=None,
 ) -> None:
     """scheduleライブラリから呼び出す同期ラッパー。"""
     state_store = StateStore(config.state_dir)
     position_mgr = PositionManager(state_store, config.trading.initial_balance, context="ForecastCycle")
-    asyncio.run(forecast_cycle(config, position_mgr, store, analysis_store, forecast_store, price_provider=price_provider))
+    asyncio.run(forecast_cycle(config, position_mgr, store, analysis_store, forecast_store, price_provider=price_provider, price_store=price_store))
 
 
 async def _summarize_pair(
