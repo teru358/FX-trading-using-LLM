@@ -92,6 +92,8 @@ class AnalysisStore:
         total_w = 0.0
         w_bias = 0.0
         w_conf = 0.0
+        w_long = 0.0
+        w_short = 0.0
 
         for snap in snapshots:
             hours_ago = (now - snap.analyzed_at).total_seconds() / 3600
@@ -99,15 +101,28 @@ class AnalysisStore:
             total_w += w
             w_bias += w * (snap.bias_score or 0.0)
             w_conf += w * (snap.confidence or 0.5)
+            if snap.direction_bias == "long":
+                w_long += w
+            elif snap.direction_bias == "short":
+                w_short += w
 
         agg_bias = w_bias / total_w
-        agg_conf = min(0.9, w_conf / total_w)
+
+        # 方向一致率（時間加重）: 全スナップショットが同方向なら1.0、半々なら0.5
+        consistency = max(w_long, w_short) / total_w if total_w > 0 else 0.5
+        agg_conf = min(0.9, (w_conf / total_w) * consistency)
 
         direction = (
             "long"    if agg_bias > 0.1  else
             "short"   if agg_bias < -0.1 else
             "neutral"
         )
+
+        # 方向カウント（ログ・reasoning用）
+        dir_counts: dict[str, int] = {}
+        for snap in snapshots:
+            d = snap.direction_bias or "neutral"
+            dir_counts[d] = dir_counts.get(d, 0) + 1
 
         # SL/TP は集約方向に一致する最新スナップショットを採用。
         # 一致するものがなければ最新スナップショットを使用する（安全ネットは signal_combiner 側に別途実装）。
@@ -116,7 +131,8 @@ class AnalysisStore:
 
         logger.info(
             f"[AGGREGATE] {symbol}: {len(snapshots)} snapshots | "
-            f"bias={agg_bias:+.2f} conf={agg_conf:.2f} dir={direction}"
+            f"bias={agg_bias:+.2f} conf={agg_conf:.2f} dir={direction} "
+            f"consistency={consistency:.0%} (L={dir_counts.get('long', 0)} S={dir_counts.get('short', 0)} N={dir_counts.get('neutral', 0)})"
             + ("" if ref is latest else f" (SL/TP from direction-matched snapshot)")
         )
         return PriceAnalysis(
@@ -130,7 +146,10 @@ class AnalysisStore:
             risk_reward_ratio=ref.risk_reward_ratio or 2.0,
             reasoning_summary=(
                 f"Aggregated {len(snapshots)} snapshots over {hours}h "
-                f"(weighted bias={agg_bias:+.2f}, latest: {latest.reasoning_summary or ''})"
+                f"(weighted bias={agg_bias:+.2f}, consistency={consistency:.0%}, "
+                f"long={dir_counts.get('long', 0)} short={dir_counts.get('short', 0)} "
+                f"neutral={dir_counts.get('neutral', 0)}, "
+                f"latest: {latest.reasoning_summary or ''})"
             ),
             analyzed_at=datetime.now(),
         )
