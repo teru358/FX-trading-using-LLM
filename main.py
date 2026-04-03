@@ -48,7 +48,6 @@ def main() -> None:
     parser.add_argument("--skip-news", action="store_true", help="起動時の初回ニュース取得をスキップ")
     parser.add_argument("--skip-tech", action="store_true", help="起動時の初回テクニカル収集をスキップ")
     parser.add_argument("--daemon", action="store_true", help="デーモンモード: stdin CLIを起動せずREST APIのみで操作")
-    parser.add_argument("--no-tui", action="store_true", help="TUI無効: 従来のコマンドラインモードで起動")
     args = parser.parse_args()
 
     config = load_config()
@@ -222,7 +221,7 @@ def main() -> None:
 
     _console.print(Rule("[dim cyan]Scheduler running[/dim cyan]", style="dim cyan"))
 
-    # メインスレッド: TUI or コマンドループ or デーモン待機
+    # メインスレッド: コマンドループ or デーモン待機
     if args.daemon:
         _console.print("[dim]daemonモード稼働中 — REST API で操作してください (Ctrl+C で終了)[/dim]")
         try:
@@ -230,28 +229,8 @@ def main() -> None:
         except KeyboardInterrupt:
             _console.print("\n[dim]終了します...[/dim]")
             _stop.set()
-    elif args.no_tui:
-        run_commands(config, store, analysis_store, _stop, _job_lock, forecast_store, price_store, hold_store, price_provider=price_provider)
     else:
-        try:
-            from src.tui import TuiApp
-            app = TuiApp(
-                config=config,
-                store=store,
-                analysis_store=analysis_store,
-                stop_event=_stop,
-                job_lock=_job_lock,
-                forecast_store=forecast_store,
-                price_store=price_store,
-                hold_store=hold_store,
-                price_provider=price_provider,
-            )
-            app.run()
-        except ImportError:
-            _console.print("[yellow][WARN] textual がインストールされていません — 従来CLIで起動します[/yellow]")
-            run_commands(config, store, analysis_store, _stop, _job_lock, forecast_store, price_store, hold_store, price_provider=price_provider)
-        finally:
-            _stop.set()
+        run_commands(config, store, analysis_store, _stop, _job_lock, forecast_store, price_store, hold_store, price_provider=price_provider)
 
 
 if __name__ == "__main__":
