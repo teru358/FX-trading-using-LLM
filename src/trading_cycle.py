@@ -31,10 +31,13 @@ from src.notifications.notifier import (
 from src.reporting.reporter import print_news_summary, print_run_summary, print_tech_summary
 from src.signals.rag_adjustment import RagAdjustmentConfig, compute_rag_adjustment
 from src.signals.signal_combiner import combine_signals
+from src.trading.atr_calculator import calculate_sl_tp
+from src.trading.entry_context_builder import build_entry_context
 from src.trading.live_broker import create_broker
 from src.trading.market_hours import is_market_open, market_status_label
 from src.trading.position_manager import PositionManager
 from src.trading.position_reviewer import review_open_positions
+from src.persistence.adaptive_params_store import AdaptiveParamsStore
 
 logger = logging.getLogger(__name__)
 
@@ -297,6 +300,19 @@ async def trading_cycle(
     logger.info(f"=== Trading cycle started: {run_start.strftime('%Y-%m-%d %H:%M %Z')} ===")
 
     broker = create_broker(config.trading.trading_mode)
+    adaptive_store = AdaptiveParamsStore(
+        state_dir=config.state_dir,
+        defaults={
+            "sl_atr_mult": config.trading.sl_atr_mult_default,
+            "tp_atr_mult": config.trading.tp_atr_mult_default,
+        },
+        limits={
+            "sl_atr_mult_min": config.trading.sl_atr_mult_min,
+            "sl_atr_mult_max": config.trading.sl_atr_mult_max,
+            "tp_atr_mult_min": config.trading.tp_atr_mult_min,
+            "tp_atr_mult_max": config.trading.tp_atr_mult_max,
+        },
+    )
     notifier = create_notifier(config.notifier.notifier)
     llm_price = create_llm_client(config, "price_analysis")
     llm_reflect = create_llm_client(config, "reflection")
@@ -352,12 +368,35 @@ async def trading_cycle(
             if pair_cfg is None:
                 continue
             try:
+                entry_analysis = ""
+                sltp_comparison = ""
+                param_history_text = ""
+                if session_store:
+                    sess = session_store.get_session(closed_order.order_id)
+                    if sess:
+                        entry_analysis = sess.analysis_summary or ""
+                        if sess.atr_value and sess.computed_sl:
+                            sltp_comparison = (
+                                f"ATR(14)={sess.atr_value:.5f} sl_mult={sess.sl_atr_mult} tp_mult={sess.tp_atr_mult}\n"
+                                f"computed: SL={sess.computed_sl:.5f} TP={sess.computed_tp:.5f}\n"
+                                f"llm: SL={sess.llm_sl:.5f} TP={sess.llm_tp:.5f}\n"
+                                f"Actual close: {(closed_order.close_price or closed_order.entry_price):.5f} ({closed_order.close_reason})"
+                            )
+                        history = adaptive_store.get_history(closed_order.pair, limit=3)
+                        if history:
+                            param_history_text = "\n".join(
+                                f"[{h.get('updated_at', '?')}] sl={h.get('sl_atr_mult')} tp={h.get('tp_atr_mult')} reason={h.get('reason', '')}"
+                                for h in history
+                            )
                 reflection = await generate_close_reflection(
                     pair_cfg=pair_cfg,
                     order=closed_order,
                     llm=llm_reflect,
                     temperature=config.llm.reflection.temperature,
                     user_notes=load_user_notes(config.user_notes_path, "reflect"),
+                    entry_analysis=entry_analysis,
+                    sltp_comparison=sltp_comparison,
+                    param_history=param_history_text,
                 )
                 await store_reflection(
                     reflection=reflection,
@@ -365,6 +404,23 @@ async def trading_cycle(
                     embed_fn=embed_fn,
                     close_reason=closed_order.close_reason,
                 )
+                if reflection.atr_params_suggestion:
+                    suggestion = reflection.atr_params_suggestion
+                    new_params = {}
+                    if suggestion.get("sl_atr_mult") is not None:
+                        new_params["sl_atr_mult"] = suggestion["sl_atr_mult"]
+                    if suggestion.get("tp_atr_mult") is not None:
+                        new_params["tp_atr_mult"] = suggestion["tp_atr_mult"]
+                    if new_params:
+                        try:
+                            adaptive_store.update_params(
+                                pair=closed_order.pair,
+                                new_params=new_params,
+                                reason=suggestion.get("reason", "LLM suggestion"),
+                                trade_id=closed_order.order_id,
+                            )
+                        except Exception as e:
+                            logger.warning(f"[ADAPTIVE] {closed_order.pair}: param update failed — {e}")
                 # Session close + directional RAG complete
                 if session_store:
                     direction = "bullish" if closed_order.direction == "buy" else "bearish"
@@ -501,12 +557,35 @@ async def trading_cycle(
                     if pair_cfg is None:
                         continue
                     try:
+                        entry_analysis = ""
+                        sltp_comparison = ""
+                        param_history_text = ""
+                        if session_store:
+                            sess = session_store.get_session(closed_order.order_id)
+                            if sess:
+                                entry_analysis = sess.analysis_summary or ""
+                                if sess.atr_value and sess.computed_sl:
+                                    sltp_comparison = (
+                                        f"ATR(14)={sess.atr_value:.5f} sl_mult={sess.sl_atr_mult} tp_mult={sess.tp_atr_mult}\n"
+                                        f"computed: SL={sess.computed_sl:.5f} TP={sess.computed_tp:.5f}\n"
+                                        f"llm: SL={sess.llm_sl:.5f} TP={sess.llm_tp:.5f}\n"
+                                        f"Actual close: {(closed_order.close_price or closed_order.entry_price):.5f} ({closed_order.close_reason})"
+                                    )
+                                history = adaptive_store.get_history(closed_order.pair, limit=3)
+                                if history:
+                                    param_history_text = "\n".join(
+                                        f"[{h.get('updated_at', '?')}] sl={h.get('sl_atr_mult')} tp={h.get('tp_atr_mult')} reason={h.get('reason', '')}"
+                                        for h in history
+                                    )
                         reflection = await generate_close_reflection(
                             pair_cfg=pair_cfg,
                             order=closed_order,
                             llm=llm_reflect,
                             temperature=config.llm.reflection.temperature,
                             user_notes=load_user_notes(config.user_notes_path, "reflect"),
+                            entry_analysis=entry_analysis,
+                            sltp_comparison=sltp_comparison,
+                            param_history=param_history_text,
                         )
                         await store_reflection(
                             reflection=reflection,
@@ -514,6 +593,23 @@ async def trading_cycle(
                             embed_fn=embed_fn,
                             close_reason=closed_order.close_reason,
                         )
+                        if reflection.atr_params_suggestion:
+                            suggestion = reflection.atr_params_suggestion
+                            new_params = {}
+                            if suggestion.get("sl_atr_mult") is not None:
+                                new_params["sl_atr_mult"] = suggestion["sl_atr_mult"]
+                            if suggestion.get("tp_atr_mult") is not None:
+                                new_params["tp_atr_mult"] = suggestion["tp_atr_mult"]
+                            if new_params:
+                                try:
+                                    adaptive_store.update_params(
+                                        pair=closed_order.pair,
+                                        new_params=new_params,
+                                        reason=suggestion.get("reason", "LLM suggestion"),
+                                        trade_id=closed_order.order_id,
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"[ADAPTIVE] {closed_order.pair}: param update failed — {e}")
                         # Session close + directional RAG complete
                         if session_store:
                             direction = "bullish" if closed_order.direction == "buy" else "bearish"
@@ -616,6 +712,57 @@ async def trading_cycle(
             sig.combined_score = round(adjusted_score, 4)
 
         if sig.action != "hold":
+            # ATRベースSL/TP算出
+            sltp_result = None
+            atr_params = adaptive_store.get_params(sig.pair)
+            try:
+                price_data = _get_ohlcv(
+                    sig.pair, config.trading.lookback_days,
+                    config.trading.ohlcv_interval, price_store,
+                    price_provider,
+                )
+                if price_data and len(price_data.df) >= 14:
+                    import pandas_ta as pta
+                    atr_series = pta.atr(
+                        price_data.df["High"], price_data.df["Low"],
+                        price_data.df["Close"], length=14,
+                    )
+                    atr_val = float(atr_series.iloc[-1]) if atr_series is not None and not atr_series.empty else None
+                    if atr_val and atr_val > 0:
+                        sltp_result = calculate_sl_tp(
+                            direction=sig.action,
+                            entry_price=sig.entry_price,
+                            atr_value=atr_val,
+                            sl_atr_mult=atr_params["sl_atr_mult"],
+                            tp_atr_mult=atr_params["tp_atr_mult"],
+                            llm_sl=sig.stop_loss,
+                            llm_tp=sig.take_profit,
+                            swing_highs=list(getattr(sig.price, "entry_zone", (0, 0))),
+                            swing_lows=[],
+                            key_support=getattr(sig.price, "key_support", None),
+                            key_resistance=getattr(sig.price, "key_resistance", None),
+                        )
+                        # Override TradeSignal SL/TP with computed values
+                        sig.stop_loss = sltp_result.computed_sl
+                        sig.take_profit = sltp_result.computed_tp
+                        # Recalculate position size with new SL distance
+                        from src.signals.signal_combiner import _calculate_position_size
+                        pair_cfg_for_size = next(
+                            (p for p in config.tradeable_instruments if p.symbol == sig.pair), None
+                        )
+                        if pair_cfg_for_size:
+                            sig.position_size = _calculate_position_size(
+                                balance=position_mgr.get_account_state().balance,
+                                risk_pct=config.trading.risk_per_trade,
+                                entry=sig.entry_price,
+                                stop_loss=sltp_result.computed_sl,
+                                pip_value=pair_cfg_for_size.pip_value,
+                                min_lot_size=config.trading.min_lot_size,
+                                lot_unit=config.trading.lot_unit,
+                            )
+            except Exception as e:
+                logger.warning(f"[ATR] {sig.pair}: ATR SL/TP calculation failed — {e}")
+
             order = broker.execute_signal(sig, position_mgr, macro_context=macro_ctxs.get(sig.pair, ""))
             if order:
                 executed_orders.append(order)
@@ -634,6 +781,20 @@ async def trading_cycle(
                 # Task 6: Create session + RAG entry
                 if session_store:
                     direction = "bullish" if order.direction == "buy" else "bearish"
+                    # Build comprehensive entry context
+                    entry_ctx = ""
+                    if sltp_result:
+                        entry_ctx = build_entry_context(
+                            combined_score=sig.combined_score,
+                            confidence=sig.confidence,
+                            action=sig.action,
+                            news_weight=config.trading.news_weight,
+                            price_weight=config.trading.price_weight,
+                            news=sig.news,
+                            price=sig.price,
+                            sltp=sltp_result,
+                            macro_context=macro_ctxs.get(sig.pair, ""),
+                        )
                     session_store.create_session(
                         session_id=order.order_id,
                         pair=order.pair,
@@ -645,8 +806,17 @@ async def trading_cycle(
                         signal_score=sig.combined_score,
                         signal_confidence=sig.confidence,
                         macro_context=macro_ctxs.get(sig.pair, ""),
-                        analysis_summary=sig.detail_reason,
+                        analysis_summary=entry_ctx or sig.detail_reason,
                         opened_at=order.opened_at,
+                        atr_value=sltp_result.atr_value if sltp_result else None,
+                        sl_atr_mult=sltp_result.sl_atr_mult if sltp_result else None,
+                        tp_atr_mult=sltp_result.tp_atr_mult if sltp_result else None,
+                        computed_sl=sltp_result.computed_sl if sltp_result else None,
+                        computed_tp=sltp_result.computed_tp if sltp_result else None,
+                        llm_sl=sltp_result.llm_sl if sltp_result else None,
+                        llm_tp=sltp_result.llm_tp if sltp_result else None,
+                        key_support=sltp_result.key_support if sltp_result else None,
+                        key_resistance=sltp_result.key_resistance if sltp_result else None,
                     )
                     try:
                         entry_text = (
