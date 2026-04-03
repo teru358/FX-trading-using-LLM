@@ -57,7 +57,7 @@ def test_hold_confidence_too_low(bullish_news, bullish_price, pair_cfg):
 
 
 def test_conflict_penalty(pair_cfg):
-    """ニュースが強気・テクニカルが弱気（逆方向）→ combined_score が 50% 減衰する。"""
+    """ニュースが強気・テクニカルが弱気（逆方向）→ conflict_penalty で減衰し、HOLD。"""
     from src.analysis.news_analyzer import NewsSentiment
     from src.analysis.price_analyzer import PriceAnalysis
     from datetime import datetime
@@ -69,8 +69,12 @@ def test_conflict_penalty(pair_cfg):
         risk_reward_ratio=2.0, reasoning_summary="conflict", analyzed_at=datetime.now(),
     )
     sig = _call(news, price, pair_cfg)
-    # conflict_penalty=0.5: raw = (0.6×0.4 + (-0.6)×0.6) = -0.12, × 0.5 = -0.06
-    assert abs(sig.combined_score - (-0.06)) < 0.005
+    # Dynamic weight: news.conf=0.8 → news_w=0.50, price_w=0.50
+    # raw = 0.6×0.50 + (-0.6)×0.50 = 0.0
+    # conflict_penalty = 1.0 - 0.5×min(0.8,0.8) = 0.60
+    # combined = 0.0 × 0.60 = 0.0
+    assert abs(sig.combined_score) < 0.01
+    assert sig.action == "hold"
     assert "[NEWS/PRICE conflict]" in sig.signal_reason
 
 

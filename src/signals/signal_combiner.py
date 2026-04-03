@@ -42,17 +42,32 @@ def combine_signals(
     min_lot_size: float = 1000.0,
     lot_unit: float = 1000.0,
 ) -> TradeSignal:
-    # Weighted score
-    combined_score = (news.sentiment_score * news_weight) + (price.bias_score * price_weight)
+    # Dynamic weight adjustment based on news confidence
+    if news.confidence >= 0.80:
+        effective_news_weight = min(news_weight + 0.10, 0.50)
+        effective_price_weight = 1.0 - effective_news_weight
+    elif news.confidence <= 0.30:
+        effective_news_weight = max(news_weight - 0.10, 0.20)
+        effective_price_weight = 1.0 - effective_news_weight
+    else:
+        effective_news_weight = news_weight
+        effective_price_weight = price_weight
 
-    # Alignment check: penalise conflicting signals
+    # Weighted score
+    combined_score = (news.sentiment_score * effective_news_weight) + (price.bias_score * effective_price_weight)
+
+    # Alignment check: penalise conflicting signals (scaled by weaker confidence)
     alignment = news.sentiment_score * price.bias_score
-    conflict_penalty = 1.0 if alignment >= 0 else 0.5
+    if alignment >= 0:
+        conflict_penalty = 1.0
+    else:
+        weaker_conf = min(news.confidence, price.confidence)
+        conflict_penalty = 1.0 - (0.5 * weaker_conf)
     combined_score *= conflict_penalty
 
     # Combined confidence
     combined_confidence = (
-        (news.confidence * news_weight + price.confidence * price_weight) * conflict_penalty
+        (news.confidence * effective_news_weight + price.confidence * effective_price_weight) * conflict_penalty
     )
 
     # Deadband: ±signal_deadband to avoid over-trading on weak signals
@@ -147,7 +162,7 @@ def combine_signals(
     logger.info(
         f"[SIGNAL] {pair_cfg.display_name}: {action.upper()}{direction_str} | "
         f"score={combined_score:+.3f} "
-        f"(news={news.sentiment_score:+.2f}×{news_weight} + price={price.bias_score:+.2f}×{price_weight}){conflict_str} | "
+        f"(news={news.sentiment_score:+.2f}×{effective_news_weight:.2f} + price={price.bias_score:+.2f}×{effective_price_weight:.2f}){conflict_str} | "
         f"conf={combined_confidence:.2f} | {reason}"
     )
     if action != "hold":
