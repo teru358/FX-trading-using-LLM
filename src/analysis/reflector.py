@@ -60,6 +60,7 @@ class Reflection:
     lesson: str
     confidence_assessment: str
     full_text: str
+    atr_params_suggestion: dict | None = None
 
 
 async def generate_reflection(
@@ -181,19 +182,30 @@ Achieved R:R: {achieved_rr:.2f}
 {signal_reason}
 
 {macro_context_section}
+{entry_analysis_section}
+{sltp_analysis_section}
+{param_history_section}
 === Task ===
 Evaluate this completed trade. Assess:
 1. Was the directional call correct? (take_profit = yes, stop_loss = no)
 2. Was the SL/TP placement appropriate given what actually happened?
-3. If macro context is available: did the macro instruments correctly indicate the direction? Which were most informative?
-4. What is the ONE most actionable lesson for future {pair} trades?
+3. If macro context is available: did the macro instruments correctly indicate the direction?
+4. Was the news sentiment assessment correct? Did the key themes play out as expected?
+5. Was the technical analysis direction correct? Were the key support/resistance levels respected?
+6. Based on the SL/TP comparison: should the ATR multipliers be adjusted for this pair?
+7. What is the ONE most actionable lesson for future {pair} trades?
 {user_context}
 Return ONLY valid JSON:
 {{
   "outcome_summary": "<one sentence: what happened and the key reason>",
   "was_directionally_correct": true|false,
   "lesson": "<one specific, actionable lesson>",
-  "confidence_assessment": "<was the entry timing and risk setup appropriate?>"
+  "confidence_assessment": "<was the entry timing and risk setup appropriate?>",
+  "atr_params_suggestion": {{
+    "sl_atr_mult": <new_value or null if no change>,
+    "tp_atr_mult": <new_value or null if no change>,
+    "reason": "<why this change, or 'no change needed'>"
+  }}
 }}"""
 
 _CLOSE_REASON_LABELS = {
@@ -214,6 +226,9 @@ async def generate_close_reflection(
     temperature: float = 0.1,
     user_notes: str = "",
     macro_context_at_entry: str = "",
+    entry_analysis: str = "",
+    sltp_comparison: str = "",
+    param_history: str = "",
 ) -> Reflection:
     """決済済み Order から確定結果ベースの振り返りを生成する。"""
     close_price = order.close_price or order.entry_price
@@ -239,6 +254,18 @@ async def generate_close_reflection(
         f"=== Macro Instruments at Entry ===\n{macro_ctx}\n"
         if macro_ctx else ""
     )
+    entry_analysis_section = (
+        f"=== Entry Analysis (Full Context) ===\n{entry_analysis}\n"
+        if entry_analysis else ""
+    )
+    sltp_analysis_section = (
+        f"=== SL/TP Analysis ===\n{sltp_comparison}\n"
+        if sltp_comparison else ""
+    )
+    param_history_section = (
+        f"=== Parameter History (last 3) ===\n{param_history}\n"
+        if param_history else ""
+    )
 
     prompt = _CLOSE_REFLECTION_PROMPT.format(
         pair=pair_cfg.display_name,
@@ -256,6 +283,9 @@ async def generate_close_reflection(
         achieved_rr=achieved_rr,
         signal_reason=signal_reason,
         macro_context_section=macro_context_section,
+        entry_analysis_section=entry_analysis_section,
+        sltp_analysis_section=sltp_analysis_section,
+        param_history_section=param_history_section,
         user_context=user_context,
     )
 
@@ -278,6 +308,7 @@ async def generate_close_reflection(
     )
     correct = bool(data.get("was_directionally_correct", won))
     conf_assess = data.get("confidence_assessment", "")
+    atr_suggestion = data.get("atr_params_suggestion")
 
     full_text = (
         f"Closed: {order.opened_at.strftime('%Y-%m-%d %H:%M')} → {closed_at.strftime('%Y-%m-%d %H:%M')} | "
@@ -304,4 +335,5 @@ async def generate_close_reflection(
         lesson=lesson,
         confidence_assessment=conf_assess,
         full_text=full_text,
+        atr_params_suggestion=atr_suggestion,
     )
