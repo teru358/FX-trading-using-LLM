@@ -197,11 +197,8 @@ async def _generate_cycle_reflections(
                 ollama_base_url=config.llm.ollama.base_url,
                 model=config.rag.embedding_model,
             )
-            await store_reflection(
-                reflection=reflection,
-                store=store,
-                embed_fn=embed_fn,
-            )
+            # レガシーfx_reflectionsへの書き込みは停止（方向別RAGに移行済み）
+            # await store_reflection(reflection=reflection, store=store, embed_fn=embed_fn)
         except Exception as e:
             logger.warning(f"Reflection failed for {pos.pair}: {e}")
 
@@ -240,17 +237,7 @@ async def _review_hold_decisions(
 
             if worth_storing:
                 embedding = await embed_fn(review_text)
-                store.upsert_reflection(
-                    entry_id=f"hold_{hold.pair}_{hold.id}",
-                    text=review_text,
-                    embedding=embedding,
-                    pair=hold.pair,
-                    cycle_time=datetime.now(),
-                    action=hold.predicted_direction,
-                    outcome_summary=review_text,
-                    lesson=lesson,
-                )
-                logger.info(f"[HOLD REVIEW] {hold.pair}: stored to RAG")
+                # レガシーfx_reflectionsへの書き込みは停止（方向別RAGに移行済み）
 
                 # Directional RAG: hold review complete
                 hold_direction = hold.predicted_direction
@@ -398,12 +385,8 @@ async def trading_cycle(
                     sltp_comparison=sltp_comparison,
                     param_history=param_history_text,
                 )
-                await store_reflection(
-                    reflection=reflection,
-                    store=store,
-                    embed_fn=embed_fn,
-                    close_reason=closed_order.close_reason,
-                )
+                # レガシーfx_reflectionsへの書き込みは停止（方向別RAGに移行済み）
+
                 if reflection.atr_params_suggestion:
                     suggestion = reflection.atr_params_suggestion
                     new_params = {}
@@ -587,12 +570,8 @@ async def trading_cycle(
                             sltp_comparison=sltp_comparison,
                             param_history=param_history_text,
                         )
-                        await store_reflection(
-                            reflection=reflection,
-                            store=store,
-                            embed_fn=embed_fn,
-                            close_reason=closed_order.close_reason,
-                        )
+                        # レガシーfx_reflectionsへの書き込みは停止（方向別RAGに移行済み）
+
                         if reflection.atr_params_suggestion:
                             suggestion = reflection.atr_params_suggestion
                             new_params = {}
@@ -1080,16 +1059,7 @@ async def forecast_cycle(
 
                 if has_significant:
                     embedding = await embed_fn(summary_text)
-                    store.upsert_reflection(
-                        entry_id=f"forecast_summary_{pair_cfg.symbol}_{now.strftime('%Y-%m-%d')}",
-                        text=summary_text,
-                        embedding=embedding,
-                        pair=pair_cfg.symbol,
-                        cycle_time=review_ts,
-                        action=recent_forecasts[-1].predicted_direction,
-                        outcome_summary=summary_text,
-                        lesson=lesson,
-                    )
+                    # レガシーfx_reflectionsへの書き込みは停止（方向別RAGに移行済み）
 
                 # Directional RAG: individual forecast reviews
                 for fc in recent_forecasts:
