@@ -37,6 +37,16 @@ class _TradingSession(_Base):
     outcome           = Column(String)
     reflection_text   = Column(Text)
     created_at        = Column(DateTime, nullable=False, default=datetime.now)
+    # ATR SL/TP比較データ
+    atr_value       = Column(Float)
+    sl_atr_mult     = Column(Float)
+    tp_atr_mult     = Column(Float)
+    computed_sl     = Column(Float)
+    computed_tp     = Column(Float)
+    llm_sl          = Column(Float)
+    llm_tp          = Column(Float)
+    key_support     = Column(Float)
+    key_resistance  = Column(Float)
 
 
 class SessionStore:
@@ -44,6 +54,24 @@ class SessionStore:
 
     def __init__(self, db_path) -> None:
         self._engine = _get_engine(db_path)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        new_columns = [
+            "atr_value", "sl_atr_mult", "tp_atr_mult",
+            "computed_sl", "computed_tp", "llm_sl", "llm_tp",
+            "key_support", "key_resistance",
+        ]
+        from sqlalchemy import text, inspect
+        insp = inspect(self._engine)
+        if "trading_sessions" not in insp.get_table_names():
+            return
+        existing = {c["name"] for c in insp.get_columns("trading_sessions")}
+        with self._engine.begin() as conn:
+            for col in new_columns:
+                if col not in existing:
+                    conn.execute(text(f"ALTER TABLE trading_sessions ADD COLUMN {col} REAL"))
+                    logger.info(f"[SESSION] Migration: added column {col}")
 
     def create_session(
         self,
@@ -59,6 +87,16 @@ class SessionStore:
         macro_context: str,
         analysis_summary: str,
         opened_at: datetime,
+        # ATR SL/TP比較データ（オプショナル）
+        atr_value: float | None = None,
+        sl_atr_mult: float | None = None,
+        tp_atr_mult: float | None = None,
+        computed_sl: float | None = None,
+        computed_tp: float | None = None,
+        llm_sl: float | None = None,
+        llm_tp: float | None = None,
+        key_support: float | None = None,
+        key_resistance: float | None = None,
     ) -> None:
         with Session(self._engine) as session:
             rec = _TradingSession(
@@ -75,6 +113,15 @@ class SessionStore:
                 analysis_summary=analysis_summary,
                 opened_at=opened_at,
                 created_at=datetime.now(),
+                atr_value=atr_value,
+                sl_atr_mult=sl_atr_mult,
+                tp_atr_mult=tp_atr_mult,
+                computed_sl=computed_sl,
+                computed_tp=computed_tp,
+                llm_sl=llm_sl,
+                llm_tp=llm_tp,
+                key_support=key_support,
+                key_resistance=key_resistance,
             )
             session.add(rec)
             session.commit()

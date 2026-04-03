@@ -122,6 +122,13 @@ class TradingConfig:
     rag_adjustment_trade_multiplier: float = 1.0
     rag_adjustment_forecast_multiplier: float = 0.5
     rag_adjustment_hold_multiplier: float = 0.3
+    # ATRベースSL/TP
+    sl_atr_mult_default: float = 1.5
+    tp_atr_mult_default: float = 3.0
+    sl_atr_mult_min: float = 0.5
+    sl_atr_mult_max: float = 3.0
+    tp_atr_mult_min: float = 1.0
+    tp_atr_mult_max: float = 6.0
 
 
 @dataclass
@@ -454,6 +461,12 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         rag_adjustment_trade_multiplier=t.get("rag_adjustment_trade_multiplier", 1.0),
         rag_adjustment_forecast_multiplier=t.get("rag_adjustment_forecast_multiplier", 0.5),
         rag_adjustment_hold_multiplier=t.get("rag_adjustment_hold_multiplier", 0.3),
+        sl_atr_mult_default=t.get("sl_atr_mult_default", 1.5),
+        tp_atr_mult_default=t.get("tp_atr_mult_default", 3.0),
+        sl_atr_mult_min=t.get("sl_atr_mult_min", 0.5),
+        sl_atr_mult_max=t.get("sl_atr_mult_max", 3.0),
+        tp_atr_mult_min=t.get("tp_atr_mult_min", 1.0),
+        tp_atr_mult_max=t.get("tp_atr_mult_max", 6.0),
     )
 
     instruments = [

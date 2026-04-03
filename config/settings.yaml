@@ -165,6 +165,13 @@ trading:
   rag_adjustment_trade_multiplier: 1.0
   rag_adjustment_forecast_multiplier: 0.5
   rag_adjustment_hold_multiplier: 0.3
+  # ATRベースSL/TP
+  sl_atr_mult_default: 1.5
+  tp_atr_mult_default: 3.0
+  sl_atr_mult_min: 0.5
+  sl_atr_mult_max: 3.0
+  tp_atr_mult_min: 1.0
+  tp_atr_mult_max: 6.0
 
 price_monitor:
   enabled: true
