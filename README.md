@@ -10,7 +10,7 @@
 |---|---|
 | 取引モード | ペーパートレード（模擬） / OANDA本取引（スタブ） |
 | 取引スタイル | スウィング（数日〜数週間） |
-| 価格データ | yfinance（Yahoo Finance・無料） |
+| 価格データ | yfinance（Yahoo Finance・無料）/ Twelve Data（リアルタイムFX・オプション） |
 | ニュース取得 | RSS（FX専門・世界情勢・日本情勢）/ Feedly API（オプション） |
 | 分析エンジン | LLM（Ollama / Gemini / OpenAI / Claude — 分析種別ごとに個別設定可） |
 | ベクトル化 | Ollama `nomic-embed-text`（ローカル） |
@@ -47,7 +47,7 @@
    - チャートパターン: ルールベースで15パターンを検出（ローソク足8 / チャート形状4 / ブレイクアウト3）
 4. LLM でテクニカル分析 → スナップショット保存（SQLite・48時間で自動削除）
    - プロンプト入力: 全指標 + 一目均衡表 + チャートパターン + ニュースセンチメント(RAG) + 振り返り教訓(RAG) + user_notes.md
-   - LLM出力: `direction_bias`(long/short/neutral) / `bias_score`(-1.0〜+1.0) / `confidence` / `entry_zone` / `stop_loss` / `take_profit` / `risk_reward_ratio` / `reasoning_summary`
+   - LLM出力: `direction_bias`(long/short/neutral) / `bias_score`(-1.0〜+1.0) / `confidence` / `entry_zone` / `stop_loss` / `take_profit` / `risk_reward_ratio` / `key_support` / `key_resistance` / `reasoning_summary`
    - `temperature: 0.1`（低め）で一貫性重視、`extract_json()` で `<think>` タグ除去後にJSON抽出
 
 ### 予測サイクル（設定間隔ごと・デフォルト6時間）
@@ -79,14 +79,14 @@ LLM不使用。蓄積済みスナップショットからシグナルを生成�
 
 ### 取引判定ループ（15:00 / 21:30 JST / 土日スキップ）
 
-1. **Phase 1**: 既存ポジションの SL/TP 到達確認・クローズ
+1. **Phase 1**: 既存ポジションの SL/TP 到達確認・クローズ + ATRパラメータ提案の処理（振り返りLLMが提案したATR倍率改善を `adaptive_params.yaml` に反映）
 2. **Phase 2**: オープンポジションの振り返り生成 → ChromaDB 蓄積
 3. **Phase 3**: テクニカルスナップショットを時間加重集約（直近8h）
    - 重み: `1/(1+経過時間[h])` — 直近ほど重く評価（1h前→0.50、3h前→0.25）
    - `bias_score` / `confidence` を加重平均、SL/TP/エントリーゾーンは最新スナップショットの値を使用
    - スナップショット未蓄積時は LLM 即時分析にフォールバック
 4. **Phase 4**: RAG からニュースセンチメントを集約
-   - シグナル統合（テクニカル60% + ニュース40%）
+   - シグナル統合（テクニカル60% + ニュース40%）+ RAG方向別スコア補正（bullish/bearishコレクションから類似パターン検索→スコア加減算）
    - BUY/SELL/HOLD 判定（HOLD時も方向予測を表示）
    - `detail_reason` にニュース/テクニカル内訳を生成（通知に付加）
 4a. **Phase 4a**（オプション）: ポジション再評価（Layer 1〜3）
@@ -94,7 +94,8 @@ LLM不使用。蓄積済みスナップショットからシグナルを生成�
    - **Layer 2**（タイムアウト）: 保有期間がmax_holding_daysを超えた上、TP方向への進捗が不足 → 損失決済
    - **Layer 3**（利益ロック）: 含み益がある程度進捗した上、シグナル強度が減衰 → 利益確定
 5. **Phase 5**: ペーパー注文執行・通知送信・レポート出力
-   - BUY/SELL → 注文執行 → 発注通知（判断理由付き）
+   - BUY/SELL → ATRベースSL/TP算出（ATR(14)×倍率、LLM提案値と比較記録） → 注文執行 → 発注通知（判断理由付き）
+   - 発注理由（ニュース+テクニカル+SL/TP比較+マクロ）を網羅的に保存
    - HOLD → スキップ通知（方向予測 + 判断理由）
    - 既存ポジションによりスキップ → スキップ通知（判断理由付き）
 
@@ -163,6 +164,7 @@ finance/
 │   ├── data/
 │   │   ├── price_fetcher.py        # yfinance OHLCV取得（差分フェッチ対応）
 │   │   ├── price_store.py          # SQLite OHLCVキャッシュ
+│   │   ├── session_store.py        # 取引セッション管理（trading_sessions テーブル）
 │   │   ├── analysis_store.py       # SQLite テクニカルスナップショット（48h自動削除）+ 予測レコード（ForecastStore/HoldDecisionStore）
 │   │   ├── indicators.py           # テクニカル指標（pandas-ta + 一目均衡表）
 │   │   ├── candle_patterns.py      # チャートパターン検出（ローソク足・形状・ブレイクアウト）
@@ -172,17 +174,22 @@ finance/
 │   │   ├── technical_collector.py  # OHLCV取得・テクニカル分析・スナップショット保存
 │   │   └── price_monitor.py        # オープンポジション価格監視・急変動通知・緊急損切り・トレーリングストップ（Layer 4）
 │   ├── signals/
-│   │   └── signal_combiner.py      # テクニカル×ニュース シグナル統合
+│   │   ├── signal_combiner.py      # テクニカル×ニュース シグナル統合
+│   │   └── rag_adjustment.py       # 方向別RAGスコア補正
 │   ├── trading/
 │   │   ├── broker_adapter.py       # BrokerAdapter ABC
 │   │   ├── paper_broker.py         # ペーパートレード実装
 │   │   ├── paper_trader.py         # 模擬注文・SL/TP判定
 │   │   ├── live_broker.py          # OANDA本取引（スタブ）+ ファクトリ
+│   │   ├── atr_calculator.py        # ATRベースSL/TP算出
+│   │   ├── entry_context_builder.py # 発注理由の網羅的テキスト構築
 │   │   ├── market_hours.py         # FX市場開閉判定（NY時間基準・DST自動対応）
 │   │   ├── position_manager.py     # ポジション・残高・PnL管理
 │   │   └── position_reviewer.py    # ポジション再評価（Layer 1〜3）
 │   ├── rag/
 │   │   ├── vector_store.py         # ChromaDB ラッパー（ニュース・振り返り）
+│   │   ├── directional_store.py    # 方向別ChromaDBコレクション管理（bullish/bearish）
+│   │   ├── ask_context_builder.py  # askコマンド用セマンティック検索（全データソース横断）
 │   │   ├── embedder.py             # nomic-embed-text ベクトル化
 │   │   └── prompt_formatter.py     # RAGデータのプロンプト整形
 │   ├── api/
@@ -192,13 +199,16 @@ finance/
 │   │   ├── discord_notifier.py     # Discord Webhook
 │   │   └── telegram_notifier.py    # Telegram Bot API
 │   ├── persistence/
-│   │   └── state_store.py          # JSON アトミック書き込み
+│   │   ├── state_store.py          # JSON アトミック書き込み
+│   │   └── adaptive_params_store.py # ペア別動的パラメータ管理（ATR倍率等）
 │   └── reporting/
 │       └── reporter.py             # Rich テーブル表示・レポート
 ├── data/
-│   ├── prices.db                   # SQLite（OHLCVキャッシュ + テクニカルスナップショット）
-│   ├── state/                      # ポジション・取引履歴（JSON）
-│   └── rag/                        # ChromaDB ファイル
+│   ├── prices.db                   # SQLite（OHLCVキャッシュ + テクニカルスナップショット + trading_sessions）
+│   ├── state/                      # ポジション・取引履歴（JSON）+ adaptive_params.yaml（ペア別ATR倍率）
+│   └── rag/                        # ChromaDB ファイル（fx_news / fx_reflections / fx_reflections_bullish / fx_reflections_bearish）
+├── scripts/
+│   └── migrate_directional_rag.py  # 既存RAGデータの方向別移行スクリプト
 └── logs/
     ├── finance.log                 # 全ログ（DEBUG以上・ローテーション対応）
     └── activity.log                # 取引・ニュース活動ログ
@@ -235,10 +245,10 @@ cp .env.example .env
 ### 実行
 
 ```bash
-uv run python main.py                        # 通常起動
+uv run python main.py                        # 通常起動（CLIモード）
+uv run python main.py --daemon               # デーモンモード（REST APIのみ）
 uv run python main.py --skip-news            # 起動時のニュース取得をスキップ
 uv run python main.py --skip-tech            # 起動時のテクニカル収集をスキップ
-uv run python main.py --skip-news --skip-tech  # 両方スキップ（即時コマンド待機）
 ```
 
 起動時に以下のチェックを実行します:
@@ -262,7 +272,7 @@ uv run python main.py --skip-news --skip-tech  # 両方スキップ（即時コ�
 | `run forecast [pair]` | `run f` | 直近24hの予測サイクルデータを表示  例: `run forecast EURUSD=X` |
 | `run trade` | `run tr` | 取引判定ループを今すぐ実行（動作確認用） |
 | `compare [pair]` | | モデル比較モード（下記参照）  例: `compare USDJPY=X` |
-| `ask <メッセージ>` | | FX分析LLMへ質問・コメントを送信。現在の分析コンテキスト（指標・ニュース・ポジション）をもとに回答 |
+| `ask <メッセージ>` | | FX分析LLMへ質問。全データソース横断のセマンティック検索により、取引実績・予測的中率・過去の類似パターンを含むコンテキストで回答 |
 | `close <pair>` | | ポジションを手動決済  例: `close USDJPY=X` |
 | `feeds` | | RSSフィード疎通確認 |
 | `notify` | `n` | 通知テストメッセージを送信 |
@@ -442,6 +452,12 @@ trading:
   min_lot_size: 1000.0              # 最小ロットサイズ
   lot_unit: 1000.0                  # ロット切り捨て単位
   trading_mode: "paper"             # "paper"（模擬）| "live"（OANDA本取引）
+  # RAG方向別スコア補正
+  rag_adjustment_enabled: true
+  rag_adjustment_max: 0.15
+  # ATRベースSL/TP
+  sl_atr_mult_default: 1.5            # SL距離 = ATR(14) × この倍率
+  tp_atr_mult_default: 3.0            # TP距離 = ATR(14) × この倍率
 ```
 
 ### 銘柄設定（`instruments`）
@@ -776,10 +792,11 @@ logging:
 
 | ファイル | 内容 |
 |---|---|
-| `data/prices.db` | SQLite — OHLCVキャッシュ + テクニカルスナップショット + 予測レコード（`forecasts` / `hold_decisions`） |
+| `data/prices.db` | SQLite — OHLCVキャッシュ + テクニカルスナップショット + 予測レコード（`forecasts` / `hold_decisions`）+ 取引セッション（`trading_sessions`） |
 | `data/state/positions.json` | 現在のオープンポジション・残高 |
 | `data/state/trades.json` | クローズ済み取引履歴 |
-| `data/rag/` | ChromaDB（ニュース・振り返りベクトルDB） |
+| `data/state/adaptive_params.yaml` | ペア別ATR倍率（振り返りLLMによる動的更新） |
+| `data/rag/` | ChromaDB（ニュース・振り返り・方向別振り返り（bullish/bearish）ベクトルDB） |
 | `config/user_notes.md` | ユーザーの裁量判断メモ（価格分析プロンプトに注入） |
 
 ---
@@ -796,6 +813,35 @@ BOJの追加利上げ観測が強まっている。
 ```
 
 HTMLコメント・見出し・区切り線は自動的に除去されます。
+
+---
+
+## 方向別RAG + 適応パラメータ
+
+### 方向別RAG（Directional RAG）
+
+取引結果・予測サイクル・HOLD判断を **bullish / bearish** に分離して ChromaDB に蓄積します。
+
+- コレクション: `fx_reflections_bullish` / `fx_reflections_bearish`
+- シグナル結合時に、現在の方向に対応するコレクションからセマンティック検索し、過去の類似パターンの成績をもとにスコアを補正（`rag_adjustment_max` が上限）
+- 移行スクリプト `scripts/migrate_directional_rag.py` で既存の `fx_reflections` データを方向別に再分類
+
+### ATRベースSL/TP
+
+SL/TPをコード側で算出し、LLM依存を排除します。
+
+- **SL** = ATR(14) × `sl_atr_mult_default`（デフォルト1.5）
+- **TP** = ATR(14) × `tp_atr_mult_default`（デフォルト3.0） → RR = 2:1
+- LLMの提案値（`stop_loss` / `take_profit`）と計算値を比較記録し、乖離を可視化
+- ペア別の倍率は `data/state/adaptive_params.yaml` で管理
+
+### 適応パラメータ（学習ループ）
+
+振り返りLLM（reflection）がクローズ済みトレードを分析し、ATR倍率の改善を提案します。
+
+1. Phase 1（クローズ時）で振り返り生成
+2. 振り返りLLMがATR倍率改善を提案（例: 「SL倍率を1.5→1.8に」）
+3. 提案値を `adaptive_params.yaml` に反映 → 次回トレードから適用
 
 ---
 
