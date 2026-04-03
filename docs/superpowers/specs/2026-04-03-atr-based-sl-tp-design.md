@@ -86,6 +86,67 @@ trading:
 
 ---
 
+## セクション1.5: trading_sessions スキーマ拡張
+
+### 追加カラム
+
+既存の `trading_sessions` テーブルに以下のカラムを追加する:
+
+```sql
+ALTER TABLE trading_sessions ADD COLUMN atr_value       REAL;
+ALTER TABLE trading_sessions ADD COLUMN sl_atr_mult     REAL;
+ALTER TABLE trading_sessions ADD COLUMN tp_atr_mult     REAL;
+ALTER TABLE trading_sessions ADD COLUMN computed_sl     REAL;
+ALTER TABLE trading_sessions ADD COLUMN computed_tp     REAL;
+ALTER TABLE trading_sessions ADD COLUMN llm_sl          REAL;
+ALTER TABLE trading_sessions ADD COLUMN llm_tp          REAL;
+ALTER TABLE trading_sessions ADD COLUMN key_support     REAL;
+ALTER TABLE trading_sessions ADD COLUMN key_resistance  REAL;
+```
+
+### 拡張後の全スキーマ
+
+```
+trading_sessions
+├── session_id        TEXT PK
+├── pair              TEXT NOT NULL
+├── direction         TEXT NOT NULL       -- "bullish" / "bearish"
+├── entry_price       REAL NOT NULL
+├── stop_loss         REAL               -- 採用されたSL（= computed_sl）
+├── take_profit       REAL               -- 採用されたTP（= computed_tp）
+├── position_size     REAL
+├── signal_score      REAL               -- combined_score
+├── signal_confidence REAL
+├── macro_context     TEXT               -- 監視銘柄スナップショット
+├── analysis_summary  TEXT               -- ニュース+テクニカル+SL/TP比較の全文
+├── opened_at         DATETIME NOT NULL
+├── closed_at         DATETIME
+├── close_price       REAL
+├── close_reason      TEXT
+├── realized_pnl      REAL
+├── outcome           TEXT               -- "win" / "loss"
+├── reflection_text   TEXT
+├── created_at        DATETIME NOT NULL
+│  ── 以下、新規追加 ──
+├── atr_value         REAL               -- 発注時のATR(14)
+├── sl_atr_mult       REAL               -- 使用したSL倍率
+├── tp_atr_mult       REAL               -- 使用したTP倍率
+├── computed_sl       REAL               -- ATRベースで算出したSL
+├── computed_tp       REAL               -- ATRベースで算出したTP
+├── llm_sl            REAL               -- LLMが提案したSL
+├── llm_tp            REAL               -- LLMが提案したTP
+├── key_support       REAL               -- LLMが意識するサポート
+└── key_resistance    REAL               -- LLMが意識するレジスタンス
+```
+
+### マイグレーション
+
+SQLiteは `ALTER TABLE ADD COLUMN` をサポートするため、既存データを破壊せずにカラム追加が可能。新規カラムはすべて NULL 許容（既存レコードは NULL のまま）。
+
+マイグレーションは `SessionStore.__init__` 内で自動実行する（テーブルにカラムが存在しなければ ALTER TABLE を発行）。これにより既存データベースでも初回起動時に自動適用される。
+
+---
+
 ## セクション2: 適応パラメータストア
 
 ### `data/state/adaptive_params.yaml`
