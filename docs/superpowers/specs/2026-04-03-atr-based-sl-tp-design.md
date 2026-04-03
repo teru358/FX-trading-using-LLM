@@ -229,7 +229,63 @@ EURUSD bearish | ... | sl_comparison: computed=1.1450(ATR×1.5) llm=1.1495 adopt
 
 ---
 
-## セクション4: 実装構成
+## セクション5: 発注時の保存データ拡充
+
+### 現状の問題
+
+TradeSignal は `news: NewsSentiment` と `price: PriceAnalysis` の完全なオブジェクトを持っているが、Order に渡す時点で `signal_reason`（`"score=-0.373 conf=0.75"` のみ）と `macro_context_at_entry` に圧縮される。振り返り時にニュース内容やテクニカル詳細が失われている。
+
+### 発注時に追加保存するデータ
+
+`trading_sessions` テーブルの `analysis_summary` カラム（既存、現在は `detail_reason` を格納）を拡充し、取引に至った理由を網羅的に保存する:
+
+```
+=== Signal Summary ===
+combined_score=-0.373 confidence=0.75 action=sell
+news_weight=0.40 price_weight=0.60
+
+=== News Sentiment ===
+score=-0.25 confidence=0.70
+key_themes: ECB rate decision, eurozone inflation
+bullish_factors: strong employment data
+bearish_factors: ECB dovish guidance, weak PMI
+summary: ECBの利下げ示唆でユーロ売り圧力
+
+=== Technical Analysis ===
+direction=short bias_score=-0.50 confidence=0.80
+reasoning: SMA20<SMA50、MACD弱気クロス、RSI=42
+entry_zone=[1.1530, 1.1540]
+key_support=1.1480 key_resistance=1.1560
+
+=== SL/TP Decision ===
+ATR(14)=0.0043 sl_atr_mult=1.5 tp_atr_mult=3.0
+computed: SL=1.1600 TP=1.1406
+llm: SL=1.1535 TP=1.1490
+adopted=computed
+
+=== Macro Context ===
+(既存のmacro_context_at_entry)
+```
+
+### 方向別RAG entry ドキュメントにも同内容を含める
+
+`{order_id}_entry` のテキストにニュースと テクニカルのサマリーを含めることで、将来の類似局面検索でファンダ+テクニカルの両面が参照可能になる。
+
+### 振り返りプロンプトへの注入
+
+精算時の `generate_close_reflection()` に上記の保存データを全文注入する。これにより振り返りLLMは以下を全て評価できる:
+
+- **ニュース判断**: ファンダメンタルの読みは正しかったか
+- **テクニカル判断**: 方向性・エントリーゾーンは適切だったか
+- **SL/TP判断**: ATR倍率は適切だったか
+- **マクロ判断**: 監視銘柄の示唆は正しかったか
+- **総合判断**: news_weight/price_weight のバランスは適切だったか
+
+振り返り結果は既存の方向別RAG（bullish/bearish）に蓄積される。
+
+---
+
+## セクション6: 実装構成
 
 ### 新規ファイル
 
@@ -237,6 +293,7 @@ EURUSD bearish | ... | sl_comparison: computed=1.1450(ATR×1.5) llm=1.1495 adopt
 |---|---|
 | `src/trading/atr_calculator.py` | ATRベースのSL/TP算出、スイングH/Lとの調整、LLM出力との比較記録生成 |
 | `src/persistence/adaptive_params_store.py` | `adaptive_params.yaml` の読み書き、クランプ、変更履歴管理 |
+| `src/trading/entry_context_builder.py` | 発注時のコンテキスト（ニュース+テクニカル+SL/TP+マクロ）をテキスト化して保存用に構築 |
 
 ### 修正ファイル
 
@@ -247,23 +304,27 @@ EURUSD bearish | ... | sl_comparison: computed=1.1450(ATR×1.5) llm=1.1495 adopt
 | `src/signals/signal_combiner.py` | LLMのSL/TPの代わりにATR算出値を使用 |
 | `src/analysis/price_analyzer.py` | LLM出力に `key_support`, `key_resistance` を追加パース |
 | `prompts/price_user.j2` | LLMに `key_support`, `key_resistance` の出力を要求 |
-| `src/analysis/reflector.py` | 振り返りプロンプトにSL/TP比較セクション追加、`atr_params_suggestion` をパース |
-| `src/trading_cycle.py` | 発注フロー（Phase 4b）でATR算出を挟む、クローズ振り返りでパラメータ更新 |
+| `src/analysis/reflector.py` | 振り返りプロンプトにSL/TP比較+ニュース+テクニカル全文を追加、`atr_params_suggestion` をパース |
+| `src/trading_cycle.py` | Phase 4b: ATR算出+コンテキスト保存、クローズ振り返りでパラメータ更新 |
 
 ### データフロー全体像
 
 ```
 [取引発注時]
-  IndicatorSummary.atr_value
+  TradeSignal (news + price + combined_score)
+    + IndicatorSummary.atr_value
     + adaptive_params.yaml のペア別倍率
     + LLMの key_support / key_resistance
-    → atr_calculator.calculate_sl_tp()
-    → SLTPResult を signal_combiner に渡す
-    → 比較記録を session/RAG に蓄積
+    → atr_calculator.calculate_sl_tp() → SLTPResult
+    → entry_context_builder.build() → 網羅的コンテキストテキスト
+    → session_store に analysis_summary として保存
+    → 方向別RAG に entry ドキュメントとして蓄積
 
 [取引クローズ時]
-  振り返りLLM に SL/TP比較データ + 変更履歴を注入
-    → atr_params_suggestion をパース
+  session_store から analysis_summary を取得
+    → 振り返りLLM に全文注入
+      (ニュース + テクニカル + SL/TP比較 + マクロ + 変更履歴)
+    → 振り返り結果 + atr_params_suggestion をパース
     → adaptive_params_store.update_params()
-    → 変更理由を RAG に蓄積
+    → 方向別RAG に complete ドキュメントとして蓄積
 ```
