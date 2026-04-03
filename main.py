@@ -161,31 +161,9 @@ def main() -> None:
     sched_table.add_row("Embed model",     config.rag.embedding_model)
     _console.print(Panel(sched_table, title="[bold cyan]Schedule[/bold cyan]", border_style="cyan", padding=(0, 1)))
 
-    # ジョブ登録
-    for t in news_times:
-        schedule.every().day.at(t, news_tz).do(run_news_collection, config, store)
+    # ジョブ登録（実行優先順: 軽量ジョブを先に登録 → 同時刻では先に実行される）
 
-    # RAGクリーンアップ（毎日1回、ニュース収集の最初の時刻に実行）
-    schedule.every().day.at(news_times[0], news_tz).do(_run_rag_cleanup)
-
-    for t in technical_times:
-        schedule.every().day.at(t, news_tz).do(
-            run_technical_collection, config, store, price_store, analysis_store, price_provider=price_provider
-        )
-        schedule.every().day.at(t, news_tz).do(
-            run_exit_check_cycle, config, store, analysis_store, price_provider=price_provider
-        )
-
-    for t in forecast_times:
-        schedule.every().day.at(t, news_tz).do(
-            run_forecast_cycle, config, store, analysis_store, forecast_store, price_provider=price_provider
-        )
-
-    for t in run_times:
-        schedule.every().day.at(t, tz).do(
-            run_trading_cycle, config, store, price_store, analysis_store, hold_store, price_provider=price_provider
-        )
-
+    # 1. 価格監視（5分ごと・LLMなし・最優先）
     if config.price_monitor.enabled:
         monitor_interval = config.price_monitor.interval_minutes
         monitor_times = [
@@ -195,6 +173,37 @@ def main() -> None:
         ]
         for t in monitor_times:
             schedule.every().day.at(t, tz).do(run_price_monitor, config, price_provider)
+
+    # 2. SL/TP確認・ポジション再評価（毎時:00・LLMなし）
+    for t in technical_times:
+        schedule.every().day.at(t, news_tz).do(
+            run_exit_check_cycle, config, store, analysis_store, price_provider=price_provider
+        )
+
+    # 3. 予測サイクル（LLMなし）
+    for t in forecast_times:
+        schedule.every().day.at(t, news_tz).do(
+            run_forecast_cycle, config, store, analysis_store, forecast_store, price_provider=price_provider
+        )
+
+    # 4. ニュース収集（LLMあり・時間がかかる）
+    for t in news_times:
+        schedule.every().day.at(t, news_tz).do(run_news_collection, config, store)
+
+    # RAGクリーンアップ（毎日1回、ニュース収集の最初の時刻に実行）
+    schedule.every().day.at(news_times[0], news_tz).do(_run_rag_cleanup)
+
+    # 5. テクニカル分析（LLMあり・最も時間がかかる）
+    for t in technical_times:
+        schedule.every().day.at(t, news_tz).do(
+            run_technical_collection, config, store, price_store, analysis_store, price_provider=price_provider
+        )
+
+    # 6. 取引判定（LLMあり・指定時刻のみ）
+    for t in run_times:
+        schedule.every().day.at(t, tz).do(
+            run_trading_cycle, config, store, price_store, analysis_store, hold_store, price_provider=price_provider
+        )
 
     # REST API サーバー（有効時のみ — Initial collection 前に起動）
     if config.api.enabled:
