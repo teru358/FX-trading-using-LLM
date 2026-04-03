@@ -116,6 +116,7 @@ async def analyze_category_sentiment(
     llm: LLMClient,
     temperature: float = 0.3,
     user_notes: str = "",
+    trade_lessons: str = "",
 ) -> NewsSentiment:
     """カテゴリのニュースをLLMでセンチメント分析する。"""
     label = _CATEGORY_LABELS.get(category, category)
@@ -141,6 +142,7 @@ async def analyze_category_sentiment(
         sources_list=", ".join(unique_sources),
         category_focus=_CATEGORY_FOCUS.get(category, ""),
         user_context=user_context,
+        trade_lessons=trade_lessons,
     )
     messages = [
         {"role": "system", "content": load_prompt("news_system.txt")},

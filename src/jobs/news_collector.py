@@ -99,6 +99,30 @@ async def collect_category(
         logger.info(f"[NEWS] {label}: no new articles since last analysis, skipping LLM")
         return
 
+    # 方向別RAGから類似テーマの取引振り返りを検索
+    trade_lessons = ""
+    try:
+        news_text_for_search = fetch_result.format_for_llm()[:500]
+        query_embedding = await embed_text(
+            text=news_text_for_search,
+            ollama_base_url=config.llm.ollama.base_url,
+            model=config.rag.embedding_model,
+        )
+        bullish_hits = store.directional.query(query_embedding, "bullish", top_k=3)
+        bearish_hits = store.directional.query(query_embedding, "bearish", top_k=3)
+        all_hits = bullish_hits + bearish_hits
+        all_hits.sort(key=lambda h: h.get("distance", float("inf")))
+        top_hits = all_hits[:3]
+        if top_hits:
+            lines = ["=== Past Trade Lessons (related) ==="]
+            for h in top_hits:
+                text = h.get("text", "")[:200]
+                lines.append(text)
+            trade_lessons = "\n".join(lines)
+            logger.info(f"[NEWS] {label}: injecting {len(top_hits)} trade lessons from directional RAG")
+    except Exception as e:
+        logger.debug(f"[NEWS] {label}: trade lessons search failed: {e}")
+
     # LLM分析
     news = await analyze_category_sentiment(
         category=category,
@@ -106,6 +130,7 @@ async def collect_category(
         llm=llm,
         temperature=config.llm.news_analysis.temperature,
         user_notes=load_user_notes(config.user_notes_path, "news"),
+        trade_lessons=trade_lessons,
     )
 
     collect_undated = news.news_count - news.recent_count
