@@ -114,10 +114,12 @@ def main() -> None:
         f"{(_fcast_offset + h) % 24:02d}:00"
         for h in range(0, 24, _fcast_interval)
     ]
+    _skipped_forecast = [t for t in forecast_times if t in run_times]
+    _skip_note = f"  skip=[dim]{','.join(_skipped_forecast)}[/dim](=trade)" if _skipped_forecast else ""
     sched_table.add_row(
         "Forecast cycle",
         f"every [cyan]{forecast_interval}[/cyan]h offset=[cyan]{forecast_start:02d}:00[/cyan]  "
-        f"({' / '.join(forecast_times)})  (signal verify + new forecast, no LLM)",
+        f"({' / '.join(forecast_times)}){_skip_note}  (signal verify + new forecast, no LLM)",
     )
     sched_table.add_row("Trading cycles",  f"[cyan]{' / '.join(run_times)}[/cyan]  ({tz})")
     monitor_status = (
@@ -180,23 +182,26 @@ def main() -> None:
             run_exit_check_cycle, config, store, analysis_store, price_provider=price_provider
         )
 
-    # 3. 予測サイクル（LLMなし）
-    for t in forecast_times:
-        schedule.every().day.at(t, news_tz).do(
-            run_forecast_cycle, config, store, analysis_store, forecast_store, price_provider=price_provider, price_store=price_store
-        )
-
-    # 4. ニュース収集（LLMあり・時間がかかる）
+    # 3. ニュース収集（LLMあり・時間がかかる）
     for t in news_times:
         schedule.every().day.at(t, news_tz).do(run_news_collection, config, store)
 
     # RAGクリーンアップ（毎日1回、ニュース収集の最初の時刻に実行）
     schedule.every().day.at(news_times[0], news_tz).do(_run_rag_cleanup)
 
-    # 5. テクニカル分析（LLMあり・最も時間がかかる）
+    # 4. テクニカル分析（LLMあり・最も時間がかかる）
     for t in technical_times:
         schedule.every().day.at(t, news_tz).do(
             run_technical_collection, config, store, price_store, analysis_store, price_provider=price_provider
+        )
+
+    # 5. 予測サイクル（LLMなし・取引判定の直前）
+    #    取引判定と同時刻の場合はスキップ（取引判定が最新データで判断するため）
+    run_times_set = set(run_times)
+    forecast_times_filtered = [t for t in forecast_times if t not in run_times_set]
+    for t in forecast_times_filtered:
+        schedule.every().day.at(t, news_tz).do(
+            run_forecast_cycle, config, store, analysis_store, forecast_store, price_provider=price_provider, price_store=price_store
         )
 
     # 6. 取引判定（LLMあり・指定時刻のみ）

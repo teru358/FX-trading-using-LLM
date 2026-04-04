@@ -35,11 +35,11 @@ llm:
   news_analysis:
     provider: "ollama"
     temperature: 0.3
-    model: "phi4:14b"
+    model: "gemma3:12b-it-qat"
   price_analysis:
     provider: "ollama"
     temperature: 0.1
-    model: "mistral-nemo:12b"
+    model: "qwen3:14b"
   reflection:
     provider: "ollama"
     temperature: 0.3
