@@ -15,6 +15,7 @@ import logging
 from src.analysis.price_analyzer import analyze_price_action
 from src.config import AppConfig, InstrumentConfig
 from src.data.analysis_store import AnalysisStore
+from src.data.correlation import PairCorrelation, compute_correlations, format_correlation_context
 from src.data.indicators import compute_indicators
 from src.data.price_provider import PriceProvider
 from src.data.price_store import PriceStore
@@ -40,6 +41,7 @@ async def _collect_one(
     analysis_store: AnalysisStore,
     llm: LLMClient,
     macro_context: str = "",
+    correlation_context: str = "",
     price_provider: "PriceProvider | None" = None,
 ) -> None:
     """1銘柄のOHLCVを取得してテクニカル分析を実行し、スナップショットを保存する。"""
@@ -80,6 +82,11 @@ async def _collect_one(
     prev_snapshots = analysis_store.get_recent_snapshots(inst.symbol, hours=8)
     prev_ctx = format_previous_analysis_for_prompt(prev_snapshots[0] if prev_snapshots else None)
 
+    # マクロコンテキストに相関データを付加
+    full_macro = macro_context
+    if correlation_context:
+        full_macro = f"{macro_context}\n\n{correlation_context}" if macro_context else correlation_context
+
     price_analysis = await analyze_price_action(
         pair_cfg=inst,
         price_data=price_data,
@@ -89,7 +96,7 @@ async def _collect_one(
         news_context=news_ctx,
         reflection_context=refl_ctx,
         previous_analysis=prev_ctx,
-        macro_context=macro_context,
+        macro_context=full_macro,
         user_notes_path=config.user_notes_path,
     )
     analysis_store.upsert_snapshot(price_analysis)
@@ -148,15 +155,49 @@ async def collect_all_technical(
         realtime_provider=config.price_provider.realtime_provider,
     )
 
-    # Phase 2: 取引対象FXペアを収集（マクロコンテキスト付き）
+    # Phase 1.5: trade×watch の価格相関を計算（LLMなし）
+    correlations: list[PairCorrelation] = []
+    if watch_only and tradeable:
+        try:
+            from src.data.price_fetcher import fetch_ohlcv as _fetch_ohlcv
+            _period = f"{config.trading.lookback_days}d"
+            _interval = config.trading.ohlcv_interval
+
+            trade_prices = {}
+            for inst in tradeable:
+                try:
+                    pd_ = (price_provider.get_ohlcv(inst.symbol, period=_period, interval=_interval, price_store=price_store)
+                           if price_provider else _fetch_ohlcv(inst.symbol, period=_period, interval=_interval, price_store=price_store))
+                    trade_prices[inst.symbol] = pd_
+                except Exception as e:
+                    logger.warning(f"[CORR] {inst.display_name}: OHLCV fetch failed: {e}")
+
+            watch_prices = {}
+            for inst in watch_only:
+                try:
+                    pd_ = (price_provider.get_ohlcv(inst.symbol, period=_period, interval=_interval, price_store=price_store)
+                           if price_provider else _fetch_ohlcv(inst.symbol, period=_period, interval=_interval, price_store=price_store))
+                    watch_prices[inst.symbol] = pd_
+                except Exception as e:
+                    logger.warning(f"[CORR] {inst.display_name}: OHLCV fetch failed: {e}")
+
+            watch_names = {inst.symbol: inst.display_name for inst in watch_only}
+            correlations = compute_correlations(trade_prices, watch_prices, watch_names)
+            logger.info(f"[CORR] Computed {len(correlations)} correlation pairs")
+        except Exception as e:
+            logger.error(f"[CORR] Correlation computation failed: {e}", exc_info=True)
+
+    # Phase 2: 取引対象FXペアを収集（マクロコンテキスト + 相関データ付き）
     if tradeable:
         if watch_only:
             await asyncio.sleep(delay)
         logger.info(f"[COLLECT] Phase 2: {len(tradeable)} tradeable instruments")
     for i, inst in enumerate(tradeable):
         try:
+            corr_ctx = format_correlation_context(correlations, inst.symbol)
             logger.debug(f"[COLLECT] {inst.display_name}: starting OHLCV + technical analysis...")
-            await _collect_one(inst, config, store, price_store, analysis_store, llm_price, macro_context=macro_ctx, price_provider=price_provider)
+            await _collect_one(inst, config, store, price_store, analysis_store, llm_price,
+                               macro_context=macro_ctx, correlation_context=corr_ctx, price_provider=price_provider)
         except Exception as e:
             logger.error(f"[COLLECT] {inst.display_name}: technical analysis failed: {e}", exc_info=True)
         if i < len(tradeable) - 1:

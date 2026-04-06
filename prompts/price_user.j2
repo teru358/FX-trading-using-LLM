@@ -29,7 +29,12 @@ Consider:
 7. News sentiment and macroeconomic context from the RAG knowledge base
 8. Lessons learned from previous trading reflections
 9. Compare with previous analysis: note any shift in direction or confidence since the last cycle
-10. Macro context: equity index trends as risk sentiment indicators, cross-currency correlation
+10. Macro context: equity index trends as risk sentiment indicators
+    - Use Price Correlation data (rolling r-values) to quantify cross-asset relationships
+    - Flag correlation shifts (Δ≥0.2): diverging correlations may signal regime change
+    - Strong positive r (≥0.7): assets move together — confirm directional bias
+    - Strong negative r (≤-0.7): inverse relationship — use as contrary confirmation
+    - Weak/none r: asset decoupled — reduce weight of that macro signal
 11. Risk/reward ratio (minimum 2:1 required)
     - For LONG:  stop_loss < entry_zone[0], take_profit > entry_zone[1]
     - For SHORT: stop_loss > entry_zone[1], take_profit < entry_zone[0]

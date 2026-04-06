@@ -156,6 +156,8 @@ def compute_indicators(
     pattern_cfg: ChartPatternConfig | None = None,
 ) -> tuple[pd.DataFrame, IndicatorSummary]:
     df = df.copy()
+    # 重複タイムスタンプを除去（OHLCV取得時に混入する場合がある）
+    df = df[~df.index.duplicated(keep="last")]
 
     # Moving averages
     if indicator_cfg is None or indicator_cfg.moving_averages:
