@@ -45,6 +45,8 @@ async def _collect_one(
     price_provider: "PriceProvider | None" = None,
 ) -> None:
     """1銘柄のOHLCVを取得してテクニカル分析を実行し、スナップショットを保存する。"""
+    from datetime import datetime, timedelta
+
     if price_provider:
         price_data = price_provider.get_ohlcv(
             inst.symbol,
@@ -60,6 +62,21 @@ async def _collect_one(
             interval=config.trading.ohlcv_interval,
             price_store=price_store,
         )
+
+    # 価格データの鮮度チェック: 最新バーが古すぎる場合LLM呼び出しをスキップ
+    latest_bar = price_data.df.index[-1]
+    if hasattr(latest_bar, "to_pydatetime"):
+        latest_bar = latest_bar.to_pydatetime()
+    if hasattr(latest_bar, "tzinfo") and latest_bar.tzinfo is not None:
+        latest_bar = latest_bar.replace(tzinfo=None)
+    staleness = datetime.now() - latest_bar
+    max_staleness = timedelta(hours=6)
+    if staleness > max_staleness:
+        logger.info(
+            f"[COLLECT] {inst.display_name}: stale data (latest bar {staleness} ago), skipping LLM analysis"
+        )
+        return
+
     _, summary = compute_indicators(
         price_data.df,
         indicator_cfg=config.analysis.indicators,
