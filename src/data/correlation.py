@@ -76,11 +76,13 @@ def compute_correlations(
 
     for t_sym, t_data in trade_prices.items():
         t_close = t_data.df["Close"].dropna()
+        t_close = t_close[~t_close.index.duplicated(keep="last")]
         if len(t_close) < rolling_window + 5:
             continue
 
         for w_sym, w_data in watch_prices.items():
             w_close = w_data.df["Close"].dropna()
+            w_close = w_close[~w_close.index.duplicated(keep="last")]
             if len(w_close) < rolling_window + 5:
                 continue
 
