@@ -83,6 +83,16 @@ async def _collect_one(
         pattern_cfg=config.analysis.chart_patterns,
     )
 
+    from src.signals.technical_scorer import compute_technical_score
+    tech_score = compute_technical_score(summary)
+    logger.info(
+        f"[COLLECT] {inst.display_name}: tech_score={tech_score.total_score:+.3f} "
+        f"conf={tech_score.confidence:.2f} dir={tech_score.direction} "
+        f"(SMA={tech_score.sma_score:+.2f} RSI={tech_score.rsi_score:+.2f} "
+        f"MACD={tech_score.macd_score:+.2f} ICH={tech_score.ichimoku_score:+.2f} "
+        f"BB={tech_score.bb_score:+.2f} PAT={tech_score.pattern_score:+.2f} ADX×{tech_score.adx_factor:.1f})"
+    )
+
     # RAGからコンテキストを構築
     news_entries = store.get_recent_category_news(
         categories=inst.news_categories,
@@ -115,6 +125,7 @@ async def _collect_one(
         previous_analysis=prev_ctx,
         macro_context=full_macro,
         user_notes_path=config.user_notes_path,
+        tech_score=tech_score,
     )
     analysis_store.upsert_snapshot(price_analysis)
     logger.info(

@@ -139,6 +139,7 @@ async def analyze_price_action(
     previous_analysis: str = "",
     macro_context: str = "",
     user_notes_path: Path | None = None,
+    tech_score: "TechnicalScore | None" = None,
 ) -> PriceAnalysis:
     formatted_data = format_for_llm(price_data, summary)
 
@@ -149,6 +150,10 @@ async def analyze_price_action(
     else:
         user_context = ""
 
+    tech_score_context = ""
+    if tech_score is not None:
+        tech_score_context = tech_score.format_for_prompt()
+
     user_prompt = render_prompt(
         "price_user.j2",
         formatted_data=formatted_data,
@@ -158,6 +163,7 @@ async def analyze_price_action(
         previous_analysis=previous_analysis or "=== Previous Analysis ===\nNo previous analysis available.",
         macro_context=macro_context or "=== Macro Reference ===\nNo macro instrument data available.",
         user_context=user_context,
+        tech_score_context=tech_score_context,
     )
 
     messages = [
@@ -227,6 +233,16 @@ async def analyze_price_action(
             f"[PRICE] {pair_cfg.display_name}: {direction} bias={bias_score:+.2f} "
             f"conf={confidence:.2f} RR={rr:.1f}"
         )
+
+        if tech_score is not None:
+            llm_bias = analysis.bias_score
+            analysis.bias_score = tech_score.total_score
+            analysis.confidence = tech_score.confidence
+            analysis.direction_bias = tech_score.direction
+            logger.info(
+                f"[PRICE] {pair_cfg.display_name}: bias overridden "
+                f"LLM={llm_bias:+.2f} → Rule={tech_score.total_score:+.2f}"
+            )
 
         validation_error = _validate_sl_tp(analysis)
         if validation_error is None:

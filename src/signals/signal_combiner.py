@@ -135,7 +135,7 @@ def combine_signals(
     news_themes = ", ".join(news.key_themes[:3]) if news.key_themes else "N/A"
     detail_lines = [
         f"ニュース: {news.sentiment_score:+.2f} ({news.confidence:.0%}) — {news_themes}",
-        f"テクニカル: {price.bias_score:+.2f} ({price.confidence:.0%}) — {price.direction_bias}, RR={price.risk_reward_ratio:.1f}",
+        f"テクニカル(ルール): {price.bias_score:+.2f} ({price.confidence:.0%}) — {price.direction_bias}",
         f"合成: {combined_score:+.3f} → {action.upper()} ({reason})",
     ]
     detail_reason = "\n".join(detail_lines)
@@ -162,7 +162,7 @@ def combine_signals(
     logger.info(
         f"[SIGNAL] {pair_cfg.display_name}: {action.upper()}{direction_str} | "
         f"score={combined_score:+.3f} "
-        f"(news={news.sentiment_score:+.2f}×{effective_news_weight:.2f} + price={price.bias_score:+.2f}×{effective_price_weight:.2f}){conflict_str} | "
+        f"(news={news.sentiment_score:+.2f}×{effective_news_weight:.2f} + tech={price.bias_score:+.2f}×{effective_price_weight:.2f}){conflict_str} | "
         f"conf={combined_confidence:.2f} | {reason}"
     )
     if action != "hold":
