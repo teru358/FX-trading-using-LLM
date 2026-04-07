@@ -14,6 +14,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# yfinance内部ロガーのレベルを上げ、閉場時の "possibly delisted" ERROR を抑止
+logging.getLogger("yfinance").setLevel(logging.CRITICAL)
+
 
 @dataclass
 class PriceData:
@@ -70,7 +73,14 @@ def _is_intraday(interval: str) -> bool:
 )
 def _yf_fetch_period(symbol: str, period: str, interval: str) -> pd.DataFrame:
     ticker = yf.Ticker(symbol)
-    df = ticker.history(period=period, interval=interval)
+    try:
+        df = ticker.history(period=period, interval=interval)
+    except Exception as e:
+        err_msg = str(e)
+        if "no price data found" in err_msg or "Data doesn't exist" in err_msg:
+            logger.debug(f"{symbol}: no data available (period={period}), market likely closed")
+            raise ValueError(f"No data returned for {symbol} (market closed)") from e
+        raise
     if df.empty:
         raise ValueError(f"No data returned for {symbol}")
     df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
@@ -83,10 +93,23 @@ def _yf_fetch_period(symbol: str, period: str, interval: str) -> pd.DataFrame:
     reraise=True,
 )
 def _yf_fetch_range(symbol: str, start: datetime, interval: str) -> pd.DataFrame:
-    """start 以降のデータのみ yfinance から取得する（差分フェッチ用）。"""
+    """start 以降のデータのみ yfinance から取得する（差分フェッチ用）。
+
+    yfinance は市場閉場中や非取引日に空DataFrameを返すことが多い（特にindex系）。
+    その場合はリトライせず空を返す。
+    """
     ticker = yf.Ticker(symbol)
     end = datetime.now() + timedelta(hours=2)  # 最新バーも取得するため余裕を持たせる
-    df = ticker.history(start=start, end=end, interval=interval)
+    try:
+        df = ticker.history(start=start, end=end, interval=interval)
+    except Exception as e:
+        err_msg = str(e)
+        # yfinance が "no price data found" / "Data doesn't exist" を返す場合は
+        # 市場閉場・非取引日の可能性が高いためリトライしない
+        if "no price data found" in err_msg or "Data doesn't exist" in err_msg:
+            logger.debug(f"{symbol}: no data available ({start:%m-%d %H:%M} -> now), market likely closed")
+            return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
+        raise
     if df.empty:
         return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"])
     df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
