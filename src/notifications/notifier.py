@@ -21,6 +21,7 @@ class OrderOpenedEvent:
     confidence: float
     signal_reason: str
     detail_reason: str = ""   # ニュース/テクニカル内訳
+    source: str = ""          # "trading" | "forecast" | "monitor" など
 
 
 @dataclass
@@ -32,6 +33,7 @@ class OrderClosedEvent:
     realized_pnl: float
     close_reason: str     # "take_profit" | "stop_loss" | "manual"
     balance: float
+    source: str = ""          # "trading" | "forecast" | "monitor" など
 
 
 @dataclass
@@ -43,6 +45,7 @@ class SignalSkippedEvent:
     signal_reason: str
     detail_reason: str = ""           # ニュース/テクニカル内訳
     predicted_direction: str = ""     # hold時の方向予測
+    source: str = ""                  # "trading" | "forecast" | "monitor" など
 
 
 @dataclass
@@ -57,9 +60,27 @@ class PriceAlertEvent:
     distance_to_sl_pct: float  # SLまでの残り距離率
     unrealized_pnl: float
     position_size: float
+    source: str = ""          # "trading" | "forecast" | "monitor" など
 
 
 # ── 抽象基底クラス ─────────────────────────────────────────
+
+_SOURCE_LABELS = {
+    "trading": "取引サイクル",
+    "forecast": "予測サイクル",
+    "monitor": "価格監視",
+    "exit_check": "決済判定",
+    "manual": "手動",
+}
+
+
+def _source_tag(source: str) -> str:
+    """source文字列を日本語ラベルに変換し、括弧付きで返す。"""
+    if not source:
+        return ""
+    label = _SOURCE_LABELS.get(source, source)
+    return f"[{label}]"
+
 
 class NotifierAdapter(ABC):
     @abstractmethod
@@ -71,8 +92,9 @@ class NotifierAdapter(ABC):
         direction_emoji = "📈" if event.direction == "buy" else "📉"
         sl_pips = abs(event.entry_price - event.stop_loss)
         tp_pips = abs(event.take_profit - event.entry_price)
+        tag = _source_tag(event.source)
         msg = (
-            f"{direction_emoji} 【注文発注】{event.pair}\n"
+            f"{direction_emoji} 【注文発注】{tag}{event.pair}\n"
             f"方向: {event.direction.upper()}\n"
             f"エントリー: {event.entry_price:.5f}\n"
             f"SL: {event.stop_loss:.5f}  ({sl_pips:.5f})\n"
@@ -101,8 +123,9 @@ class NotifierAdapter(ABC):
             reason_label = "手動決済"
 
         pnl_sign = "+" if event.realized_pnl >= 0 else ""
+        tag = _source_tag(event.source)
         msg = (
-            f"{emoji} 【決済】{event.pair} — {reason_label}\n"
+            f"{emoji} 【決済】{tag}{event.pair} — {reason_label}\n"
             f"方向: {event.direction.upper()}\n"
             f"エントリー: {event.entry_price:.5f} → {event.close_price:.5f}\n"
             f"損益: {pnl_sign}{event.realized_pnl:.2f}\n"
@@ -113,8 +136,9 @@ class NotifierAdapter(ABC):
     async def notify_price_alert(self, event: PriceAlertEvent) -> None:
         direction_emoji = "📈" if event.direction == "buy" else "📉"
         pnl_sign = "+" if event.unrealized_pnl >= 0 else ""
+        tag = _source_tag(event.source)
         msg = (
-            f"⚠️ 【価格急変動】{event.pair}\n"
+            f"⚠️ 【価格急変動】{tag}{event.pair}\n"
             f"方向: {direction_emoji} {event.direction.upper()}\n"
             f"エントリー: {event.entry_price:.5f} → 現在: {event.current_price:.5f}\n"
             f"損失: {event.adverse_move_pct:.2%}  未実現損益: {pnl_sign}{event.unrealized_pnl:.2f}\n"
@@ -123,16 +147,17 @@ class NotifierAdapter(ABC):
         await self.send(msg)
 
     async def notify_signal_skipped(self, event: SignalSkippedEvent) -> None:
+        tag = _source_tag(event.source)
         if event.action == "hold":
             direction_label = event.predicted_direction or "neutral"
             msg = (
-                f"⏸️ 【シグナル】{event.pair} — HOLD ({direction_label}寄り)\n"
+                f"⏸️ 【シグナル】{tag}{event.pair} — HOLD ({direction_label}寄り)\n"
                 f"確信度: {event.confidence:.0%}"
             )
         else:
             direction_emoji = "📈" if event.action == "buy" else "📉"
             msg = (
-                f"{direction_emoji} 【シグナル】{event.pair} — 既存ポジションのためスキップ\n"
+                f"{direction_emoji} 【シグナル】{tag}{event.pair} — 既存ポジションのためスキップ\n"
                 f"方向: {event.action.upper()}  確信度: {event.confidence:.0%}"
             )
         if event.detail_reason:

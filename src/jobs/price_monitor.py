@@ -129,6 +129,7 @@ async def monitor_open_positions(
                     distance_to_sl_pct=sl_distance_pct,
                     unrealized_pnl=unrealized_pnl,
                     position_size=pos.position_size,
+                    source="monitor",
                 ))
                 _alert_state[pos.order_id] = adverse_pct
                 logger.warning(
@@ -160,6 +161,7 @@ async def monitor_open_positions(
                         realized_pnl=closed.realized_pnl or 0.0,
                         close_reason="emergency_stop",
                         balance=account_after.balance,
+                        source="monitor",
                     ))
 
         except Exception as e:

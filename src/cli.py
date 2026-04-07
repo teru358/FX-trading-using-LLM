@@ -135,6 +135,7 @@ def _cmd_close(config: AppConfig, pair_arg: str) -> None:
                     realized_pnl=closed.realized_pnl or 0.0,
                     close_reason="manual",
                     balance=pm.get_account_state().balance,
+                    source="manual",
                 ))
 
     asyncio.run(_do())

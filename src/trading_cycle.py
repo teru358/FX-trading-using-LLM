@@ -361,6 +361,7 @@ async def trading_cycle(
                     realized_pnl=closed.realized_pnl or 0.0,
                     close_reason=closed.close_reason or "manual",
                     balance=account_after_close.balance,
+                    source="trading",
                 ))
 
     # Phase 1.5: 決済トレードの確定結果ベース振り返りをRAGに保存
@@ -546,6 +547,7 @@ async def trading_cycle(
                             realized_pnl=closed_order.realized_pnl or 0.0,
                             close_reason=decision.close_reason,
                             balance=account_after.balance,
+                            source="trading",
                         ))
 
             # Phase 4a 決済分の振り返りをRAGに保存
@@ -779,6 +781,7 @@ async def trading_cycle(
                         confidence=sig.confidence,
                         signal_reason=sig.signal_reason,
                         detail_reason=sig.detail_reason,
+                        source="trading",
                     ))
                 # Task 6: Create session + RAG entry
                 if session_store:
@@ -854,6 +857,7 @@ async def trading_cycle(
                     confidence=sig.confidence,
                     signal_reason=sig.signal_reason,
                     detail_reason=sig.detail_reason,
+                    source="trading",
                 ))
         else:
             # sig.action == "hold": シグナル弱く見送り → 次サイクルで結果を検証
@@ -865,6 +869,7 @@ async def trading_cycle(
                     signal_reason=sig.signal_reason,
                     detail_reason=sig.detail_reason,
                     predicted_direction=sig.predicted_direction,
+                    source="trading",
                 ))
             hold_store.save_hold(sig.pair, sig)
 
@@ -949,6 +954,7 @@ async def exit_check_cycle(
                 realized_pnl=closed.realized_pnl or 0.0,
                 close_reason=closed.close_reason or "manual",
                 balance=account_after.balance,
+                source="exit_check",
             ))
 
     # Phase 4a: ポジション再評価（キャッシュ集約のみ、LLM不使用）
@@ -1006,6 +1012,7 @@ async def exit_check_cycle(
                     realized_pnl=closed_order.realized_pnl or 0.0,
                     close_reason=decision.close_reason,
                     balance=account_after.balance,
+                    source="exit_check",
                 ))
 
 

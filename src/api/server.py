@@ -558,6 +558,7 @@ async def close_position(pair: str) -> dict[str, Any]:
                 realized_pnl=closed.realized_pnl or 0.0,
                 close_reason="manual",
                 balance=pm.get_account_state().balance,
+                source="manual",
             ))
         except Exception as e:
             logger.warning(f"[API] Close notification failed: {e}")
