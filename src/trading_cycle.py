@@ -131,6 +131,8 @@ async def _process_pair(
                 indicator_cfg=config.analysis.indicators,
                 pattern_cfg=config.analysis.chart_patterns,
             )
+            from src.signals.technical_scorer import compute_technical_score
+            tech_score = compute_technical_score(summary)
             news_ctx, refl_ctx = await _build_rag_context(pair_cfg, config, store)
             price = await analyze_price_action(
                 pair_cfg=pair_cfg,
@@ -142,6 +144,7 @@ async def _process_pair(
                 reflection_context=refl_ctx,
                 macro_context=macro_ctx,
                 user_notes_path=config.user_notes_path,
+                tech_score=tech_score,
             )
 
         news = aggregate_news_sentiment(pair_cfg, store, config)
@@ -1102,7 +1105,7 @@ async def forecast_cycle(
                 # Directional RAG: individual forecast reviews
                 for fc in recent_forecasts:
                     try:
-                        fc_text, fc_significant = build_forecast_review(
+                        fc_text, _fc_lesson, fc_significant = build_forecast_review(
                             pair=pair_cfg.symbol,
                             forecast=fc,
                             current_price=current_price,
