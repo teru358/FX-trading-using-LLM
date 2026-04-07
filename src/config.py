@@ -98,8 +98,8 @@ class TradingConfig:
     signal_confidence_threshold: float = 0.55
     lookback_days: int = 90
     ohlcv_interval: str = "1h"
-    news_weight: float = 0.40
-    price_weight: float = 0.60
+    news_weight: float = 0.20
+    price_weight: float = 0.80
     signal_deadband: float = 0.15
     min_lot_size: float = 1000.0
     lot_unit: float = 1000.0
@@ -300,7 +300,7 @@ class AnalysisConfig:
     chart_patterns: ChartPatternConfig = field(default_factory=ChartPatternConfig)
     forecast_review_interval_hours: int = 8        # B: 予測検証ウィンドウ（時間）
     forecast_start_hour: int = 0                   # 予測サイクル開始時刻オフセット（0〜23）
-    forecast_min_combined_score: float = 0.25      # C: 予測生成の最低スコア閾値（±）
+    forecast_min_combined_score: float = 0.15      # C: 予測生成の最低スコア閾値（±）
     forecast_significance_atr_ratio: float = 0.30  # A: 有意性判定の ATR proxy 比率
 
 
@@ -438,8 +438,8 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         signal_confidence_threshold=t.get("signal_confidence_threshold", 0.55),
         lookback_days=t.get("lookback_days", 90),
         ohlcv_interval=t.get("ohlcv_interval", "1h"),
-        news_weight=t.get("news_weight", 0.40),
-        price_weight=t.get("price_weight", 0.60),
+        news_weight=t.get("news_weight", 0.20),
+        price_weight=t.get("price_weight", 0.80),
         signal_deadband=t.get("signal_deadband", 0.15),
         min_lot_size=t.get("min_lot_size", 1000.0),
         lot_unit=t.get("lot_unit", 1000.0),
@@ -669,7 +669,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         chart_patterns=pattern_cfg,
         forecast_review_interval_hours=an.get("forecast_review_interval_hours", 8),
         forecast_start_hour=an.get("forecast_start_hour", 0),
-        forecast_min_combined_score=an.get("forecast_min_combined_score", 0.25),
+        forecast_min_combined_score=an.get("forecast_min_combined_score", 0.15),
         forecast_significance_atr_ratio=an.get("forecast_significance_atr_ratio", 0.30),
     )
 

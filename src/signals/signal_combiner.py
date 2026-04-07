@@ -57,12 +57,13 @@ def combine_signals(
     combined_score = (news.sentiment_score * effective_news_weight) + (price.bias_score * effective_price_weight)
 
     # Alignment check: penalise conflicting signals (scaled by weaker confidence)
+    # ニュース重み削減後はテクニカル主導のため、ペナルティを緩和 (0.5→0.3)
     alignment = news.sentiment_score * price.bias_score
     if alignment >= 0:
         conflict_penalty = 1.0
     else:
         weaker_conf = min(news.confidence, price.confidence)
-        conflict_penalty = 1.0 - (0.5 * weaker_conf)
+        conflict_penalty = 1.0 - (0.3 * weaker_conf)
     combined_score *= conflict_penalty
 
     # Combined confidence
