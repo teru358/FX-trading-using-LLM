@@ -20,7 +20,7 @@ def build_forecast_review(
     review_ts: datetime,
     significance_atr_ratio: float = 0.30,
     atr_value: float | None = None,
-) -> tuple[str, bool]:
+) -> tuple[str, str, bool]:
     """予測と実際の結果を比較し、事実文字列と有意性フラグを返す。
 
     Args:
