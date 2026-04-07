@@ -65,6 +65,22 @@ def format_reflections_for_prompt(reflections: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def format_insights_for_prompt(insights: list[dict]) -> str:
+    """askから得た洞察をプロンプト用テキストに整形する。"""
+    if not insights:
+        return ""
+    lines = ["=== Trading Insights (from analysis) ==="]
+    for i, r in enumerate(insights, 1):
+        meta = r.get("metadata", {})
+        pair = meta.get("pair", "?")
+        itype = meta.get("insight_type", "general")
+        created = meta.get("created_at", "?")
+        if len(created) > 16:
+            created = created[:16]
+        lines.append(f"{i}. [{created}] ({pair}/{itype}) {r.get('text', '')}")
+    return "\n".join(lines)
+
+
 def format_news_for_prompt(news_entries: list[dict]) -> str:
     """RAG取得ニュースをOllamaプロンプト用テキストに整形する。
 

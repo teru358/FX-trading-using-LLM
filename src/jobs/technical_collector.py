@@ -22,6 +22,7 @@ from src.data.price_store import PriceStore
 from src.llm.client import LLMClient
 from src.llm.factory import create_llm_client
 from src.rag.prompt_formatter import (
+    format_insights_for_prompt,
     format_macro_context_for_prompt,
     format_news_for_prompt,
     format_previous_analysis_for_prompt,
@@ -104,6 +105,12 @@ async def _collect_one(
     )
     news_ctx = format_news_for_prompt(news_entries)
     refl_ctx = format_reflections_for_prompt(reflections)
+
+    # 過去のask洞察を取得
+    insights = store.get_recent_insights(pair=inst.symbol, limit=3, lookback_hours=72)
+    insight_ctx = format_insights_for_prompt(insights)
+    if insight_ctx:
+        refl_ctx = f"{refl_ctx}\n\n{insight_ctx}" if refl_ctx else insight_ctx
 
     # 前回分析スナップショット（直近1件）
     prev_snapshots = analysis_store.get_recent_snapshots(inst.symbol, hours=8)

@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 # ChromaDB コレクション名
 _NEWS_COL = "fx_news"
 _REFLECTION_COL = "fx_reflections"
+_INSIGHT_COL = "fx_insights"
 
 
 class VectorStore:
@@ -32,10 +33,15 @@ class VectorStore:
             name=_REFLECTION_COL,
             metadata={"hnsw:space": "cosine"},
         )
+        self._insights = self._client.get_or_create_collection(
+            name=_INSIGHT_COL,
+            metadata={"hnsw:space": "cosine"},
+        )
         self.directional = DirectionalStore(db_path)
         logger.info(
             f"VectorStore ready at {db_path} "
-            f"(news={self._news.count()}, reflections={self._reflections.count()})"
+            f"(news={self._news.count()}, reflections={self._reflections.count()}, "
+            f"insights={self._insights.count()})"
         )
 
     # ---- Category News (カテゴリ別分析結果) --------------------------------
@@ -271,6 +277,105 @@ class VectorStore:
             entries.append({"text": doc, "metadata": meta})
         entries.sort(key=lambda x: x["metadata"].get("cycle_ts", 0), reverse=True)
         return entries[:limit]
+
+    # ---- Insights -----------------------------------------------------------
+
+    def upsert_insight(
+        self,
+        entry_id: str,
+        text: str,
+        embedding: list[float],
+        pair: str,
+        insight_type: str,  # "analysis" | "pattern" | "risk" | "general"
+        source_question: str,
+        created_at: datetime,
+    ) -> None:
+        """ask回答から抽出した洞察をRAGに保存する。"""
+        metadata = {
+            "pair": pair,
+            "insight_type": insight_type,
+            "source_question": source_question[:200],
+            "created_at": created_at.isoformat(),
+            "created_ts": created_at.timestamp(),
+        }
+        self._insights.upsert(
+            ids=[entry_id],
+            embeddings=[embedding],
+            documents=[text],
+            metadatas=[metadata],
+        )
+        logger.info(f"[INSIGHT] Stored: {entry_id} | {pair} | {insight_type}")
+
+    def get_recent_insights(
+        self,
+        pair: str | None = None,
+        limit: int = 5,
+        lookback_hours: int = 72,
+    ) -> list[dict]:
+        """直近の洞察を取得する。"""
+        if self._insights.count() == 0:
+            return []
+        cutoff_ts = (datetime.now() - timedelta(hours=lookback_hours)).timestamp()
+        where: dict | None = {"created_ts": {"$gte": cutoff_ts}}
+        if pair:
+            where = {"$and": [
+                {"pair": {"$eq": pair}},
+                {"created_ts": {"$gte": cutoff_ts}},
+            ]}
+        try:
+            results = self._insights.get(
+                where=where,
+                limit=limit,
+            )
+        except Exception:
+            results = self._insights.get(limit=limit)
+        entries = []
+        for i, doc in enumerate(results.get("documents", [])):
+            entries.append({
+                "text": doc,
+                "metadata": results["metadatas"][i] if results.get("metadatas") else {},
+            })
+        # Sort by created_ts descending
+        entries.sort(key=lambda e: e["metadata"].get("created_ts", 0), reverse=True)
+        return entries[:limit]
+
+    def query_insights(
+        self,
+        query_embedding: list[float],
+        pair: str | None = None,
+        top_k: int = 3,
+        lookback_hours: int = 72,
+    ) -> list[dict]:
+        """セマンティック検索で関連する洞察を取得する。"""
+        if self._insights.count() == 0:
+            return []
+        cutoff_ts = (datetime.now() - timedelta(hours=lookback_hours)).timestamp()
+        where: dict | None = {"created_ts": {"$gte": cutoff_ts}}
+        if pair:
+            where = {"$and": [
+                {"pair": {"$eq": pair}},
+                {"created_ts": {"$gte": cutoff_ts}},
+            ]}
+        n = min(top_k, self._insights.count())
+        try:
+            results = self._insights.query(
+                query_embeddings=[query_embedding],
+                n_results=n,
+                where=where,
+            )
+        except Exception:
+            results = self._insights.query(
+                query_embeddings=[query_embedding],
+                n_results=n,
+            )
+        entries = []
+        for i, doc in enumerate(results.get("documents", [[]])[0]):
+            entries.append({
+                "text": doc,
+                "metadata": results["metadatas"][0][i] if results.get("metadatas") else {},
+                "distance": results["distances"][0][i] if results.get("distances") else 0.5,
+            })
+        return entries
 
     # ---- Maintenance --------------------------------------------------------
 

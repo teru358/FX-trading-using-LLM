@@ -211,6 +211,24 @@ class AskContextBuilder:
         except Exception as e:
             logger.warning(f"[ASK] Reflection search failed: {e}")
 
+        # Insights collection
+        try:
+            insights_results = self._store.query_insights(
+                query_embedding=query_embedding,
+                pair=pairs[0] if len(pairs) == 1 else None,
+                top_k=3,
+                lookback_hours=72,
+            )
+            for r in insights_results:
+                all_results.append({
+                    "text": r["text"],
+                    "metadata": r.get("metadata", {}),
+                    "distance": r.get("distance", 0.5),
+                    "source": "insight",
+                })
+        except Exception as e:
+            logger.warning(f"[ASK] Insight search failed: {e}")
+
         # Directional collections (bullish + bearish)
         for direction in ("bullish", "bearish"):
             try:

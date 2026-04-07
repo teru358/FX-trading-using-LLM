@@ -1436,6 +1436,51 @@ async def _run_ask(
     response = await llm.chat(messages, temperature=config.llm.price_analysis.temperature)
     import re as _re
     response = _re.sub(r"<think>.*?</think>", "", response, flags=_re.DOTALL).strip()
+
+    # === Ask回答を洞察としてRAGに保存 ===
+    try:
+        from src.rag.ask_context_builder import extract_pairs
+        from src.rag.embedder import embed_text
+        all_instruments = config.watch_only_instruments + config.tradeable_instruments
+        mentioned_pairs = extract_pairs(user_message, all_instruments)
+        pair_label = mentioned_pairs[0] if mentioned_pairs else "GENERAL"
+
+        # 回答の要約（長すぎる場合は先頭500文字）
+        insight_text = response[:500] if len(response) > 500 else response
+
+        insight_embedding = await embed_text(
+            text=f"Q: {user_message}\nA: {insight_text}",
+            ollama_base_url=config.llm.ollama.base_url,
+            model=config.rag.embedding_model,
+        )
+
+        from datetime import datetime
+        now = datetime.now()
+        entry_id = f"insight_{now.strftime('%Y%m%d_%H%M%S')}"
+
+        # insight_type をキーワードで分類
+        msg_lower = user_message.lower()
+        if any(w in msg_lower for w in ["分析", "テクニカル", "チャート", "パターン"]):
+            insight_type = "analysis"
+        elif any(w in msg_lower for w in ["リスク", "損切", "ストップ"]):
+            insight_type = "risk"
+        elif any(w in msg_lower for w in ["振り返", "反省", "レビュー", "パフォーマンス"]):
+            insight_type = "pattern"
+        else:
+            insight_type = "general"
+
+        store.upsert_insight(
+            entry_id=entry_id,
+            text=insight_text,
+            embedding=insight_embedding,
+            pair=pair_label,
+            insight_type=insight_type,
+            source_question=user_message,
+            created_at=now,
+        )
+    except Exception as e:
+        logger.warning(f"[ASK] Failed to save insight: {e}")
+
     return response
 
 
