@@ -292,4 +292,4 @@ def run_commands(
         except KeyboardInterrupt:
             _console.print("\n[yellow]中断しました[/yellow]")
         except Exception as e:
-            _console.print(f"[red]エラー: {e}[/red]")
+            _console.print(f"[red]エラー: {type(e).__name__}: {e}[/red]")
