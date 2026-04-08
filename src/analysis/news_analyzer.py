@@ -149,17 +149,33 @@ async def analyze_category_sentiment(
         {"role": "user", "content": user_prompt},
     ]
 
-    try:
-        logger.info(f"[NEWS] Calling LLM for {label}...")
-        response_text = await llm.chat(messages, temperature=temperature)
-        logger.debug(f"[NEWS] {label}: LLM response length: {len(response_text)} chars")
+    MAX_RETRIES = 2
+    last_error: str | None = None
 
-        data = extract_json(response_text)
-        return _build_sentiment(
-            category, data,
-            sources=unique_sources, fetch_result=fetch_result,
-        )
+    for attempt in range(MAX_RETRIES):
+        try:
+            logger.info(f"[NEWS] Calling LLM for {label}... (attempt {attempt + 1}/{MAX_RETRIES})")
+            response_text = await llm.chat(messages, temperature=temperature)
+            logger.debug(f"[NEWS] {label}: LLM response length: {len(response_text)} chars")
 
-    except Exception as e:
-        logger.warning(f"[NEWS] {label}: Analysis failed: {e}. Returning neutral sentiment.")
-        return _neutral_sentiment(category, f"Analysis failed: {e}")
+            data = extract_json(response_text)
+            return _build_sentiment(
+                category, data,
+                sources=unique_sources, fetch_result=fetch_result,
+            )
+
+        except (ValueError, Exception) as e:
+            last_error = str(e)
+            logger.warning(
+                f"[NEWS] {label}: Analysis failed (attempt {attempt + 1}/{MAX_RETRIES}): {e}"
+            )
+            if attempt < MAX_RETRIES - 1:
+                # リトライ: JSON出力を明示的に要求
+                messages.append({"role": "assistant", "content": response_text})
+                messages.append({"role": "user", "content":
+                    "Your response was not valid JSON. Please return ONLY a valid JSON object with no extra text."
+                })
+                continue
+
+    logger.warning(f"[NEWS] {label}: All {MAX_RETRIES} attempts failed. Returning neutral sentiment.")
+    return _neutral_sentiment(category, f"Analysis failed after {MAX_RETRIES} attempts: {last_error}")
