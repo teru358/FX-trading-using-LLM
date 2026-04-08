@@ -26,8 +26,8 @@ _BASE_URL = "https://api.twelvedata.com"
 _FX_PATTERN = re.compile(r"^([A-Z]{3})([A-Z]{3})=X$")
 
 # yfinance index/ETF → Twelve Data シンボル変換（Free枠で利用可能なもの）
+# 注: SPX はGrow以上プランが必要なため除外
 _INDEX_SYMBOL_MAP: dict[str, str] = {
-    "^GSPC": "SPX",       # S&P 500
     # GLD はそのまま使えるのでマッピング不要
 }
 
