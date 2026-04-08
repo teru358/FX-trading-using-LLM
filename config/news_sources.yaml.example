@@ -1,0 +1,66 @@
+# ── ニュース検索キーワード ──────────────────────────────────────────
+keywords:
+  global:
+    # マクロ経済・金融（feeds_global の記事フィルタ）
+    - "forex"
+    - "fx"
+    - "currency"
+    - "central bank"
+    - "economy"
+    - "inflation"
+    - "rate"
+    - "geopolit"
+    - "oil"
+    - "gold"
+    - "bond"
+    - "yield"
+    - "trade war"
+    - "tariff"
+    - "dollar"
+    - "euro"
+    - "yen"
+    - "sterling"
+    - "fed"
+    - "ecb"
+    - "boe"
+    - "boj"
+  japan:
+    # feeds_japan の記事フィルタ（英語・日本語混在可）
+    - "boj"
+    - "bank of japan"
+    - "japan"
+    - "japanese"
+    - "yen"
+    - "jpy"
+    - "日銀"
+    - "円安"
+    - "円高"
+    - "金利"
+    - "為替"
+    - "利上げ"
+    - "利下げ"
+    - "円"
+
+# ── ニュースソース ────────────────────────────────────────────────
+news_sources:
+  # ── Feedly API（有効にすると RSS の代わりに Feedly カテゴリから取得） ──
+  feedly:
+    enabled: false
+    streams_fx: []
+    streams_global: []
+    streams_japan: []
+    count: 20             # 1ストリームあたりの取得件数上限
+
+  feeds_fx:
+    - "https://www.forexlive.com/feed/news"
+    - "https://www.fxstreet.com/rss/news"
+    - "https://www.investing.com/rss/news_285.rss"
+  feeds_global:
+    - "https://feeds.marketwatch.com/marketwatch/topstories/"
+    - "https://feeds.bbci.co.uk/news/business/rss.xml"
+    - "https://www.ft.com/rss/home/uk"
+    - "https://finance.yahoo.com/news/rssindex"
+    - "https://www.investing.com/rss/news_14.rss"
+  feeds_japan:
+    - "https://japantoday.com/feed"
+    - "https://www.japantimes.co.jp/feed/"
