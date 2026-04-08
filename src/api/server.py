@@ -367,23 +367,72 @@ def logs(lines: int = 100) -> dict[str, Any]:
 
 @app.get("/schedule", dependencies=[Depends(_verify_api_key)])
 def schedule_info() -> dict[str, Any]:
-    """スケジュール済みジョブの次回実行時刻一覧を返す。"""
+    """スケジュール情報を返す。
+
+    - 取引サイクル・予測サイクルの次回実行時刻
+    - 各サイクルの全スケジュール
+    - ニュース取得間隔
+    - price_monitor (5分間隔) は除外
+    """
     import schedule as sched_mod
+    from datetime import datetime
+
+    # ジョブ名 → カテゴリ分類
+    _CATEGORY = {
+        "run_trading_cycle":      "trading",
+        "run_forecast_cycle":     "forecast",
+        "run_news_collection":    "news",
+        "run_technical_collection": "technical",
+        "run_exit_check_cycle":   "exit_check",
+    }
+    _HIDDEN = {"run_price_monitor", "_run_rag_cleanup"}
 
     jobs = sched_mod.get_jobs()
-    job_list = []
+
+    # カテゴリ別に分類
+    categorized: dict[str, list[dict]] = {}
     for j in jobs:
-        job_list.append({
-            "name":     getattr(j.job_func, "__name__", str(j.job_func)),
+        name = getattr(j.job_func, "__name__", str(j.job_func))
+        if name in _HIDDEN:
+            continue
+        cat = _CATEGORY.get(name, "other")
+        entry = {
+            "time": j.next_run.strftime("%H:%M") if j.next_run else None,
             "next_run": j.next_run.isoformat() if j.next_run else None,
             "last_run": j.last_run.isoformat() if j.last_run else None,
-        })
+        }
+        categorized.setdefault(cat, []).append(entry)
 
-    next_run = min((j.next_run for j in jobs if j.next_run), default=None)
+    def _next_for(cat: str) -> str | None:
+        entries = categorized.get(cat, [])
+        times = [e["next_run"] for e in entries if e["next_run"]]
+        return min(times) if times else None
+
+    def _all_times(cat: str) -> list[str]:
+        entries = categorized.get(cat, [])
+        return sorted({e["time"] for e in entries if e["time"]})
+
     return {
-        "jobs_count": len(jobs),
-        "next_run":   next_run.isoformat() if next_run else None,
-        "jobs":       job_list,
+        "trading": {
+            "next_run": _next_for("trading"),
+            "schedule": _all_times("trading"),
+        },
+        "forecast": {
+            "next_run": _next_for("forecast"),
+            "schedule": _all_times("forecast"),
+        },
+        "news": {
+            "next_run": _next_for("news"),
+            "schedule": _all_times("news"),
+        },
+        "technical": {
+            "next_run": _next_for("technical"),
+            "schedule": _all_times("technical"),
+        },
+        "exit_check": {
+            "next_run": _next_for("exit_check"),
+            "schedule": _all_times("exit_check"),
+        },
     }
 
 
