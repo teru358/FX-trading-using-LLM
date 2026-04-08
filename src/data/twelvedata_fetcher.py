@@ -25,9 +25,19 @@ _BASE_URL = "https://api.twelvedata.com"
 # FXシンボル変換: "USDJPY=X" <-> "USD/JPY"
 _FX_PATTERN = re.compile(r"^([A-Z]{3})([A-Z]{3})=X$")
 
+# yfinance index/ETF → Twelve Data シンボル変換（Free枠で利用可能なもの）
+_INDEX_SYMBOL_MAP: dict[str, str] = {
+    "^GSPC": "SPX",       # S&P 500
+    # GLD はそのまま使えるのでマッピング不要
+}
+
 
 def _symbol_to_twelvedata(symbol: str) -> str:
-    """yfinance形式 → Twelve Data形式。FX以外はそのまま返す。"""
+    """yfinance形式 → Twelve Data形式。"""
+    # index/ETFマッピング
+    if symbol in _INDEX_SYMBOL_MAP:
+        return _INDEX_SYMBOL_MAP[symbol]
+    # FXペア変換
     m = _FX_PATTERN.match(symbol)
     if m:
         return f"{m.group(1)}/{m.group(2)}"

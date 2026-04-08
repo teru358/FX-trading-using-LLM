@@ -35,11 +35,11 @@ llm:
   news_analysis:
     provider: "ollama"
     temperature: 0.3
-    model: "gemma3:12b-it-qat"
+    model: "gemma4:e4b"
   price_analysis:
     provider: "ollama"
     temperature: 0.1
-    model: "qwen3:14b"
+    model: "qwen3.5:9b"
   reflection:
     provider: "ollama"
     temperature: 0.3
@@ -91,49 +91,50 @@ instruments:
     quote_currency: "USD"
     enabled: false
   # ── 株価指数（監視専用） ──
-  - symbol: "^N225"
-    display_name: "Nikkei 225"
-    asset_type: index
-    mode: watch
-    currency: "JPY"
-    enabled: true
+  # yfinanceのindex取得が不安定なため、安定したETF/Twelve Data対応シンボルを使用
   - symbol: "^GSPC"
     display_name: "S&P 500"
     asset_type: index
     mode: watch
     currency: "USD"
-    enabled: true
+    enabled: true         # Twelve Data (SPX) で取得
+  - symbol: "1321.T"
+    display_name: "Nikkei 225 ETF"
+    asset_type: index
+    mode: watch
+    currency: "JPY"
+    enabled: true         # 東証ETF、yfinanceで安定
   # ── マクロ参照指標（監視専用） ──
-  - symbol: "DX-Y.NYB"
-    display_name: "US Dollar Index"
+  - symbol: "UUP"
+    display_name: "US Dollar Index (UUP)"
     asset_type: index
     mode: watch
     currency: "USD"
-    enabled: true
+    enabled: true         # DX-Y.NYB代替ETF
   - symbol: "GLD"
     display_name: "Gold (GLD ETF)"
     asset_type: index
     mode: watch
     currency: "USD"
-    enabled: true
-  - symbol: "^TNX"
-    display_name: "US 10Y Yield"
+    enabled: true         # Twelve Data で取得
+  - symbol: "IEF"
+    display_name: "US 7-10Y Treasury (IEF)"
     asset_type: index
     mode: watch
     currency: "USD"
-    enabled: true
-  - symbol: "^IRX"
-    display_name: "US 2Y Yield"
+    enabled: true         # ^TNX代替ETF（債券価格 ≈ 利回り逆相関）
+  - symbol: "SHY"
+    display_name: "US 1-3Y Treasury (SHY)"
     asset_type: index
     mode: watch
     currency: "USD"
-    enabled: true
-  - symbol: "CL=F"
-    display_name: "WTI Crude Oil"
+    enabled: true         # ^IRX代替ETF
+  - symbol: "USO"
+    display_name: "WTI Crude Oil (USO)"
     asset_type: index
     mode: watch
     currency: "USD"
-    enabled: true
+    enabled: true         # CL=F代替ETF
 
 trading:
   initial_balance: 10000.0
@@ -175,7 +176,7 @@ trading:
 
 price_monitor:
   enabled: true
-  interval_minutes: 5             # Layer 4: 監視間隔（分）
+  interval_minutes: 10            # Layer 4: 監視間隔（分）
   alert_threshold_pct: 0.003      # 損失 0.3% で最初の通知
   alert_step_pct: 0.002           # 追加 0.2% ごとに再通知（スパム防止）
   emergency_close_pct: 0.008      # 損失 0.8% で緊急損切り（0 = 無効）
@@ -193,6 +194,10 @@ price_provider:
   twelvedata:
     daily_limit: 800
     per_minute_limit: 8
+    use_for_monitor: true           # price_monitorでもTwelve Dataを使うか（falseでyfinance）
+    watch_symbols:                  # Twelve Data Free枠で取得するwatch銘柄
+      - "^GSPC"                     # → SPX (Twelve Data変換)
+      - "GLD"                       # そのまま
 
 schedule:
   run_times:

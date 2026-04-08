@@ -21,7 +21,13 @@ logger = logging.getLogger(__name__)
 
 
 class PriceProvider:
-    """設定に基づいて価格データプロバイダーを選択するファサード。"""
+    """設定に基づいて価格データプロバイダーを選択するファサード。
+
+    Twelve Data有効時:
+      - trade銘柄: 常にTwelve Data（リアルタイムFX）
+      - watch銘柄: td_symbols に含まれればTwelve Data、それ以外はyfinance
+      - price_monitor: use_for_monitor設定に従う
+    """
 
     def __init__(self, config: "AppConfig") -> None:
         self._config = config
@@ -29,6 +35,11 @@ class PriceProvider:
         self._trade_symbols: set[str] = {
             i.symbol for i in config.tradeable_instruments
         }
+        # Twelve Data対応シンボル（trade + 設定で指定されたwatch銘柄）
+        self._td_symbols: set[str] = set(self._trade_symbols)
+        for sym in config.price_provider.twelvedata.watch_symbols:
+            self._td_symbols.add(sym)
+        self._use_for_monitor = config.price_provider.twelvedata.use_for_monitor
         self._td_fetcher = None
         self._daily_count = 0
         self._daily_count_date: date | None = None
@@ -48,13 +59,16 @@ class PriceProvider:
     def _is_trade_pair(self, symbol: str) -> bool:
         return symbol in self._trade_symbols
 
-    def _use_twelvedata(self, symbol: str) -> bool:
+    def _use_twelvedata(self, symbol: str, is_monitor: bool = False) -> bool:
         """このシンボルに Twelve Data を使うか判定する。"""
         if self._provider != "twelvedata":
             return False
         if self._td_fetcher is None:
             return False
-        if not self._is_trade_pair(symbol):
+        # monitorからの呼び出しはuse_for_monitor設定に従う
+        if is_monitor and not self._use_for_monitor:
+            return False
+        if symbol not in self._td_symbols:
             return False
         # 日次上限チェック
         today = date.today()
@@ -69,9 +83,9 @@ class PriceProvider:
     def _increment_count(self) -> None:
         self._daily_count += 1
 
-    def get_current_price(self, symbol: str) -> CurrentPrice:
+    def get_current_price(self, symbol: str, is_monitor: bool = False) -> CurrentPrice:
         """現在価格を取得する（同期）。Twelve Data有効時は非同期を同期ラップ。"""
-        if self._use_twelvedata(symbol):
+        if self._use_twelvedata(symbol, is_monitor=is_monitor):
             try:
                 cp = self._td_fetcher.fetch_current_price(symbol)
                 self._increment_count()
@@ -101,27 +115,39 @@ class PriceProvider:
         """Twelve Data使用時の日次リクエスト見積もりを返す。yfinance時は0。"""
         if self._provider != "twelvedata":
             return 0
-        n_pairs = len(self._trade_symbols)
+        n_trade = len(self._trade_symbols)
+        n_watch_td = len(self._td_symbols - self._trade_symbols)
         interval = self._config.price_monitor.interval_minutes
         monitor_per_hour = 60 // interval
-        # :00はOHLCV取得と兼用するため -1
-        monitor_only = monitor_per_hour - 1
-        ohlcv_per_hour = 1  # 毎時:00
-        per_pair_per_hour = monitor_only + ohlcv_per_hour
-        daily = n_pairs * per_pair_per_hour * 24
-        # 取引判定（3回/日 × n_pairs）
-        daily += n_pairs * len(self._config.schedule.run_times)
+
+        # price_monitor (trade銘柄のみ、use_for_monitor設定に従う)
+        if self._use_for_monitor:
+            # :00はOHLCV取得と兼用するため -1
+            monitor_only = monitor_per_hour - 1
+            daily = n_trade * monitor_only * 24
+        else:
+            daily = 0
+
+        # テクニカル分析 OHLCV (trade + watch TD銘柄、毎時:00)
+        daily += (n_trade + n_watch_td) * 24
+        # 取引判定 (trade銘柄のみ)
+        daily += n_trade * len(self._config.schedule.run_times)
         return daily
 
     def status_line(self) -> str:
         """起動パネル用のステータス行を返す。"""
         if self._provider == "yfinance":
             return "yfinance"
+        n_watch_td = len(self._td_symbols - self._trade_symbols)
         est = self.estimate_daily_requests()
         limit = self._daily_limit
         margin = (limit - est) / limit * 100
+        td_scope = "trade"
+        if n_watch_td > 0:
+            td_scope += f" + {n_watch_td} watch"
+        monitor_label = "TD" if self._use_for_monitor else "yfinance"
         return (
-            f"twelvedata (trade pairs) + yfinance (watch)\n"
+            f"twelvedata ({td_scope}) + yfinance (残watch)  monitor={monitor_label}\n"
             f"                 推定 {est} req/日 (上限 {limit})  余裕 {margin:.0f}%"
         )
 

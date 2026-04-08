@@ -240,6 +240,8 @@ class TwelveDataConfig:
     """Twelve Data API 設定。"""
     daily_limit: int = 800
     per_minute_limit: int = 8
+    watch_symbols: list[str] = field(default_factory=list)  # Twelve Dataで取得するwatch銘柄
+    use_for_monitor: bool = True  # price_monitorでもTwelve Dataを使うか
 
 
 @dataclass
@@ -586,6 +588,8 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         twelvedata=TwelveDataConfig(
             daily_limit=td.get("daily_limit", 800),
             per_minute_limit=td.get("per_minute_limit", 8),
+            watch_symbols=td.get("watch_symbols", []),
+            use_for_monitor=td.get("use_for_monitor", True),
         ),
     )
 

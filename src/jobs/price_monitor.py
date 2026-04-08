@@ -91,7 +91,7 @@ async def monitor_open_positions(
 
     for pos in account.open_positions:
         try:
-            current = price_provider.get_current_price(pos.pair).price
+            current = price_provider.get_current_price(pos.pair, is_monitor=True).price
 
             # ── トレーリングストップ ──────────────────────────────
             if cfg.trailing_stop_enabled:
