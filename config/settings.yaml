@@ -26,7 +26,7 @@ llm:
   # Ollama 接続設定（model 指定は各ロールで行う）
   ollama:
     base_url: "http://localhost:11434"
-    timeout_seconds: 120
+    timeout_seconds: 300
     max_retries: 2
     max_concurrent: 2          # 同時分析数上限（VRAM保護）
 

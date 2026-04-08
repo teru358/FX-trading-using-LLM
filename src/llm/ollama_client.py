@@ -41,7 +41,9 @@ class OllamaClient(LLMClient):
             stop=stop_after_attempt(self._max_retries), wait=wait_fixed(5), reraise=True
         ):
             with attempt:
-                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                # connect/pool は短く、read(LLM推論待ち)は長く設定
+                timeout = httpx.Timeout(connect=10.0, read=self._timeout, write=10.0, pool=10.0)
+                async with httpx.AsyncClient(timeout=timeout) as client:
                     resp = await client.post(f"{self._base_url}/api/chat", json=payload)
                     resp.raise_for_status()
         return resp.json()["message"]["content"]
