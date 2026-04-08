@@ -1,0 +1,84 @@
+# ── 価格データプロバイダー ──────────────────────────────────────────
+# yfinance: デフォルト（無料、15-20分遅延）
+# twelvedata: リアルタイムFX（無料枠800req/日、要TWELVEDATA_API_KEY）
+price_provider:
+  realtime_provider: "twelvedata"   # "yfinance" | "twelvedata"
+  twelvedata:
+    daily_limit: 800
+    per_minute_limit: 8
+    use_for_monitor: true           # price_monitorでもTwelve Dataを使うか（falseでyfinance）
+    watch_symbols:                  # Twelve Data Free枠で取得するwatch銘柄
+      - "GLD"                       # Gold ETF
+
+# ── 取引・監視銘柄 ────────────────────────────────────────────────
+instruments:
+  # ── FX（取引対象） ──
+  - symbol: "USDJPY=X"
+    display_name: "USD/JPY"
+    asset_type: fx
+    mode: trade
+    pip_value: 0.01
+    base_currency: "USD"
+    quote_currency: "JPY"
+    enabled: true
+  - symbol: "EURUSD=X"
+    display_name: "EUR/USD"
+    asset_type: fx
+    mode: trade
+    pip_value: 0.0001
+    base_currency: "EUR"
+    quote_currency: "USD"
+    enabled: true
+  - symbol: "GBPUSD=X"
+    display_name: "GBP/USD"
+    asset_type: fx
+    mode: watch
+    pip_value: 0.0001
+    base_currency: "GBP"
+    quote_currency: "USD"
+    enabled: false
+  # ── 株価指数（監視専用） ──
+  # yfinanceのindex取得が不安定なため、安定したETF/Twelve Data対応シンボルを使用
+  - symbol: "SPY"
+    display_name: "S&P 500 (SPY)"
+    asset_type: index
+    mode: watch
+    currency: "USD"
+    enabled: true         # S&P 500 ETF、yfinanceで安定
+  - symbol: "1321.T"
+    display_name: "Nikkei 225 ETF"
+    asset_type: index
+    mode: watch
+    currency: "JPY"
+    enabled: true         # 東証ETF、yfinanceで安定
+  # ── マクロ参照指標（監視専用） ──
+  - symbol: "UUP"
+    display_name: "US Dollar Index (UUP)"
+    asset_type: index
+    mode: watch
+    currency: "USD"
+    enabled: true         # DX-Y.NYB代替ETF
+  - symbol: "GLD"
+    display_name: "Gold (GLD ETF)"
+    asset_type: index
+    mode: watch
+    currency: "USD"
+    enabled: true         # Twelve Data で取得
+  - symbol: "IEF"
+    display_name: "US 7-10Y Treasury (IEF)"
+    asset_type: index
+    mode: watch
+    currency: "USD"
+    enabled: true         # ^TNX代替ETF（債券価格 ≈ 利回り逆相関）
+  - symbol: "SHY"
+    display_name: "US 1-3Y Treasury (SHY)"
+    asset_type: index
+    mode: watch
+    currency: "USD"
+    enabled: true         # ^IRX代替ETF
+  - symbol: "USO"
+    display_name: "WTI Crude Oil (USO)"
+    asset_type: index
+    mode: watch
+    currency: "USD"
+    enabled: true         # CL=F代替ETF

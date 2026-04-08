@@ -64,77 +64,8 @@ claude:
   max_retries: 2
   max_tokens: 4096
 
-instruments:
-  # ── FX（取引対象） ──
-  - symbol: "USDJPY=X"
-    display_name: "USD/JPY"
-    asset_type: fx
-    mode: trade
-    pip_value: 0.01
-    base_currency: "USD"
-    quote_currency: "JPY"
-    enabled: true
-  - symbol: "EURUSD=X"
-    display_name: "EUR/USD"
-    asset_type: fx
-    mode: trade
-    pip_value: 0.0001
-    base_currency: "EUR"
-    quote_currency: "USD"
-    enabled: true
-  - symbol: "GBPUSD=X"
-    display_name: "GBP/USD"
-    asset_type: fx
-    mode: watch
-    pip_value: 0.0001
-    base_currency: "GBP"
-    quote_currency: "USD"
-    enabled: false
-  # ── 株価指数（監視専用） ──
-  # yfinanceのindex取得が不安定なため、安定したETF/Twelve Data対応シンボルを使用
-  - symbol: "SPY"
-    display_name: "S&P 500 (SPY)"
-    asset_type: index
-    mode: watch
-    currency: "USD"
-    enabled: true         # S&P 500 ETF、yfinanceで安定
-  - symbol: "1321.T"
-    display_name: "Nikkei 225 ETF"
-    asset_type: index
-    mode: watch
-    currency: "JPY"
-    enabled: true         # 東証ETF、yfinanceで安定
-  # ── マクロ参照指標（監視専用） ──
-  - symbol: "UUP"
-    display_name: "US Dollar Index (UUP)"
-    asset_type: index
-    mode: watch
-    currency: "USD"
-    enabled: true         # DX-Y.NYB代替ETF
-  - symbol: "GLD"
-    display_name: "Gold (GLD ETF)"
-    asset_type: index
-    mode: watch
-    currency: "USD"
-    enabled: true         # Twelve Data で取得
-  - symbol: "IEF"
-    display_name: "US 7-10Y Treasury (IEF)"
-    asset_type: index
-    mode: watch
-    currency: "USD"
-    enabled: true         # ^TNX代替ETF（債券価格 ≈ 利回り逆相関）
-  - symbol: "SHY"
-    display_name: "US 1-3Y Treasury (SHY)"
-    asset_type: index
-    mode: watch
-    currency: "USD"
-    enabled: true         # ^IRX代替ETF
-  - symbol: "USO"
-    display_name: "WTI Crude Oil (USO)"
-    asset_type: index
-    mode: watch
-    currency: "USD"
-    enabled: true         # CL=F代替ETF
+# instruments → config/instruments.yaml に分離
+# price_provider → config/instruments.yaml に分離
 
 trading:
   initial_balance: 10000.0
@@ -185,18 +116,6 @@ price_monitor:
   trailing_stop_enabled: true
   trailing_stop_activation_pct: 0.40   # TP距離の40%到達で発動開始
   trailing_stop_distance_ratio: 1.0    # 元のSL距離と同比率でSLを追従（1.0 = 同じ幅）
-
-# ── 価格データプロバイダー ──────────────────────────────────────────
-# yfinance: デフォルト（無料、15-20分遅延）
-# twelvedata: リアルタイムFX（無料枠800req/日、要TWELVEDATA_API_KEY）
-price_provider:
-  realtime_provider: "twelvedata"   # "yfinance" | "twelvedata"
-  twelvedata:
-    daily_limit: 800
-    per_minute_limit: 8
-    use_for_monitor: true           # price_monitorでもTwelve Dataを使うか（falseでyfinance）
-    watch_symbols:                  # Twelve Data Free枠で取得するwatch銘柄
-      - "GLD"                       # Gold ETF
 
 schedule:
   run_times:
@@ -255,121 +174,8 @@ news_collection:
   news_freshness_hours: 24      # この時間以上古い記事は除外
   summary_max_chars: 600        # RSS summary の切り捨て文字数（LLM context に合わせて調整）
 
-keywords:
-  global:
-    # マクロ経済・金融
-    - "forex"
-    - "fx"
-    - "currency"
-    - "central bank"
-    - "economy"
-    - "inflation"
-    - "rate"
-    - "geopolit"
-    - "oil"
-    - "gold"
-    - "bond"
-    - "yield"
-    - "trade war"
-    - "tariff"
-    - "dollar"
-    - "euro"
-    - "yen"
-    - "sterling"
-    - "fed"
-    - "ecb"
-    - "boe"
-    - "boj"
-    # 半導体・テック
-    - "semiconductor"
-    - "chip"
-    - "chipmaker"
-    - "foundry"
-    - "tsmc"
-    - "nvidia"
-    - "intel"
-    - "samsung"
-    - "export control"
-    - "supply chain"
-    - "ai chip"
-  japan:
-    # 英語
-    - "boj"
-    - "bank of japan"
-    - "nippon ginko"
-    - "japan"
-    - "japanese"
-    - "yen"
-    - "jpy"
-    - "ueda"
-    # 半導体・テック（英語）
-    - "semiconductor"
-    - "chip"
-    - "chipmaker"
-    - "foundry"
-    - "tsmc"
-    - "nvidia"
-    - "oil"
-    # 日本語
-    - "日銀"
-    - "円安"
-    - "円高"
-    - "金利"
-    - "為替"
-    - "利上げ"
-    - "利下げ"
-    - "植田"
-    - "円"
-    # 半導体・テック（日本語）
-    - "半導体"
-    - "チップ"
-    - "半導体製造"
-    - "半導体株"
-    - "東京エレクトロン"
-    - "ルネサス"
-    - "石油"
-    - "生成AI"
-
-news_sources:
-  # ── Feedly API（有効にすると RSS の代わりに Feedly カテゴリから取得） ──
-  feedly:
-    enabled: false
-    streams_fx: []
-    streams_global: []
-    streams_japan: []
-    count: 20             # 1ストリームあたりの取得件数上限
-
-  feeds_fx:
-    - "https://www.forexlive.com/feed/news"
-    - "https://www.fxstreet.com/rss/news"
-    - "https://www.investing.com/rss/news_285.rss"
-    - "https://www.financemagnates.com/feed/"
-    - "https://www.forexcrunch.com/feed/"
-    - "https://www.marketpulse.com/feed/"
-    - "https://assets.wor.jp/rss/rdf/bloomberg/markets.rdf"
-    - "https://assets.wor.jp/rss/rdf/bloomberg/finance.rdf"
-    - "https://assets.wor.jp/rss/rdf/minkabufx/statement.rdf"
-  feeds_global:
-    - "https://feeds.marketwatch.com/marketwatch/topstories/"
-    - "https://feeds.bbci.co.uk/news/business/rss.xml"
-    - "https://www.ft.com/rss/home/uk"
-    - "https://finance.yahoo.com/news/rssindex"
-    - "https://www.investing.com/rss/news_14.rss"
-    - "https://techcrunch.com/feed/"
-    - "https://www.digitimes.com/rss/daily.xml"
-    - "https://spectrum.ieee.org/feeds/feed.rss"
-    - "https://assets.wor.jp/rss/rdf/ynnews/world.rdf"
-  feeds_japan:
-    - "https://news.web.nhk/n-data/conf/na/rss/cat4.xml"
-    - "https://news.web.nhk/n-data/conf/na/rss/cat5.xml"
-    - "https://news.web.nhk/n-data/conf/na/rss/cat6.xml"
-    - "https://japantoday.com/feed"
-    - "https://www.japantimes.co.jp/feed/"
-    - "https://assets.wor.jp/rss/rdf/nikkei/markets.rdf"
-    - "https://assets.wor.jp/rss/rdf/nikkei/business.rdf"
-    - "https://assets.wor.jp/rss/rdf/nikkei/technology.rdf"
-    - "https://assets.wor.jp/rss/rdf/ynnews/economics.rdf"
-    - "https://xtech.nikkei.com/rss/index.rdf"
+# keywords → config/news_sources.yaml に分離
+# news_sources → config/news_sources.yaml に分離
 
 rag:
   db_path: "data/rag"

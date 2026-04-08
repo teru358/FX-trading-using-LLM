@@ -424,6 +424,24 @@ class AppConfig:
         return self.tradeable_instruments
 
 
+def _merge_split_configs(base: dict, config_dir: Path) -> dict:
+    """分割設定ファイルをメイン設定にマージする。
+
+    分割ファイルが存在すれば読み込み、同一キーは分割ファイル側が優先。
+    存在しなければスキップ（config.pyのデフォルト値が使われる）。
+    """
+    split_files = ["instruments.yaml", "news_sources.yaml"]
+    for fname in split_files:
+        fpath = config_dir / fname
+        if fpath.exists():
+            with open(fpath, encoding="utf-8") as f:
+                extra = yaml.safe_load(f)
+            if extra and isinstance(extra, dict):
+                for key, value in extra.items():
+                    base[key] = value
+    return base
+
+
 def load_config(config_path: Path | None = None) -> AppConfig:
     load_dotenv(BASE_DIR / ".env")
 
@@ -432,6 +450,9 @@ def load_config(config_path: Path | None = None) -> AppConfig:
 
     with open(config_path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
+
+    # 分割設定ファイルをマージ（分割ファイル優先）
+    raw = _merge_split_configs(raw, config_path.parent)
 
     t = raw.get("trading", {})
     trading = TradingConfig(
