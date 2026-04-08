@@ -46,4 +46,10 @@ class OllamaClient(LLMClient):
                 async with httpx.AsyncClient(timeout=timeout) as client:
                     resp = await client.post(f"{self._base_url}/api/chat", json=payload)
                     resp.raise_for_status()
-        return resp.json()["message"]["content"]
+        content = resp.json()["message"]["content"]
+        # 一部モデルが停止トークン後に自己対話を続けるケースを切り捨て
+        for eos in ("<|endoftext|>", "<|im_end|>", "<|eot_id|>"):
+            if eos in content:
+                content = content[:content.index(eos)]
+                break
+        return content.strip()

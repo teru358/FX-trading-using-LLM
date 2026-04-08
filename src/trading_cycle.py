@@ -1428,7 +1428,7 @@ async def _run_ask(
     )
     context_dict = await builder.build(user_message)
 
-    llm = create_llm_client(config, "price_analysis")
+    llm = create_llm_client(config, "reflection")
 
     user_prompt = render_prompt(
         "ask_user.j2",
@@ -1440,7 +1440,7 @@ async def _run_ask(
         {"role": "user", "content": user_prompt},
     ]
     logger.info(f"[ASK] LLM呼び出し中 ({len(user_message)} chars, context={len(user_prompt)} chars)...")
-    response = await llm.chat(messages, temperature=config.llm.price_analysis.temperature)
+    response = await llm.chat(messages, temperature=config.llm.reflection.temperature)
     import re as _re
     response = _re.sub(r"<think>.*?</think>", "", response, flags=_re.DOTALL).strip()
 
