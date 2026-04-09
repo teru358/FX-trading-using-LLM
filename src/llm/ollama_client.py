@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 import httpx
-from tenacity import Retrying, stop_after_attempt, wait_fixed
+from tenacity import Retrying, retry_if_not_exception_type, stop_after_attempt, wait_fixed
 
 from src.llm.client import LLMClient
 
@@ -38,7 +38,10 @@ class OllamaClient(LLMClient):
         }
         logger.debug(f"[LLM] Ollama({self._model}): /api/chat ({len(messages)} messages)")
         for attempt in Retrying(
-            stop=stop_after_attempt(self._max_retries), wait=wait_fixed(5), reraise=True
+            stop=stop_after_attempt(self._max_retries),
+            wait=wait_fixed(5),
+            retry=retry_if_not_exception_type(httpx.ReadTimeout),
+            reraise=True,
         ):
             with attempt:
                 # connect/pool は短く、read(LLM推論待ち)は長く設定
