@@ -1,0 +1,78 @@
+//@version=6
+indicator("Finance Bot Signal — {{ pair }}", overlay=true, max_lines_count=20, max_labels_count=20)
+
+// --- Auto-generated: {{ timestamp }} ---
+entryPrice  = {{ entry_price }}
+stopLoss    = {{ stop_loss }}
+takeProfit  = {{ take_profit }}
+direction   = "{{ direction }}"
+confidence  = {{ confidence }}
+biasScore   = {{ bias_score }}
+reason      = "{{ reason[:80] }}"
+trend       = "{{ trend_direction }}"
+{% if key_support %}keySupport  = {{ key_support }}{% endif %}
+{% if key_resistance %}keyResist   = {{ key_resistance }}{% endif %}
+
+// Colors
+colEntry = color.new(color.blue, 0)
+colSL    = color.new(color.red, 0)
+colTP    = color.new(color.green, 0)
+colSupport    = color.new(color.teal, 20)
+colResistance = color.new(color.orange, 20)
+colSwingHigh  = color.new(color.purple, 30)
+colSwingLow   = color.new(color.purple, 30)
+colBG    = direction == "long" ? color.new(color.green, 90) : direction == "short" ? color.new(color.red, 90) : color.new(color.gray, 90)
+
+// Trend arrow
+trendIcon = trend == "uptrend" ? "▲" : trend == "downtrend" ? "▼" : "◆"
+
+// Info Label
+var label infoLabel = na
+if barstate.islast
+    txt = direction + " " + trendIcon + " | bias=" + str.tostring(biasScore, "#.##") + " conf=" + str.tostring(confidence, "#.##")
+{% if patterns %}
+    txt += "\nPatterns: {{ patterns }}"
+{% endif %}
+    txt += "\n" + reason
+    infoLabel := label.new(bar_index, close, txt, style=label.style_label_left, color=colBG, textcolor=color.white, size=size.normal)
+
+{% if direction != "hold" %}
+// Entry / SL / TP lines
+if barstate.islast
+    line.new(bar_index - 50, entryPrice, bar_index + 10, entryPrice, color=colEntry, width=2)
+    line.new(bar_index - 50, stopLoss,   bar_index + 10, stopLoss,   color=colSL,    width=1, style=line.style_dashed)
+    line.new(bar_index - 50, takeProfit,  bar_index + 10, takeProfit, color=colTP,    width=1, style=line.style_dashed)
+    label.new(bar_index + 12, entryPrice, "Entry " + str.tostring(entryPrice), style=label.style_none, textcolor=colEntry, size=size.small)
+    label.new(bar_index + 12, stopLoss,   "SL " + str.tostring(stopLoss),      style=label.style_none, textcolor=colSL,    size=size.small)
+    label.new(bar_index + 12, takeProfit,  "TP " + str.tostring(takeProfit),    style=label.style_none, textcolor=colTP,    size=size.small)
+{% endif %}
+
+{% if key_support %}
+// Key Support (LLM分析)
+if barstate.islast
+    line.new(bar_index - 80, keySupport, bar_index + 10, keySupport, color=colSupport, width=1, style=line.style_dotted)
+    label.new(bar_index + 12, keySupport, "Support " + str.tostring(keySupport), style=label.style_none, textcolor=colSupport, size=size.tiny)
+{% endif %}
+
+{% if key_resistance %}
+// Key Resistance (LLM分析)
+if barstate.islast
+    line.new(bar_index - 80, keyResist, bar_index + 10, keyResist, color=colResistance, width=1, style=line.style_dotted)
+    label.new(bar_index + 12, keyResist, "Resist " + str.tostring(keyResist), style=label.style_none, textcolor=colResistance, size=size.tiny)
+{% endif %}
+
+{% if swing_highs %}
+// Swing Highs (直近高値)
+if barstate.islast
+{% for h in swing_highs %}
+    line.new(bar_index - 60, {{ h }}, bar_index - 10, {{ h }}, color=colSwingHigh, width=1, style=line.style_dotted)
+{% endfor %}
+{% endif %}
+
+{% if swing_lows %}
+// Swing Lows (直近安値)
+if barstate.islast
+{% for l in swing_lows %}
+    line.new(bar_index - 60, {{ l }}, bar_index - 10, {{ l }}, color=colSwingLow, width=1, style=line.style_dotted)
+{% endfor %}
+{% endif %}

@@ -1,0 +1,52 @@
+//@version=6
+indicator("Finance Bot Signals", overlay=true, max_lines_count=50, max_labels_count=50)
+
+// --- Auto-generated: {{ timestamp }} ---
+// {{ signals | length }} pair(s) tracked
+
+// Colors
+colEntry = color.new(color.blue, 0)
+colSL    = color.new(color.red, 0)
+colTP    = color.new(color.green, 0)
+colSupport    = color.new(color.teal, 20)
+colResistance = color.new(color.orange, 20)
+colSwingHigh  = color.new(color.purple, 30)
+colSwingLow   = color.new(color.purple, 30)
+
+ticker = syminfo.ticker
+
+{% for sig in signals %}
+// ── {{ sig.pair }} ──
+if barstate.islast and str.contains(ticker, "{{ sig.tv_ticker }}")
+    colBG = "{{ sig.direction }}" == "long" ? color.new(color.green, 90) : "{{ sig.direction }}" == "short" ? color.new(color.red, 90) : color.new(color.gray, 90)
+    trendIcon = "{{ sig.trend_direction }}" == "uptrend" ? "▲" : "{{ sig.trend_direction }}" == "downtrend" ? "▼" : "◆"
+    txt = "{{ sig.direction }} " + trendIcon + " | bias={{ '%+.2f' | format(sig.bias_score) }} conf={{ '%.2f' | format(sig.confidence) }}"
+{% if sig.patterns %}
+    txt += "\nPatterns: {{ sig.patterns }}"
+{% endif %}
+    txt += "\n{{ sig.reason[:80] }}"
+    label.new(bar_index, close, txt, style=label.style_label_left, color=colBG, textcolor=color.white, size=size.normal)
+{% if sig.direction != "hold" and sig.entry_price > 0 %}
+    line.new(bar_index - 50, {{ sig.entry_price }}, bar_index + 10, {{ sig.entry_price }}, color=colEntry, width=2)
+    line.new(bar_index - 50, {{ sig.stop_loss }},   bar_index + 10, {{ sig.stop_loss }},   color=colSL,    width=1, style=line.style_dashed)
+    line.new(bar_index - 50, {{ sig.take_profit }},  bar_index + 10, {{ sig.take_profit }},  color=colTP,    width=1, style=line.style_dashed)
+    label.new(bar_index + 12, {{ sig.entry_price }}, "Entry {{ sig.entry_price }}", style=label.style_none, textcolor=colEntry, size=size.small)
+    label.new(bar_index + 12, {{ sig.stop_loss }},   "SL {{ sig.stop_loss }}",      style=label.style_none, textcolor=colSL,    size=size.small)
+    label.new(bar_index + 12, {{ sig.take_profit }},  "TP {{ sig.take_profit }}",    style=label.style_none, textcolor=colTP,    size=size.small)
+{% endif %}
+{% if sig.key_support %}
+    line.new(bar_index - 80, {{ sig.key_support }}, bar_index + 10, {{ sig.key_support }}, color=colSupport, width=1, style=line.style_dotted)
+    label.new(bar_index + 12, {{ sig.key_support }}, "Support {{ sig.key_support }}", style=label.style_none, textcolor=colSupport, size=size.tiny)
+{% endif %}
+{% if sig.key_resistance %}
+    line.new(bar_index - 80, {{ sig.key_resistance }}, bar_index + 10, {{ sig.key_resistance }}, color=colResistance, width=1, style=line.style_dotted)
+    label.new(bar_index + 12, {{ sig.key_resistance }}, "Resist {{ sig.key_resistance }}", style=label.style_none, textcolor=colResistance, size=size.tiny)
+{% endif %}
+{% for h in sig.swing_highs %}
+    line.new(bar_index - 60, {{ h }}, bar_index - 10, {{ h }}, color=colSwingHigh, width=1, style=line.style_dotted)
+{% endfor %}
+{% for l in sig.swing_lows %}
+    line.new(bar_index - 60, {{ l }}, bar_index - 10, {{ l }}, color=colSwingLow, width=1, style=line.style_dotted)
+{% endfor %}
+
+{% endfor %}

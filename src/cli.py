@@ -34,6 +34,7 @@ _HELP = """\
   [cyan]compare[/cyan]  (pair)      — 複数モデルで分析を比較  例: compare USDJPY=X
   [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問・コメントを送信
   [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
+  [cyan]tv[/cyan]                   — TradingViewチャートにシグナルを描画更新
   [cyan]feeds[/cyan]                — RSSフィード疎通確認
   [cyan]notify[/cyan]  (n)          — 通知テストメッセージを送信
   [cyan]edit[/cyan]   (e)           — user_notes.md を vim で編集
@@ -139,6 +140,51 @@ def _cmd_close(config: AppConfig, pair_arg: str) -> None:
                 ))
 
     asyncio.run(_do())
+
+
+async def _update_tv_chart(config: AppConfig, analysis_store) -> None:
+    """全trade銘柄の最新スナップショットをTradingViewチャートに反映する。"""
+    from src.tradingview.cdp_client import CDPClient
+    from src.tradingview.pine_injector import PineInjector
+    from src.tradingview.chart_control import to_tv_ticker
+    from src.tradingview.script_generator import SignalData, generate_multi_signal_pine
+
+    tv_cdp = CDPClient(host=config.tradingview.cdp_host, port=config.tradingview.cdp_port)
+    if not await tv_cdp.connect():
+        _console.print("[red]TradingViewに接続できません（Edge CDP起動済み？）[/red]")
+        return
+    try:
+        injector = PineInjector(tv_cdp)
+        sig_data_list = []
+        for inst in config.tradeable_instruments:
+            snaps = analysis_store.get_recent_snapshots(inst.symbol, hours=8)
+            if not snaps:
+                _console.print(f"[dim]{inst.display_name}: スナップショットなし[/dim]")
+                continue
+            snap = snaps[0]
+            sig_data_list.append(SignalData(
+                pair=inst.display_name,
+                tv_ticker=to_tv_ticker(inst.symbol),
+                direction=snap.direction_bias,
+                confidence=snap.confidence,
+                reason=snap.reasoning_summary[:80] if snap.reasoning_summary else "",
+                bias_score=snap.bias_score,
+            ))
+            _console.print(
+                f"  {inst.display_name}: {snap.direction_bias} "
+                f"bias={snap.bias_score:+.2f} conf={snap.confidence:.2f}"
+            )
+        if not sig_data_list:
+            _console.print("[yellow]反映するデータがありません[/yellow]")
+            return
+        pine = generate_multi_signal_pine(sig_data_list)
+        result = await injector.inject_and_compile(pine)
+        if result["success"]:
+            _console.print(f"[green]チャート更新完了 ({len(sig_data_list)} pairs)[/green]")
+        else:
+            _console.print(f"[red]コンパイルエラー: {result['errors']}[/red]")
+    finally:
+        await tv_cdp.disconnect()
 
 
 def _cmd_notify(config: AppConfig) -> None:
@@ -278,6 +324,14 @@ def run_commands(
                 _cmd_notify(config)
             elif cmd in ("e", "edit"):
                 _cmd_edit(config)
+            elif cmd == "tv":
+                if not config.tradingview.enabled:
+                    _console.print("[red]tradingview.enabled が false です[/red]")
+                    continue
+                _console.print("[cyan]TradingViewチャートを更新中...[/cyan]")
+                with job_lock:
+                    import asyncio as _aio
+                    _aio.run(_update_tv_chart(config, analysis_store))
             elif cmd == "feeds":
                 _cmd_feeds(config)
             elif cmd == "close":

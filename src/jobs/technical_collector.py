@@ -238,6 +238,44 @@ async def collect_all_technical(
         if i < len(tradeable) - 1:
             await asyncio.sleep(delay)
 
+    # TradingView チャート反映（オプション・trade銘柄の最新スナップショット）
+    if config.tradingview.enabled and tradeable:
+        try:
+            from src.tradingview.cdp_client import CDPClient
+            from src.tradingview.pine_injector import PineInjector
+            from src.tradingview.chart_control import to_tv_ticker
+            from src.tradingview.script_generator import SignalData, generate_multi_signal_pine
+
+            tv_cdp = CDPClient(host=config.tradingview.cdp_host, port=config.tradingview.cdp_port)
+            if await tv_cdp.connect():
+                try:
+                    injector = PineInjector(tv_cdp)
+                    sig_data_list = []
+                    for inst in tradeable:
+                        snaps = analysis_store.get_recent_snapshots(inst.symbol, hours=2)
+                        if not snaps:
+                            continue
+                        snap = snaps[0]
+                        sig_data_list.append(SignalData(
+                            pair=inst.display_name,
+                            tv_ticker=to_tv_ticker(inst.symbol),
+                            direction=snap.direction_bias,
+                            confidence=snap.confidence,
+                            reason=snap.reasoning_summary[:80] if snap.reasoning_summary else "",
+                            bias_score=snap.bias_score,
+                        ))
+                    if sig_data_list:
+                        pine = generate_multi_signal_pine(sig_data_list)
+                        result = await injector.inject_and_compile(pine)
+                        if result["success"]:
+                            logger.info(f"[TV] Technical snapshots reflected ({len(sig_data_list)} pairs)")
+                        else:
+                            logger.warning(f"[TV] Pine compile errors: {result['errors']}")
+                finally:
+                    await tv_cdp.disconnect()
+        except Exception as e:
+            logger.warning(f"[TV] Chart visualization failed: {e}")
+
     logger.info("=== Technical collection complete ===")
 
 
