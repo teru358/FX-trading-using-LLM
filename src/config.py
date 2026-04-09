@@ -368,6 +368,13 @@ class LoggingConfig:
 
 
 @dataclass
+class TradingViewConfig:
+    """TradingView Desktop 連携設定。"""
+    enabled: bool = False
+    cdp_port: int = 9222
+
+
+@dataclass
 class AppConfig:
     trading: TradingConfig
     instruments: list[InstrumentConfig]
@@ -386,6 +393,7 @@ class AppConfig:
     openai: OpenAIConfig = field(default_factory=OpenAIConfig)
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     keywords: KeywordsConfig = field(default_factory=KeywordsConfig)
+    tradingview: TradingViewConfig = field(default_factory=TradingViewConfig)
 
     @property
     def state_dir(self) -> Path:
@@ -698,6 +706,12 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         forecast_significance_atr_ratio=an.get("forecast_significance_atr_ratio", 0.30),
     )
 
+    tv = raw.get("tradingview", {})
+    tradingview_cfg = TradingViewConfig(
+        enabled=tv.get("enabled", False),
+        cdp_port=tv.get("cdp_port", 9222),
+    )
+
     return AppConfig(
         trading=trading,
         instruments=instruments,
@@ -716,4 +730,5 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         claude=claude_cfg,
         analysis=analysis_cfg,
         keywords=keywords_cfg,
+        tradingview=tradingview_cfg,
     )

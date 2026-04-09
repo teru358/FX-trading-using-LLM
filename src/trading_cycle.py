@@ -873,6 +873,42 @@ async def trading_cycle(
                 ))
             hold_store.save_hold(sig.pair, sig)
 
+    # TradingView チャート反映（オプション）
+    if config.tradingview.enabled and signals:
+        try:
+            from src.tradingview.cdp_client import CDPClient
+            from src.tradingview.pine_injector import PineInjector
+            from src.tradingview.chart_control import ChartControl
+            from src.tradingview.script_generator import generate_signal_pine
+
+            tv_cdp = CDPClient(port=config.tradingview.cdp_port)
+            if await tv_cdp.connect():
+                try:
+                    chart = ChartControl(tv_cdp)
+                    injector = PineInjector(tv_cdp)
+                    last_sig = signals[-1]
+                    pair_cfg = next((p for p in config.tradeable_instruments if p.symbol == last_sig.pair), None)
+                    if pair_cfg:
+                        await chart.set_symbol(last_sig.pair)
+                    pine = generate_signal_pine(
+                        pair=pair_cfg.display_name if pair_cfg else last_sig.pair,
+                        direction=last_sig.action,
+                        entry_price=last_sig.entry_price,
+                        stop_loss=last_sig.stop_loss,
+                        take_profit=last_sig.take_profit,
+                        confidence=last_sig.confidence,
+                        reason=last_sig.signal_reason,
+                    )
+                    result = await injector.inject_and_compile(pine)
+                    if result["success"]:
+                        logger.info(f"[TV] Pine Script injected for {last_sig.pair}")
+                    else:
+                        logger.warning(f"[TV] Pine compile errors: {result['errors']}")
+                finally:
+                    await tv_cdp.disconnect()
+        except Exception as e:
+            logger.warning(f"[TV] Chart visualization failed: {e}")
+
     # Phase 5: レポート
     all_closed = closed_this_run + reviewed_closed
     account_state = position_mgr.get_account_state()
