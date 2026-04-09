@@ -247,24 +247,29 @@ class PineInjector:
         return False
 
     async def inject_and_compile(self, source: str) -> dict:
-        """既存シグナル削除→Pine Script書き込み→コンパイルを一括実行する。"""
-        await self._remove_existing_signal()
-        await asyncio.sleep(0.5)
+        """Pine Script書き込み→コンパイルを一括実行する。
 
-        # 「チャートに追加」ボタンが表示されない場合、新規作成でリセット
-        has_add_btn = await self._cdp.evaluate("""
+        saveButton（既存スクリプト上書き）がある場合はそのまま上書き。
+        ない場合（初回）は既存シグナルを削除してから「チャートに追加」で新規追加。
+        """
+        if not await self.set_source(source):
+            return {"success": False, "errors": ["Failed to set source"]}
+
+        # saveButtonがあれば上書き更新（削除不要）
+        has_save_btn = await self._cdp.evaluate("""
             (function() {
                 var btns = document.querySelectorAll('button');
                 for (var i = 0; i < btns.length; i++) {
-                    var t = btns[i].textContent.trim();
-                    if (/Add to chart|チャートに追加|save and add|保存してチャート/i.test(t)) return true;
+                    if (btns[i].className.indexOf('saveButton') !== -1 && btns[i].offsetParent !== null)
+                        return true;
                 }
                 return false;
             })()
         """)
-        if not has_add_btn:
-            await self._new_indicator()
 
-        if not await self.set_source(source):
-            return {"success": False, "errors": ["Failed to set source"]}
+        if not has_save_btn:
+            # 初回追加: 既存シグナルを削除してから新規追加
+            await self._remove_existing_signal()
+            await asyncio.sleep(0.5)
+
         return await self.compile()
