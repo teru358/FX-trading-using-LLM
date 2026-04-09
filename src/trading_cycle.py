@@ -890,6 +890,8 @@ async def trading_cycle(
                     pair_cfg = next((p for p in config.tradeable_instruments if p.symbol == last_sig.pair), None)
                     if pair_cfg:
                         await chart.set_symbol(last_sig.pair)
+                    # PriceAnalysisからテクニカルデータを抽出
+                    pa = last_sig.price
                     pine = generate_signal_pine(
                         pair=pair_cfg.display_name if pair_cfg else last_sig.pair,
                         direction=last_sig.action,
@@ -898,6 +900,13 @@ async def trading_cycle(
                         take_profit=last_sig.take_profit,
                         confidence=last_sig.confidence,
                         reason=last_sig.signal_reason,
+                        bias_score=pa.bias_score if pa else 0.0,
+                        trend_direction=getattr(pa, "trend_direction", "sideways") if pa else "sideways",
+                        key_support=pa.key_support if pa else None,
+                        key_resistance=pa.key_resistance if pa else None,
+                        swing_highs=getattr(pa, "recent_highs", []) if pa else [],
+                        swing_lows=getattr(pa, "recent_lows", []) if pa else [],
+                        patterns=", ".join(getattr(pa, "chart_patterns", [])) if pa else "",
                     )
                     result = await injector.inject_and_compile(pine)
                     if result["success"]:
