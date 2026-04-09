@@ -881,7 +881,7 @@ async def trading_cycle(
             from src.tradingview.chart_control import ChartControl
             from src.tradingview.script_generator import generate_signal_pine
 
-            tv_cdp = CDPClient(port=config.tradingview.cdp_port)
+            tv_cdp = CDPClient(host=config.tradingview.cdp_host, port=config.tradingview.cdp_port)
             if await tv_cdp.connect():
                 try:
                     chart = ChartControl(tv_cdp)

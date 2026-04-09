@@ -129,10 +129,12 @@ class PineInjector:
                 for (var i = 0; i < btns.length; i++) {
                     var text = btns[i].textContent.trim();
                     if (/save and add to chart/i.test(text)) { btns[i].click(); return text; }
+                    if (/保存してチャートに追加/i.test(text)) { btns[i].click(); return text; }
                 }
                 for (var i = 0; i < btns.length; i++) {
                     var text = btns[i].textContent.trim();
                     if (/^(Add to chart|Update on chart)/i.test(text)) { btns[i].click(); return text; }
+                    if (/^(チャートに追加|チャートを更新)/i.test(text)) { btns[i].click(); return text; }
                 }
                 return null;
             })()

@@ -371,6 +371,7 @@ class LoggingConfig:
 class TradingViewConfig:
     """TradingView Desktop 連携設定。"""
     enabled: bool = False
+    cdp_host: str = "localhost"
     cdp_port: int = 9222
 
 
@@ -709,6 +710,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     tv = raw.get("tradingview", {})
     tradingview_cfg = TradingViewConfig(
         enabled=tv.get("enabled", False),
+        cdp_host=tv.get("cdp_host", "localhost"),
         cdp_port=tv.get("cdp_port", 9222),
     )
 

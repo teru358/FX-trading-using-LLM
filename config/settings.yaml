@@ -194,5 +194,6 @@ notification:
 
 # TradingView Desktop連携（オプション）
 tradingview:
-  enabled: false                # true で取引判定時にチャートへ自動反映
+  enabled: true                 # true で取引判定時にチャートへ自動反映
+  cdp_host: "172.31.192.1"      # CDP ホスト（WSLからWindowsへは gateway IP）
   cdp_port: 9222                # TradingView Desktop の CDP ポート
