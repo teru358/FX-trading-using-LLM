@@ -21,6 +21,16 @@ def to_tv_symbol(yf_symbol: str) -> str:
     return _SYMBOL_MAP.get(yf_symbol, yf_symbol)
 
 
+def to_tv_ticker(yf_symbol: str) -> str:
+    """yfinanceシンボルからTradingView ticker部分を返す（syminfo.ticker用）。
+
+    例: "USDJPY=X" → "USDJPY", "EURUSD=X" → "EURUSD"
+    """
+    tv = to_tv_symbol(yf_symbol)
+    # "FX:USDJPY" → "USDJPY"
+    return tv.split(":")[-1] if ":" in tv else tv
+
+
 class ChartControl:
     """TradingViewチャートの操作を行う。"""
 

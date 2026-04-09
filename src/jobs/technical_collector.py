@@ -243,35 +243,32 @@ async def collect_all_technical(
         try:
             from src.tradingview.cdp_client import CDPClient
             from src.tradingview.pine_injector import PineInjector
-            from src.tradingview.chart_control import ChartControl
-            from src.tradingview.script_generator import generate_signal_pine
+            from src.tradingview.chart_control import to_tv_ticker
+            from src.tradingview.script_generator import SignalData, generate_multi_signal_pine
 
             tv_cdp = CDPClient(host=config.tradingview.cdp_host, port=config.tradingview.cdp_port)
             if await tv_cdp.connect():
                 try:
-                    chart = ChartControl(tv_cdp)
                     injector = PineInjector(tv_cdp)
-                    # 最後のtrade銘柄の最新スナップショットを反映
-                    last_inst = tradeable[-1]
-                    snaps = analysis_store.get_recent_snapshots(last_inst.symbol, hours=2)
-                    if snaps:
+                    sig_data_list = []
+                    for inst in tradeable:
+                        snaps = analysis_store.get_recent_snapshots(inst.symbol, hours=2)
+                        if not snaps:
+                            continue
                         snap = snaps[0]
-                        await chart.set_symbol(last_inst.symbol)
-                        pine = generate_signal_pine(
-                            pair=last_inst.display_name,
+                        sig_data_list.append(SignalData(
+                            pair=inst.display_name,
+                            tv_ticker=to_tv_ticker(inst.symbol),
                             direction=snap.direction_bias,
-                            entry_price=0,
-                            stop_loss=0,
-                            take_profit=0,
                             confidence=snap.confidence,
                             reason=snap.reasoning_summary[:80] if snap.reasoning_summary else "",
                             bias_score=snap.bias_score,
-                            key_support=snap.key_support,
-                            key_resistance=snap.key_resistance,
-                        )
+                        ))
+                    if sig_data_list:
+                        pine = generate_multi_signal_pine(sig_data_list)
                         result = await injector.inject_and_compile(pine)
                         if result["success"]:
-                            logger.info(f"[TV] Technical snapshot reflected for {last_inst.display_name}")
+                            logger.info(f"[TV] Technical snapshots reflected ({len(sig_data_list)} pairs)")
                         else:
                             logger.warning(f"[TV] Pine compile errors: {result['errors']}")
                 finally:
