@@ -20,11 +20,12 @@ ticker = syminfo.ticker
 if barstate.islast and str.contains(ticker, "{{ sig.tv_ticker }}")
     colBG = "{{ sig.direction }}" == "long" ? color.new(color.green, 90) : "{{ sig.direction }}" == "short" ? color.new(color.red, 90) : color.new(color.gray, 90)
     trendIcon = "{{ sig.trend_direction }}" == "uptrend" ? "▲" : "{{ sig.trend_direction }}" == "downtrend" ? "▼" : "◆"
-    txt = "{{ sig.direction }} " + trendIcon + " | bias={{ '%+.2f' | format(sig.bias_score) }} conf={{ '%.2f' | format(sig.confidence) }}"
+    txt = "{{ sig.direction }} " + trendIcon
+    txt += "\nbias={{ '%+.2f' | format(sig.bias_score) }} conf={{ '%.2f' | format(sig.confidence) }}"
 {% if sig.patterns %}
-    txt += "\nPatterns: {{ sig.patterns }}"
+    txt += "\n{{ sig.patterns[:40] }}"
 {% endif %}
-    txt += "\n{{ sig.reason[:80] }}"
+    txt += "\n{{ sig.reason[:40] }}"
     label.new(bar_index, close, txt, style=label.style_label_left, color=colBG, textcolor=color.white, size=size.normal)
 {% if sig.direction != "hold" and sig.entry_price > 0 %}
     line.new(bar_index - 50, {{ sig.entry_price }}, bar_index + 10, {{ sig.entry_price }}, color=colEntry, width=2)

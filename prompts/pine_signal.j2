@@ -29,9 +29,10 @@ trendIcon = trend == "uptrend" ? "▲" : trend == "downtrend" ? "▼" : "◆"
 // Info Label
 var label infoLabel = na
 if barstate.islast
-    txt = direction + " " + trendIcon + " | bias=" + str.tostring(biasScore, "#.##") + " conf=" + str.tostring(confidence, "#.##")
+    txt = direction + " " + trendIcon
+    txt += "\nbias=" + str.tostring(biasScore, "#.##") + " conf=" + str.tostring(confidence, "#.##")
 {% if patterns %}
-    txt += "\nPatterns: {{ patterns }}"
+    txt += "\n{{ patterns[:40] }}"
 {% endif %}
     txt += "\n" + reason
     infoLabel := label.new(bar_index, close, txt, style=label.style_label_left, color=colBG, textcolor=color.white, size=size.normal)
