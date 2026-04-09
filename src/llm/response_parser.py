@@ -23,6 +23,9 @@ def _sanitize_json(raw: str) -> str:
     # "N/A" / "n/a" / "-" を値として使っている場合
     raw = re.sub(r':\s*"[Nn]/?[Aa]"', ": null", raw)
     raw = re.sub(r':\s*"-"', ": null", raw)
+    # 数値の先頭 +記号を除去 (JSON非準拠: +0.16 → 0.16)
+    raw = re.sub(r":\s*\+(\d)", r": \1", raw)
+    raw = re.sub(r"\[\s*\+(\d)", r"[\1", raw)
     # 値なし ("key": ,) / ("key": }) / ("key": ])
     raw = re.sub(r":\s*,", ": null,", raw)
     raw = re.sub(r":\s*}", ": null}", raw)
