@@ -39,7 +39,7 @@ llm:
   price_analysis:
     provider: "ollama"
     temperature: 0.1
-    model: "qwen3.5:9b"
+    model: "0xroyce/plutus:latest"
   reflection:
     provider: "ollama"
     temperature: 0.3
@@ -164,7 +164,7 @@ analysis:
   # 予測サイクル設定（技術+ニュース合成シグナルの定期検証）
   forecast_review_interval_hours: 2    # B: 予測から検証までの時間（2h = 1セッション）
   forecast_start_hour: 0               # 予測サイクル開始時刻オフセット（0 → 00:00/02:00/04:00/... JST）
-  forecast_min_combined_score: 0.15    # C: この絶対値未満のシグナルは予測対象外（signal_deadbandと同値）
+  forecast_min_combined_score: 0.05    # C: この絶対値未満のシグナルは予測対象外（低confでもデータ蓄積）
   forecast_significance_atr_ratio: 0.30  # A: ATR proxy の何倍以上動いたら有意とするか
 
 news_collection:
