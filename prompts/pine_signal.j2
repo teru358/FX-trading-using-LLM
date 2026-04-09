@@ -1,0 +1,34 @@
+//@version=6
+indicator("Finance Bot Signal — {{ pair }}", overlay=true)
+
+// --- Auto-generated: {{ timestamp }} ---
+entryPrice  = {{ entry_price }}
+stopLoss    = {{ stop_loss }}
+takeProfit  = {{ take_profit }}
+direction   = "{{ direction }}"
+confidence  = {{ confidence }}
+reason      = "{{ reason[:80] }}"
+
+// Colors
+colEntry = color.new(color.blue, 0)
+colSL    = color.new(color.red, 0)
+colTP    = color.new(color.green, 0)
+colBG    = direction == "long" ? color.new(color.green, 90) : direction == "short" ? color.new(color.red, 90) : color.new(color.gray, 90)
+
+// Label
+var label infoLabel = na
+if barstate.islast
+    txt = direction + " | conf=" + str.tostring(confidence, "#.##") + "\n" + reason
+    infoLabel := label.new(bar_index, close, txt, style=label.style_label_left, color=colBG, textcolor=color.white, size=size.normal)
+
+{% if direction != "hold" %}
+// Entry / SL / TP lines
+if barstate.islast
+    line.new(bar_index - 50, entryPrice, bar_index + 10, entryPrice, color=colEntry, width=2)
+    line.new(bar_index - 50, stopLoss,   bar_index + 10, stopLoss,   color=colSL,    width=1, style=line.style_dashed)
+    line.new(bar_index - 50, takeProfit,  bar_index + 10, takeProfit, color=colTP,    width=1, style=line.style_dashed)
+    // Labels
+    label.new(bar_index + 12, entryPrice, "Entry " + str.tostring(entryPrice), style=label.style_none, textcolor=colEntry, size=size.small)
+    label.new(bar_index + 12, stopLoss,   "SL " + str.tostring(stopLoss),      style=label.style_none, textcolor=colSL,    size=size.small)
+    label.new(bar_index + 12, takeProfit,  "TP " + str.tostring(takeProfit),    style=label.style_none, textcolor=colTP,    size=size.small)
+{% endif %}
