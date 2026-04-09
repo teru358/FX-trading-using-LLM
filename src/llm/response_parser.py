@@ -20,12 +20,19 @@ def extract_json(text: str) -> dict:
     if not matches:
         raise ValueError(f"No JSON block found in LLM response. Response: {text[:500]}")
     raw = matches[-1].group()
+    # JS コメントの除去 (// ...)
+    raw = re.sub(r"//[^\n]*", "", raw)
     # LLMが trailing comma を出力する場合の補正: ",}" → "}", ",]" → "]"
     raw = re.sub(r",\s*([}\]])", r"\1", raw)
-    # LLMが NaN / Infinity / -Infinity を出力する場合の補正
+    # LLMが NaN / Infinity / -Infinity / undefined / N/A を出力する場合の補正
     raw = re.sub(r"\bNaN\b", "null", raw)
     raw = re.sub(r"\b-?Infinity\b", "null", raw)
-    # LLMが値なし ("key": ,) を出力する場合の補正
+    raw = re.sub(r"\bundefined\b", "null", raw)
+    raw = re.sub(r':\s*"?N/?A"?', ": null", raw)
+    raw = re.sub(r':\s*"-"', ": null", raw)
+    # LLMが値なし ("key": ,) / ("key": }) を出力する場合の補正
     raw = re.sub(r":\s*,", ": null,", raw)
     raw = re.sub(r":\s*}", ": null}", raw)
+    # 単一引用符→二重引用符 (JSON非準拠の 'value' を修正)
+    raw = re.sub(r"(?<=[\[,{:\s])'([^']*)'(?=[,\]}:\s])", r'"\1"', raw)
     return json.loads(raw)
