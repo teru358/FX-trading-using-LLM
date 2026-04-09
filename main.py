@@ -80,12 +80,14 @@ def main() -> None:
     interval = config.news_collection.interval_minutes
     run_times = config.schedule.run_times
 
+    news_offset = config.news_collection.offset_minutes
     news_times = [
         f"{h:02d}:{m:02d}"
         for h in range(24)
-        for m in range(0, 60, interval)
+        for m in range(news_offset, 60, interval)
     ]
-    technical_times = [t for t in news_times if t.endswith(":00")]
+    # テクニカル分析は毎時:00（ニュース時刻と独立）
+    technical_times = [f"{h:02d}:00" for h in range(24)]
 
     # スケジュール情報パネル
     sched_table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))

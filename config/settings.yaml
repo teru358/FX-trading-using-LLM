@@ -168,7 +168,8 @@ analysis:
   forecast_significance_atr_ratio: 0.30  # A: ATR proxy の何倍以上動いたら有意とするか
 
 news_collection:
-  interval_minutes: 15          # この間隔でtimezoneに揃えた時刻を自動生成（OHLCV+テクニカル分析も同時実行）
+  interval_minutes: 30          # ニュース収集間隔（分）
+  offset_minutes: 15            # 開始オフセット（15 → :15, :45）
   timezone: "Asia/Tokyo"
   inter_pair_delay_seconds: 10  # ペア間の待機（Ollama VRAM保護）
   news_freshness_hours: 24      # この時間以上古い記事は除外

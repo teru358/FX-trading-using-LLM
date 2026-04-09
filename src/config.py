@@ -134,6 +134,7 @@ class TradingConfig:
 @dataclass
 class NewsCollectionConfig:
     interval_minutes: int = 30
+    offset_minutes: int = 0              # 開始オフセット（15 → :15, :45）
     timezone: str = "Asia/Tokyo"
     inter_pair_delay_seconds: int = 60
     news_freshness_hours: float = 24.0   # この時間以上古い記事は除外
@@ -534,6 +535,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     nc = raw.get("news_collection", {})
     news_collection = NewsCollectionConfig(
         interval_minutes=nc.get("interval_minutes", 30),
+        offset_minutes=nc.get("offset_minutes", 0),
         timezone=nc.get("timezone", "Asia/Tokyo"),
         inter_pair_delay_seconds=nc.get("inter_pair_delay_seconds", 60),
         news_freshness_hours=nc.get("news_freshness_hours", 24.0),
