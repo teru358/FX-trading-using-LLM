@@ -34,7 +34,7 @@ _HELP = """\
   [cyan]compare[/cyan]  (pair)      — 複数モデルで分析を比較  例: compare USDJPY=X
   [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問・コメントを送信
   [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
-  [cyan]tv[/cyan]                    — TradingViewチャートにシグナルを描画更新
+  [cyan]tv[/cyan]                   — TradingViewチャートにシグナルを描画更新
   [cyan]feeds[/cyan]                — RSSフィード疎通確認
   [cyan]notify[/cyan]  (n)          — 通知テストメッセージを送信
   [cyan]edit[/cyan]   (e)           — user_notes.md を vim で編集
