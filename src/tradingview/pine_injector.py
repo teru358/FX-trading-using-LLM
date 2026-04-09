@@ -136,6 +136,12 @@ class PineInjector:
                     if (/^(Add to chart|Update on chart)/i.test(text)) { btns[i].click(); return text; }
                     if (/^(チャートに追加|チャートを更新)/i.test(text)) { btns[i].click(); return text; }
                 }
+                // フォールバック: saveButton（既存スクリプト更新時）
+                for (var i = 0; i < btns.length; i++) {
+                    if (btns[i].className.indexOf('saveButton') !== -1 && btns[i].offsetParent !== null) {
+                        btns[i].click(); return 'saveButton';
+                    }
+                }
                 return null;
             })()
         """)
@@ -188,8 +194,77 @@ class PineInjector:
             "errors": errors,
         }
 
+    async def _remove_existing_signal(self) -> int:
+        """チャート上の既存 Finance Bot Signal インジケーターを削除する。"""
+        removed = await self._cdp.evaluate("""
+            (function() {
+                try {
+                    var chart = window.TradingViewApi._activeChartWidgetWV.value();
+                    var studies = chart.getAllStudies();
+                    var count = 0;
+                    for (var i = studies.length - 1; i >= 0; i--) {
+                        if (studies[i].title && /Finance Bot Signal/i.test(studies[i].title)) {
+                            chart.removeEntity(studies[i].id);
+                            count++;
+                        }
+                    }
+                    return count;
+                } catch(e) { return 0; }
+            })()
+        """)
+        if removed:
+            logger.info(f"[TV] Removed {removed} existing signal indicator(s)")
+        return removed or 0
+
+    async def _new_indicator(self) -> bool:
+        """Pine Editorで新規インジケーターを作成し、エディタ状態をリセットする。"""
+        result = await self._cdp.evaluate("""
+            (function() {
+                try {
+                    var frame = document.querySelector('iframe[id*="tradingview"]');
+                    var api = window.TradingViewApi;
+                    if (api && api._pineEditor) {
+                        api._pineEditor.newScript('indicator');
+                        return 'api';
+                    }
+                } catch(e) {}
+                // フォールバック: メニューから新規作成
+                var items = document.querySelectorAll('[class*="menu"] [class*="item"], [role="menuitem"]');
+                for (var i = 0; i < items.length; i++) {
+                    var t = items[i].textContent.trim();
+                    if (/new.*indicator|新規.*インジケーター|Open.*New/i.test(t)) {
+                        items[i].click();
+                        return 'menu: ' + t;
+                    }
+                }
+                return null;
+            })()
+        """)
+        if result:
+            await asyncio.sleep(1)
+            logger.debug(f"[TV] New indicator created via {result}")
+            return True
+        return False
+
     async def inject_and_compile(self, source: str) -> dict:
-        """Pine Script書き込み→コンパイルを一括実行する。"""
+        """既存シグナル削除→Pine Script書き込み→コンパイルを一括実行する。"""
+        await self._remove_existing_signal()
+        await asyncio.sleep(0.5)
+
+        # 「チャートに追加」ボタンが表示されない場合、新規作成でリセット
+        has_add_btn = await self._cdp.evaluate("""
+            (function() {
+                var btns = document.querySelectorAll('button');
+                for (var i = 0; i < btns.length; i++) {
+                    var t = btns[i].textContent.trim();
+                    if (/Add to chart|チャートに追加|save and add|保存してチャート/i.test(t)) return true;
+                }
+                return false;
+            })()
+        """)
+        if not has_add_btn:
+            await self._new_indicator()
+
         if not await self.set_source(source):
             return {"success": False, "errors": ["Failed to set source"]}
         return await self.compile()
