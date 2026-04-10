@@ -28,3 +28,4 @@ compare/
 
 clear_data.py
 .pid
+data/econ_events.db
