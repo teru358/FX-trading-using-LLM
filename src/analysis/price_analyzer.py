@@ -27,10 +27,18 @@ def _to_float(val, default: float) -> float:
         return default
 
 
+# SL/TP が entry_zone からこの割合以内なら自動補正する閾値 (0.2%)
+# これを超える大きな逸脱は LLM のロジックエラーとみなし補正しない
+_AUTO_CORRECT_TOLERANCE_PCT = 0.002
+
+
 def _validate_sl_tp(analysis: "PriceAnalysis") -> str | None:
     """SL/TPが発注方向と矛盾していないか検証する。
-    同値の場合は微小マージン（価格の0.01%）を自動付与して補正する。
-    問題なければNone、矛盾があればエラーメッセージを返す。
+
+    entry_zone 境界からの逸脱が _AUTO_CORRECT_TOLERANCE_PCT 以内なら
+    micro-margin (0.02%) で算術補正する。それを超える逸脱は LLM の
+    ロジックエラーとしてエラーメッセージを返しリトライに回す。
+    問題なければNone、補正しきれなければエラー文字列を返す。
     """
     direction = analysis.direction_bias
     if direction == "neutral":
@@ -38,30 +46,77 @@ def _validate_sl_tp(analysis: "PriceAnalysis") -> str | None:
     entry_low, entry_high = analysis.entry_zone
     sl = analysis.stop_loss
     tp = analysis.take_profit
-    margin = entry_high * 0.0001  # 0.01% の微小マージン
+    margin = entry_high * 0.0002  # 0.02% の補正マージン
+    tolerance_sl = entry_low * _AUTO_CORRECT_TOLERANCE_PCT
+    tolerance_tp = entry_high * _AUTO_CORRECT_TOLERANCE_PCT
+
     if direction == "long":
-        if sl == entry_low:
-            analysis.stop_loss = sl = entry_low - margin
-            logger.debug(f"SL auto-adjusted: {sl:.5f} (margin applied for LONG)")
-        if tp == entry_high:
-            analysis.take_profit = tp = entry_high + margin
-            logger.debug(f"TP auto-adjusted: {tp:.5f} (margin applied for LONG)")
+        # SL: entry_low 未満にあるべき
         if sl >= entry_low:
-            return f"LONG requires stop_loss < entry_zone[0]={entry_low:.5f}, got stop_loss={sl:.5f}"
+            if sl - entry_low <= tolerance_sl:
+                corrected = entry_low - margin
+                logger.warning(
+                    f"[PRICE] SL auto-corrected for LONG: {sl:.5f} → {corrected:.5f} "
+                    f"(was >= entry_zone[0]={entry_low:.5f})"
+                )
+                analysis.stop_loss = sl = corrected
+            else:
+                return f"LONG requires stop_loss < entry_zone[0]={entry_low:.5f}, got stop_loss={sl:.5f}"
+        # TP: entry_high 超過にあるべき
         if tp <= entry_high:
-            return f"LONG requires take_profit > entry_zone[1]={entry_high:.5f}, got take_profit={tp:.5f}"
+            if entry_high - tp <= tolerance_tp:
+                corrected = entry_high + margin
+                logger.warning(
+                    f"[PRICE] TP auto-corrected for LONG: {tp:.5f} → {corrected:.5f} "
+                    f"(was <= entry_zone[1]={entry_high:.5f})"
+                )
+                analysis.take_profit = tp = corrected
+            else:
+                return f"LONG requires take_profit > entry_zone[1]={entry_high:.5f}, got take_profit={tp:.5f}"
     elif direction == "short":
-        if sl == entry_high:
-            analysis.stop_loss = sl = entry_high + margin
-            logger.debug(f"SL auto-adjusted: {sl:.5f} (margin applied for SHORT)")
-        if tp == entry_low:
-            analysis.take_profit = tp = entry_low - margin
-            logger.debug(f"TP auto-adjusted: {tp:.5f} (margin applied for SHORT)")
+        # SL: entry_high 超過にあるべき
         if sl <= entry_high:
-            return f"SHORT requires stop_loss > entry_zone[1]={entry_high:.5f}, got stop_loss={sl:.5f}"
+            if entry_high - sl <= tolerance_sl:
+                corrected = entry_high + margin
+                logger.warning(
+                    f"[PRICE] SL auto-corrected for SHORT: {sl:.5f} → {corrected:.5f} "
+                    f"(was <= entry_zone[1]={entry_high:.5f})"
+                )
+                analysis.stop_loss = sl = corrected
+            else:
+                return f"SHORT requires stop_loss > entry_zone[1]={entry_high:.5f}, got stop_loss={sl:.5f}"
+        # TP: entry_low 未満にあるべき
         if tp >= entry_low:
-            return f"SHORT requires take_profit < entry_zone[0]={entry_low:.5f}, got take_profit={tp:.5f}"
+            if tp - entry_low <= tolerance_tp:
+                corrected = entry_low - margin
+                logger.warning(
+                    f"[PRICE] TP auto-corrected for SHORT: {tp:.5f} → {corrected:.5f} "
+                    f"(was >= entry_zone[0]={entry_low:.5f})"
+                )
+                analysis.take_profit = tp = corrected
+            else:
+                return f"SHORT requires take_profit < entry_zone[0]={entry_low:.5f}, got take_profit={tp:.5f}"
     return None
+
+
+def _downgrade_to_neutral(analysis: "PriceAnalysis", reason: str) -> "PriceAnalysis":
+    """SL/TP バリデーション全滅時に direction を neutral に降格させる。
+
+    bias_score / trend_direction / support / resistance などのテクニカル情報は維持し、
+    entry_zone / stop_loss / take_profit だけを current price 中心にクリアする。
+    reasoning_summary に降格理由を追記する。
+    """
+    entry_low, entry_high = analysis.entry_zone
+    mid = (entry_low + entry_high) / 2.0
+    analysis.direction_bias = "neutral"
+    analysis.entry_zone = (mid, mid)
+    analysis.stop_loss = 0.0
+    analysis.take_profit = 0.0
+    analysis.risk_reward_ratio = 0.0
+    suffix = f" [neutral降格: {reason}]"
+    if suffix not in analysis.reasoning_summary:
+        analysis.reasoning_summary = (analysis.reasoning_summary or "") + suffix
+    return analysis
 
 
 def _build_feedback(error: str, analysis: "PriceAnalysis") -> str:
@@ -255,9 +310,11 @@ async def analyze_price_action(
         messages.append({"role": "assistant", "content": response_text})
         messages.append({"role": "user", "content": _build_feedback(validation_error, analysis)})
 
-    raise ValueError(
-        f"[PRICE] {pair_cfg.display_name}: SL/TP validation failed after {MAX_RETRIES} attempts. Last error: {last_error}"
+    logger.error(
+        f"[PRICE] {pair_cfg.display_name}: SL/TP validation failed after {MAX_RETRIES} attempts. "
+        f"Downgrading to neutral. Last error: {last_error}"
     )
+    return _downgrade_to_neutral(analysis, last_error or "unknown validation error")
 
 
 async def chat_with_context(
