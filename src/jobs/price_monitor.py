@@ -31,11 +31,16 @@ def _apply_trailing_stop(
     cfg,
     position_mgr: PositionManager,
 ) -> None:
-    """トレーリングストップを適用する。
+    """段階型トレーリングストップを適用する。
 
-    TP方向への到達率が activation_pct を超えたら、
-    現在価格から元のSL幅 * distance_ratio だけ離れた位置にSLを追従させる。
-    SLは利益方向にのみ移動する（update_stop_loss が保証）。
+    進捗率(pos.take_profit方向への到達率)に応じてSLを段階的に繰り上げる:
+
+    - `breakeven_pct / 2` 以上: SL = entry と 元SL の中間(半額ロック)
+    - `breakeven_pct` 以上:     SL = entry (損益ゼロ)        [Task 5で追加]
+    - `activation_pct` 以上:    SL = current − 元SL距離 × distance_ratio [Task 6で追加]
+
+    SLは `update_stop_loss` により利益方向へのみ移動する。段階の境界に到達していない
+    区間ではSLを一切動かさない（ボラに対する耐性を確保）。
     """
     tp_distance = abs(pos.take_profit - pos.entry_price)
     if tp_distance == 0:
@@ -47,19 +52,17 @@ def _apply_trailing_stop(
         progress = pos.entry_price - current
 
     progress_pct = progress / tp_distance
-    if progress_pct < cfg.trailing_stop_activation_pct:
+    if progress_pct <= 0:
         return
 
-    # 元のSL距離 × distance_ratio でトレール幅を計算
-    original_sl_distance = abs(pos.entry_price - pos.stop_loss)
-    trail_distance = original_sl_distance * cfg.trailing_stop_distance_ratio
+    breakeven_pct = cfg.trailing_stop_breakeven_pct
+    half_pct = breakeven_pct / 2.0
 
-    if pos.direction == "buy":
-        new_sl = current - trail_distance
-    else:
-        new_sl = current + trail_distance
-
-    position_mgr.update_stop_loss(pos.order_id, round(new_sl, 5))
+    # 半額ステージ
+    if progress_pct >= half_pct:
+        midpoint = (pos.entry_price + pos.stop_loss) / 2.0
+        position_mgr.update_stop_loss(pos.order_id, round(midpoint, 5), stage="half")
+        return
 
 
 def _adverse_move_pct(direction: str, entry: float, current: float) -> float:
