@@ -24,6 +24,9 @@ logger = logging.getLogger(__name__)
 # {order_id: last_alerted_adverse_pct} — 通知スパム防止用（メモリ内のみ）
 _alert_state: dict[str, float] = {}
 
+# {order_id: initial_stop_loss} — トレーリング開始前の元SLを記憶（半額ステージ目標値算出用）
+_trailing_initial_sl: dict[str, float] = {}
+
 
 def _apply_trailing_stop(
     pos,
@@ -55,12 +58,24 @@ def _apply_trailing_stop(
     if progress_pct <= 0:
         return
 
+    # 元SLを初回のみ記憶する（半額ステージの目標値を固定するため）
+    if pos.order_id not in _trailing_initial_sl:
+        _trailing_initial_sl[pos.order_id] = pos.stop_loss
+    initial_sl = _trailing_initial_sl[pos.order_id]
+
     breakeven_pct = cfg.trailing_stop_breakeven_pct
     half_pct = breakeven_pct / 2.0
 
+    # break-even ステージ
+    if progress_pct >= breakeven_pct:
+        position_mgr.update_stop_loss(pos.order_id, round(pos.entry_price, 5), stage="breakeven")
+        return
+
     # 半額ステージ
+    # midpointは元SL(initial_sl)とentryの中間で固定。SLが既にmidpoint以上なら
+    # update_stop_loss側の片方向ガードにより拒否され、SLは据え置きとなる。
     if progress_pct >= half_pct:
-        midpoint = (pos.entry_price + pos.stop_loss) / 2.0
+        midpoint = (pos.entry_price + initial_sl) / 2.0
         position_mgr.update_stop_loss(pos.order_id, round(midpoint, 5), stage="half")
         return
 
