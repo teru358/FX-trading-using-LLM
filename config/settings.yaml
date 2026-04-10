@@ -115,10 +115,11 @@ price_monitor:
   alert_step_pct: 0.002           # 追加 0.2% ごとに再通知（スパム防止）
   emergency_close_pct: 0.008      # 損失 0.8% で緊急損切り（0 = 無効）
   enable_emergency_close: false   # 緊急損切りを有効にするか（false = 通知のみ）
-  # トレーリングストップ（利益保護）
+  # トレーリングストップ（段階型・利益保護）
   trailing_stop_enabled: true
-  trailing_stop_activation_pct: 0.40   # TP距離の40%到達で発動開始
-  trailing_stop_distance_ratio: 1.0    # 元のSL距離と同比率でSLを追従（1.0 = 同じ幅）
+  trailing_stop_breakeven_pct: 0.20    # TP距離の20%到達でSL=entry。10%(=半分)でSL=entryと元SLの中間
+  trailing_stop_activation_pct: 0.40   # TP距離の40%到達で動的追従(current - 元SL距離×ratio)
+  trailing_stop_distance_ratio: 1.0    # 動的追従時のSL距離倍率（1.0 = 元SLと同じ幅）
 
 schedule:
   run_times:
