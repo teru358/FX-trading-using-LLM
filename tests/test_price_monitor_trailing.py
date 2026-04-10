@@ -163,3 +163,22 @@ def test_initial_stop_loss_preserved_across_updates(tmp_state_store, trailing_bu
     pos_after = mgr.get_account_state().open_positions[0]
     assert pos_after.stop_loss == 100.0  # break-evenに更新された
     assert pos_after.initial_stop_loss == 99.0  # 元のまま
+
+
+def test_follow_stage_sell_after_breakeven_uses_initial_sl_distance(tmp_state_store, trailing_sell_pos):
+    """SELL: break-even後のfollow ステージも元SL距離(1.0)を使う。
+
+    まずSL=entry(100.0)まで下げた後、current=96.0で呼ぶと SL=96+1.0=97.0。
+    """
+    mgr = _mk_mgr(tmp_state_store, trailing_sell_pos)
+    pos = mgr.get_account_state().open_positions[0]
+    cfg = _mk_cfg()
+
+    # break-evenに乗せる: progress=20% → current=98.0
+    _apply_trailing_stop(pos, current=98.0, cfg=cfg, position_mgr=mgr)
+    assert mgr.get_account_state().open_positions[0].stop_loss == 100.0
+
+    # 動的追従: current=96.0, 元SL距離=1.0 → SL=96+1.0=97.0
+    pos2 = mgr.get_account_state().open_positions[0]
+    _apply_trailing_stop(pos2, current=96.0, cfg=cfg, position_mgr=mgr)
+    assert mgr.get_account_state().open_positions[0].stop_loss == 97.0

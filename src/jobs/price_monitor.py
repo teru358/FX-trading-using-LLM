@@ -61,7 +61,8 @@ def _apply_trailing_stop(
     activation_pct = cfg.trailing_stop_activation_pct
 
     # 元SL距離は Order.initial_stop_loss を基準に計算する（break-even後も不変）
-    initial_sl = pos.initial_stop_loss if pos.initial_stop_loss else pos.stop_loss
+    # initial_stop_loss == 0.0 は「未設定」のセンチネル（Order.from_dict の legacy fallback と共通）
+    initial_sl = pos.initial_stop_loss if pos.initial_stop_loss != 0.0 else pos.stop_loss
     original_sl_distance = abs(pos.entry_price - initial_sl)
 
     # 動的追従ステージ (最も高い進捗から評価)

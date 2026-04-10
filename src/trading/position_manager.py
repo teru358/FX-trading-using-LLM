@@ -69,6 +69,10 @@ class Order:
         if d.get("closed_at"):
             d["closed_at"] = datetime.fromisoformat(d["closed_at"])
         d.setdefault("macro_context_at_entry", "")
+        # 既存データ (initial_stop_loss 追加以前) のフォールバック。
+        # 既にトレーリングで SL が更新されたポジションでは真の元SLは失われており、
+        # 現在のSLを記録することしかできない (follow ステージでの元SL距離が
+        # 実際より小さくなる可能性がある)。新規Orderは Order.new で正しく設定される。
         d.setdefault("initial_stop_loss", d["stop_loss"])
         return Order(**d)
 
