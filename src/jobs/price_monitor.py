@@ -43,6 +43,9 @@ def _apply_trailing_stop(
     SLは `update_stop_loss` により利益方向へのみ移動する。段階の境界に到達していない
     区間ではSLを一切動かさない（ボラに対する耐性を確保）。
     """
+    # TPが未設定(0.0)の場合はトレーリング対象外
+    if not pos.take_profit:
+        return
     tp_distance = abs(pos.take_profit - pos.entry_price)
     if tp_distance == 0:
         return
@@ -64,6 +67,9 @@ def _apply_trailing_stop(
     # initial_stop_loss == 0.0 は「未設定」のセンチネル（Order.from_dict の legacy fallback と共通）
     initial_sl = pos.initial_stop_loss if pos.initial_stop_loss != 0.0 else pos.stop_loss
     original_sl_distance = abs(pos.entry_price - initial_sl)
+    if original_sl_distance == 0:
+        # 元SLがentryと同値 = トレーリング計算不能 (通常は発生しないが防御)
+        return
 
     # 動的追従ステージ (最も高い進捗から評価)
     if progress_pct >= activation_pct:

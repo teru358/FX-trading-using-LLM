@@ -182,3 +182,19 @@ def test_follow_stage_sell_after_breakeven_uses_initial_sl_distance(tmp_state_st
     pos2 = mgr.get_account_state().open_positions[0]
     _apply_trailing_stop(pos2, current=96.0, cfg=cfg, position_mgr=mgr)
     assert mgr.get_account_state().open_positions[0].stop_loss == 97.0
+
+
+def test_between_half_and_breakeven_holds_sl_at_midpoint_sell(tmp_state_store, trailing_sell_pos):
+    """SELL: 10%〜20%の区間では半額ステージで下げた中間値(100.5)のまま据え置き。"""
+    mgr = _mk_mgr(tmp_state_store, trailing_sell_pos)
+    pos = mgr.get_account_state().open_positions[0]
+    cfg = _mk_cfg()
+
+    # 先に進捗10%で半額ステージに乗せる
+    _apply_trailing_stop(pos, current=99.0, cfg=cfg, position_mgr=mgr)
+    assert mgr.get_account_state().open_positions[0].stop_loss == 100.5
+
+    # 進捗15% (=98.5): break-even未満 → 半額ステージが再実行されSL=100.5のまま(片方向保証)
+    pos2 = mgr.get_account_state().open_positions[0]
+    _apply_trailing_stop(pos2, current=98.5, cfg=cfg, position_mgr=mgr)
+    assert mgr.get_account_state().open_positions[0].stop_loss == 100.5
