@@ -161,10 +161,16 @@ class PositionManager:
             f"size={order.position_size:.0f}"
         )
 
-    def update_stop_loss(self, order_id: str, new_stop_loss: float) -> bool:
+    def update_stop_loss(
+        self,
+        order_id: str,
+        new_stop_loss: float,
+        stage: Optional[str] = None,
+    ) -> bool:
         """オープンポジションのSLを更新する（トレーリングストップ用）。
 
         SLは利益方向にのみ移動可能。損失方向への移動は無視される。
+        stage: ログ表示用の段階ラベル（例: "half", "breakeven", "follow"）。
         """
         for pos in self._open:
             if pos.order_id == order_id:
@@ -175,9 +181,10 @@ class PositionManager:
                 old_sl = pos.stop_loss
                 pos.stop_loss = new_stop_loss
                 self._save()
+                stage_suffix = f" (stage={stage})" if stage else ""
                 logger.info(
                     f"[TRAIL] {pos.pair} {pos.direction.upper()} SL updated: "
-                    f"{old_sl:.5f} → {new_stop_loss:.5f}"
+                    f"{old_sl:.5f} → {new_stop_loss:.5f}{stage_suffix}"
                 )
                 return True
         return False
