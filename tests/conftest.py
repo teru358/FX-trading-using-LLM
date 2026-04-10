@@ -123,3 +123,39 @@ def sell_order() -> Order:
         position_size=10000.0,
         signal_reason="test",
     )
+
+
+@pytest.fixture
+def trailing_buy_pos() -> Order:
+    """トレーリングストップ計算用 BUY ポジション。
+
+    entry=100.0 / SL=99.0 (距離=1.0) / TP=110.0 (距離=10.0)
+    → 進捗10%=現在価格101.0、20%=102.0、40%=104.0 で境界テストしやすい。
+    """
+    return Order.new(
+        pair="USDJPY=X",
+        direction="buy",
+        entry_price=100.0,
+        stop_loss=99.0,
+        take_profit=110.0,
+        position_size=10000.0,
+        signal_reason="trailing-test",
+    )
+
+
+@pytest.fixture
+def trailing_sell_pos() -> Order:
+    """トレーリングストップ計算用 SELL ポジション。
+
+    entry=100.0 / SL=101.0 (距離=1.0) / TP=90.0 (距離=10.0)
+    → 進捗10%=現在価格99.0、20%=98.0、40%=96.0。
+    """
+    return Order.new(
+        pair="USDJPY=X",
+        direction="sell",
+        entry_price=100.0,
+        stop_loss=101.0,
+        take_profit=90.0,
+        position_size=10000.0,
+        signal_reason="trailing-test",
+    )
