@@ -28,8 +28,8 @@ ticker = syminfo.ticker
 // ── {{ sig.pair }} signal ──
 if barstate.islast and str.contains(ticker, "{{ sig.tv_ticker }}")
     sigColEntry = "{{ sig.direction }}" == "long" ? colLongEntry : "{{ sig.direction }}" == "short" ? colShortEntry : color.new(color.gray, 40)
-    sigColSL    = "{{ sig.direction }}" == "long" ? colLongSL    : colShortSL
-    sigColTP    = "{{ sig.direction }}" == "long" ? colLongTP    : colShortTP
+    sigColSL    = "{{ sig.direction }}" == "long" ? colLongSL    : "{{ sig.direction }}" == "short" ? colShortSL : color.new(color.gray, 40)
+    sigColTP    = "{{ sig.direction }}" == "long" ? colLongTP    : "{{ sig.direction }}" == "short" ? colShortTP : color.new(color.gray, 40)
     colBG = "{{ sig.direction }}" == "long" ? color.new(color.green, 90) : "{{ sig.direction }}" == "short" ? color.new(color.red, 90) : color.new(color.gray, 90)
     trendIcon = "{{ sig.trend_direction }}" == "uptrend" ? "▲" : "{{ sig.trend_direction }}" == "downtrend" ? "▼" : "◆"
     txt = "{{ sig.direction }} " + trendIcon
