@@ -231,10 +231,6 @@ def main() -> None:
             config.economic_calendar.fetch_time,
             config.economic_calendar.fetch_timezone,
         ).do(_econ_daily)
-        logger.info(
-            f"[ECON] Daily fetch scheduled at {config.economic_calendar.fetch_time} "
-            f"{config.economic_calendar.fetch_timezone}"
-        )
 
     # REST API サーバー（有効時のみ — Initial collection 前に起動）
     if config.api.enabled:
