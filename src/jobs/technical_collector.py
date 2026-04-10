@@ -290,7 +290,6 @@ async def collect_all_technical(
             )
             from src.analysis.economic_calendar import classify_surprise
             from src.rag.embedder import embed_text
-            from src.llm.factory import create_llm_client
 
             econ_store = EconEventStore(config.econ_db_path)
 
