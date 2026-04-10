@@ -914,47 +914,28 @@ async def trading_cycle(
                 ))
             hold_store.save_hold(sig.pair, sig)
 
-    # TradingView チャート反映（オプション・全trade銘柄）
-    if config.tradingview.enabled and signals:
+    # TradingView チャート反映（シグナル + オープンポジション）
+    if config.tradingview.enabled:
         try:
             from src.tradingview.cdp_client import CDPClient
             from src.tradingview.pine_injector import PineInjector
-            from src.tradingview.chart_control import to_tv_ticker
-            from src.tradingview.script_generator import SignalData, generate_multi_signal_pine
+            from src.tradingview.tv_payload import build_tv_pine
 
-            tv_cdp = CDPClient(host=config.tradingview.cdp_host, port=config.tradingview.cdp_port)
-            if await tv_cdp.connect():
-                try:
-                    injector = PineInjector(tv_cdp)
-                    sig_data_list = []
-                    for sig in signals:
-                        pa = sig.price
-                        pair_cfg = next((p for p in config.tradeable_instruments if p.symbol == sig.pair), None)
-                        sig_data_list.append(SignalData(
-                            pair=pair_cfg.display_name if pair_cfg else sig.pair,
-                            tv_ticker=to_tv_ticker(sig.pair),
-                            direction=sig.action,
-                            entry_price=sig.entry_price,
-                            stop_loss=sig.stop_loss,
-                            take_profit=sig.take_profit,
-                            confidence=sig.confidence,
-                            reason=sig.signal_reason,
-                            bias_score=pa.bias_score if pa else 0.0,
-                            trend_direction=getattr(pa, "trend_direction", "sideways") if pa else "sideways",
-                            key_support=pa.key_support if pa else None,
-                            key_resistance=pa.key_resistance if pa else None,
-                            swing_highs=getattr(pa, "recent_highs", []) if pa else [],
-                            swing_lows=getattr(pa, "recent_lows", []) if pa else [],
-                            patterns=", ".join(getattr(pa, "chart_patterns", [])) if pa else "",
-                        ))
-                    pine = generate_multi_signal_pine(sig_data_list)
-                    result = await injector.inject_and_compile(pine)
-                    if result["success"]:
-                        logger.info(f"[TV] Multi-signal Pine injected ({len(sig_data_list)} pairs)")
-                    else:
-                        logger.warning(f"[TV] Pine compile errors: {result['errors']}")
-                finally:
-                    await tv_cdp.disconnect()
+            pine = build_tv_pine(config, analysis_store, position_mgr)
+            if pine is None:
+                logger.debug("[TV] No signals or positions to render")
+            else:
+                tv_cdp = CDPClient(host=config.tradingview.cdp_host, port=config.tradingview.cdp_port)
+                if await tv_cdp.connect():
+                    try:
+                        injector = PineInjector(tv_cdp)
+                        result = await injector.inject_and_compile(pine)
+                        if result["success"]:
+                            logger.info("[TV] Signals + positions reflected")
+                        else:
+                            logger.warning(f"[TV] Pine compile errors: {result['errors']}")
+                    finally:
+                        await tv_cdp.disconnect()
         except Exception as e:
             logger.warning(f"[TV] Chart visualization failed: {e}")
 

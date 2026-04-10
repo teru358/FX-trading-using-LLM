@@ -239,41 +239,36 @@ async def collect_all_technical(
         if i < len(tradeable) - 1:
             await asyncio.sleep(delay)
 
-    # TradingView チャート反映（オプション・trade銘柄の最新スナップショット）
-    if config.tradingview.enabled and tradeable:
+    # TradingView チャート反映（シグナル + オープンポジション）
+    if config.tradingview.enabled:
         try:
             from src.tradingview.cdp_client import CDPClient
             from src.tradingview.pine_injector import PineInjector
-            from src.tradingview.chart_control import to_tv_ticker
-            from src.tradingview.script_generator import SignalData, generate_multi_signal_pine
+            from src.tradingview.tv_payload import build_tv_pine
+            from src.persistence.state_store import StateStore
+            from src.trading.position_manager import PositionManager
 
-            tv_cdp = CDPClient(host=config.tradingview.cdp_host, port=config.tradingview.cdp_port)
-            if await tv_cdp.connect():
-                try:
-                    injector = PineInjector(tv_cdp)
-                    sig_data_list = []
-                    for inst in tradeable:
-                        snaps = analysis_store.get_recent_snapshots(inst.symbol, hours=2)
-                        if not snaps:
-                            continue
-                        snap = snaps[0]
-                        sig_data_list.append(SignalData(
-                            pair=inst.display_name,
-                            tv_ticker=to_tv_ticker(inst.symbol),
-                            direction=snap.direction_bias,
-                            confidence=snap.confidence,
-                            reason=snap.reasoning_summary[:80] if snap.reasoning_summary else "",
-                            bias_score=snap.bias_score,
-                        ))
-                    if sig_data_list:
-                        pine = generate_multi_signal_pine(sig_data_list)
+            state_store = StateStore(config.state_dir)
+            position_mgr = PositionManager(
+                state_store,
+                config.trading.initial_balance,
+                context="TechnicalCollector",
+            )
+            pine = build_tv_pine(config, analysis_store, position_mgr)
+            if pine is None:
+                logger.debug("[TV] No signals or positions to render")
+            else:
+                tv_cdp = CDPClient(host=config.tradingview.cdp_host, port=config.tradingview.cdp_port)
+                if await tv_cdp.connect():
+                    try:
+                        injector = PineInjector(tv_cdp)
                         result = await injector.inject_and_compile(pine)
                         if result["success"]:
-                            logger.info(f"[TV] Technical snapshots reflected ({len(sig_data_list)} pairs)")
+                            logger.info("[TV] Technical snapshots + positions reflected")
                         else:
                             logger.warning(f"[TV] Pine compile errors: {result['errors']}")
-                finally:
-                    await tv_cdp.disconnect()
+                    finally:
+                        await tv_cdp.disconnect()
         except Exception as e:
             logger.warning(f"[TV] Chart visualization failed: {e}")
 

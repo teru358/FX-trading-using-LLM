@@ -143,11 +143,24 @@ def _cmd_close(config: AppConfig, pair_arg: str) -> None:
 
 
 async def _update_tv_chart(config: AppConfig, analysis_store) -> None:
-    """全trade銘柄の最新スナップショットをTradingViewチャートに反映する。"""
+    """シグナル + オープンポジションを TradingView チャートに反映する。"""
     from src.tradingview.cdp_client import CDPClient
     from src.tradingview.pine_injector import PineInjector
-    from src.tradingview.chart_control import to_tv_ticker
-    from src.tradingview.script_generator import SignalData, generate_multi_signal_pine
+    from src.tradingview.tv_payload import build_tv_pine
+    from src.persistence.state_store import StateStore
+    from src.trading.position_manager import PositionManager
+
+    state_store = StateStore(config.state_dir)
+    position_mgr = PositionManager(
+        state_store,
+        config.trading.initial_balance,
+        context="CLI",
+    )
+
+    pine = build_tv_pine(config, analysis_store, position_mgr)
+    if pine is None:
+        _console.print("[yellow]シグナル/ポジションが無いため更新しません[/yellow]")
+        return
 
     tv_cdp = CDPClient(host=config.tradingview.cdp_host, port=config.tradingview.cdp_port)
     if not await tv_cdp.connect():
@@ -155,32 +168,13 @@ async def _update_tv_chart(config: AppConfig, analysis_store) -> None:
         return
     try:
         injector = PineInjector(tv_cdp)
-        sig_data_list = []
-        for inst in config.tradeable_instruments:
-            snaps = analysis_store.get_recent_snapshots(inst.symbol, hours=8)
-            if not snaps:
-                _console.print(f"[dim]{inst.display_name}: スナップショットなし[/dim]")
-                continue
-            snap = snaps[0]
-            sig_data_list.append(SignalData(
-                pair=inst.display_name,
-                tv_ticker=to_tv_ticker(inst.symbol),
-                direction=snap.direction_bias,
-                confidence=snap.confidence,
-                reason=snap.reasoning_summary[:80] if snap.reasoning_summary else "",
-                bias_score=snap.bias_score,
-            ))
-            _console.print(
-                f"  {inst.display_name}: {snap.direction_bias} "
-                f"bias={snap.bias_score:+.2f} conf={snap.confidence:.2f}"
-            )
-        if not sig_data_list:
-            _console.print("[yellow]反映するデータがありません[/yellow]")
-            return
-        pine = generate_multi_signal_pine(sig_data_list)
         result = await injector.inject_and_compile(pine)
         if result["success"]:
-            _console.print(f"[green]チャート更新完了 ({len(sig_data_list)} pairs)[/green]")
+            account = position_mgr.get_account_state()
+            _console.print(
+                f"[green]チャート更新完了 "
+                f"(positions={len(account.open_positions)})[/green]"
+            )
         else:
             _console.print(f"[red]コンパイルエラー: {result['errors']}[/red]")
     finally:

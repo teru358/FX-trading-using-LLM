@@ -1,5 +1,11 @@
 """Pine Script生成のテスト。"""
-from src.tradingview.script_generator import generate_signal_pine
+import pytest
+from src.tradingview.script_generator import (
+    PositionData,
+    SignalData,
+    generate_signal_pine,
+    generate_multi_signal_pine,
+)
 
 
 class TestGenerateSignalPine:
@@ -88,3 +94,100 @@ class TestGenerateSignalPine:
         # key_support/resistance未指定時はライン描画ブロックが出力されない
         assert "keySupport" not in script
         assert "keyResist" not in script
+
+
+class TestGenerateMultiSignalPine:
+    def test_signals_only_backward_compatible(self):
+        """positions 未指定時は従来通りシグナルのみ描画される。"""
+        signals = [
+            SignalData(
+                pair="USD/JPY",
+                tv_ticker="USDJPY",
+                direction="long",
+                entry_price=158.25,
+                stop_loss=157.50,
+                take_profit=160.50,
+                confidence=0.80,
+                reason="Test",
+            )
+        ]
+        script = generate_multi_signal_pine(signals)
+        assert "//@version=6" in script
+        assert "158.25" in script
+        assert "157.5" in script
+        assert "160.5" in script
+
+    def test_positions_block_rendered(self):
+        """positions が渡されるとポジション線ブロックが描画される。"""
+        positions = [
+            PositionData(
+                pair="USD/JPY",
+                tv_ticker="USDJPY",
+                direction="buy",
+                entry_price=158.85,
+                stop_loss=157.26,
+                take_profit=162.03,
+                position_size=10000.0,
+                opened_at_ms=1712739600000,
+            )
+        ]
+        script = generate_multi_signal_pine(signals=[], positions=positions)
+        assert "// ─ POSITIONS ─" in script
+        assert "158.85" in script
+        assert "157.26" in script
+        assert "162.03" in script
+        assert "1712739600000" in script  # opened_at_ms
+        assert "xloc.bar_time" in script
+        assert "▲" in script  # buy → ▲
+
+    def test_position_sell_uses_down_arrow(self):
+        positions = [
+            PositionData(
+                pair="EUR/USD",
+                tv_ticker="EURUSD",
+                direction="sell",
+                entry_price=1.1700,
+                stop_loss=1.1750,
+                take_profit=1.1600,
+                position_size=10000.0,
+                opened_at_ms=1712739600000,
+            )
+        ]
+        script = generate_multi_signal_pine(signals=[], positions=positions)
+        assert "▼" in script
+
+    def test_signals_and_positions_coexist(self):
+        """シグナルとポジション両方を同時描画できる。"""
+        signals = [
+            SignalData(
+                pair="USD/JPY",
+                tv_ticker="USDJPY",
+                direction="long",
+                entry_price=159.0,
+                stop_loss=158.0,
+                take_profit=161.0,
+                confidence=0.8,
+                reason="New signal",
+            )
+        ]
+        positions = [
+            PositionData(
+                pair="USD/JPY",
+                tv_ticker="USDJPY",
+                direction="buy",
+                entry_price=158.85,
+                stop_loss=157.26,
+                take_profit=162.03,
+                position_size=10000.0,
+                opened_at_ms=1712739600000,
+            )
+        ]
+        script = generate_multi_signal_pine(signals=signals, positions=positions)
+        # シグナル側
+        assert "159" in script
+        assert "158" in script
+        assert "161" in script
+        # ポジション側
+        assert "158.85" in script
+        assert "157.26" in script
+        assert "162.03" in script

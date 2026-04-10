@@ -27,6 +27,19 @@ class SignalData:
     patterns: str = ""
 
 
+@dataclass
+class PositionData:
+    """1銘柄分のオープンポジションデータ。"""
+    pair: str                  # 表示名 (例: "USD/JPY")
+    tv_ticker: str             # TradingView ticker (例: "USDJPY")
+    direction: str             # "buy" | "sell"
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    position_size: float
+    opened_at_ms: int          # オープン時刻の UNIX ミリ秒 (xloc.bar_time 用)
+
+
 def generate_signal_pine(
     pair: str,
     direction: str,
@@ -64,14 +77,18 @@ def generate_signal_pine(
     )
 
 
-def generate_multi_signal_pine(signals: list[SignalData]) -> str:
-    """複数銘柄のシグナルを1つのPine Scriptに統合する。
+def generate_multi_signal_pine(
+    signals: list[SignalData],
+    positions: list[PositionData] | None = None,
+) -> str:
+    """複数銘柄のシグナルとオープンポジションを1つのPine Scriptに統合する。
 
-    syminfo.tickerで現在のチャートシンボルを判定し、
-    該当銘柄のラインを表示する。
+    syminfo.ticker で現在のチャートシンボルを判定し、該当銘柄のラインを表示する。
+    signals はシグナル線 (破線、推奨値)、positions は実ポジション線 (実線、実約定)。
     """
     return render_prompt(
         "pine_multi_signal.j2",
         signals=signals,
+        positions=positions or [],
         timestamp=datetime.now().strftime("%Y-%m-%d %H:%M"),
     )
