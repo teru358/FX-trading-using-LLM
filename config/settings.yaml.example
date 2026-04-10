@@ -194,3 +194,15 @@ notification:
 tradingview:
   enabled: false                # true で取引判定時にチャートへ自動反映
   cdp_port: 9222                # TradingView Desktop の CDP ポート
+
+# 経済指標カレンダー（TradingView非公式API経由）
+economic_calendar:
+  enabled: false                   # true で経済指標カレンダー連携を有効化
+  fetch_time: "06:00"
+  fetch_timezone: "Asia/Tokyo"
+  lookahead_hours: 48
+  currencies: ["USD", "JPY", "EUR", "GBP"]
+  min_importance: 0
+  post_event_window_min: 30
+  post_event_impact_min: 1
+  refresh_lookback_min: 60

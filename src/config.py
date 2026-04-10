@@ -145,6 +145,20 @@ class NewsCollectionConfig:
 
 
 @dataclass
+class EconomicCalendarConfig:
+    """経済指標カレンダー設定。"""
+    enabled: bool = False
+    fetch_time: str = "06:00"
+    fetch_timezone: str = "Asia/Tokyo"
+    lookahead_hours: int = 48
+    currencies: list[str] = field(default_factory=lambda: ["USD", "JPY", "EUR", "GBP"])
+    min_importance: int = 0
+    post_event_window_min: int = 30
+    post_event_impact_min: int = 1
+    refresh_lookback_min: int = 60
+
+
+@dataclass
 class FeedlyConfig:
     """Feedly API 設定。
 
@@ -398,6 +412,7 @@ class AppConfig:
     openai: OpenAIConfig = field(default_factory=OpenAIConfig)
     claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     keywords: KeywordsConfig = field(default_factory=KeywordsConfig)
+    economic_calendar: EconomicCalendarConfig = field(default_factory=EconomicCalendarConfig)
     tradingview: TradingViewConfig = field(default_factory=TradingViewConfig)
 
     @property
@@ -411,6 +426,10 @@ class AppConfig:
     @property
     def prices_db_path(self) -> Path:
         return BASE_DIR / "data" / "prices.db"
+
+    @property
+    def econ_db_path(self) -> Path:
+        return BASE_DIR / "data" / "econ_events.db"
 
     @property
     def user_notes_path(self) -> Path:
@@ -552,6 +571,19 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     keywords_cfg = KeywordsConfig(
         global_keywords=kw.get("global", _default_kw.global_keywords),
         japan_keywords=kw.get("japan", _default_kw.japan_keywords),
+    )
+
+    ec = raw.get("economic_calendar", {})
+    economic_calendar_cfg = EconomicCalendarConfig(
+        enabled=ec.get("enabled", False),
+        fetch_time=ec.get("fetch_time", "06:00"),
+        fetch_timezone=ec.get("fetch_timezone", "Asia/Tokyo"),
+        lookahead_hours=ec.get("lookahead_hours", 48),
+        currencies=ec.get("currencies", ["USD", "JPY", "EUR", "GBP"]),
+        min_importance=ec.get("min_importance", 0),
+        post_event_window_min=ec.get("post_event_window_min", 30),
+        post_event_impact_min=ec.get("post_event_impact_min", 1),
+        refresh_lookback_min=ec.get("refresh_lookback_min", 60),
     )
 
     _default_ns = NewsSourcesConfig()
@@ -739,5 +771,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         claude=claude_cfg,
         analysis=analysis_cfg,
         keywords=keywords_cfg,
+        economic_calendar=economic_calendar_cfg,
         tradingview=tradingview_cfg,
     )
