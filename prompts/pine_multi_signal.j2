@@ -1,13 +1,21 @@
 //@version=6
-indicator("Finance Bot Signals", overlay=true, max_lines_count=50, max_labels_count=50)
+indicator("Finance Bot Signals", overlay=true, max_lines_count=100, max_labels_count=100)
 
 // --- Auto-generated: {{ timestamp }} ---
-// {{ signals | length }} pair(s) tracked
+// {{ signals | length }} signal(s), {{ positions | length }} position(s)
 
-// Colors
-colEntry = color.new(color.blue, 0)
-colSL    = color.new(color.red, 0)
-colTP    = color.new(color.green, 0)
+// === Common color palette ===
+// Long (green family)
+colLongEntry = color.new(color.green, 0)
+colLongSL    = color.new(color.green, 40)
+colLongTP    = color.new(color.lime, 0)
+
+// Short (red family)
+colShortEntry = color.new(color.red, 0)
+colShortSL    = color.new(color.red, 40)
+colShortTP    = color.new(color.maroon, 0)
+
+// Other (support/resistance/swing)
 colSupport    = color.new(color.teal, 20)
 colResistance = color.new(color.orange, 20)
 colSwingHigh  = color.new(color.purple, 30)
@@ -15,9 +23,13 @@ colSwingLow   = color.new(color.purple, 30)
 
 ticker = syminfo.ticker
 
+// ─ SIGNALS (dashed, recommendation) ─
 {% for sig in signals %}
-// ── {{ sig.pair }} ──
+// ── {{ sig.pair }} signal ──
 if barstate.islast and str.contains(ticker, "{{ sig.tv_ticker }}")
+    sigColEntry = "{{ sig.direction }}" == "long" ? colLongEntry : "{{ sig.direction }}" == "short" ? colShortEntry : color.new(color.gray, 40)
+    sigColSL    = "{{ sig.direction }}" == "long" ? colLongSL    : colShortSL
+    sigColTP    = "{{ sig.direction }}" == "long" ? colLongTP    : colShortTP
     colBG = "{{ sig.direction }}" == "long" ? color.new(color.green, 90) : "{{ sig.direction }}" == "short" ? color.new(color.red, 90) : color.new(color.gray, 90)
     trendIcon = "{{ sig.trend_direction }}" == "uptrend" ? "▲" : "{{ sig.trend_direction }}" == "downtrend" ? "▼" : "◆"
     txt = "{{ sig.direction }} " + trendIcon
@@ -28,12 +40,12 @@ if barstate.islast and str.contains(ticker, "{{ sig.tv_ticker }}")
     txt += "\n{{ sig.reason[:40] }}"
     label.new(bar_index, close, txt, style=label.style_label_left, color=colBG, textcolor=color.white, size=size.normal)
 {% if sig.direction != "hold" and sig.entry_price > 0 %}
-    line.new(bar_index - 50, {{ sig.entry_price }}, bar_index + 10, {{ sig.entry_price }}, color=colEntry, width=2)
-    line.new(bar_index - 50, {{ sig.stop_loss }},   bar_index + 10, {{ sig.stop_loss }},   color=colSL,    width=1, style=line.style_dashed)
-    line.new(bar_index - 50, {{ sig.take_profit }},  bar_index + 10, {{ sig.take_profit }},  color=colTP,    width=1, style=line.style_dashed)
-    label.new(bar_index + 12, {{ sig.entry_price }}, "Entry {{ sig.entry_price }}", style=label.style_none, textcolor=colEntry, size=size.small)
-    label.new(bar_index + 12, {{ sig.stop_loss }},   "SL {{ sig.stop_loss }}",      style=label.style_none, textcolor=colSL,    size=size.small)
-    label.new(bar_index + 12, {{ sig.take_profit }},  "TP {{ sig.take_profit }}",    style=label.style_none, textcolor=colTP,    size=size.small)
+    line.new(bar_index - 50, {{ sig.entry_price }}, bar_index + 10, {{ sig.entry_price }}, color=sigColEntry, width=1, style=line.style_dashed)
+    line.new(bar_index - 50, {{ sig.stop_loss }},   bar_index + 10, {{ sig.stop_loss }},   color=sigColSL,    width=1, style=line.style_dashed)
+    line.new(bar_index - 50, {{ sig.take_profit }},  bar_index + 10, {{ sig.take_profit }},  color=sigColTP,    width=1, style=line.style_dashed)
+    label.new(bar_index + 12, {{ sig.entry_price }}, "Entry {{ sig.entry_price }}", style=label.style_none, textcolor=sigColEntry, size=size.small)
+    label.new(bar_index + 12, {{ sig.stop_loss }},   "SL {{ sig.stop_loss }}",      style=label.style_none, textcolor=sigColSL,    size=size.small)
+    label.new(bar_index + 12, {{ sig.take_profit }},  "TP {{ sig.take_profit }}",    style=label.style_none, textcolor=sigColTP,    size=size.small)
 {% endif %}
 {% if sig.key_support %}
     line.new(bar_index - 80, {{ sig.key_support }}, bar_index + 10, {{ sig.key_support }}, color=colSupport, width=1, style=line.style_dotted)
@@ -49,5 +61,26 @@ if barstate.islast and str.contains(ticker, "{{ sig.tv_ticker }}")
 {% for l in sig.swing_lows %}
     line.new(bar_index - 60, {{ l }}, bar_index - 10, {{ l }}, color=colSwingLow, width=1, style=line.style_dotted)
 {% endfor %}
+
+{% endfor %}
+
+// ─ POSITIONS ─ (solid, actual open orders)
+{% for pos in positions %}
+// ── {{ pos.pair }} position ──
+if barstate.islast and str.contains(ticker, "{{ pos.tv_ticker }}")
+    posColEntry = "{{ pos.direction }}" == "buy" ? colLongEntry : colShortEntry
+    posColSL    = "{{ pos.direction }}" == "buy" ? colLongSL    : colShortSL
+    posColTP    = "{{ pos.direction }}" == "buy" ? colLongTP    : colShortTP
+    posArrow    = "{{ pos.direction }}" == "buy" ? "▲" : "▼"
+    // 実ポジションの entry/SL/TP (実線、左端にラベル)
+    line.new(bar_index - 100, {{ pos.entry_price }}, bar_index + 20, {{ pos.entry_price }}, color=posColEntry, width=3, style=line.style_solid)
+    line.new(bar_index - 100, {{ pos.stop_loss }},   bar_index + 20, {{ pos.stop_loss }},   color=posColSL,    width=2, style=line.style_solid)
+    line.new(bar_index - 100, {{ pos.take_profit }},  bar_index + 20, {{ pos.take_profit }},  color=posColTP,    width=2, style=line.style_solid)
+    // ラベルは実線の左端に配置 (style_label_right = アンカー右、吹き出し右展開)
+    label.new(bar_index - 100, {{ pos.entry_price }}, "POS Entry {{ pos.entry_price }}", style=label.style_label_right, textcolor=color.white, color=posColEntry, size=size.small)
+    label.new(bar_index - 100, {{ pos.stop_loss }},   "POS SL {{ pos.stop_loss }}",      style=label.style_label_right, textcolor=color.white, color=posColSL,    size=size.small)
+    label.new(bar_index - 100, {{ pos.take_profit }},  "POS TP {{ pos.take_profit }}",    style=label.style_label_right, textcolor=color.white, color=posColTP,    size=size.small)
+    // 発注マーカー (発注時刻 × 発注価格、xloc.bar_time)
+    label.new(x={{ pos.opened_at_ms }}, y={{ pos.entry_price }}, text=posArrow + " {{ pos.entry_price }}", xloc=xloc.bar_time, style=label.style_label_down, color=posColEntry, textcolor=color.white, size=size.normal)
 
 {% endfor %}
