@@ -29,26 +29,23 @@ def _apply_trailing_stop(
     current: float,
     cfg,
     position_mgr: PositionManager,
-) -> None:
+) -> bool:
     """段階型トレーリングストップを適用する。
 
-    進捗率(TP方向への到達率)に応じてSLを段階的に繰り上げる:
+    戻り値: SL が実際に更新された場合 True (update_stop_loss が True を返した場合のみ)。
+    それ以外 (進捗未達、片方向ガード拒否、条件不成立) は False。
 
+    進捗率(TP方向への到達率)に応じてSLを段階的に繰り上げる:
     - `breakeven_pct / 2` 以上: SL = entry と 元SL の中間 (半額ロック, stage="half")
     - `breakeven_pct` 以上:     SL = entry (損益ゼロ, stage="breakeven")
     - `activation_pct` 以上:    SL = current − 元SL距離 × distance_ratio (動的追従, stage="follow")
-
-    元SL距離は `pos.initial_stop_loss` から計算するため、break-even以降に現在SLが
-    entryに更新されても、follow ステージの追従幅は変わらない。
-    SLは `update_stop_loss` により利益方向へのみ移動する。段階の境界に到達していない
-    区間ではSLを一切動かさない（ボラに対する耐性を確保）。
     """
-    # TPが未設定(0.0)の場合はトレーリング対象外
     if not pos.take_profit:
-        return
+        return False
+
     tp_distance = abs(pos.take_profit - pos.entry_price)
     if tp_distance == 0:
-        return
+        return False
 
     if pos.direction == "buy":
         progress = current - pos.entry_price
@@ -57,40 +54,38 @@ def _apply_trailing_stop(
 
     progress_pct = progress / tp_distance
     if progress_pct <= 0:
-        return
+        return False
 
     breakeven_pct = cfg.trailing_stop_breakeven_pct
     half_pct = breakeven_pct / 2.0
     activation_pct = cfg.trailing_stop_activation_pct
 
     # 元SL距離は Order.initial_stop_loss を基準に計算する（break-even後も不変）
-    # initial_stop_loss == 0.0 は「未設定」のセンチネル（Order.from_dict の legacy fallback と共通）
+    # initial_stop_loss == 0.0 は「未設定」のセンチネル
     initial_sl = pos.initial_stop_loss if pos.initial_stop_loss != 0.0 else pos.stop_loss
     original_sl_distance = abs(pos.entry_price - initial_sl)
     if original_sl_distance == 0:
-        # 元SLがentryと同値 = トレーリング計算不能 (通常は発生しないが防御)
-        return
+        return False
 
-    # 動的追従ステージ (最も高い進捗から評価)
+    # 動的追従ステージ
     if progress_pct >= activation_pct:
         trail_distance = original_sl_distance * cfg.trailing_stop_distance_ratio
         if pos.direction == "buy":
             new_sl = current - trail_distance
         else:
             new_sl = current + trail_distance
-        position_mgr.update_stop_loss(pos.order_id, round(new_sl, 5), stage="follow")
-        return
+        return position_mgr.update_stop_loss(pos.order_id, round(new_sl, 5), stage="follow")
 
     # break-even ステージ
     if progress_pct >= breakeven_pct:
-        position_mgr.update_stop_loss(pos.order_id, round(pos.entry_price, 5), stage="breakeven")
-        return
+        return position_mgr.update_stop_loss(pos.order_id, round(pos.entry_price, 5), stage="breakeven")
 
     # 半額ステージ
     if progress_pct >= half_pct:
         midpoint = (pos.entry_price + initial_sl) / 2.0
-        position_mgr.update_stop_loss(pos.order_id, round(midpoint, 5), stage="half")
-        return
+        return position_mgr.update_stop_loss(pos.order_id, round(midpoint, 5), stage="half")
+
+    return False
 
 
 def _adverse_move_pct(direction: str, entry: float, current: float) -> float:
@@ -120,13 +115,16 @@ async def monitor_open_positions(
 
     notifier = create_notifier(config.notifier.notifier)
 
+    trailing_updated = False  # トレーリングで SL が1つでも更新されたかを追跡
+
     for pos in account.open_positions:
         try:
             current = price_provider.get_current_price(pos.pair, is_monitor=True).price
 
             # ── トレーリングストップ ──────────────────────────────
             if cfg.trailing_stop_enabled:
-                _apply_trailing_stop(pos, current, cfg, position_mgr)
+                if _apply_trailing_stop(pos, current, cfg, position_mgr):
+                    trailing_updated = True
 
             adverse_pct = _adverse_move_pct(pos.direction, pos.entry_price, current)
 
@@ -197,6 +195,31 @@ async def monitor_open_positions(
 
         except Exception as e:
             logger.warning(f"[MONITOR] {pos.pair}: price check failed: {e}")
+
+    # トレーリングでSLが更新された場合、TradingView チャートを再注入
+    if trailing_updated and config.tradingview.enabled:
+        try:
+            from src.tradingview.cdp_client import CDPClient
+            from src.tradingview.pine_injector import PineInjector
+            from src.tradingview.tv_payload import build_tv_pine
+            from src.data.analysis_store import AnalysisStore
+
+            analysis_store = AnalysisStore(config.prices_db_path)
+            pine = build_tv_pine(config, analysis_store, position_mgr)
+            if pine is not None:
+                tv_cdp = CDPClient(host=config.tradingview.cdp_host, port=config.tradingview.cdp_port)
+                if await tv_cdp.connect():
+                    try:
+                        injector = PineInjector(tv_cdp)
+                        result = await injector.inject_and_compile(pine)
+                        if result["success"]:
+                            logger.info("[TV] Chart updated after trailing stop adjustment")
+                        else:
+                            logger.warning(f"[TV] Pine compile errors after trailing: {result['errors']}")
+                    finally:
+                        await tv_cdp.disconnect()
+        except Exception as e:
+            logger.warning(f"[TV] Post-trailing chart update failed: {e}")
 
 
 def run_price_monitor(config: AppConfig, price_provider: PriceProvider) -> None:
