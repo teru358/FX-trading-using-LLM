@@ -22,6 +22,7 @@ class Order:
     stop_loss: float
     take_profit: float
     position_size: float
+    initial_stop_loss: float = 0.0
     status: str = "open"  # "open" | "closed" | "cancelled"
     opened_at: datetime = field(default_factory=datetime.now)
     closed_at: Optional[datetime] = None
@@ -50,6 +51,7 @@ class Order:
             stop_loss=stop_loss,
             take_profit=take_profit,
             position_size=position_size,
+            initial_stop_loss=stop_loss,
             signal_reason=signal_reason,
             macro_context_at_entry=macro_context_at_entry,
         )
@@ -67,6 +69,7 @@ class Order:
         if d.get("closed_at"):
             d["closed_at"] = datetime.fromisoformat(d["closed_at"])
         d.setdefault("macro_context_at_entry", "")
+        d.setdefault("initial_stop_loss", d["stop_loss"])
         return Order(**d)
 
 

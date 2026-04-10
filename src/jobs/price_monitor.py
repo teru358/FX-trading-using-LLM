@@ -24,10 +24,6 @@ logger = logging.getLogger(__name__)
 # {order_id: last_alerted_adverse_pct} — 通知スパム防止用（メモリ内のみ）
 _alert_state: dict[str, float] = {}
 
-# {order_id: initial_stop_loss} — トレーリング開始前の元SLを記憶（半額ステージ目標値算出用）
-_trailing_initial_sl: dict[str, float] = {}
-
-
 def _apply_trailing_stop(
     pos,
     current: float,
@@ -36,12 +32,14 @@ def _apply_trailing_stop(
 ) -> None:
     """段階型トレーリングストップを適用する。
 
-    進捗率(pos.take_profit方向への到達率)に応じてSLを段階的に繰り上げる:
+    進捗率(TP方向への到達率)に応じてSLを段階的に繰り上げる:
 
-    - `breakeven_pct / 2` 以上: SL = entry と 元SL の中間(半額ロック)
-    - `breakeven_pct` 以上:     SL = entry (損益ゼロ)        [Task 5で追加]
-    - `activation_pct` 以上:    SL = current − 元SL距離 × distance_ratio [Task 6で追加]
+    - `breakeven_pct / 2` 以上: SL = entry と 元SL の中間 (半額ロック, stage="half")
+    - `breakeven_pct` 以上:     SL = entry (損益ゼロ, stage="breakeven")
+    - `activation_pct` 以上:    SL = current − 元SL距離 × distance_ratio (動的追従, stage="follow")
 
+    元SL距離は `pos.initial_stop_loss` から計算するため、break-even以降に現在SLが
+    entryに更新されても、follow ステージの追従幅は変わらない。
     SLは `update_stop_loss` により利益方向へのみ移動する。段階の境界に到達していない
     区間ではSLを一切動かさない（ボラに対する耐性を確保）。
     """
@@ -58,13 +56,23 @@ def _apply_trailing_stop(
     if progress_pct <= 0:
         return
 
-    # 元SLを初回のみ記憶する（半額ステージの目標値を固定するため）
-    if pos.order_id not in _trailing_initial_sl:
-        _trailing_initial_sl[pos.order_id] = pos.stop_loss
-    initial_sl = _trailing_initial_sl[pos.order_id]
-
     breakeven_pct = cfg.trailing_stop_breakeven_pct
     half_pct = breakeven_pct / 2.0
+    activation_pct = cfg.trailing_stop_activation_pct
+
+    # 元SL距離は Order.initial_stop_loss を基準に計算する（break-even後も不変）
+    initial_sl = pos.initial_stop_loss if pos.initial_stop_loss else pos.stop_loss
+    original_sl_distance = abs(pos.entry_price - initial_sl)
+
+    # 動的追従ステージ (最も高い進捗から評価)
+    if progress_pct >= activation_pct:
+        trail_distance = original_sl_distance * cfg.trailing_stop_distance_ratio
+        if pos.direction == "buy":
+            new_sl = current - trail_distance
+        else:
+            new_sl = current + trail_distance
+        position_mgr.update_stop_loss(pos.order_id, round(new_sl, 5), stage="follow")
+        return
 
     # break-even ステージ
     if progress_pct >= breakeven_pct:
@@ -72,8 +80,6 @@ def _apply_trailing_stop(
         return
 
     # 半額ステージ
-    # midpointは元SL(initial_sl)とentryの中間で固定。SLが既にmidpoint以上なら
-    # update_stop_loss側の片方向ガードにより拒否され、SLは据え置きとなる。
     if progress_pct >= half_pct:
         midpoint = (pos.entry_price + initial_sl) / 2.0
         position_mgr.update_stop_loss(pos.order_id, round(midpoint, 5), stage="half")
