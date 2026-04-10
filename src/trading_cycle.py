@@ -149,6 +149,17 @@ async def _process_pair(
 
         news = aggregate_news_sentiment(pair_cfg, store, config)
 
+        # TradingView テクニカルサマリー取得 (オプション・矛盾検出用)
+        tv_summary = None
+        if config.trading.tv_summary_enabled:
+            from src.analysis.tv_summary import get_tv_summary
+            tv_summary = get_tv_summary(pair_cfg.symbol, interval=config.trading.ohlcv_interval)
+            if tv_summary:
+                logger.info(
+                    f"[TV-TA] {pair_cfg.display_name}: {tv_summary.recommendation} "
+                    f"(buy={tv_summary.buy} sell={tv_summary.sell} neutral={tv_summary.neutral})"
+                )
+
         account = position_mgr.get_account_state()
         signal = combine_signals(
             news=news,
@@ -163,6 +174,8 @@ async def _process_pair(
             signal_deadband=config.trading.signal_deadband,
             min_lot_size=config.trading.min_lot_size,
             lot_unit=config.trading.lot_unit,
+            tv_summary=tv_summary,
+            tv_conflict_dampen=config.trading.tv_conflict_dampen,
         )
         return signal, macro_ctx
     except Exception as e:

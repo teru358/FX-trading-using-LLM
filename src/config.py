@@ -129,6 +129,9 @@ class TradingConfig:
     sl_atr_mult_max: float = 3.0
     tp_atr_mult_min: float = 1.0
     tp_atr_mult_max: float = 6.0
+    # TradingView テクニカルサマリー (矛盾検出)
+    tv_summary_enabled: bool = False
+    tv_conflict_dampen: float = 0.7    # TV判定と方向が矛盾時のconfidence倍率
 
 
 @dataclass
@@ -500,6 +503,8 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         sl_atr_mult_max=t.get("sl_atr_mult_max", 3.0),
         tp_atr_mult_min=t.get("tp_atr_mult_min", 1.0),
         tp_atr_mult_max=t.get("tp_atr_mult_max", 6.0),
+        tv_summary_enabled=t.get("tv_summary_enabled", False),
+        tv_conflict_dampen=t.get("tv_conflict_dampen", 0.7),
     )
 
     instruments = [

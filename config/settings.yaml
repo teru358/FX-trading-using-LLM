@@ -104,6 +104,9 @@ trading:
   sl_atr_mult_max: 3.0
   tp_atr_mult_min: 1.0
   tp_atr_mult_max: 6.0
+  # TradingView テクニカルサマリー (矛盾検出)
+  tv_summary_enabled: true       # TV判定と方向矛盾時にconfidence減衰
+  tv_conflict_dampen: 0.7        # 矛盾時のconfidence倍率
 
 price_monitor:
   enabled: true
