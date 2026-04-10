@@ -1,0 +1,25 @@
+=== 経済指標発表 ===
+タイトル: {{ event.title }}
+国/通貨: {{ event.country }}/{{ event.currency }}
+重要度: {{ importance_label }}
+実測値: {{ event.actual }}{{ event.unit }}
+予測値: {{ event.forecast }}{{ event.unit }}
+前回値: {{ event.previous }}{{ event.unit }}
+サプライズ: {{ surprise_label }}
+
+=== 価格反応 (関連ペア) ===
+{% for p in pair_reactions %}
+{{ p.pair }}:
+  発表5分前: {{ p.t_minus_5 }}
+  発表時刻:  {{ p.t_zero }}
+  発表+5分:  {{ p.t_plus_5 }}
+  発表+15分: {{ p.t_plus_15 }}
+  発表+30分: {{ p.t_plus_30 }}
+{% endfor %}
+
+=== 現在のテクニカル ===
+{% for s in snapshots %}
+{{ s.pair }}: bias={{ s.bias_score }} conf={{ s.confidence }} dir={{ s.direction_bias }}
+{% endfor %}
+
+上記の情報を元に、分析してください。

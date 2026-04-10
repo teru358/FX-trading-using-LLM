@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import timedelta
 
 from src.analysis.price_analyzer import analyze_price_action
 from src.config import AppConfig, InstrumentConfig
@@ -275,6 +276,140 @@ async def collect_all_technical(
                     await tv_cdp.disconnect()
         except Exception as e:
             logger.warning(f"[TV] Chart visualization failed: {e}")
+
+    # Phase 3: 経済指標影響分析 (オプション)
+    if config.economic_calendar.enabled:
+        try:
+            from datetime import datetime
+            from functools import partial
+
+            from src.data.econ_event_store import EconEventStore
+            from src.jobs.econ_calendar_fetcher import refresh_recent_events
+            from src.analysis.econ_impact_analyzer import (
+                analyze_event_impact, PairReaction, SnapshotBrief
+            )
+            from src.analysis.economic_calendar import classify_surprise
+            from src.rag.embedder import embed_text
+            from src.llm.factory import create_llm_client
+
+            econ_store = EconEventStore(config.econ_db_path)
+
+            # 3a. actual更新
+            refresh_recent_events(
+                econ_store,
+                lookback_min=config.economic_calendar.refresh_lookback_min,
+                currencies=config.economic_calendar.currencies,
+            )
+
+            # 3b. 未分析イベントを取得
+            events_to_analyze = econ_store.get_unanalyzed_with_actual(
+                lookback_min=config.economic_calendar.refresh_lookback_min,
+                min_importance=config.economic_calendar.post_event_impact_min,
+            )
+
+            if events_to_analyze:
+                llm_reflect = create_llm_client(config, "reflection")
+                logger.info(f"[ECON] {len(events_to_analyze)} events to analyze")
+
+                for ev in events_to_analyze:
+                    try:
+                        # 関連ペアを特定 (base または quote が該当通貨)
+                        related_pairs = [
+                            p for p in tradeable
+                            if ev.currency in (p.base_currency, p.quote_currency)
+                        ]
+                        if not related_pairs:
+                            econ_store.mark_analyzed(ev.event_id)
+                            continue
+
+                        # 価格反応データ収集
+                        pair_reactions = []
+                        snapshot_briefs = []
+                        for p in related_pairs:
+                            try:
+                                event_time_naive = ev.event_time.replace(tzinfo=None)
+                                pd_ = price_store.load_ohlcv(
+                                    p.symbol,
+                                    event_time_naive - timedelta(hours=1),
+                                    event_time_naive + timedelta(hours=1),
+                                )
+                                if pd_.empty or len(pd_) < 2:
+                                    continue
+
+                                def _close_at(offset_min: int) -> float:
+                                    target = event_time_naive + timedelta(minutes=offset_min)
+                                    best_idx = 0
+                                    best_diff = None
+                                    for i, ts in enumerate(pd_.index):
+                                        ts_py = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+                                        if hasattr(ts_py, "tzinfo") and ts_py.tzinfo is not None:
+                                            ts_py = ts_py.replace(tzinfo=None)
+                                        diff = abs((ts_py - target).total_seconds())
+                                        if best_diff is None or diff < best_diff:
+                                            best_diff = diff
+                                            best_idx = i
+                                    return float(pd_["Close"].iloc[best_idx])
+
+                                pair_reactions.append(PairReaction(
+                                    pair=p.display_name,
+                                    t_minus_5=_close_at(-5),
+                                    t_zero=_close_at(0),
+                                    t_plus_5=_close_at(5),
+                                    t_plus_15=_close_at(15),
+                                    t_plus_30=_close_at(30),
+                                ))
+                            except Exception as e:
+                                logger.debug(f"[ECON] price reaction failed for {p.symbol}: {e}")
+
+                            snaps = analysis_store.get_recent_snapshots(p.symbol, hours=2)
+                            if snaps:
+                                s = snaps[0]
+                                snapshot_briefs.append(SnapshotBrief(
+                                    pair=p.display_name,
+                                    bias_score=s.bias_score,
+                                    confidence=s.confidence,
+                                    direction_bias=s.direction_bias,
+                                ))
+
+                        if not pair_reactions:
+                            econ_store.mark_analyzed(ev.event_id)
+                            continue
+
+                        # LLM分析実行
+                        report = await analyze_event_impact(
+                            event=ev,
+                            pair_reactions=pair_reactions,
+                            snapshots=snapshot_briefs,
+                            llm=llm_reflect,
+                            temperature=config.llm.reflection.temperature,
+                        )
+
+                        # RAG保存
+                        embed_fn = partial(
+                            embed_text,
+                            ollama_base_url=config.llm.ollama.base_url,
+                            model=config.rag.embedding_model,
+                        )
+                        embedding = await embed_fn(report)
+                        store.upsert_econ_analysis(
+                            event_id=ev.event_id,
+                            text=report,
+                            embedding=embedding,
+                            title=ev.title,
+                            currency=ev.currency,
+                            importance=ev.importance,
+                            event_time=ev.event_time,
+                            actual=ev.actual,
+                            forecast=ev.forecast,
+                            surprise=classify_surprise(ev.actual, ev.forecast),
+                            analyzed_at=datetime.now(),
+                        )
+                        econ_store.mark_analyzed(ev.event_id)
+                        logger.info(f"[ECON] Analyzed {ev.event_id}: {ev.title[:40]}")
+                    except Exception as e:
+                        logger.error(f"[ECON] Analysis failed for {ev.event_id}: {e}", exc_info=True)
+        except Exception as e:
+            logger.warning(f"[ECON] Economic calendar phase failed: {e}")
 
     logger.info("=== Technical collection complete ===")
 

@@ -201,3 +201,15 @@ tradingview:
   enabled: true                 # true で取引判定時にチャートへ自動反映
   cdp_host: "172.31.192.1"      # CDP ホスト（WSLからWindowsへは gateway IP）
   cdp_port: 9222                # TradingView Desktop の CDP ポート
+
+# 経済指標カレンダー（TradingView非公式API経由）
+economic_calendar:
+  enabled: true
+  fetch_time: "06:00"              # JST 日次取得時刻
+  fetch_timezone: "Asia/Tokyo"
+  lookahead_hours: 48
+  currencies: ["USD", "JPY", "EUR", "GBP"]
+  min_importance: 0                # 0=medium以上を保存
+  post_event_window_min: 30        # 発表後この時間以内の分析結果を取引判定に注入
+  post_event_impact_min: 1         # 分析対象は importance>=1 (high) のみ
+  refresh_lookback_min: 60         # 毎時:00にこの範囲のactualを更新

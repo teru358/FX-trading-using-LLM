@@ -72,6 +72,34 @@ async def _build_rag_context(
     )
     refl_ctx = format_reflections_for_prompt(reflections)
 
+    # 経済指標分析レポートをreflection_contextに付加
+    if config.economic_calendar.enabled:
+        try:
+            currencies = [
+                c for c in (pair_cfg.base_currency, pair_cfg.quote_currency) if c
+            ]
+            econ_reports = store.get_recent_econ_analyses(
+                currencies=currencies,
+                lookback_minutes=config.economic_calendar.post_event_window_min,
+                limit=3,
+            )
+            if econ_reports:
+                lines = ["=== 直近の経済指標発表影響分析 ==="]
+                for r in econ_reports:
+                    meta = r["metadata"]
+                    lines.append(
+                        f"[{meta.get('event_time', '')}] {meta.get('title', '')} "
+                        f"({meta.get('currency', '')}, surprise={meta.get('surprise', '')})"
+                    )
+                    lines.append(r["text"][:400])
+                econ_ctx = "\n".join(lines)
+                refl_ctx = f"{refl_ctx}\n\n{econ_ctx}" if refl_ctx else econ_ctx
+                logger.info(
+                    f"[ECON] Injected {len(econ_reports)} econ analyses into {pair_cfg.display_name} context"
+                )
+        except Exception as e:
+            logger.debug(f"[ECON] RAG injection failed: {e}")
+
     return news_ctx, refl_ctx
 
 

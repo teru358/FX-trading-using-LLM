@@ -212,6 +212,30 @@ def main() -> None:
             run_trading_cycle, config, store, price_store, analysis_store, hold_store, price_provider=price_provider
         )
 
+    # 経済指標カレンダー日次フェッチ (オプション)
+    if config.economic_calendar.enabled:
+        from src.data.econ_event_store import EconEventStore
+        from src.jobs.econ_calendar_fetcher import run_daily_fetch as _run_daily_econ
+
+        _econ_store = EconEventStore(config.econ_db_path)
+
+        def _econ_daily():
+            _run_daily_econ(
+                _econ_store,
+                lookahead_hours=config.economic_calendar.lookahead_hours,
+                currencies=config.economic_calendar.currencies,
+                min_importance=config.economic_calendar.min_importance,
+            )
+
+        schedule.every().day.at(
+            config.economic_calendar.fetch_time,
+            config.economic_calendar.fetch_timezone,
+        ).do(_econ_daily)
+        logger.info(
+            f"[ECON] Daily fetch scheduled at {config.economic_calendar.fetch_time} "
+            f"{config.economic_calendar.fetch_timezone}"
+        )
+
     # REST API サーバー（有効時のみ — Initial collection 前に起動）
     if config.api.enabled:
         from src.api.server import start_api_server

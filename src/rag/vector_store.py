@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 _NEWS_COL = "fx_news"
 _REFLECTION_COL = "fx_reflections"
 _INSIGHT_COL = "fx_insights"
+_ECON_ANALYSIS_COL = "fx_econ_event_analysis"
 
 
 class VectorStore:
@@ -37,11 +38,15 @@ class VectorStore:
             name=_INSIGHT_COL,
             metadata={"hnsw:space": "cosine"},
         )
+        self._econ_analyses = self._client.get_or_create_collection(
+            name=_ECON_ANALYSIS_COL,
+            metadata={"hnsw:space": "cosine"},
+        )
         self.directional = DirectionalStore(db_path)
         logger.info(
             f"VectorStore ready at {db_path} "
             f"(news={self._news.count()}, reflections={self._reflections.count()}, "
-            f"insights={self._insights.count()})"
+            f"insights={self._insights.count()}, econ={self._econ_analyses.count()})"
         )
 
     # ---- Category News (カテゴリ別分析結果) --------------------------------
@@ -401,3 +406,69 @@ class VectorStore:
         self._news.delete(ids=ids)
         logger.info(f"[VectorStore] cleanup: deleted {len(ids)} news entries older than {max_age_hours}h")
         return len(ids)
+
+    # ---- Economic Event Analysis ---------------------------------
+
+    def upsert_econ_analysis(
+        self,
+        event_id: str,
+        text: str,
+        embedding: list[float],
+        title: str,
+        currency: str,
+        importance: int,
+        event_time: datetime,
+        actual: float | None,
+        forecast: float | None,
+        surprise: str | None,
+        analyzed_at: datetime,
+    ) -> None:
+        """経済指標イベント分析をRAGに保存する。"""
+        metadata = {
+            "event_id": event_id,
+            "title": title[:200],
+            "currency": currency,
+            "importance": importance,
+            "event_time": event_time.isoformat(),
+            "event_ts": event_time.timestamp(),
+            "actual": actual if actual is not None else 0.0,
+            "forecast": forecast if forecast is not None else 0.0,
+            "surprise": surprise or "unknown",
+            "analyzed_at": analyzed_at.isoformat(),
+        }
+        self._econ_analyses.upsert(
+            ids=[event_id],
+            embeddings=[embedding],
+            documents=[text],
+            metadatas=[metadata],
+        )
+        logger.info(f"[ECON-RAG] Stored: {event_id} | {currency} | {title[:40]}")
+
+    def get_recent_econ_analyses(
+        self,
+        currencies: list[str] | None = None,
+        lookback_minutes: int = 30,
+        limit: int = 5,
+    ) -> list[dict]:
+        """直近の経済指標分析を取得する。"""
+        if self._econ_analyses.count() == 0:
+            return []
+        cutoff_ts = (datetime.now() - timedelta(minutes=lookback_minutes)).timestamp()
+        where: dict = {"event_ts": {"$gte": cutoff_ts}}
+        if currencies:
+            where = {"$and": [
+                {"currency": {"$in": currencies}},
+                {"event_ts": {"$gte": cutoff_ts}},
+            ]}
+        try:
+            results = self._econ_analyses.get(where=where, limit=limit)
+        except Exception:
+            results = self._econ_analyses.get(limit=limit)
+        entries = []
+        for i, doc in enumerate(results.get("documents", [])):
+            entries.append({
+                "text": doc,
+                "metadata": results["metadatas"][i] if results.get("metadatas") else {},
+            })
+        entries.sort(key=lambda e: e["metadata"].get("event_ts", 0), reverse=True)
+        return entries[:limit]
