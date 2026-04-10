@@ -24,19 +24,28 @@ logger = logging.getLogger(__name__)
 # {order_id: last_alerted_adverse_pct} — 通知スパム防止用（メモリ内のみ）
 _alert_state: dict[str, float] = {}
 
-
 def _apply_trailing_stop(
     pos,
     current: float,
     cfg,
     position_mgr: PositionManager,
 ) -> None:
-    """トレーリングストップを適用する。
+    """段階型トレーリングストップを適用する。
 
-    TP方向への到達率が activation_pct を超えたら、
-    現在価格から元のSL幅 * distance_ratio だけ離れた位置にSLを追従させる。
-    SLは利益方向にのみ移動する（update_stop_loss が保証）。
+    進捗率(TP方向への到達率)に応じてSLを段階的に繰り上げる:
+
+    - `breakeven_pct / 2` 以上: SL = entry と 元SL の中間 (半額ロック, stage="half")
+    - `breakeven_pct` 以上:     SL = entry (損益ゼロ, stage="breakeven")
+    - `activation_pct` 以上:    SL = current − 元SL距離 × distance_ratio (動的追従, stage="follow")
+
+    元SL距離は `pos.initial_stop_loss` から計算するため、break-even以降に現在SLが
+    entryに更新されても、follow ステージの追従幅は変わらない。
+    SLは `update_stop_loss` により利益方向へのみ移動する。段階の境界に到達していない
+    区間ではSLを一切動かさない（ボラに対する耐性を確保）。
     """
+    # TPが未設定(0.0)の場合はトレーリング対象外
+    if not pos.take_profit:
+        return
     tp_distance = abs(pos.take_profit - pos.entry_price)
     if tp_distance == 0:
         return
@@ -47,19 +56,41 @@ def _apply_trailing_stop(
         progress = pos.entry_price - current
 
     progress_pct = progress / tp_distance
-    if progress_pct < cfg.trailing_stop_activation_pct:
+    if progress_pct <= 0:
         return
 
-    # 元のSL距離 × distance_ratio でトレール幅を計算
-    original_sl_distance = abs(pos.entry_price - pos.stop_loss)
-    trail_distance = original_sl_distance * cfg.trailing_stop_distance_ratio
+    breakeven_pct = cfg.trailing_stop_breakeven_pct
+    half_pct = breakeven_pct / 2.0
+    activation_pct = cfg.trailing_stop_activation_pct
 
-    if pos.direction == "buy":
-        new_sl = current - trail_distance
-    else:
-        new_sl = current + trail_distance
+    # 元SL距離は Order.initial_stop_loss を基準に計算する（break-even後も不変）
+    # initial_stop_loss == 0.0 は「未設定」のセンチネル（Order.from_dict の legacy fallback と共通）
+    initial_sl = pos.initial_stop_loss if pos.initial_stop_loss != 0.0 else pos.stop_loss
+    original_sl_distance = abs(pos.entry_price - initial_sl)
+    if original_sl_distance == 0:
+        # 元SLがentryと同値 = トレーリング計算不能 (通常は発生しないが防御)
+        return
 
-    position_mgr.update_stop_loss(pos.order_id, round(new_sl, 5))
+    # 動的追従ステージ (最も高い進捗から評価)
+    if progress_pct >= activation_pct:
+        trail_distance = original_sl_distance * cfg.trailing_stop_distance_ratio
+        if pos.direction == "buy":
+            new_sl = current - trail_distance
+        else:
+            new_sl = current + trail_distance
+        position_mgr.update_stop_loss(pos.order_id, round(new_sl, 5), stage="follow")
+        return
+
+    # break-even ステージ
+    if progress_pct >= breakeven_pct:
+        position_mgr.update_stop_loss(pos.order_id, round(pos.entry_price, 5), stage="breakeven")
+        return
+
+    # 半額ステージ
+    if progress_pct >= half_pct:
+        midpoint = (pos.entry_price + initial_sl) / 2.0
+        position_mgr.update_stop_loss(pos.order_id, round(midpoint, 5), stage="half")
+        return
 
 
 def _adverse_move_pct(direction: str, entry: float, current: float) -> float:

@@ -22,6 +22,7 @@ class Order:
     stop_loss: float
     take_profit: float
     position_size: float
+    initial_stop_loss: float = 0.0
     status: str = "open"  # "open" | "closed" | "cancelled"
     opened_at: datetime = field(default_factory=datetime.now)
     closed_at: Optional[datetime] = None
@@ -50,6 +51,7 @@ class Order:
             stop_loss=stop_loss,
             take_profit=take_profit,
             position_size=position_size,
+            initial_stop_loss=stop_loss,
             signal_reason=signal_reason,
             macro_context_at_entry=macro_context_at_entry,
         )
@@ -67,6 +69,11 @@ class Order:
         if d.get("closed_at"):
             d["closed_at"] = datetime.fromisoformat(d["closed_at"])
         d.setdefault("macro_context_at_entry", "")
+        # 既存データ (initial_stop_loss 追加以前) のフォールバック。
+        # 既にトレーリングで SL が更新されたポジションでは真の元SLは失われており、
+        # 現在のSLを記録することしかできない (follow ステージでの元SL距離が
+        # 実際より小さくなる可能性がある)。新規Orderは Order.new で正しく設定される。
+        d.setdefault("initial_stop_loss", d["stop_loss"])
         return Order(**d)
 
 
@@ -161,10 +168,16 @@ class PositionManager:
             f"size={order.position_size:.0f}"
         )
 
-    def update_stop_loss(self, order_id: str, new_stop_loss: float) -> bool:
+    def update_stop_loss(
+        self,
+        order_id: str,
+        new_stop_loss: float,
+        stage: Optional[str] = None,
+    ) -> bool:
         """オープンポジションのSLを更新する（トレーリングストップ用）。
 
         SLは利益方向にのみ移動可能。損失方向への移動は無視される。
+        stage: ログ表示用の段階ラベル（例: "half", "breakeven", "follow"）。
         """
         for pos in self._open:
             if pos.order_id == order_id:
@@ -175,9 +188,10 @@ class PositionManager:
                 old_sl = pos.stop_loss
                 pos.stop_loss = new_stop_loss
                 self._save()
+                stage_suffix = f" (stage={stage})" if stage else ""
                 logger.info(
                     f"[TRAIL] {pos.pair} {pos.direction.upper()} SL updated: "
-                    f"{old_sl:.5f} → {new_stop_loss:.5f}"
+                    f"{old_sl:.5f} → {new_stop_loss:.5f}{stage_suffix}"
                 )
                 return True
         return False

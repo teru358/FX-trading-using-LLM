@@ -249,8 +249,9 @@ class PriceMonitorConfig:
     enable_emergency_close: bool = False  # 緊急損切り機能の有効/無効
     # トレーリングストップ
     trailing_stop_enabled: bool = False
-    trailing_stop_activation_pct: float = 0.40  # TP距離の40%到達で発動
-    trailing_stop_distance_ratio: float = 1.0   # 元のSL距離と同比率でSLを追従
+    trailing_stop_breakeven_pct: float = 0.20   # TP距離のこの割合でSL=entry。半分(pct/2)でSL=中間
+    trailing_stop_activation_pct: float = 0.40  # TP距離のこの割合以降は動的追従（current - 元SL距離×ratio）
+    trailing_stop_distance_ratio: float = 1.0   # 動的追従時のSL距離倍率（元SL距離×この値）
 
 
 @dataclass
@@ -646,9 +647,18 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         emergency_close_pct=pm.get("emergency_close_pct", 0.008),
         enable_emergency_close=pm.get("enable_emergency_close", False),
         trailing_stop_enabled=pm.get("trailing_stop_enabled", False),
+        trailing_stop_breakeven_pct=pm.get("trailing_stop_breakeven_pct", 0.20),
         trailing_stop_activation_pct=pm.get("trailing_stop_activation_pct", 0.40),
         trailing_stop_distance_ratio=pm.get("trailing_stop_distance_ratio", 1.0),
     )
+    if price_monitor.trailing_stop_enabled:
+        if not (0.0 < price_monitor.trailing_stop_breakeven_pct < price_monitor.trailing_stop_activation_pct):
+            raise ValueError(
+                "trailing_stop_breakeven_pct must satisfy "
+                "0 < breakeven_pct < activation_pct "
+                f"(breakeven={price_monitor.trailing_stop_breakeven_pct}, "
+                f"activation={price_monitor.trailing_stop_activation_pct})"
+            )
 
     pp = raw.get("price_provider", {})
     td = pp.get("twelvedata", {})
