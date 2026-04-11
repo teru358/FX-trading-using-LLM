@@ -148,30 +148,38 @@ async def collect_category(
         f"score={news.sentiment_score:+.2f} conf={news.confidence:.2f} | {news.summary}"
     )
 
-    # ベクトル化してRAGに格納
+    # ベクトル化してRAGに格納。embed / upsert 失敗時も LLM 分析結果を捨てない
+    # (次カテゴリ処理は続行する)。fingerprint はこのカテゴリでは保存されないため、
+    # 次サイクルで同じ記事セットに対する再分析は起こるが、LLM 分析結果自体はログに残る。
     text = _format_for_embedding(category, news)
-    embedding = await embed_text(
-        text=text,
-        ollama_base_url=config.llm.ollama.base_url,
-        model=config.rag.embedding_model,
-    )
-    entry_id = f"{category}_{datetime.now().strftime('%Y%m%d%H%M')}"
-    store.upsert_category_news(
-        entry_id=entry_id,
-        text=text,
-        embedding=embedding,
-        category=category,
-        sentiment_score=news.sentiment_score,
-        confidence=news.confidence,
-        key_themes=news.key_themes,
-        summary=news.summary,
-        news_count=news.news_count,
-        collected_at=datetime.now(),
-        newest_article_ts=fetch_result.newest_published_ts,
-        articles_fingerprint=fetch_result.articles_fingerprint,
-        article_title_hashes=fetch_result.title_hashes_csv,
-    )
-    logger.debug(f"[COLLECT] {label}: stored to RAG | id={entry_id}")
+    try:
+        embedding = await embed_text(
+            text=text,
+            ollama_base_url=config.llm.ollama.base_url,
+            model=config.rag.embedding_model,
+        )
+        entry_id = f"{category}_{datetime.now().strftime('%Y%m%d%H%M')}"
+        store.upsert_category_news(
+            entry_id=entry_id,
+            text=text,
+            embedding=embedding,
+            category=category,
+            sentiment_score=news.sentiment_score,
+            confidence=news.confidence,
+            key_themes=news.key_themes,
+            summary=news.summary,
+            news_count=news.news_count,
+            collected_at=datetime.now(),
+            newest_article_ts=fetch_result.newest_published_ts,
+            articles_fingerprint=fetch_result.articles_fingerprint,
+            article_title_hashes=fetch_result.title_hashes_csv,
+        )
+        logger.debug(f"[COLLECT] {label}: stored to RAG | id={entry_id}")
+    except Exception as e:
+        logger.warning(
+            f"[COLLECT] {label}: RAG storage failed ({type(e).__name__}: {e}) — "
+            f"analysis kept in logs, will re-run next cycle"
+        )
 
 
 async def collect_all_news(config: AppConfig, store: VectorStore) -> None:
