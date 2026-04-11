@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Column, DateTime, Float, Integer, String, select
 from sqlalchemy.orm import Session
 
 from src.data.price_store import _Base, _get_engine
+
+if TYPE_CHECKING:
+    from src.analysis.price_analyzer import PriceAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +137,7 @@ class AnalysisStore:
             f"[AGGREGATE] {symbol}: {len(snapshots)} snapshots | "
             f"bias={agg_bias:+.2f} conf={agg_conf:.2f} dir={direction} "
             f"consistency={consistency:.0%} (L={dir_counts.get('long', 0)} S={dir_counts.get('short', 0)} N={dir_counts.get('neutral', 0)})"
-            + ("" if ref is latest else f" (SL/TP from direction-matched snapshot)")
+            + ("" if ref is latest else " (SL/TP from direction-matched snapshot)")
         )
         return PriceAnalysis(
             pair=symbol,

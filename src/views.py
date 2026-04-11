@@ -120,7 +120,7 @@ def run_forecast_view(config: AppConfig, forecast_store, pair_filter: str | None
         console.print(f"[red]対象ペアが見つかりません: {pair_filter}[/red]")
         return
 
-    console.print(f"\n[bold cyan]=== Forecast Data (直近24h) ===[/bold cyan]")
+    console.print("\n[bold cyan]=== Forecast Data (直近24h) ===[/bold cyan]")
 
     for inst in targets:
         records = forecast_store.get_recent_all(inst.symbol, hours=24)

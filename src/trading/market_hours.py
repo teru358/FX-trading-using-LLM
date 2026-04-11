@@ -48,4 +48,4 @@ def market_status_label(now: datetime | None = None) -> str:
         et = now.astimezone(_ET) if now.tzinfo is not None else now.replace(tzinfo=_ET)
 
     day = et.strftime("%A")
-    return f"open" if is_market_open(now) else f"closed ({day} {et.strftime('%H:%M')} ET)"
+    return "open" if is_market_open(now) else f"closed ({day} {et.strftime('%H:%M')} ET)"

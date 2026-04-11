@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from src.analysis.prompt_loader import load_prompt, render_prompt
 from src.data.indicator_formatter import format_for_llm
@@ -14,6 +15,9 @@ from src.data.indicators import IndicatorSummary
 from src.data.price_fetcher import PriceData
 from src.llm.client import LLMClient
 from src.llm.response_parser import extract_json
+
+if TYPE_CHECKING:
+    from src.signals.technical_scorer import TechnicalScore
 
 logger = logging.getLogger(__name__)
 
