@@ -8,6 +8,8 @@ logging:
 api:
   enabled: true              # true で REST API サーバーを起動
   port: 8811                 # リッスンポート
+  run_trade_soft_timeout_sec: 10   # POST /run/trade: この秒数内に完了したら同期返答、超過で非同期化+webhook
+  ask_soft_timeout_sec: 60         # POST /ask: 同上
   # 認証: .env の API_SECRET_KEY を設定（X-API-Key ヘッダーで送信）
 
 # ============================================================

@@ -375,6 +375,8 @@ class ApiConfig:
     """REST API サーバー設定。"""
     enabled: bool = False
     port: int = 8811
+    run_trade_soft_timeout_sec: float = 10.0  # POST /run/trade: この秒数内に完了したら同期返答、超過で非同期化
+    ask_soft_timeout_sec: float = 60.0         # POST /ask: 同上
 
 
 @dataclass
@@ -636,6 +638,8 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     api_cfg = ApiConfig(
         enabled=api_raw.get("enabled", False),
         port=api_raw.get("port", 8811),
+        run_trade_soft_timeout_sec=api_raw.get("run_trade_soft_timeout_sec", 10.0),
+        ask_soft_timeout_sec=api_raw.get("ask_soft_timeout_sec", 60.0),
     )
 
     pm = raw.get("price_monitor", {})
