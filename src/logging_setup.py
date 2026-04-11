@@ -36,21 +36,44 @@ def _make_rotating_handler(path: Path, cfg) -> logging.Handler:
     )
 
 
+# ログプレフィックスの一元レジストリ。
+#
+# 各エントリは (prefix, rich_style_or_None, goes_to_activity_log) のタプル。
+# 着色と activity.log フィルタの両方がここから派生するため、新しい構造化
+# プレフィックスを追加する際はこの 1 箇所に追記する。
+#
+# goes_to_activity_log=True のものは logs/activity.log に流れる
+# (INFO 以上 + プレフィックス合致時のみ)。
+_PREFIX_REGISTRY: tuple[tuple[str, str | None, bool], ...] = (
+    ("[COLLECT]",      "cyan",          True),
+    ("[NEWS]",         "blue",          True),
+    ("[PRICE]",        "cyan",          True),
+    ("[SIGNAL]",       "bold yellow",   True),
+    ("[CLOSE]",        "dark_orange",   True),
+    ("[TRADE]",        "bold green",    True),
+    ("[ORDER]",        "bright_green",  True),
+    ("[REFLECT]",      "magenta",       True),
+    ("[AGGREGATE]",    "dim cyan",      True),
+    ("[MONITOR]",      "bold red",      True),
+    ("[HOLD REVIEW]",  "yellow",        True),
+    ("[FORECAST]",     "cyan",          True),
+    ("[EXIT]",         "bold red",      True),
+    ("[API]",          None,            True),
+    # 取引判定・ポジション運用に関わるが従来 activity に載っていなかった
+    # 主要イベント (今回追加):
+    ("[REVIEW]",       "yellow",        True),   # Layer 1-3 position_review 結果
+    ("[TRAIL]",        "bright_green",  True),   # 段階トレーリングストップ更新
+    ("[RAG ADJ]",      "dim magenta",   True),   # RAG スコア補正
+    ("[ADAPTIVE]",     "magenta",       True),   # adaptive params 更新
+)
+
 _PREFIX_STYLES: dict[str, str] = {
-    "[COLLECT]":    "cyan",
-    "[NEWS]":       "blue",
-    "[PRICE]":      "cyan",
-    "[SIGNAL]":     "bold yellow",
-    "[CLOSE]":      "dark_orange",
-    "[TRADE]":      "bold green",
-    "[ORDER]":      "bright_green",
-    "[REFLECT]":    "magenta",
-    "[AGGREGATE]":  "dim cyan",
-    "[MONITOR]":    "bold red",
-    "[HOLD REVIEW]":"yellow",
-    "[FORECAST]":   "cyan",
-    "[EXIT]":       "bold red",
+    prefix: style for prefix, style, _ in _PREFIX_REGISTRY if style is not None
 }
+
+_ACTIVITY_PREFIXES: tuple[str, ...] = tuple(
+    prefix for prefix, _, activity in _PREFIX_REGISTRY if activity
+)
 
 _MODEL_RE = re.compile(r"(\w+Client\()([^)]+)(\))")
 
@@ -92,13 +115,11 @@ class _PrefixRichHandler:
 
 
 class _ActivityLogFilter(logging.Filter):
-    """構造化ログプレフィックスのみを通すフィルタ。"""
-
-    _PREFIXES = ("[COLLECT]", "[AGGREGATE]", "[SIGNAL]", "[CLOSE]", "[TRADE]", "[ORDER]", "[REFLECT]", "[API]", "[FORECAST]", "[EXIT]", "[NEWS]", "[MONITOR]", "[HOLD REVIEW]")
+    """構造化ログプレフィックスのみを通すフィルタ。対象は _PREFIX_REGISTRY 由来。"""
 
     def filter(self, record: logging.LogRecord) -> bool:
         msg = record.getMessage()
-        return any(msg.startswith(p) for p in self._PREFIXES)
+        return any(msg.startswith(p) for p in _ACTIVITY_PREFIXES)
 
 
 class _ApiAccessPrefixFilter(logging.Filter):
