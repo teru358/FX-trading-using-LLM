@@ -170,6 +170,7 @@ analysis:
 
 news_collection:
   interval_minutes: 15             # この間隔でtimezoneに揃えた時刻を自動生成（OHLCV+テクニカル分析も同時実行）
+  offset_minutes: 0                # 開始オフセット（例: 15 → :15, :30, :45, :00 の順に実行）
   timezone: "Asia/Tokyo"
   inter_pair_delay_seconds: 10     # ペア間の待機（Ollama VRAM保護）
   news_freshness_hours: 24         # この時間以上古い記事は除外
@@ -196,6 +197,7 @@ notification:
 # TradingView Desktop連携（オプション）
 tradingview:
   enabled: false                # true で取引判定時にチャートへ自動反映
+  cdp_host: "127.0.0.1"         # CDP ホスト（WSLからWindowsへは `cat /etc/resolv.conf` の gateway IP を指定）
   cdp_port: 9222                # TradingView Desktop の CDP ポート
 
 # 経済指標カレンダー（TradingView非公式API経由）
