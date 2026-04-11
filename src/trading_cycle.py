@@ -251,42 +251,6 @@ async def _process_pair(
         return e
 
 
-async def _generate_cycle_reflections(
-    config: AppConfig, position_mgr: PositionManager, store: VectorStore, llm: LLMClient,
-    price_provider: PriceProvider | None = None,
-) -> None:
-    """オープンポジションに対して振り返りを生成・RAGに蓄積する。"""
-    for pos in position_mgr.get_account_state().open_positions:
-        try:
-            current_price = _get_price(pos.pair, price_provider)
-            pair_cfg = next((p for p in config.tradeable_instruments if p.symbol == pos.pair), None)
-            if pair_cfg is None:
-                continue
-
-            reflection = await generate_reflection(
-                pair_cfg=pair_cfg,
-                previous_action=pos.direction,
-                previous_entry_price=pos.entry_price,
-                previous_stop_loss=pos.stop_loss,
-                previous_take_profit=pos.take_profit,
-                previous_reasoning=f"entry={pos.entry_price:.5f} SL={pos.stop_loss:.5f} TP={pos.take_profit:.5f}",
-                previous_cycle_time=pos.opened_at,
-                current_price=current_price,
-                llm=llm,
-                temperature=config.llm.reflection.temperature,
-                user_notes=load_user_notes(config.user_notes_path, "reflect"),
-            )
-            embed_fn = partial(
-                embed_text,
-                ollama_base_url=config.llm.ollama.base_url,
-                model=config.rag.embedding_model,
-            )
-            # レガシーfx_reflectionsへの書き込みは停止（方向別RAGに移行済み）
-            # await store_reflection(reflection=reflection, store=store, embed_fn=embed_fn)
-        except Exception as e:
-            logger.warning(f"Reflection failed for {pos.pair}: {e}")
-
-
 def _apply_atr_sltp_to_signal(
     sig,
     config: AppConfig,
@@ -916,9 +880,6 @@ async def trading_cycle(
         adaptive_store, session_store, log_source="[REFLECT/CLOSE]",
     )
 
-    # Phase 2: オープンポジションの振り返り生成
-    await _generate_cycle_reflections(config, position_mgr, store, llm_reflect, price_provider=price_provider)
-
     # Phase 2.5: 前回 HOLD 判断のレビュー
     await _review_hold_decisions(config, hold_store, store, price_provider=price_provider, price_store=price_store)
 
@@ -1152,7 +1113,7 @@ async def forecast_cycle(
                     delta = current_price - fc.current_price
                     forecast_store.update_review(fc.id, delta)
 
-                # 24h集計サマリーをRAGに上書きupsert（D）
+                # 24h集計サマリーをログ出力のみ (RAG 蓄積は下の individual forecast reviews で行う)
                 summary_text, lesson, has_significant = build_forecast_review_summary(
                     pair=pair_cfg.symbol,
                     forecasts=recent_forecasts,
@@ -1162,10 +1123,6 @@ async def forecast_cycle(
                     atr_value=pair_atr,
                 )
                 logger.info(f"[FORECAST] {pair_cfg.symbol}: {summary_text}")
-
-                if has_significant:
-                    embedding = await embed_fn(summary_text)
-                    # レガシーfx_reflectionsへの書き込みは停止（方向別RAGに移行済み）
 
                 # Directional RAG: individual forecast reviews
                 for fc in recent_forecasts:
