@@ -525,6 +525,37 @@ def _schedule_completion_webhook_for_promoted_job(
     ).start()
 
 
+def _handle_promoted_or_slot_busy(
+    status: str,
+    job: Any,  # Callable[[], Any]
+    slot: PriorityJobSlot,
+    started_at: datetime,
+    job_name: str,
+    on_complete_when_busy: Any,  # Callable[[Any, Exception | None], None]
+    question: str | None = None,
+) -> None:
+    """try_run_user_sync の promoted / slot_busy ブランチを共通化する。
+
+    - "promoted":  worker は既に稼働中 → 完了ポーリング + webhook 通知を仕掛ける
+    - "slot_busy": worker 未起動 → spawn_user_background でキュー投入 (拒否時 409)
+    - その他の status は呼び出し側で処理済みの想定なので何もしない
+    """
+    if status == "promoted":
+        _schedule_completion_webhook_for_promoted_job(
+            slot=slot,
+            job_name=job_name,
+            started_at=started_at,
+            question=question,
+        )
+    elif status == "slot_busy":
+        accepted = slot.spawn_user_background(job, on_complete=on_complete_when_busy)
+        if not accepted:
+            raise HTTPException(
+                status_code=409,
+                detail="他のユーザージョブが既にキュー待機中です。しばらく経ってから再試行してください。",
+            )
+
+
 # ── POST /run/trade ───────────────────────────────────────────────
 
 @app.post("/run/trade", dependencies=[Depends(_verify_api_key)])
@@ -567,24 +598,15 @@ def run_trade() -> dict[str, Any]:
     if status == "completed_with_error":
         raise HTTPException(status_code=500, detail=f"run_trade failed: {result}")
 
-    if status == "promoted":
-        # soft_timeout 超過で worker は既にバックグラウンド継続中 → 完了ポーリングを仕掛ける
-        _schedule_completion_webhook_for_promoted_job(
-            slot=_llm_slot,
-            job_name="取引サイクル",
-            started_at=started_at,
-        )
-    elif status == "slot_busy":
-        # 他ジョブが占有中で worker 未起動 → spawn_user_background でキューに入れる
-        accepted = _llm_slot.spawn_user_background(
-            _job,
-            on_complete=lambda r, e: _notify_trade_complete(started_at, e),
-        )
-        if not accepted:
-            raise HTTPException(
-                status_code=409,
-                detail="他のユーザージョブが既にキュー待機中です。しばらく経ってから再試行してください。",
-            )
+    # promoted or slot_busy → 完了 webhook / background queue
+    _handle_promoted_or_slot_busy(
+        status=status,
+        job=_job,
+        slot=_llm_slot,
+        started_at=started_at,
+        job_name="取引サイクル",
+        on_complete_when_busy=lambda r, e: _notify_trade_complete(started_at, e),
+    )
 
     return {
         "status": "accepted",
@@ -672,25 +694,16 @@ def ask(body: _AskRequest) -> dict[str, Any]:
         logger.error(f"[API] /ask failed: {result}", exc_info=isinstance(result, BaseException))
         raise HTTPException(status_code=504, detail=f"LLM error: {result}")
 
-    if status == "promoted":
-        # soft_timeout 超過で worker は既にバックグラウンド継続中
-        _schedule_completion_webhook_for_promoted_job(
-            slot=_llm_slot,
-            job_name="ask",
-            started_at=started_at,
-            question=message,
-        )
-    elif status == "slot_busy":
-        # 他ジョブが占有中で worker 未起動 → キューに入れる
-        accepted = _llm_slot.spawn_user_background(
-            _job,
-            on_complete=lambda r, e: _notify_ask_complete(message, r, e, started_at),
-        )
-        if not accepted:
-            raise HTTPException(
-                status_code=409,
-                detail="他のユーザージョブが既にキュー待機中です。しばらく経ってから再試行してください。",
-            )
+    # promoted or slot_busy → 完了 webhook / background queue
+    _handle_promoted_or_slot_busy(
+        status=status,
+        job=_job,
+        slot=_llm_slot,
+        started_at=started_at,
+        job_name="ask",
+        on_complete_when_busy=lambda r, e: _notify_ask_complete(message, r, e, started_at),
+        question=message,
+    )
 
     return {
         "status": "accepted",
