@@ -148,7 +148,7 @@ watch銘柄はETFシンボルを使用（yfinance安定性のため）:
 
 ## 通知
 
-Discord / Telegram / None から選択。全通知にサイクル種別ラベル付き。
+Discord / None から選択。全通知にサイクル種別ラベル付き。
 
 | 通知種別 | トリガー | 内容 |
 |---|---|---|
@@ -196,7 +196,7 @@ finance/
 │   ├── trading/                    # ブローカー・ATR算出・ポジション管理
 │   ├── rag/                        # ChromaDB・方向別ストア・セマンティック検索
 │   ├── api/                        # REST API (FastAPI)
-│   ├── notifications/              # Discord/Telegram通知
+│   ├── notifications/              # Discord通知
 │   └── persistence/                # 状態管理・動的パラメータ
 ├── data/
 │   ├── prices.db                   # SQLite（OHLCV + スナップショット + セッション）

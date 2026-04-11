@@ -217,7 +217,7 @@ rag:
   analysis_lookback_hours: 8       # 取引判定時に集約するテクニカル分析の時間幅（最大32スナップショット）
 
 notification:
-  notifier: "none"                 # "telegram" | "discord" | "none"
+  notifier: "none"                 # "discord" | "none"
   notify_on_order_open: true       # 注文発注時に通知
   notify_on_order_close: true      # 決済時に通知（SL/TP到達・緊急損切り含む）
   notify_on_signal_skipped: true   # スキップ（既存ポジション）/ 保留（hold）時に通知（判断理由付き）

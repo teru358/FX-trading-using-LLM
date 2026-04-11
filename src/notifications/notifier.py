@@ -178,13 +178,7 @@ class NullNotifier(NotifierAdapter):
 
 def create_notifier(notifier_type: str) -> NotifierAdapter:
     """notifier_type に応じた NotifierAdapter を返す。"""
-    if notifier_type == "telegram":
-        from src.notifications.telegram_notifier import TelegramNotifier
-        return TelegramNotifier(
-            bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
-            chat_id=os.environ.get("TELEGRAM_CHAT_ID", ""),
-        )
-    elif notifier_type == "discord":
+    if notifier_type == "discord":
         from src.notifications.discord_notifier import DiscordNotifier
         return DiscordNotifier(
             webhook_url=os.environ.get("DISCORD_WEBHOOK_URL", ""),
@@ -192,4 +186,4 @@ def create_notifier(notifier_type: str) -> NotifierAdapter:
     elif notifier_type in ("none", "null", ""):
         return NullNotifier()
     else:
-        raise ValueError(f"Unknown notifier_type: {notifier_type!r}. Use 'telegram', 'discord', or 'none'.")
+        raise ValueError(f"Unknown notifier_type: {notifier_type!r}. Use 'discord' or 'none'.")
