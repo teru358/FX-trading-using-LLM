@@ -31,7 +31,6 @@ def format_macro_context_for_prompt(
     lines = [
         "=== Macro Reference Instruments ===",
         "Note: Rising equity indices generally indicate risk-on sentiment.",
-        "Note: Bond ETFs (IEF, SHY) have INVERSE relationship to yields — rising ETF = falling rates.",
     ]
     if realtime_provider != "yfinance":
         lines.append(

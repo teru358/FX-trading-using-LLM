@@ -131,8 +131,8 @@ watch銘柄はETFシンボルを使用（yfinance安定性のため）:
 | 日経225 | 1321.T | 東証ETF |
 | ドル指数 | UUP | ETF |
 | Gold | GLD | Twelve Data対応 |
-| 米国債7-10年 | IEF | 利回り逆相関 |
-| 米国債1-3年 | SHY | 利回り逆相関 |
+| 長期債ETF | IEF | 独立銘柄（旧^TNX利回りとは非連続） |
+| 短期債ETF | SHY | 独立銘柄（旧^IRX利回りとは非連続） |
 | 原油 | USO | ETF |
 
 ## LLMプロバイダー

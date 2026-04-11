@@ -64,17 +64,17 @@ instruments:
     currency: "USD"
     enabled: true
   - symbol: "IEF"
-    display_name: "US 7-10Y Treasury (IEF)"
+    display_name: "7-10Y Treasury Bond ETF (IEF)"
     asset_type: index
     mode: watch
     currency: "USD"
-    enabled: true                   # 債券価格 ≈ 利回り逆相関
+    enabled: true                   # 長期債ETF価格として独立銘柄で追跡（旧^TNX利回りデータとは非連続）
   - symbol: "SHY"
-    display_name: "US 1-3Y Treasury (SHY)"
+    display_name: "1-3Y Treasury Bond ETF (SHY)"
     asset_type: index
     mode: watch
     currency: "USD"
-    enabled: true
+    enabled: true                   # 短期債ETF価格として独立銘柄で追跡（旧^IRX利回りデータとは非連続）
   - symbol: "USO"
     display_name: "WTI Crude Oil (USO)"
     asset_type: index
