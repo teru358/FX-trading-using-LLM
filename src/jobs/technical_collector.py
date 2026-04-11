@@ -59,14 +59,14 @@ def _fetch_instrument_ohlcv(
 
 def _is_price_data_stale(price_data, max_staleness: timedelta = _MAX_STALENESS) -> timedelta | None:
     """最新バーの鮮度をチェック。古すぎる場合は経過時間を返す (スキップ判定用)。"""
-    from datetime import datetime
+    from src.utils.clock import db_now
 
     latest_bar = price_data.df.index[-1]
     if hasattr(latest_bar, "to_pydatetime"):
         latest_bar = latest_bar.to_pydatetime()
     if hasattr(latest_bar, "tzinfo") and latest_bar.tzinfo is not None:
         latest_bar = latest_bar.replace(tzinfo=None)
-    staleness = datetime.now() - latest_bar
+    staleness = db_now() - latest_bar
     if staleness > max_staleness:
         return staleness
     return None
@@ -413,8 +413,9 @@ async def collect_all_technical(
     # Phase 3: 経済指標影響分析 (オプション)
     if config.economic_calendar.enabled:
         try:
-            from datetime import datetime
             from functools import partial
+
+            from src.utils.clock import db_now
 
             from src.data.econ_event_store import EconEventStore
             from src.jobs.econ_calendar_fetcher import refresh_recent_events
@@ -534,7 +535,7 @@ async def collect_all_technical(
                             actual=ev.actual,
                             forecast=ev.forecast,
                             surprise=classify_surprise(ev.actual, ev.forecast),
-                            analyzed_at=datetime.now(),
+                            analyzed_at=db_now(),
                         )
                         econ_store.mark_analyzed(ev.event_id)
                         logger.info(f"[ECON] Analyzed {ev.event_id}: {ev.title[:40]}")

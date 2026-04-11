@@ -10,6 +10,7 @@ from sqlalchemy import Column, DateTime, Float, Integer, String, select
 from sqlalchemy.orm import Session
 
 from src.data.price_store import _Base, _get_engine
+from src.utils.clock import db_now
 
 if TYPE_CHECKING:
     from src.analysis.price_analyzer import PriceAnalysis
@@ -68,7 +69,7 @@ class AnalysisStore:
         self, symbol: str, hours: int = 8
     ) -> list[_TechnicalSnapshot]:
         """直近 hours 時間以内のスナップショットを新しい順で返す。"""
-        since = datetime.now() - timedelta(hours=hours)
+        since = db_now() - timedelta(hours=hours)
         with Session(self._engine) as session:
             stmt = (
                 select(_TechnicalSnapshot)
@@ -92,7 +93,7 @@ class AnalysisStore:
         if not snapshots:
             return None
 
-        now = datetime.now()
+        now = db_now()
         total_w = 0.0
         w_bias = 0.0
         w_conf = 0.0
@@ -155,12 +156,12 @@ class AnalysisStore:
                 f"neutral={dir_counts.get('neutral', 0)}, "
                 f"latest: {latest.reasoning_summary or ''})"
             ),
-            analyzed_at=datetime.now(),
+            analyzed_at=db_now(),
         )
 
     def _prune_old(self, symbol: str) -> None:
         """古いスナップショットを削除する。"""
-        cutoff = datetime.now() - timedelta(hours=self._PRUNE_OLDER_THAN_HOURS)
+        cutoff = db_now() - timedelta(hours=self._PRUNE_OLDER_THAN_HOURS)
         with Session(self._engine) as session:
             old = session.execute(
                 select(_TechnicalSnapshot)
@@ -209,7 +210,7 @@ class ForecastStore:
         with Session(self._engine) as session:
             rec = _ForecastRecord(
                 pair=pair,
-                forecast_ts=datetime.now(),
+                forecast_ts=db_now(),
                 current_price=signal.entry_price,
                 predicted_direction=signal.predicted_direction,
                 combined_score=signal.combined_score,
@@ -231,7 +232,7 @@ class ForecastStore:
         with Session(self._engine) as session:
             rec = _ForecastRecord(
                 pair=pair,
-                forecast_ts=datetime.now(),
+                forecast_ts=db_now(),
                 current_price=signal.entry_price,
                 predicted_direction=signal.predicted_direction,
                 combined_score=signal.combined_score,
@@ -248,7 +249,7 @@ class ForecastStore:
 
     def get_recent_forecasts(self, pair: str, hours: int = 24) -> list[_ForecastRecord]:
         """直近N時間の予測レコードを古い順に返す（skip=3 は除外）。"""
-        cutoff = datetime.now() - timedelta(hours=hours)
+        cutoff = db_now() - timedelta(hours=hours)
         with Session(self._engine) as session:
             stmt = (
                 select(_ForecastRecord)
@@ -264,7 +265,7 @@ class ForecastStore:
 
     def get_recent_all(self, pair: str, hours: int = 24) -> list[_ForecastRecord]:
         """直近N時間の全レコード（skip含む）を古い順に返す。run forecast 表示用。"""
-        cutoff = datetime.now() - timedelta(hours=hours)
+        cutoff = db_now() - timedelta(hours=hours)
         with Session(self._engine) as session:
             stmt = (
                 select(_ForecastRecord)
@@ -283,13 +284,13 @@ class ForecastStore:
             rec = session.get(_ForecastRecord, record_id)
             if rec:
                 rec.reviewed = 1
-                rec.latest_review_ts = datetime.now()
+                rec.latest_review_ts = db_now()
                 rec.latest_price_delta = delta
                 session.commit()
 
     def prune_old(self) -> None:
         """7日以上古いレコードを削除する。"""
-        cutoff = datetime.now() - timedelta(hours=self._PRUNE_OLDER_THAN_HOURS)
+        cutoff = db_now() - timedelta(hours=self._PRUNE_OLDER_THAN_HOURS)
         with Session(self._engine) as session:
             old = session.execute(
                 select(_ForecastRecord)
@@ -333,7 +334,7 @@ class HoldDecisionStore:
         with Session(self._engine) as session:
             rec = _HoldDecisionRecord(
                 pair=pair,
-                decision_ts=datetime.now(),
+                decision_ts=db_now(),
                 current_price=signal.entry_price,
                 signal_score=signal.combined_score,
                 predicted_direction=signal.predicted_direction or "neutral",
@@ -372,7 +373,7 @@ class HoldDecisionStore:
 
     def prune_old(self) -> None:
         """7日以上古いレコードを削除する。"""
-        cutoff = datetime.now() - timedelta(hours=self._PRUNE_OLDER_THAN_HOURS)
+        cutoff = db_now() - timedelta(hours=self._PRUNE_OLDER_THAN_HOURS)
         with Session(self._engine) as session:
             old = session.execute(
                 select(_HoldDecisionRecord)

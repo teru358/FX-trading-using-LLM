@@ -11,17 +11,9 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Session
 
 from src.analysis.economic_calendar import EconEvent
+from src.utils.clock import db_utc_now as _utc_now_naive
 
 logger = logging.getLogger(__name__)
-
-
-def _utc_now_naive() -> datetime:
-    """SQLite DateTime 列用の naive UTC datetime を返す。
-
-    _utc_now_naive() は Python 3.12+ で deprecated のため、明示的に
-    UTC aware datetime を作ってから tzinfo を落とす。
-    """
-    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 class _Base(DeclarativeBase):

@@ -16,8 +16,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import re as _re
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from src.analysis.prompt_loader import load_prompt, render_prompt
 from src.config import AppConfig
@@ -30,6 +28,7 @@ from src.rag.embedder import embed_text
 from src.rag.vector_store import VectorStore
 from src.reporting.reporter import print_news_summary, print_run_summary, print_tech_summary
 from src.trading.position_manager import PositionManager
+from src.utils.clock import db_now, local_now
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +69,7 @@ async def _analysis_summary(
     # への片方向依存で循環を作らない (trading_cycle.py からは views.py を import しない)。
     from src.trading_cycle import _summarize_pair
 
-    run_start = datetime.now(ZoneInfo(config.schedule.timezone))
+    run_start = local_now(config)
     logger.info(f"=== Analysis summary: {run_start.strftime('%Y-%m-%d %H:%M %Z')} ===")
 
     results = await asyncio.gather(
@@ -254,7 +253,7 @@ async def _run_ask(
             model=config.rag.embedding_model,
         )
 
-        now = datetime.now()
+        now = db_now()
         entry_id = f"insight_{now.strftime('%Y%m%d_%H%M%S')}"
 
         # insight_type をキーワードで分類

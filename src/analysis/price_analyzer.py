@@ -15,6 +15,7 @@ from src.data.indicators import IndicatorSummary
 from src.data.price_fetcher import PriceData
 from src.llm.client import LLMClient
 from src.llm.response_parser import extract_json
+from src.utils.clock import db_now
 
 if TYPE_CHECKING:
     from src.signals.technical_scorer import MultiTfTechnicalScore, TechnicalScore
@@ -294,7 +295,7 @@ async def analyze_price_action(
             take_profit=take_profit,
             risk_reward_ratio=rr,
             reasoning_summary=data.get("reasoning_summary", ""),
-            analyzed_at=datetime.now(),
+            analyzed_at=db_now(),
             key_support=key_support,
             key_resistance=key_resistance,
         )

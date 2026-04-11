@@ -10,6 +10,7 @@ from sqlalchemy import Column, DateTime, Float, String, Text
 from sqlalchemy.orm import Session
 
 from src.data.price_store import _Base, _get_engine
+from src.utils.clock import db_now
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ class _TradingSession(_Base):
     realized_pnl      = Column(Float)
     outcome           = Column(String)
     reflection_text   = Column(Text)
-    created_at        = Column(DateTime, nullable=False, default=datetime.now)
+    created_at        = Column(DateTime, nullable=False, default=db_now)
     # ATR SL/TP比較データ
     atr_value       = Column(Float)
     sl_atr_mult     = Column(Float)
@@ -112,7 +113,7 @@ class SessionStore:
                 macro_context=macro_context,
                 analysis_summary=analysis_summary,
                 opened_at=opened_at,
-                created_at=datetime.now(),
+                created_at=db_now(),
                 atr_value=atr_value,
                 sl_atr_mult=sl_atr_mult,
                 tp_atr_mult=tp_atr_mult,

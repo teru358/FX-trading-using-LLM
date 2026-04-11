@@ -6,6 +6,7 @@ from datetime import datetime
 
 from src.analysis.news_analyzer import NewsSentiment
 from src.analysis.price_analyzer import PriceAnalysis
+from src.utils.clock import db_now
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +179,7 @@ def combine_signals(
         detail_reason=detail_reason,
         news=news,
         price=price,
-        generated_at=datetime.now(),
+        generated_at=db_now(),
     )
 
     conflict_str = " [CONFLICT]" if alignment < 0 else ""

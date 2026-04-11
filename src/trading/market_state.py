@@ -15,6 +15,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 
 from src.trading.market_hours import is_market_open, market_status_label
+from src.utils.clock import utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ _DEFAULT_HEARTBEAT_INTERVAL = timedelta(hours=6)
 
 def _to_utc(now: datetime | None) -> datetime:
     if now is None:
-        return datetime.now(timezone.utc)
+        return utc_now()
     if now.tzinfo is None:
         return now.replace(tzinfo=timezone.utc)
     return now.astimezone(timezone.utc)

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from src.utils.clock import db_now
 
 from src.analysis.feedly_fetcher import fetch_feedly_category
 from src.analysis.news_analyzer import NewsSentiment, analyze_category_sentiment
@@ -158,7 +158,7 @@ async def collect_category(
             ollama_base_url=config.llm.ollama.base_url,
             model=config.rag.embedding_model,
         )
-        entry_id = f"{category}_{datetime.now().strftime('%Y%m%d%H%M')}"
+        entry_id = f"{category}_{db_now().strftime('%Y%m%d%H%M')}"
         store.upsert_category_news(
             entry_id=entry_id,
             text=text,
@@ -169,7 +169,7 @@ async def collect_category(
             key_themes=news.key_themes,
             summary=news.summary,
             news_count=news.news_count,
-            collected_at=datetime.now(),
+            collected_at=db_now(),
             newest_article_ts=fetch_result.newest_published_ts,
             articles_fingerprint=fetch_result.articles_fingerprint,
             article_title_hashes=fetch_result.title_hashes_csv,

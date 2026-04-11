@@ -8,6 +8,7 @@ from src.analysis.prompt_loader import load_prompt, render_prompt
 from src.analysis.rss_fetcher import FetchResult
 from src.llm.client import LLMClient
 from src.llm.response_parser import extract_json
+from src.utils.clock import db_now
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +68,7 @@ class NewsSentiment:
     recent_count: int = 0
     feeds_ok: int = 0
     feeds_failed: int = 0
-    fetched_at: datetime = field(default_factory=datetime.now)
+    fetched_at: datetime = field(default_factory=db_now)
 
 
 # ── ヘルパー ────────────────────────────────────────────────────
@@ -98,7 +99,7 @@ def _build_sentiment(
         recent_count=fetch_result.recent_count,
         feeds_ok=fetch_result.feeds_ok,
         feeds_failed=fetch_result.feeds_failed,
-        fetched_at=datetime.now(),
+        fetched_at=db_now(),
     )
     label = _CATEGORY_LABELS.get(category, category)
     logger.info(

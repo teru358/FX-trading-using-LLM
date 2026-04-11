@@ -8,6 +8,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional
 
 from src.persistence.state_store import StateStore
+from src.utils.clock import db_now
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +24,7 @@ class Order:
     position_size: float
     initial_stop_loss: float = 0.0
     status: str = "open"  # "open" | "closed" | "cancelled"
-    opened_at: datetime = field(default_factory=datetime.now)
+    opened_at: datetime = field(default_factory=db_now)
     closed_at: Optional[datetime] = None
     close_price: Optional[float] = None
     close_reason: Optional[str] = None  # "take_profit" | "stop_loss" | "manual"
@@ -206,7 +207,7 @@ class PositionManager:
                     * Decimal(multiplier)
                 )
                 pos.status = "closed"
-                pos.closed_at = datetime.now()
+                pos.closed_at = db_now()
                 pos.close_price = close_price
                 pos.close_reason = reason
                 pos.realized_pnl = pnl
