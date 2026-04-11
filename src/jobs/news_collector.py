@@ -99,6 +99,12 @@ async def collect_category(
         logger.info(f"[NEWS] {label}: no new articles since last analysis, skipping LLM")
         return
 
+    # 新規ニュースが0件ならLLM分析をスキップ (fingerprintが僅かに変わっても、
+    # new=0 なら分析結果は前回と実質変わらないため、LLMリソースを無駄にしない)
+    if last_fingerprint is not None and new_count == 0:
+        logger.info(f"[NEWS] {label}: new=0 (no new articles), skipping LLM")
+        return
+
     # 方向別RAGから類似テーマの取引振り返りを検索
     trade_lessons = ""
     try:
