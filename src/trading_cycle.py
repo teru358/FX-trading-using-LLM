@@ -80,19 +80,14 @@ def _compute_atr_from_price_data(price_data) -> float | None:
 
 
 def _fetch_and_compute_atr(symbol: str, config: AppConfig, price_store) -> float | None:
-    """price_store から OHLCV を取得し ATR(14) を返す。失敗時は None。
-
-    既存呼び出し側との挙動互換のため lookback_days(int) をそのまま fetch_ohlcv に渡している
-    (fetch_ohlcv は period:str を期待するため呼び出しは内部で例外となり None が返る)。
-    significance フィルタの ATR ベース判定はこの helper の戻り値に依存する。
-    """
+    """price_store から OHLCV を取得し ATR(14) を返す。失敗時は None。"""
     if price_store is None:
         return None
     try:
         from src.data.price_fetcher import fetch_ohlcv as _fetch_ohlcv
         price_data = _fetch_ohlcv(
             symbol,
-            config.trading.lookback_days,
+            f"{config.trading.lookback_days}d",
             config.trading.ohlcv_interval,
             price_store=price_store,
         )
@@ -312,7 +307,7 @@ def _apply_atr_sltp_to_signal(
     atr_params = adaptive_store.get_params(sig.pair)
     try:
         price_data = _get_ohlcv(
-            sig.pair, config.trading.lookback_days,
+            sig.pair, f"{config.trading.lookback_days}d",
             config.trading.ohlcv_interval, price_store,
             price_provider,
         )
