@@ -30,8 +30,6 @@ from src.analysis.prompt_stats import estimate_prompt_size
 
 _console = Console()
 _stop = threading.Event()
-_job_lock = threading.Lock()  # スケジューラとコマンドの同時実行を防ぐ (Task 7で削除予定)
-
 # LLMジョブ用の単一スロット (news/tech/trade/econ/ask/run_trade の排他制御)
 _llm_slot = PriorityJobSlot("llm")
 
@@ -308,7 +306,7 @@ def main() -> None:
             _console.print("\n[dim]終了します...[/dim]")
             _stop.set()
     else:
-        run_commands(config, store, analysis_store, _stop, _job_lock, forecast_store, price_store, hold_store, price_provider=price_provider)
+        run_commands(config, store, analysis_store, _stop, _llm_slot, forecast_store, price_store, hold_store, price_provider=price_provider)
 
 
 if __name__ == "__main__":

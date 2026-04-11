@@ -240,7 +240,7 @@ def run_commands(
     store: VectorStore,
     analysis_store,
     stop_event: threading.Event,
-    job_lock: threading.Lock,
+    llm_slot,  # PriorityJobSlot — avoid forward-import at module top; use string annotation instead
     forecast_store=None,
     price_store=None,
     hold_store=None,
@@ -276,32 +276,33 @@ def run_commands(
                     _console.print("[red]使い方: run news | tech | analyze | mon[/red]")
                     continue
                 sub = args[0].lower()
-                with job_lock:
-                    if sub in ("news", "n"):
-                        _console.print("[cyan]最新ニュースセンチメントを表示中...[/cyan]")
-                        run_news_view(config, store)
-                    elif sub in ("tech", "t", "technical"):
-                        _console.print("[cyan]最新テクニカルスナップショットを表示中...[/cyan]")
-                        run_tech_view(config, analysis_store)
-                    elif sub in ("analyze", "a", "analysis"):
-                        _console.print("[cyan]総合分析を表示中...[/cyan]")
-                        run_analysis_summary(config, store, analysis_store)
-                    elif sub in ("forecast", "f"):
-                        if forecast_store is None:
-                            _console.print("[red]forecast_store が利用できません[/red]")
-                        else:
-                            pair_filter = args[1] if len(args) > 1 else None
-                            run_forecast_view(config, forecast_store, pair_filter)
-                    elif sub in ("trade", "tr"):
-                        if price_store is None or hold_store is None:
-                            _console.print("[red]price_store / hold_store が利用できません[/red]")
-                        else:
-                            _console.print("[cyan]取引判定ループを実行中...[/cyan]")
-                            run_trading_cycle(config, store, price_store, analysis_store, hold_store)
+                if sub in ("news", "n"):
+                    _console.print("[cyan]最新ニュースセンチメントを表示中...[/cyan]")
+                    run_news_view(config, store)
+                elif sub in ("tech", "t", "technical"):
+                    _console.print("[cyan]最新テクニカルスナップショットを表示中...[/cyan]")
+                    run_tech_view(config, analysis_store)
+                elif sub in ("analyze", "a", "analysis"):
+                    _console.print("[cyan]総合分析を表示中...[/cyan]")
+                    run_analysis_summary(config, store, analysis_store)
+                elif sub in ("forecast", "f"):
+                    if forecast_store is None:
+                        _console.print("[red]forecast_store が利用できません[/red]")
                     else:
-                        _console.print(
-                            f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | forecast | trade"
+                        pair_filter = args[1] if len(args) > 1 else None
+                        run_forecast_view(config, forecast_store, pair_filter)
+                elif sub in ("trade", "tr"):
+                    if price_store is None or hold_store is None:
+                        _console.print("[red]price_store / hold_store が利用できません[/red]")
+                    else:
+                        _console.print("[cyan]取引判定ループを実行中 (LLMスロット取得待機)...[/cyan]")
+                        llm_slot.run_user_blocking(
+                            run_trading_cycle, config, store, price_store, analysis_store, hold_store
                         )
+                else:
+                    _console.print(
+                        f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | forecast | trade"
+                    )
             elif cmd == "compare":
                 pair_arg = args[0] if args else None
                 run_compare(config, store, analysis_store, pair_arg)
@@ -310,9 +311,10 @@ def run_commands(
                     _console.print("[red]使い方: ask <メッセージ>  例: ask 今のUSDJPYはどう見る？[/red]")
                     continue
                 user_message = " ".join(args)
-                _console.print("[cyan]LLMに問い合わせ中...[/cyan]")
-                with job_lock:
-                    response = run_ask(user_message, config, store, analysis_store)
+                _console.print("[cyan]LLMに問い合わせ中 (LLMスロット取得待機)...[/cyan]")
+                response = llm_slot.run_user_blocking(
+                    run_ask, user_message, config, store, analysis_store
+                )
                 _console.print(f"\n[bold]LLM回答:[/bold]\n{response}\n")
             elif cmd in ("n", "notify"):
                 _cmd_notify(config)
@@ -323,9 +325,8 @@ def run_commands(
                     _console.print("[red]tradingview.enabled が false です[/red]")
                     continue
                 _console.print("[cyan]TradingViewチャートを更新中...[/cyan]")
-                with job_lock:
-                    import asyncio as _aio
-                    _aio.run(_update_tv_chart(config, analysis_store))
+                import asyncio as _aio
+                _aio.run(_update_tv_chart(config, analysis_store))
             elif cmd == "feeds":
                 _cmd_feeds(config)
             elif cmd == "close":
