@@ -345,7 +345,7 @@ class TuiApp(App):
         from src.notifications.notifier import create_notifier
 
         async def _do():
-            notifier = create_notifier(self._config.notifier.notifier)
+            notifier = create_notifier(self._config.notifier.enabled)
             await notifier.send("🔔 【通知テスト】FX Trading Bot から送信しました。")
 
         asyncio.run(_do())

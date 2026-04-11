@@ -113,7 +113,7 @@ async def monitor_open_positions(
     if not account.open_positions:
         return
 
-    notifier = create_notifier(config.notifier.notifier)
+    notifier = create_notifier(config.notifier.enabled)
 
     trailing_updated = False  # トレーリングで SL が1つでも更新されたかを追跡
 

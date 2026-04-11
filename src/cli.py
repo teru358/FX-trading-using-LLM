@@ -127,7 +127,7 @@ def _cmd_close(config: AppConfig, pair_arg: str) -> None:
                 f"@ {current:.5f}  損益: {closed.realized_pnl:+.2f}[/green]"
             )
             if config.notifier.notify_on_order_close:
-                notifier = create_notifier(config.notifier.notifier)
+                notifier = create_notifier(config.notifier.enabled)
                 await notifier.notify_order_closed(OrderClosedEvent(
                     pair=closed.pair,
                     direction=closed.direction,
@@ -183,7 +183,7 @@ async def _update_tv_chart(config: AppConfig, analysis_store) -> None:
 
 def _cmd_notify(config: AppConfig) -> None:
     async def _do() -> None:
-        notifier = create_notifier(config.notifier.notifier)
+        notifier = create_notifier(config.notifier.enabled)
         await notifier.send("🔔 【通知テスト】FX Trading Bot から送信しました。")
 
     asyncio.run(_do())

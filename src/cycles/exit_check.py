@@ -55,7 +55,7 @@ async def exit_check_cycle(
     )
 
     broker = create_broker(config.trading.trading_mode)
-    notifier = create_notifier(config.notifier.notifier)
+    notifier = create_notifier(config.notifier.enabled)
 
     # Phase 1: SL/TP 確認
     current_prices: dict[str, float] = {}

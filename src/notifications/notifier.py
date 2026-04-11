@@ -176,14 +176,11 @@ class NullNotifier(NotifierAdapter):
 
 # ── ファクトリ ──────────────────────────────────────────────
 
-def create_notifier(notifier_type: str) -> NotifierAdapter:
-    """notifier_type に応じた NotifierAdapter を返す。"""
-    if notifier_type == "discord":
-        from src.notifications.discord_notifier import DiscordNotifier
-        return DiscordNotifier(
-            webhook_url=os.environ.get("DISCORD_WEBHOOK_URL", ""),
-        )
-    elif notifier_type in ("none", "null", ""):
+def create_notifier(enabled: bool) -> NotifierAdapter:
+    """enabled が True なら Discord 通知、False なら NullNotifier を返す。"""
+    if not enabled:
         return NullNotifier()
-    else:
-        raise ValueError(f"Unknown notifier_type: {notifier_type!r}. Use 'discord' or 'none'.")
+    from src.notifications.discord_notifier import DiscordNotifier
+    return DiscordNotifier(
+        webhook_url=os.environ.get("DISCORD_WEBHOOK_URL", ""),
+    )

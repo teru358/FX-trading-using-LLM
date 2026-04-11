@@ -756,7 +756,7 @@ def _build_trading_runtime(config: AppConfig):
             "tp_atr_mult_max": config.trading.tp_atr_mult_max,
         },
     )
-    notifier = create_notifier(config.notifier.notifier)
+    notifier = create_notifier(config.notifier.enabled)
     llm_price = create_llm_client(config, "price_analysis")
     llm_reflect = create_llm_client(config, "reflection")
     return broker, adaptive_store, notifier, llm_price, llm_reflect

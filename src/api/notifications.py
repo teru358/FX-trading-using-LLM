@@ -27,7 +27,7 @@ def send_discord_notification(message: str) -> None:
         from src.notifications.notifier import create_notifier
         if state.config is None:
             return
-        notifier = create_notifier(state.config.notifier.notifier)
+        notifier = create_notifier(state.config.notifier.enabled)
 
         async def _send() -> None:
             await notifier.send(message)

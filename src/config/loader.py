@@ -224,7 +224,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
 
     n = raw.get("notification", {})
     notifier = NotifierConfig(
-        notifier=n.get("notifier", "none"),
+        enabled=n.get("enabled", False),
         notify_on_order_open=n.get("notify_on_order_open", True),
         notify_on_order_close=n.get("notify_on_order_close", True),
         notify_on_signal_skipped=n.get("notify_on_signal_skipped", False),

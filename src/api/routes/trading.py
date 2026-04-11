@@ -119,7 +119,7 @@ async def close_position(pair: str) -> dict[str, Any]:
     # 非同期通知 (ベストエフォート)
     if state.config.notifier.notify_on_order_close:
         try:
-            notifier = create_notifier(state.config.notifier.notifier)
+            notifier = create_notifier(state.config.notifier.enabled)
             await notifier.notify_order_closed(OrderClosedEvent(
                 pair=closed.pair,
                 direction=closed.direction,

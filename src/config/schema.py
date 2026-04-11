@@ -260,7 +260,7 @@ class PriceProviderConfig:
 
 @dataclass
 class NotifierConfig:
-    notifier: str = "none"
+    enabled: bool = False                 # true で Discord 通知を有効化
     notify_on_order_open: bool = True
     notify_on_order_close: bool = True
     notify_on_signal_skipped: bool = True
