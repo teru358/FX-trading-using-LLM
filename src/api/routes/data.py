@@ -1,0 +1,224 @@
+"""データ参照系のエンドポイント。
+
+GET /news      — カテゴリ別の最新ニュースセンチメント
+GET /tech      — 銘柄別の最新テクニカルスナップショット
+GET /analyze   — 保存済みスナップショット + ニュースから総合シグナル算出 (LLM 不使用)
+GET /forecast  — 直近 N 時間の予測サイクルレコード
+GET /feeds     — RSS フィード疎通確認
+"""
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+
+from fastapi import APIRouter, Depends
+
+from src.api._state import state, verify_api_key
+from src.persistence.state_store import StateStore
+from src.trading.position_manager import PositionManager
+
+router = APIRouter()
+
+
+@router.get("/news", dependencies=[Depends(verify_api_key)])
+def news() -> dict[str, Any]:
+    """カテゴリ別の最新ニュースセンチメント (run news と同等)。"""
+    assert state.store is not None and state.config is not None
+
+    result: dict[str, Any] = {}
+    for category in ("fx", "global", "japan"):
+        entries = state.store.get_recent_category_news(
+            categories=[category],
+            lookback_hours=state.config.rag.news_lookback_hours,
+        )
+        if entries:
+            latest = entries[0]["metadata"]
+            result[category] = {
+                "sentiment_score": latest.get("sentiment_score"),
+                "confidence": latest.get("confidence"),
+                "summary": latest.get("summary", ""),
+                "key_themes": latest.get("key_themes", ""),
+                "news_count": latest.get("news_count"),
+                "collected_at": latest.get("collected_at"),
+            }
+        else:
+            result[category] = None
+
+    return {"lookback_hours": state.config.rag.news_lookback_hours, "categories": result}
+
+
+@router.get("/tech", dependencies=[Depends(verify_api_key)])
+def tech() -> dict[str, Any]:
+    """銘柄別の最新テクニカルスナップショット (run tech と同等)。"""
+    assert state.config is not None and state.analysis_store is not None
+
+    all_instruments = state.config.watch_only_instruments + state.config.tradeable_instruments
+    snapshots = []
+    for inst in all_instruments:
+        snaps = state.analysis_store.get_recent_snapshots(
+            inst.symbol, hours=state.config.rag.analysis_lookback_hours
+        )
+        if snaps:
+            s = snaps[0]
+            snapshots.append({
+                "symbol":            s.symbol,
+                "display_name":      inst.display_name,
+                "analyzed_at":       s.analyzed_at.isoformat() if s.analyzed_at else None,
+                "direction_bias":    s.direction_bias,
+                "bias_score":        s.bias_score,
+                "confidence":        s.confidence,
+                "entry_zone_low":    s.entry_zone_low,
+                "entry_zone_high":   s.entry_zone_high,
+                "stop_loss":         s.stop_loss,
+                "take_profit":       s.take_profit,
+                "risk_reward_ratio": s.risk_reward_ratio,
+                "reasoning_summary": s.reasoning_summary,
+            })
+        else:
+            snapshots.append({
+                "symbol":       inst.symbol,
+                "display_name": inst.display_name,
+                "analyzed_at":  None,
+            })
+
+    return {"lookback_hours": state.config.rag.analysis_lookback_hours, "snapshots": snapshots}
+
+
+@router.get("/analyze", dependencies=[Depends(verify_api_key)])
+async def analyze() -> dict[str, Any]:
+    """保存済みスナップショット + ニュースから総合シグナルを返す (新規 LLM 取得なし)。"""
+    assert state.config is not None and state.store is not None and state.analysis_store is not None
+
+    from src.cycles._helpers import _summarize_pair
+
+    state_store = StateStore(state.config.state_dir)
+    pm = PositionManager(state_store, state.config.trading.initial_balance, context="API_Analyze")
+
+    results = await asyncio.gather(
+        *[_summarize_pair(p, state.config, pm, state.store, state.analysis_store)
+          for p in state.config.tradeable_instruments],
+        return_exceptions=True,
+    )
+    signals = [r for r in results if r is not None and not isinstance(r, Exception)]
+
+    if not signals:
+        return {"signals": [], "message": "No snapshots available. Run 'run tech' first."}
+
+    output = []
+    for sig in signals:
+        output.append({
+            "pair": sig.pair,
+            "action": sig.action,
+            "predicted_direction": sig.predicted_direction,
+            "combined_score": round(sig.combined_score, 4),
+            "confidence": round(sig.confidence, 4),
+            "entry_price": sig.entry_price,
+            "stop_loss": sig.stop_loss,
+            "take_profit": sig.take_profit,
+            "position_size": sig.position_size,
+            "signal_reason": sig.signal_reason,
+            "news_score": round(sig.news.sentiment_score, 4),
+            "news_confidence": round(sig.news.confidence, 4),
+            "price_score": round(sig.price.bias_score, 4),
+            "price_confidence": round(sig.price.confidence, 4),
+            "generated_at": sig.generated_at.isoformat(),
+        })
+
+    return {"signals": output}
+
+
+@router.get("/forecast", dependencies=[Depends(verify_api_key)])
+def forecast(pair: str | None = None, hours: int = 24) -> dict[str, Any]:
+    """直近 N 時間の予測サイクルレコードを返す (skip 含む全レコード)。"""
+    assert state.config is not None and state.forecast_store is not None
+
+    instruments = state.config.tradeable_instruments
+    if pair:
+        instruments = [i for i in instruments if i.symbol.upper() == pair.upper()]
+
+    result: dict[str, Any] = {}
+    for inst in instruments:
+        records = state.forecast_store.get_recent_all(inst.symbol, hours=hours)
+        result[inst.symbol] = [
+            {
+                "id":                  r.id,
+                "forecast_ts":         r.forecast_ts.isoformat(),
+                "current_price":       r.current_price,
+                "predicted_direction": r.predicted_direction,
+                "combined_score":      r.combined_score,
+                "confidence":          r.confidence,
+                "signal_reason":       r.signal_reason,
+                "reviewed":            r.reviewed,
+                "latest_review_ts":    r.latest_review_ts.isoformat() if r.latest_review_ts else None,
+                "latest_price_delta":  r.latest_price_delta,
+            }
+            for r in records
+        ]
+
+    return {"hours": hours, "forecasts": result}
+
+
+@router.get("/feeds", dependencies=[Depends(verify_api_key)])
+def feeds() -> dict[str, Any]:
+    """RSS フィード疎通確認 (カテゴリ別・フィード別の状態を返す)。"""
+    import feedparser
+    from src.analysis.rss_fetcher import feed_short_name
+
+    assert state.config is not None
+
+    global_kw = frozenset(k.lower() for k in state.config.keywords.global_keywords)
+    japan_kw = frozenset(k.lower() for k in state.config.keywords.japan_keywords)
+
+    categories_def = [
+        ("FX",     state.config.news_sources.feeds_fx,     None),
+        ("Global", state.config.news_sources.feeds_global, global_kw),
+        ("Japan",  state.config.news_sources.feeds_japan,  japan_kw),
+    ]
+
+    result: dict[str, Any] = {}
+    for label, feed_urls, keywords in categories_def:
+        feed_results = []
+        feeds_ok = 0
+        filtered_count = 0
+
+        for feed_url in feed_urls:
+            name = feed_short_name(feed_url)
+            try:
+                parsed = feedparser.parse(feed_url)
+                count = len(parsed.entries)
+                latest_title = parsed.entries[0].get("title", "") if parsed.entries else ""
+                feed_status = "ok" if count > 0 else "empty"
+                feeds_ok += 1
+
+                # Count keyword-filtered entries (simplified: check title+summary contains keyword)
+                if keywords is None:
+                    # FX: no keyword filter, count up to 5 recent entries
+                    filtered_count += min(count, 5)
+                else:
+                    for entry in parsed.entries[:20]:
+                        title = entry.get("title", "")
+                        body = entry.get("summary", "")[:600]
+                        combined = (title + " " + body).lower()
+                        if any(kw in combined for kw in keywords):
+                            filtered_count += 1
+
+            except Exception:
+                count = 0
+                latest_title = ""
+                feed_status = "failed"
+
+            feed_results.append({
+                "name": name,
+                "status": feed_status,
+                "count": count,
+                "latest_title": latest_title[:80],
+            })
+
+        result[label] = {
+            "feeds": feed_results,
+            "filtered_count": filtered_count,
+            "feeds_ok": feeds_ok,
+            "total_feeds": len(feed_urls),
+        }
+
+    return {"categories": result}
