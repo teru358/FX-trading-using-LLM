@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 
 
@@ -21,3 +22,13 @@ class LLMClient(ABC):
 
         messages: [{"role": "system"|"user"|"assistant", "content": "..."}]
         """
+
+
+def require_env(var_name: str, provider: str) -> str:
+    """環境変数を必須として読む。未設定時は EnvironmentError を投げる。"""
+    value = os.environ.get(var_name, "")
+    if not value:
+        raise EnvironmentError(
+            f"{var_name} を .env に設定してください。 (provider={provider})"
+        )
+    return value

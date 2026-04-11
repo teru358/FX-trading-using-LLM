@@ -19,12 +19,11 @@ from __future__ import annotations
 """
 
 import logging
-import os
 
 import httpx
 from tenacity import Retrying, stop_after_attempt, wait_fixed
 
-from src.llm.client import LLMClient
+from src.llm.client import LLMClient, require_env
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +45,7 @@ class ClaudeClient(LLMClient):
         self._timeout = timeout_seconds
         self._max_retries = max_retries
         self._max_tokens = max_tokens
-        self._api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        if not self._api_key:
-            raise EnvironmentError("ANTHROPIC_API_KEY を .env に設定してください。")
+        self._api_key = require_env("ANTHROPIC_API_KEY", "claude")
 
     @property
     def model_name(self) -> str:

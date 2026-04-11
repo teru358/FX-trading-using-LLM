@@ -18,12 +18,11 @@ from __future__ import annotations
 """
 
 import logging
-import os
 
 import httpx
 from tenacity import Retrying, stop_after_attempt, wait_fixed
 
-from src.llm.client import LLMClient
+from src.llm.client import LLMClient, require_env
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +41,7 @@ class GeminiClient(LLMClient):
         self._model = model
         self._timeout = timeout_seconds
         self._max_retries = max_retries
-        self._api_key = os.environ.get("GEMINI_API_KEY", "")
-        if not self._api_key:
-            raise EnvironmentError("GEMINI_API_KEY を .env に設定してください。")
+        self._api_key = require_env("GEMINI_API_KEY", "gemini")
 
     @property
     def model_name(self) -> str:
