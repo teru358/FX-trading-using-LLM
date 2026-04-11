@@ -19,6 +19,7 @@ from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 
 from src.config import AppConfig, BASE_DIR
+from src.concurrency.priority_job_slot import PriorityJobSlot
 from src.data.analysis_store import AnalysisStore
 from src.data.price_fetcher import fetch_current_price
 from src.data.price_store import PriceStore
@@ -38,7 +39,7 @@ _started_at: datetime | None = None
 _config: AppConfig | None = None
 _store: VectorStore | None = None
 _analysis_store: AnalysisStore | None = None
-_job_lock: threading.Lock | None = None
+_llm_slot: PriorityJobSlot | None = None
 _price_store: PriceStore | None = None
 _hold_store = None        # HoldDecisionStore
 _forecast_store = None    # ForecastStore
@@ -436,60 +437,160 @@ def schedule_info() -> dict[str, Any]:
     }
 
 
+# ── 完了 webhook ヘルパー ─────────────────────────────────────────
+
+def _send_discord_notification(message: str) -> None:
+    """ベストエフォートでDiscord webhookを発火する。失敗しても例外を投げない。"""
+    import asyncio
+    try:
+        from src.notifications.notifier import create_notifier
+        if _config is None:
+            return
+        notifier = create_notifier(_config.notifier.notifier)
+
+        async def _send() -> None:
+            await notifier.send(message)
+
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(_send())
+        finally:
+            loop.close()
+    except Exception as e:
+        logger.warning(f"[API] discord notification failed: {e}")
+
+
+def _notify_trade_complete(started_at: datetime, error: Exception | None) -> None:
+    """spawn_user_background の on_complete 用: 取引サイクル完了を Discord に通知。"""
+    elapsed = (datetime.now() - started_at).total_seconds()
+    if error:
+        msg = f"❌ 取引サイクル失敗 ({elapsed:.0f}s): {error}"
+    else:
+        msg = f"✅ 取引サイクル完了 ({elapsed:.0f}s)\n詳細は finance bot ログを参照してください。"
+    _send_discord_notification(msg)
+
+
+def _notify_ask_complete(
+    question: str,
+    answer: Any,
+    error: Exception | None,
+    started_at: datetime,
+) -> None:
+    """spawn_user_background の on_complete 用: ask ジョブ完了を Discord に通知。"""
+    elapsed = (datetime.now() - started_at).total_seconds()
+    if error:
+        msg = f"❌ ask 失敗 ({elapsed:.0f}s): {error}"
+    else:
+        ans_str = str(answer or "")
+        preview = ans_str[:500] + ("..." if len(ans_str) > 500 else "")
+        msg = (
+            f"✅ ask 完了 ({elapsed:.0f}s)\n"
+            f"**質問**: {question[:200]}\n"
+            f"**回答**: {preview}"
+        )
+    _send_discord_notification(msg)
+
+
+def _schedule_completion_webhook_for_promoted_job(
+    slot: PriorityJobSlot,
+    job_name: str,
+    started_at: datetime,
+    question: str | None = None,
+) -> None:
+    """try_run_user_sync が soft_timeout 超過で promote したジョブの完了を監視し、
+    完了時に Discord webhook で通知する。
+
+    slot.is_running が False になるまでポーリングし、完了を検知して通知する。
+    """
+    import time as _time
+
+    def _wait_and_notify() -> None:
+        while slot.is_running:
+            _time.sleep(1.0)
+        elapsed = (datetime.now() - started_at).total_seconds()
+        if question:
+            msg = (
+                f"✅ {job_name} 完了 ({elapsed:.0f}s)\n"
+                f"**質問**: {question[:200]}\n"
+                f"回答は finance bot ログを参照してください。"
+            )
+        else:
+            msg = f"✅ {job_name} 完了 ({elapsed:.0f}s)\n詳細は finance bot ログを参照してください。"
+        _send_discord_notification(msg)
+
+    threading.Thread(
+        target=_wait_and_notify,
+        daemon=True,
+        name=f"webhook-{job_name}",
+    ).start()
+
+
 # ── POST /run/trade ───────────────────────────────────────────────
 
 @app.post("/run/trade", dependencies=[Depends(_verify_api_key)])
 def run_trade() -> dict[str, Any]:
-    """取引判定ループを手動実行する（同期・job_lock取得）。実行後の最新状態を返す。"""
-    assert _config is not None and _job_lock is not None
+    """取引判定ループを手動実行する。
+
+    soft_timeout 内に完了したら結果を同期返答。超過したら "accepted" を返し、
+    バックグラウンドで継続 + 完了時に Discord webhook で通知する。
+    既に他のLLMジョブが走行中なら即座に "accepted" を返してキュー待機する。
+    """
+    assert _config is not None and _llm_slot is not None
     assert _store is not None and _analysis_store is not None
     assert _price_store is not None and _hold_store is not None
 
     from src.trading_cycle import run_trading_cycle as _run_trading_cycle
 
     started_at = datetime.now()
-    with _job_lock:
+    soft_timeout = _config.api.run_trade_soft_timeout_sec
+
+    def _job() -> None:
         _run_trading_cycle(_config, _store, _price_store, _analysis_store, _hold_store)
-    elapsed = (datetime.now() - started_at).total_seconds()
 
-    # 実行後の最新状態を取得
-    state_store = StateStore(_config.state_dir)
-    pm = PositionManager(state_store, _config.trading.initial_balance, context="API_RunTrade")
-    account = pm.get_account_state()
+    status, result = _llm_slot.try_run_user_sync(_job, soft_timeout=soft_timeout)
 
-    positions = []
-    for pos in account.open_positions:
-        entry: dict[str, Any] = {
-            "pair":          pos.pair,
-            "direction":     pos.direction,
-            "entry_price":   pos.entry_price,
-            "stop_loss":     pos.stop_loss,
-            "take_profit":   pos.take_profit,
-            "position_size": pos.position_size,
-            "opened_at":     pos.opened_at.isoformat(),
+    if status == "completed":
+        # 同期で完了 → 現在の口座状態を返す
+        elapsed = (datetime.now() - started_at).total_seconds()
+        state_store = StateStore(_config.state_dir)
+        pm = PositionManager(state_store, _config.trading.initial_balance, context="API_RunTrade")
+        account = pm.get_account_state()
+        return {
+            "status": "completed",
+            "elapsed_seconds": round(elapsed, 1),
+            "executed_at": started_at.isoformat(),
+            "balance": account.balance,
+            "open_positions_count": len(account.open_positions),
+            "total_trades": account.total_trades,
         }
-        try:
-            current = fetch_current_price(pos.pair).price
-            mult = 1 if pos.direction == "buy" else -1
-            entry["current_price"] = current
-            entry["unrealized_pnl"] = round(
-                (current - pos.entry_price) * pos.position_size * mult, 2
-            )
-        except Exception:
-            entry["current_price"] = None
-            entry["unrealized_pnl"] = None
-        positions.append(entry)
 
-    pnl = account.balance - account.initial_balance
+    if status == "completed_with_error":
+        raise HTTPException(status_code=500, detail=f"run_trade failed: {result}")
+
+    # status == "accepted_background"
+    if _llm_slot.is_running:
+        # try_run_user_sync が soft_timeout 超過で promote した → 既にバックグラウンド化済み
+        _schedule_completion_webhook_for_promoted_job(
+            slot=_llm_slot,
+            job_name="取引サイクル",
+            started_at=started_at,
+        )
+    else:
+        # スロットが他のジョブで占有中 → キュー待機する
+        accepted = _llm_slot.spawn_user_background(
+            _job,
+            on_complete=lambda r, e: _notify_trade_complete(started_at, e),
+        )
+        if not accepted:
+            raise HTTPException(
+                status_code=409,
+                detail="他のユーザージョブが既にキュー待機中です。しばらく経ってから再試行してください。",
+            )
+
     return {
-        "status":          "completed",
-        "elapsed_seconds": round(elapsed, 1),
-        "executed_at":     started_at.isoformat(),
-        "balance":         account.balance,
-        "pnl":             round(pnl, 2),
-        "pnl_pct":         round(pnl / account.initial_balance * 100, 2),
-        "total_trades":    account.total_trades,
-        "open_positions":  positions,
+        "status": "accepted",
+        "message": "取引サイクルを実行中です。完了時にDiscordへ通知します。",
+        "started_at": started_at.isoformat(),
     }
 
 
@@ -538,8 +639,12 @@ class _AskRequest(BaseModel):
 
 @app.post("/ask", dependencies=[Depends(_verify_api_key)])
 def ask(body: _AskRequest) -> dict[str, Any]:
-    """FX分析LLMへ質問する（同期・LLM呼び出しあり）。UIはローディング表示を推奨。"""
-    assert _config is not None and _store is not None and _analysis_store is not None
+    """FX分析LLMへ質問する。
+
+    soft_timeout 内に完了したら同期返答、超過したら "accepted" + Discord通知。
+    """
+    assert _config is not None and _llm_slot is not None
+    assert _store is not None and _analysis_store is not None
 
     message = body.message.strip()
     if not message:
@@ -548,17 +653,50 @@ def ask(body: _AskRequest) -> dict[str, Any]:
     from src.trading_cycle import run_ask as _run_ask
 
     started_at = datetime.now()
-    try:
-        response = _run_ask(message, _config, _store, _analysis_store)
-    except Exception as e:
-        logger.error(f"[API] /ask failed: {e}", exc_info=True)
-        raise HTTPException(status_code=504, detail=f"LLM error: {e}")
-    elapsed = (datetime.now() - started_at).total_seconds()
+    soft_timeout = _config.api.ask_soft_timeout_sec
+
+    def _job() -> str:
+        return _run_ask(message, _config, _store, _analysis_store)
+
+    status, result = _llm_slot.try_run_user_sync(_job, soft_timeout=soft_timeout)
+
+    if status == "completed":
+        elapsed = (datetime.now() - started_at).total_seconds()
+        return {
+            "message": message,
+            "response": result,
+            "elapsed_seconds": round(elapsed, 1),
+            "status": "completed",
+        }
+
+    if status == "completed_with_error":
+        logger.error(f"[API] /ask failed: {result}", exc_info=isinstance(result, BaseException))
+        raise HTTPException(status_code=504, detail=f"LLM error: {result}")
+
+    # accepted_background: soft_timeout 超過 or スロット占有中
+    if _llm_slot.is_running:
+        _schedule_completion_webhook_for_promoted_job(
+            slot=_llm_slot,
+            job_name="ask",
+            started_at=started_at,
+            question=message,
+        )
+    else:
+        accepted = _llm_slot.spawn_user_background(
+            _job,
+            on_complete=lambda r, e: _notify_ask_complete(message, r, e, started_at),
+        )
+        if not accepted:
+            raise HTTPException(
+                status_code=409,
+                detail="他のユーザージョブが既にキュー待機中です。しばらく経ってから再試行してください。",
+            )
 
     return {
-        "message":         message,
-        "response":        response,
-        "elapsed_seconds": round(elapsed, 1),
+        "status": "accepted",
+        "message": message,
+        "notice": "質問を受け付けました。回答が出来次第 Discord へ通知します。",
+        "started_at": started_at.isoformat(),
     }
 
 
@@ -567,7 +705,7 @@ def ask(body: _AskRequest) -> dict[str, Any]:
 @app.post("/close/{pair}", dependencies=[Depends(_verify_api_key)])
 async def close_position(pair: str) -> dict[str, Any]:
     """ポジションを緊急決済する。"""
-    assert _config is not None and _job_lock is not None
+    assert _config is not None
 
     state_store = StateStore(_config.state_dir)
     pm = PositionManager(state_store, _config.trading.initial_balance, context="API_Close")
@@ -589,8 +727,7 @@ async def close_position(pair: str) -> dict[str, Any]:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Price fetch failed: {e}")
 
-    with _job_lock:
-        closed = pm.close_position(pos.order_id, current, "manual")
+    closed = pm.close_position(pos.order_id, current, "manual")
 
     if closed is None:
         raise HTTPException(status_code=500, detail="Close failed")
@@ -643,18 +780,18 @@ def start_api_server(
     config: AppConfig,
     store: VectorStore,
     analysis_store: AnalysisStore,
-    job_lock: threading.Lock,
+    llm_slot: PriorityJobSlot,
     price_store: PriceStore,
     hold_store,        # HoldDecisionStore
     forecast_store,    # ForecastStore
 ) -> threading.Thread:
     """バックグラウンドスレッドで uvicorn を起動する。"""
-    global _config, _store, _analysis_store, _job_lock, _started_at
+    global _config, _store, _analysis_store, _llm_slot, _started_at
     global _price_store, _hold_store, _forecast_store
     _config = config
     _store = store
     _analysis_store = analysis_store
-    _job_lock = job_lock
+    _llm_slot = llm_slot
     _price_store = price_store
     _hold_store = hold_store
     _forecast_store = forecast_store
