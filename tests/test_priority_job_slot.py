@@ -68,7 +68,8 @@ def test_try_run_user_sync_exception_returns_error():
     assert isinstance(result, ValueError)
 
 
-def test_try_run_user_sync_timeout_returns_accepted_background():
+def test_try_run_user_sync_timeout_returns_promoted():
+    """soft_timeout 超過時: worker は既に起動済みで裏で継続中 → "promoted"。"""
     slot = PriorityJobSlot("test")
     release = threading.Event()
 
@@ -77,15 +78,22 @@ def test_try_run_user_sync_timeout_returns_accepted_background():
         return "done"
 
     status, result = slot.try_run_user_sync(_slow_fn, soft_timeout=0.2)
-    assert status == "accepted_background"
+    assert status == "promoted"
     assert result is None
+
+    # promoted ならスロットはまだ占有中 (worker 実行中)
+    assert slot.is_running is True
 
     # 解放してバックグラウンド完了を待つ
     release.set()
-    time.sleep(0.3)
+    time.sleep(0.5)
+    assert slot.is_running is False
 
 
-def test_try_run_user_sync_when_slot_busy_returns_accepted_background():
+def test_try_run_user_sync_when_slot_busy_returns_slot_busy():
+    """他ジョブがスロット占有中: worker 未起動 → "slot_busy"。
+    呼び出し側ジョブは実行されていない。
+    """
     slot = PriorityJobSlot("test")
     bg_release = threading.Event()
     bg_started = threading.Event()
@@ -98,15 +106,19 @@ def test_try_run_user_sync_when_slot_busy_returns_accepted_background():
     threading.Thread(target=lambda: slot.try_run_scheduled(_bg_fn), daemon=True).start()
     bg_started.wait(timeout=1.0)
 
-    # この間 try_run_user_sync は accepted_background を即返すべき
+    # この間 try_run_user_sync は slot_busy を即返し、user の fn は呼ばれない
     new_called = threading.Event()
     status, result = slot.try_run_user_sync(
         lambda: new_called.set(), soft_timeout=0.1
     )
-    assert status == "accepted_background"
+    assert status == "slot_busy"
+    # 重要: user ジョブは実行されていないことを確認
+    assert not new_called.is_set()
 
     bg_release.set()
     time.sleep(0.3)
+    # bg 終了後も user ジョブは勝手に実行されない (呼び出し側が spawn_user_background する想定)
+    assert not new_called.is_set()
 
 
 # ── spawn_user_background ────────────────────────────────────

@@ -567,16 +567,15 @@ def run_trade() -> dict[str, Any]:
     if status == "completed_with_error":
         raise HTTPException(status_code=500, detail=f"run_trade failed: {result}")
 
-    # status == "accepted_background"
-    if _llm_slot.is_running:
-        # try_run_user_sync が soft_timeout 超過で promote した → 既にバックグラウンド化済み
+    if status == "promoted":
+        # soft_timeout 超過で worker は既にバックグラウンド継続中 → 完了ポーリングを仕掛ける
         _schedule_completion_webhook_for_promoted_job(
             slot=_llm_slot,
             job_name="取引サイクル",
             started_at=started_at,
         )
-    else:
-        # スロットが他のジョブで占有中 → キュー待機する
+    elif status == "slot_busy":
+        # 他ジョブが占有中で worker 未起動 → spawn_user_background でキューに入れる
         accepted = _llm_slot.spawn_user_background(
             _job,
             on_complete=lambda r, e: _notify_trade_complete(started_at, e),
@@ -673,15 +672,16 @@ def ask(body: _AskRequest) -> dict[str, Any]:
         logger.error(f"[API] /ask failed: {result}", exc_info=isinstance(result, BaseException))
         raise HTTPException(status_code=504, detail=f"LLM error: {result}")
 
-    # accepted_background: soft_timeout 超過 or スロット占有中
-    if _llm_slot.is_running:
+    if status == "promoted":
+        # soft_timeout 超過で worker は既にバックグラウンド継続中
         _schedule_completion_webhook_for_promoted_job(
             slot=_llm_slot,
             job_name="ask",
             started_at=started_at,
             question=message,
         )
-    else:
+    elif status == "slot_busy":
+        # 他ジョブが占有中で worker 未起動 → キューに入れる
         accepted = _llm_slot.spawn_user_background(
             _job,
             on_complete=lambda r, e: _notify_ask_complete(message, r, e, started_at),
@@ -707,27 +707,32 @@ async def close_position(pair: str) -> dict[str, Any]:
     """ポジションを緊急決済する。"""
     assert _config is not None
 
+    # state_store のファイルロックを取得してから PositionManager を作成し、
+    # load → close → save の read-modify-write を他のジョブと直列化する。
+    # これにより price_monitor のトレーリング更新や run_trading_cycle の
+    # 決済処理との競合を防ぐ。
     state_store = StateStore(_config.state_dir)
-    pm = PositionManager(state_store, _config.trading.initial_balance, context="API_Close")
-    account = pm.get_account_state()
+    with state_store._lock:
+        pm = PositionManager(state_store, _config.trading.initial_balance, context="API_Close")
+        account = pm.get_account_state()
 
-    pos = next(
-        (p for p in account.open_positions if p.pair.upper() == pair.upper()),
-        None,
-    )
-    if pos is None:
-        open_pairs = [p.pair for p in account.open_positions]
-        raise HTTPException(
-            status_code=404,
-            detail=f"Position not found: {pair}. Open: {open_pairs}",
+        pos = next(
+            (p for p in account.open_positions if p.pair.upper() == pair.upper()),
+            None,
         )
+        if pos is None:
+            open_pairs = [p.pair for p in account.open_positions]
+            raise HTTPException(
+                status_code=404,
+                detail=f"Position not found: {pair}. Open: {open_pairs}",
+            )
 
-    try:
-        current = fetch_current_price(pos.pair).price
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Price fetch failed: {e}")
+        try:
+            current = fetch_current_price(pos.pair).price
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Price fetch failed: {e}")
 
-    closed = pm.close_position(pos.order_id, current, "manual")
+        closed = pm.close_position(pos.order_id, current, "manual")
 
     if closed is None:
         raise HTTPException(status_code=500, detail="Close failed")

@@ -13,7 +13,7 @@ from typing import Any, Callable, Literal
 
 logger = logging.getLogger(__name__)
 
-UserSyncStatus = Literal["completed", "completed_with_error", "accepted_background"]
+UserSyncStatus = Literal["completed", "completed_with_error", "promoted", "slot_busy"]
 
 
 class PriorityJobSlot:
@@ -98,13 +98,15 @@ class PriorityJobSlot:
         戻り値:
             ("completed", result)            → soft_timeout 内に正常完了
             ("completed_with_error", exc)    → soft_timeout 内に例外完了
-            ("accepted_background", None)    → スロット占有中 or 時間超過で非同期化、
-                                               呼び出し側が spawn_user_background を呼ぶべき
+            ("promoted", None)               → soft_timeout 超過 → ジョブはバックグラウンドで継続中
+                                               呼び出し側は完了 webhook のためのポーリングを仕掛けるだけでよい
+            ("slot_busy", None)              → 他ジョブが占有中で worker 未起動
+                                               呼び出し側は spawn_user_background で再投入する必要あり
         """
         # スロット取得を試みる
         if not self._slot_lock.acquire(blocking=False):
-            # 既に占有中 → 非同期化へ
-            return ("accepted_background", None)
+            # 既に占有中 → worker 未起動、呼び出し側で spawn_user_background を呼ぶ
+            return ("slot_busy", None)
 
         # 取れた → 別スレッドで実行し soft_timeout 待機
         result_holder: dict[str, Any] = {}
@@ -150,7 +152,7 @@ class PriorityJobSlot:
                 self._slot_lock.release()
 
             threading.Thread(target=_cleanup_after_worker, daemon=True).start()
-            return ("accepted_background", None)
+            return ("promoted", None)
 
     # ── ユーザー非同期用 ────────────────────────────────────
 
