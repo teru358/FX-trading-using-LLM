@@ -286,3 +286,179 @@ def compute_technical_score(
         confidence=confidence,
         direction=direction,
     )
+
+
+# ── Multi-Timeframe 合成 ──────────────────────────────────────
+
+
+@dataclass
+class MultiTfTechnicalScore:
+    """MTF 合成後のスコア。
+
+    compute_multi_tf_technical_score が返す拡張データ。
+    tf_scores に各タイムフレームの個別 TechnicalScore を保持し、
+    total_score / confidence / direction はそれらを weight 合成 + alignment
+    bonus/減衰で導出した最終値。
+
+    既存呼び出し側は .as_technical_score() で従来の TechnicalScore に落として
+    互換インターフェースとして使える。
+    """
+    tf_scores: dict[str, TechnicalScore]       # {"long": ..., "medium": ..., "short": ...}
+    tf_weights: dict[str, float]                # 実際に使われた weight (enabled TF のみ)
+    alignment: float                             # 0.33 / 0.67 / 1.0
+    raw_score: float                             # weight 合成後 (alignment 未適用)
+    total_score: float                           # alignment 適用後の最終 [-1, 1]
+    confidence: float                            # [0, 1]
+    direction: str                               # "long" | "short" | "neutral"
+
+    def as_technical_score(self) -> TechnicalScore:
+        """既存インターフェース互換の TechnicalScore を返す。
+
+        カテゴリ別スコアは短期 TF の値を採用 (エントリータイミング判定は
+        短期が中心のため)。短期 TF がない場合は最初に見つかった TF を使う。
+        """
+        ref = self.tf_scores.get("short") or next(iter(self.tf_scores.values()), None)
+        if ref is None:
+            return TechnicalScore(
+                sma_score=0.0, rsi_score=0.0, macd_score=0.0,
+                ichimoku_score=0.0, bb_score=0.0, pattern_score=0.0,
+                adx_factor=1.0,
+                total_score=self.total_score,
+                confidence=self.confidence,
+                direction=self.direction,
+            )
+        return TechnicalScore(
+            sma_score=ref.sma_score,
+            rsi_score=ref.rsi_score,
+            macd_score=ref.macd_score,
+            ichimoku_score=ref.ichimoku_score,
+            bb_score=ref.bb_score,
+            pattern_score=ref.pattern_score,
+            adx_factor=ref.adx_factor,
+            total_score=self.total_score,
+            confidence=self.confidence,
+            direction=self.direction,
+        )
+
+    def format_for_prompt(self) -> str:
+        """LLM プロンプト用の簡潔な MTF サマリー。"""
+        lines = [
+            f"[MTF] total_bias={self.total_score:+.3f}  "
+            f"direction={self.direction}  confidence={self.confidence:.2f}  "
+            f"alignment={self.alignment:.2f}",
+        ]
+        for tf_name in ("long", "medium", "short"):
+            if tf_name not in self.tf_scores:
+                continue
+            s = self.tf_scores[tf_name]
+            w = self.tf_weights.get(tf_name, 0.0)
+            lines.append(
+                f"  {tf_name:6s}: score={s.total_score:+.3f}  "
+                f"dir={s.direction:7s}  conf={s.confidence:.2f}  (weight={w:.2f})"
+            )
+        return "\n".join(lines)
+
+
+def _direction_sign(direction: str) -> int:
+    return {"long": 1, "short": -1, "neutral": 0}.get(direction, 0)
+
+
+def _alignment_score(signs: list[int]) -> float:
+    """方向符号リストから alignment スコアを計算。
+
+    全 neutral → 0.33 (不確実)
+    全て同じ非 neutral → 1.0
+    2/3 同方向 → 0.67
+    ミックス → 0.33
+    """
+    non_zero = [s for s in signs if s != 0]
+    if not non_zero:
+        return 0.33
+    if all(s == non_zero[0] for s in non_zero):
+        # 全 non-neutral が同方向 (neutral が混じってもここに該当)
+        return 1.0 if len(non_zero) >= 2 else 0.67
+    # 方向が混在
+    pos = sum(1 for s in signs if s > 0)
+    neg = sum(1 for s in signs if s < 0)
+    total = max(pos, neg)
+    if total >= 2 and (pos == 0 or neg == 0):
+        return 1.0
+    if max(pos, neg) >= 2:
+        return 0.67
+    return 0.33
+
+
+def compute_multi_tf_technical_score(
+    tf_scores: dict[str, TechnicalScore],
+    weights: dict[str, float],
+) -> MultiTfTechnicalScore:
+    """複数タイムフレームの TechnicalScore を合成する。
+
+    Args:
+        tf_scores: {"long": TechnicalScore, "medium": ..., "short": ...}
+                   欠落した TF はその TF が計算できなかったことを示す。
+        weights:   {"long": 0.40, "medium": 0.35, "short": 0.25} など。
+                   欠落 TF は合成から除外され、残りの weight を再正規化。
+
+    合成ロジック:
+        raw_score = Σ (tf.total_score × tf.weight) / Σ weight
+        alignment = 方向一致率 (0.33 / 0.67 / 1.0)
+        final_score = raw_score × (0.5 + 0.5 × alignment)
+                      - alignment 1.0 で 100%、0.33 で 約67%、不一致なら減衰
+        confidence = avg(tf.confidence) × (0.8 + 0.2 × alignment)
+    """
+    present = {name: s for name, s in tf_scores.items() if s is not None}
+    active_weights = {
+        name: weights.get(name, 0.0) for name in present
+        if weights.get(name, 0.0) > 0.0
+    }
+    total_weight = sum(active_weights.values())
+
+    if total_weight <= 0.0 or not present:
+        return MultiTfTechnicalScore(
+            tf_scores={},
+            tf_weights={},
+            alignment=0.33,
+            raw_score=0.0,
+            total_score=0.0,
+            confidence=0.5,
+            direction="neutral",
+        )
+
+    # weight 再正規化した係数で合成
+    raw_score = sum(
+        present[name].total_score * (w / total_weight)
+        for name, w in active_weights.items()
+    )
+
+    signs = [_direction_sign(present[name].direction) for name in active_weights]
+    alignment = _alignment_score(signs)
+
+    # 減衰/増幅
+    final_score = raw_score * (0.5 + 0.5 * alignment)
+    final_score = _clamp(final_score)
+
+    # confidence: 各 TF confidence の重み付き平均 × alignment bonus
+    weighted_conf = sum(
+        present[name].confidence * (w / total_weight)
+        for name, w in active_weights.items()
+    )
+    confidence = _clamp(weighted_conf * (0.8 + 0.2 * alignment), 0.1, 0.95)
+
+    # 方向判定
+    if final_score > 0.05:
+        direction = "long"
+    elif final_score < -0.05:
+        direction = "short"
+    else:
+        direction = "neutral"
+
+    return MultiTfTechnicalScore(
+        tf_scores=dict(present),
+        tf_weights=active_weights,
+        alignment=alignment,
+        raw_score=raw_score,
+        total_score=final_score,
+        confidence=confidence,
+        direction=direction,
+    )
