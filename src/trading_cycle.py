@@ -292,6 +292,70 @@ async def _generate_cycle_reflections(
             logger.warning(f"Reflection failed for {pos.pair}: {e}")
 
 
+def _apply_atr_sltp_to_signal(
+    sig,
+    config: AppConfig,
+    position_mgr: PositionManager,
+    price_store: PriceStore,
+    adaptive_store: "AdaptiveParamsStore",
+    price_provider: PriceProvider | None = None,
+):
+    """ATR(14) ベースで SL/TP を再計算し、シグナルへ反映する。
+
+    成功時:
+      - sig.stop_loss / sig.take_profit を計算結果で上書き
+      - sig.position_size を新しい SL 距離でリスク計算し直して上書き
+      - SLTPResult を返す (session 記録に使う)
+
+    OHLCV 取得失敗 / ATR 不足 / その他例外時は None を返し、シグナルは無変更。
+    """
+    atr_params = adaptive_store.get_params(sig.pair)
+    try:
+        price_data = _get_ohlcv(
+            sig.pair, config.trading.lookback_days,
+            config.trading.ohlcv_interval, price_store,
+            price_provider,
+        )
+        atr_val = _compute_atr_from_price_data(price_data)
+        if not atr_val or atr_val <= 0:
+            return None
+
+        sltp_result = calculate_sl_tp(
+            direction=sig.action,
+            entry_price=sig.entry_price,
+            atr_value=atr_val,
+            sl_atr_mult=atr_params["sl_atr_mult"],
+            tp_atr_mult=atr_params["tp_atr_mult"],
+            llm_sl=sig.stop_loss,
+            llm_tp=sig.take_profit,
+            swing_highs=list(getattr(sig.price, "entry_zone", (0, 0))),
+            swing_lows=[],
+            key_support=getattr(sig.price, "key_support", None),
+            key_resistance=getattr(sig.price, "key_resistance", None),
+        )
+        sig.stop_loss = sltp_result.computed_sl
+        sig.take_profit = sltp_result.computed_tp
+
+        from src.signals.signal_combiner import _calculate_position_size
+        pair_cfg_for_size = next(
+            (p for p in config.tradeable_instruments if p.symbol == sig.pair), None
+        )
+        if pair_cfg_for_size:
+            sig.position_size = _calculate_position_size(
+                balance=position_mgr.get_account_state().balance,
+                risk_pct=config.trading.risk_per_trade,
+                entry=sig.entry_price,
+                stop_loss=sltp_result.computed_sl,
+                pip_value=pair_cfg_for_size.pip_value,
+                min_lot_size=config.trading.min_lot_size,
+                lot_unit=config.trading.lot_unit,
+            )
+        return sltp_result
+    except Exception as e:
+        logger.warning(f"[ATR] {sig.pair}: ATR SL/TP calculation failed — {e}")
+        return None
+
+
 async def _finalize_closed_orders(
     closed_orders: list,
     config: AppConfig,
@@ -656,50 +720,10 @@ async def trading_cycle(
             sig.combined_score = round(adjusted_score, 4)
 
         if sig.action != "hold":
-            # ATRベースSL/TP算出
-            sltp_result = None
-            atr_params = adaptive_store.get_params(sig.pair)
-            try:
-                price_data = _get_ohlcv(
-                    sig.pair, config.trading.lookback_days,
-                    config.trading.ohlcv_interval, price_store,
-                    price_provider,
-                )
-                atr_val = _compute_atr_from_price_data(price_data)
-                if atr_val and atr_val > 0:
-                        sltp_result = calculate_sl_tp(
-                            direction=sig.action,
-                            entry_price=sig.entry_price,
-                            atr_value=atr_val,
-                            sl_atr_mult=atr_params["sl_atr_mult"],
-                            tp_atr_mult=atr_params["tp_atr_mult"],
-                            llm_sl=sig.stop_loss,
-                            llm_tp=sig.take_profit,
-                            swing_highs=list(getattr(sig.price, "entry_zone", (0, 0))),
-                            swing_lows=[],
-                            key_support=getattr(sig.price, "key_support", None),
-                            key_resistance=getattr(sig.price, "key_resistance", None),
-                        )
-                        # Override TradeSignal SL/TP with computed values
-                        sig.stop_loss = sltp_result.computed_sl
-                        sig.take_profit = sltp_result.computed_tp
-                        # Recalculate position size with new SL distance
-                        from src.signals.signal_combiner import _calculate_position_size
-                        pair_cfg_for_size = next(
-                            (p for p in config.tradeable_instruments if p.symbol == sig.pair), None
-                        )
-                        if pair_cfg_for_size:
-                            sig.position_size = _calculate_position_size(
-                                balance=position_mgr.get_account_state().balance,
-                                risk_pct=config.trading.risk_per_trade,
-                                entry=sig.entry_price,
-                                stop_loss=sltp_result.computed_sl,
-                                pip_value=pair_cfg_for_size.pip_value,
-                                min_lot_size=config.trading.min_lot_size,
-                                lot_unit=config.trading.lot_unit,
-                            )
-            except Exception as e:
-                logger.warning(f"[ATR] {sig.pair}: ATR SL/TP calculation failed — {e}")
+            sltp_result = _apply_atr_sltp_to_signal(
+                sig, config, position_mgr, price_store, adaptive_store,
+                price_provider=price_provider,
+            )
 
             order = broker.execute_signal(sig, position_mgr, macro_context=macro_ctxs.get(sig.pair, ""))
             if order:
