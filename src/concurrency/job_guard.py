@@ -21,8 +21,19 @@ class JobGuard:
     異なるガードインスタンスのジョブは完全独立 (並行可)。
     """
 
-    def __init__(self, name: str) -> None:
+    def __init__(
+        self,
+        name: str,
+        skip_predicate: Callable[[], bool] | None = None,
+    ) -> None:
+        """
+        Args:
+            name: ログ表示用のジョブ名
+            skip_predicate: 呼び出し時 True を返すと spawn をスキップする (ログも出さない)。
+                市場休場中など「ジョブが走るべきではない状態」の判定に使う。
+        """
         self._name = name
+        self._skip_predicate = skip_predicate
         self._lock = threading.Lock()
         self._running = False
         self._started_at: datetime | None = None
@@ -50,9 +61,13 @@ class JobGuard:
     def spawn_if_idle(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> bool:
         """実行中でなければ別スレッドで fn を spawn する。
 
+        ``skip_predicate`` が設定されていて True を返した場合は、
+        何もせず (ログも出さず) False を返す。
         既に実行中なら False を返し、warning ログを出す。
         fn が例外を投げても guard は確実に解放される。
         """
+        if self._skip_predicate is not None and self._skip_predicate():
+            return False
         with self._lock:
             if self._running:
                 elapsed = (datetime.now() - self._started_at).total_seconds() if self._started_at else 0

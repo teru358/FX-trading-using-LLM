@@ -30,7 +30,7 @@ from src.rag.prompt_formatter import (
     format_reflections_for_prompt,
 )
 from src.rag.vector_store import VectorStore
-from src.trading.market_hours import is_market_open, market_status_label
+from src.trading.market_hours import is_market_open
 
 logger = logging.getLogger(__name__)
 
@@ -292,7 +292,7 @@ async def collect_all_technical(
 ) -> None:
     """全有効銘柄のテクニカル分析を2フェーズで収集してストアに格納する。"""
     if not force and not is_market_open():
-        logger.info(f"Market {market_status_label()}. Skipping technical collection.")
+        # 休場中は無音スキップ (MarketStateTracker が遷移/ハートビートのみログ化)
         return
 
     llm_price = create_llm_client(config, "price_analysis")

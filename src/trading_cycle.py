@@ -41,7 +41,7 @@ from src.signals.signal_combiner import combine_signals
 from src.trading.atr_calculator import calculate_sl_tp
 from src.trading.entry_context_builder import build_entry_context
 from src.trading.live_broker import create_broker
-from src.trading.market_hours import is_market_open, market_status_label
+from src.trading.market_hours import is_market_open
 from src.trading.position_manager import PositionManager
 from src.trading.position_reviewer import review_open_positions
 from src.persistence.adaptive_params_store import AdaptiveParamsStore
@@ -866,7 +866,7 @@ async def trading_cycle(
     )
 
     if not is_market_open(run_start):
-        logger.info(f"Market {market_status_label(run_start)}. Skipping trading cycle.")
+        # 休場中は無音スキップ (MarketStateTracker が遷移/ハートビートのみログ化)
         return
 
     embed_fn = partial(

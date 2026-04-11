@@ -25,6 +25,7 @@ from src.rag.vector_store import VectorStore
 from src.startup import startup_checks
 from src.data.analysis_store import ForecastStore, HoldDecisionStore
 from src.data.price_provider import PriceProvider
+from src.trading.market_state import market_skip_check
 from src.trading_cycle import run_exit_check_cycle, run_forecast_cycle, run_trading_cycle
 from src.analysis.prompt_stats import estimate_prompt_size
 
@@ -34,10 +35,12 @@ _stop = threading.Event()
 _llm_slot = PriorityJobSlot("llm")
 
 # 個別ジョブのガード (LLM 不使用の軽量ジョブ)
+# FX 市場休場中はスケジューラから呼ばれても spawn 自体しない (無音スキップ)。
+# econ_calendar は市場営業とは独立した日次フェッチなので予定どおり動かす。
 _guards: dict[str, JobGuard] = {
-    "price_monitor": JobGuard("price_monitor"),
-    "exit_check": JobGuard("exit_check"),
-    "forecast": JobGuard("forecast"),
+    "price_monitor": JobGuard("price_monitor", skip_predicate=market_skip_check),
+    "exit_check": JobGuard("exit_check", skip_predicate=market_skip_check),
+    "forecast": JobGuard("forecast", skip_predicate=market_skip_check),
     "econ": JobGuard("econ_calendar"),
 }
 
@@ -53,8 +56,14 @@ def _run_with_slot(fn, *args, **kwargs) -> None:
     """スケジューラから呼ばれたLLMジョブをスロット経由で実行する。
 
     スレッドで spawn してからスロット取得を試みる (非 blocking)。
+    ``_market_aware=True`` を渡すと、FX 市場休場中は無音スキップする
+    (テクニカル/取引サイクルに使用)。ニュース収集などは休日でも走る想定。
     """
+    market_aware = kwargs.pop("_market_aware", False)
+
     def _try() -> None:
+        if market_aware and market_skip_check():
+            return
         _llm_slot.try_run_scheduled(fn, *args, **kwargs)
     threading.Thread(
         target=_try,
@@ -232,6 +241,7 @@ def main() -> None:
             _run_with_slot,
             run_technical_collection, config, store, price_store, analysis_store,
             price_provider=price_provider,
+            _market_aware=True,
         )
 
     # 5. 予測サイクル（LLMなし・取引判定の直前）
@@ -251,6 +261,7 @@ def main() -> None:
             _run_with_slot,
             run_trading_cycle, config, store, price_store, analysis_store, hold_store,
             price_provider=price_provider,
+            _market_aware=True,
         )
 
     # 経済指標カレンダー日次フェッチ (オプション)
@@ -282,6 +293,15 @@ def main() -> None:
     # 起動直後にニュース収集+テクニカル分析を1回実行
     # prices.db が存在しない場合（初回起動）は市場時間を無視して強制実行
     _console.print(Rule("[dim]Initial collection[/dim]", style="dim"))
+
+    # 休場中起動の明示表示 (同時に MarketStateTracker の初期状態ログも発行される)
+    if market_skip_check():
+        _console.print(
+            "[yellow]Market is currently closed.[/yellow] "
+            "[dim]Price-dependent jobs (price_monitor / exit_check / forecast / "
+            "technical / trading) will stay paused until market open.[/dim]"
+        )
+
     if args.skip_news:
         _console.print("[dim]--skip-news: 初回ニュース取得をスキップ[/dim]")
     else:

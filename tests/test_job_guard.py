@@ -45,6 +45,52 @@ def test_spawn_if_idle_blocks_duplicate_while_running():
     assert second_started.wait(timeout=1.0)
 
 
+def test_skip_predicate_blocks_spawn_silently():
+    """skip_predicate が True を返すと fn は呼ばれず False が返る。"""
+    called = threading.Event()
+    guard = JobGuard("test", skip_predicate=lambda: True)
+
+    assert guard.spawn_if_idle(lambda: called.set()) is False
+    time.sleep(0.1)
+    assert not called.is_set()
+    # 実行扱いにならないので is_running も False のまま
+    assert guard.is_running is False
+
+
+def test_skip_predicate_false_allows_spawn():
+    """skip_predicate が False を返すと通常通り spawn される。"""
+    called = threading.Event()
+    guard = JobGuard("test", skip_predicate=lambda: False)
+
+    assert guard.spawn_if_idle(lambda: called.set()) is True
+    assert called.wait(timeout=1.0)
+
+
+def test_skip_predicate_toggles_between_calls():
+    """skip_predicate が呼び出しごとに True/False を切り替えても正しく動く。"""
+    allowed = [False]
+    call_count = [0]
+
+    def _predicate() -> bool:
+        return not allowed[0]
+
+    def _fn() -> None:
+        call_count[0] += 1
+
+    guard = JobGuard("test", skip_predicate=_predicate)
+
+    # 最初はブロック
+    assert guard.spawn_if_idle(_fn) is False
+    time.sleep(0.05)
+    assert call_count[0] == 0
+
+    # 許可してから呼び直す
+    allowed[0] = True
+    assert guard.spawn_if_idle(_fn) is True
+    time.sleep(0.2)
+    assert call_count[0] == 1
+
+
 def test_is_running_reflects_state():
     guard = JobGuard("test")
     assert guard.is_running is False
