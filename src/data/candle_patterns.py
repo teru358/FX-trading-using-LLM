@@ -147,7 +147,14 @@ def _detect_doji(df: pd.DataFrame) -> list[str]:
 
 
 def _detect_morning_evening_star(df: pd.DataFrame) -> list[str]:
-    """モーニング/イブニングスター: 3本パターン。"""
+    """モーニング/イブニングスター: 3本パターン。
+
+    classical definition:
+      day1: 大きめの反対方向ロウソク (bearish for morning / bullish for evening)
+      day2: 小実体 (body2 <= body1 * 0.5)
+      day3: day1 と逆方向の大きめロウソク (body3 >= body1 * 0.5)
+            かつ day1 の中点を越えて終値する
+    """
     found_morning = False
     found_evening = False
     if len(df) < 3:
@@ -159,12 +166,14 @@ def _detect_morning_evening_star(df: pd.DataFrame) -> list[str]:
         body1 = _body(o1, c1)
         body2 = _body(o2, c2)
         body3 = _body(o3, c3)
-        # モーニングスター: 陰線 → 小実体 → 陽線
-        if (c1 < o1 and body2 <= body1 * 0.5 and c3 > o3
+        # モーニングスター: 陰線 → 小実体 → 陽線 (day3 は大きめの実体が必要)
+        if (c1 < o1 and body2 <= body1 * 0.5
+                and c3 > o3 and body3 >= body1 * 0.5
                 and c3 > (o1 + c1) / 2):
             found_morning = True
-        # イブニングスター: 陽線 → 小実体 → 陰線
-        if (c1 > o1 and body2 <= body1 * 0.5 and c3 < o3
+        # イブニングスター: 陽線 → 小実体 → 陰線 (day3 は大きめの実体が必要)
+        if (c1 > o1 and body2 <= body1 * 0.5
+                and c3 < o3 and body3 >= body1 * 0.5
                 and c3 < (o1 + c1) / 2):
             found_evening = True
     patterns = []
@@ -333,14 +342,25 @@ def _detect_bb_squeeze(bb_upper: float, bb_lower: float, sma_20: float) -> list[
 
 
 def _detect_atr_contraction(df: pd.DataFrame, current_atr: float) -> list[str]:
-    """ATR収縮: 現在ATRが直近20本の平均ATRの70%以下。"""
-    if len(df) < 20 or current_atr <= 0:
+    """ATR収縮: 現在ATRが直近20本の平均TRの70%以下。
+
+    True Range = max(high-low, |high-prev_close|, |low-prev_close|)
+    Wilder 1978 の正式定義 — 前バーとのギャップを考慮する。
+    """
+    if len(df) < 21 or current_atr <= 0:
         return []
-    # TR を簡易計算
-    high = df["High"].iloc[-20:]
-    low = df["Low"].iloc[-20:]
-    close_prev = df["Close"].iloc[-21:-1] if len(df) >= 21 else df["Close"].iloc[-20:]
-    tr = (high.values - low.values)
+
+    import numpy as np
+
+    high = df["High"].iloc[-20:].to_numpy()
+    low = df["Low"].iloc[-20:].to_numpy()
+    close_prev = df["Close"].iloc[-21:-1].to_numpy()
+
+    tr = np.maximum.reduce([
+        high - low,
+        np.abs(high - close_prev),
+        np.abs(low - close_prev),
+    ])
     avg_tr = float(tr.mean())
     if avg_tr > 0 and current_atr <= avg_tr * 0.7:
         return ["atr_contraction"]
