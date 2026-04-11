@@ -496,93 +496,54 @@ async def _review_hold_decisions(
     hold_store.prune_old()
 
 
-async def trading_cycle(
+async def _phase_close_sl_tp(
+    config: AppConfig,
+    position_mgr: PositionManager,
+    broker,
+    notifier,
+    price_provider: PriceProvider | None,
+) -> list:
+    """Phase 1: SL/TP に到達した既存ポジションをチェックして決済する。"""
+    account = position_mgr.get_account_state()
+    if not account.open_positions:
+        return []
+
+    current_prices: dict[str, float] = {}
+    for pos in account.open_positions:
+        try:
+            current_prices[pos.pair] = _get_price(pos.pair, price_provider)
+        except Exception as e:
+            logger.warning(f"Could not fetch price for {pos.pair}: {e}")
+
+    closed_this_run = broker.check_and_close_positions(
+        account.open_positions, current_prices, position_mgr,
+    )
+    if config.notifier.notify_on_order_close:
+        account_after = position_mgr.get_account_state()
+        for closed in closed_this_run:
+            await notifier.notify_order_closed(OrderClosedEvent(
+                pair=closed.pair,
+                direction=closed.direction,
+                entry_price=closed.entry_price,
+                close_price=closed.close_price or 0.0,
+                realized_pnl=closed.realized_pnl or 0.0,
+                close_reason=closed.close_reason or "manual",
+                balance=account_after.balance,
+                source="trading",
+            ))
+    return closed_this_run
+
+
+async def _phase_analyze_pairs(
     config: AppConfig,
     position_mgr: PositionManager,
     store: VectorStore,
     price_store: PriceStore,
     analysis_store: AnalysisStore,
-    hold_store: HoldDecisionStore,
-    price_provider: PriceProvider | None = None,
-    session_store=None,
-) -> None:
-    """取引サイクルの全5フェーズを実行する。"""
-    run_start = datetime.now(ZoneInfo(config.schedule.timezone))
-    logger.info(f"=== Trading cycle started: {run_start.strftime('%Y-%m-%d %H:%M %Z')} ===")
-
-    broker = create_broker(config.trading.trading_mode)
-    adaptive_store = AdaptiveParamsStore(
-        state_dir=config.state_dir,
-        defaults={
-            "sl_atr_mult": config.trading.sl_atr_mult_default,
-            "tp_atr_mult": config.trading.tp_atr_mult_default,
-        },
-        limits={
-            "sl_atr_mult_min": config.trading.sl_atr_mult_min,
-            "sl_atr_mult_max": config.trading.sl_atr_mult_max,
-            "tp_atr_mult_min": config.trading.tp_atr_mult_min,
-            "tp_atr_mult_max": config.trading.tp_atr_mult_max,
-        },
-    )
-    notifier = create_notifier(config.notifier.notifier)
-    llm_price = create_llm_client(config, "price_analysis")
-    llm_reflect = create_llm_client(config, "reflection")
-    logger.info(
-        f"[TRADE] mode={config.trading.trading_mode} broker={type(broker).__name__} "
-        f"notifier={type(notifier).__name__} "
-        f"price={type(llm_price).__name__}({llm_price.model_name}) "
-        f"reflect={type(llm_reflect).__name__}({llm_reflect.model_name})"
-    )
-
-    if not is_market_open(run_start):
-        logger.info(f"Market {market_status_label(run_start)}. Skipping trading cycle.")
-        return
-
-    # Phase 1: SL/TP確認・クローズ
-    account = position_mgr.get_account_state()
-    closed_this_run = []
-    if account.open_positions:
-        current_prices = {}
-        for pos in account.open_positions:
-            try:
-                current_prices[pos.pair] = _get_price(pos.pair, price_provider)
-            except Exception as e:
-                logger.warning(f"Could not fetch price for {pos.pair}: {e}")
-        closed_this_run = broker.check_and_close_positions(
-            account.open_positions, current_prices, position_mgr
-        )
-        if config.notifier.notify_on_order_close:
-            account_after_close = position_mgr.get_account_state()
-            for closed in closed_this_run:
-                await notifier.notify_order_closed(OrderClosedEvent(
-                    pair=closed.pair,
-                    direction=closed.direction,
-                    entry_price=closed.entry_price,
-                    close_price=closed.close_price or 0.0,
-                    realized_pnl=closed.realized_pnl or 0.0,
-                    close_reason=closed.close_reason or "manual",
-                    balance=account_after_close.balance,
-                    source="trading",
-                ))
-
-    # Phase 1.5: 決済トレードの確定結果ベース振り返りをRAGに保存
-    embed_fn = partial(
-        embed_text,
-        ollama_base_url=config.llm.ollama.base_url,
-        model=config.rag.embedding_model,
-    )
-    await _finalize_closed_orders(
-        closed_this_run, config, store, embed_fn, llm_reflect,
-        adaptive_store, session_store, log_source="[REFLECT/CLOSE]",
-    )
-
-    # Phase 2: 振り返り生成
-    await _generate_cycle_reflections(config, position_mgr, store, llm_reflect, price_provider=price_provider)
-
-    # Phase 2.5: HOLD判断レビュー（前回HOLDの方向性を事実で検証）
-    await _review_hold_decisions(config, hold_store, store, price_provider=price_provider, price_store=price_store)
-
-    # Phase 3: 各ペアを並列分析（蓄積済みスナップショットを集約）
+    llm_price: LLMClient,
+    price_provider: PriceProvider | None,
+) -> tuple[list, dict[str, str]]:
+    """Phase 3: 全ペアを並列分析してシグナル + macro_ctx を生成する。"""
     semaphore = asyncio.Semaphore(config.llm.ollama.max_concurrent)
 
     async def bounded(pair_cfg):
@@ -603,66 +564,225 @@ async def trading_cycle(
     macro_ctxs = {s.pair: m for s, m in signals_with_macro}
     if errors:
         logger.warning(f"{len(errors)} pair(s) failed during analysis.")
+    return signals, macro_ctxs
 
-    # Phase 4a: ポジション再評価（Layer 1〜3）
+
+async def _phase_review_open_positions(
+    config: AppConfig,
+    position_mgr: PositionManager,
+    signals: list,
+    notifier,
+    price_provider: PriceProvider | None,
+) -> list:
+    """Phase 4a: position_review (Layer 1-3) を実行し決済済オーダーを返す。"""
+    if not config.trading.position_review_enabled:
+        return []
+
+    account_for_review = position_mgr.get_account_state()
+    if not account_for_review.open_positions:
+        return []
+
+    signals_by_pair = {s.pair: s for s in signals}
+    review_prices: dict[str, float] = {}
+    for pos in account_for_review.open_positions:
+        try:
+            review_prices[pos.pair] = _get_price(pos.pair, price_provider)
+        except Exception as e:
+            logger.warning(f"[REVIEW] Could not fetch price for {pos.pair}: {e}")
+
+    decisions = review_open_positions(
+        open_positions=account_for_review.open_positions,
+        signals_by_pair=signals_by_pair,
+        current_prices=review_prices,
+        reversal_confidence_min=config.trading.reversal_confidence_min,
+        reversal_score_threshold=config.trading.reversal_score_threshold,
+        max_holding_days=config.trading.max_holding_days,
+        timeout_min_progress_pct=config.trading.timeout_min_progress_pct,
+        profit_lock_min_progress_pct=config.trading.profit_lock_min_progress_pct,
+        profit_lock_score_floor=config.trading.profit_lock_score_floor,
+    )
+
     reviewed_closed = []
-    if config.trading.position_review_enabled:
-        account_for_review = position_mgr.get_account_state()
-        if account_for_review.open_positions:
-            signals_by_pair = {s.pair: s for s in signals}
-            review_prices = {}
-            for pos in account_for_review.open_positions:
-                try:
-                    review_prices[pos.pair] = _get_price(pos.pair, price_provider)
-                except Exception as e:
-                    logger.warning(f"[REVIEW] Could not fetch price for {pos.pair}: {e}")
+    for decision in decisions:
+        price = review_prices.get(decision.pair)
+        if price is None:
+            continue
+        closed_order = position_mgr.close_position(
+            decision.order_id, price, decision.close_reason,
+        )
+        if not closed_order:
+            continue
+        reviewed_closed.append(closed_order)
+        logger.info(
+            f"[REVIEW] {decision.pair}: closed ({decision.close_reason}) — "
+            f"{decision.detail}"
+        )
+        if config.notifier.notify_on_order_close:
+            account_after = position_mgr.get_account_state()
+            await notifier.notify_order_closed(OrderClosedEvent(
+                pair=closed_order.pair,
+                direction=closed_order.direction,
+                entry_price=closed_order.entry_price,
+                close_price=price,
+                realized_pnl=closed_order.realized_pnl or 0.0,
+                close_reason=decision.close_reason,
+                balance=account_after.balance,
+                source="trading",
+            ))
+    return reviewed_closed
 
-            decisions = review_open_positions(
-                open_positions=account_for_review.open_positions,
-                signals_by_pair=signals_by_pair,
-                current_prices=review_prices,
-                reversal_confidence_min=config.trading.reversal_confidence_min,
-                reversal_score_threshold=config.trading.reversal_score_threshold,
-                max_holding_days=config.trading.max_holding_days,
-                timeout_min_progress_pct=config.trading.timeout_min_progress_pct,
-                profit_lock_min_progress_pct=config.trading.profit_lock_min_progress_pct,
-                profit_lock_score_floor=config.trading.profit_lock_score_floor,
+
+async def _adjust_signal_with_rag(
+    sig,
+    rag_cfg: RagAdjustmentConfig,
+    store: VectorStore,
+    embed_fn_adj,
+    deadband: float,
+) -> None:
+    """方向別RAGの過去成績をもとにシグナルスコアを補正し、必要なら action も再判定する。"""
+    if not (rag_cfg.enabled and sig.action != "hold"):
+        return
+    try:
+        query_embedding = await embed_fn_adj(sig.detail_reason)
+        same_dir = "bullish" if sig.combined_score > 0 else "bearish"
+        opposite_dir = "bearish" if sig.combined_score > 0 else "bullish"
+        same_hits = store.directional.query(
+            query_embedding=query_embedding, direction=same_dir,
+            top_k=rag_cfg.search_top_n, phase_filter="complete",
+        )
+        opposite_hits = store.directional.query(
+            query_embedding=query_embedding, direction=opposite_dir,
+            top_k=rag_cfg.search_top_n, phase_filter="complete",
+        )
+        adjustment = compute_rag_adjustment(
+            combined_score=sig.combined_score,
+            same_direction_hits=same_hits,
+            opposite_direction_hits=opposite_hits,
+            config=rag_cfg,
+        )
+    except Exception as e:
+        logger.warning(f"[RAG ADJ] {sig.pair}: failed — {e}")
+        return
+
+    adjusted_score = sig.combined_score + adjustment
+    if adjusted_score == sig.combined_score:
+        return
+
+    logger.info(f"[RAG ADJ] {sig.pair}: combined={sig.combined_score:+.3f} → adjusted={adjusted_score:+.3f}")
+    if adjusted_score > deadband:
+        sig.action = "buy"
+    elif adjusted_score < -deadband:
+        sig.action = "sell"
+    else:
+        sig.action = "hold"
+    sig.combined_score = round(adjusted_score, 4)
+
+
+async def _execute_one_signal(
+    sig,
+    macro_ctx: str,
+    config: AppConfig,
+    position_mgr: PositionManager,
+    broker,
+    notifier,
+    store: VectorStore,
+    price_store: PriceStore,
+    session_store,
+    adaptive_store: "AdaptiveParamsStore",
+    embed_fn_adj,
+    price_provider: PriceProvider | None,
+):
+    """1シグナルの発注処理 (ATR SL/TP → broker → session → RAG 記録) を実行する。"""
+    sltp_result = _apply_atr_sltp_to_signal(
+        sig, config, position_mgr, price_store, adaptive_store,
+        price_provider=price_provider,
+    )
+
+    order = broker.execute_signal(sig, position_mgr, macro_context=macro_ctx)
+    if not order:
+        if config.notifier.notify_on_signal_skipped:
+            await notifier.notify_signal_skipped(SignalSkippedEvent(
+                pair=sig.pair,
+                action=sig.action,
+                confidence=sig.confidence,
+                signal_reason=sig.signal_reason,
+                detail_reason=sig.detail_reason,
+                source="trading",
+            ))
+        return None
+
+    if config.notifier.notify_on_order_open:
+        await notifier.notify_order_opened(OrderOpenedEvent(
+            pair=sig.pair,
+            direction=sig.action,
+            entry_price=sig.entry_price,
+            stop_loss=sig.stop_loss,
+            take_profit=sig.take_profit,
+            position_size=sig.position_size,
+            confidence=sig.confidence,
+            signal_reason=sig.signal_reason,
+            detail_reason=sig.detail_reason,
+            source="trading",
+        ))
+
+    if session_store:
+        direction = "bullish" if order.direction == "buy" else "bearish"
+        entry_ctx = ""
+        if sltp_result:
+            entry_ctx = build_entry_context(
+                combined_score=sig.combined_score,
+                confidence=sig.confidence,
+                action=sig.action,
+                news_weight=config.trading.news_weight,
+                price_weight=config.trading.price_weight,
+                news=sig.news,
+                price=sig.price,
+                sltp=sltp_result,
+                macro_context=macro_ctx,
             )
+        session_store.create_session(
+            session_id=order.order_id,
+            pair=order.pair,
+            direction=direction,
+            entry_price=order.entry_price,
+            stop_loss=order.stop_loss,
+            take_profit=order.take_profit,
+            position_size=order.position_size,
+            signal_score=sig.combined_score,
+            signal_confidence=sig.confidence,
+            macro_context=macro_ctx,
+            analysis_summary=entry_ctx or sig.detail_reason,
+            opened_at=order.opened_at,
+            atr_value=sltp_result.atr_value if sltp_result else None,
+            sl_atr_mult=sltp_result.sl_atr_mult if sltp_result else None,
+            tp_atr_mult=sltp_result.tp_atr_mult if sltp_result else None,
+            computed_sl=sltp_result.computed_sl if sltp_result else None,
+            computed_tp=sltp_result.computed_tp if sltp_result else None,
+            llm_sl=sltp_result.llm_sl if sltp_result else None,
+            llm_tp=sltp_result.llm_tp if sltp_result else None,
+            key_support=sltp_result.key_support if sltp_result else None,
+            key_resistance=sltp_result.key_resistance if sltp_result else None,
+        )
+        await record_trade_entry(store, embed_fn_adj, order, sig)
+    return order
 
-            for decision in decisions:
-                price = review_prices.get(decision.pair)
-                if price is None:
-                    continue
-                closed_order = position_mgr.close_position(
-                    decision.order_id, price, decision.close_reason,
-                )
-                if closed_order:
-                    reviewed_closed.append(closed_order)
-                    logger.info(
-                        f"[REVIEW] {decision.pair}: closed ({decision.close_reason}) — "
-                        f"{decision.detail}"
-                    )
-                    if config.notifier.notify_on_order_close:
-                        account_after = position_mgr.get_account_state()
-                        await notifier.notify_order_closed(OrderClosedEvent(
-                            pair=closed_order.pair,
-                            direction=closed_order.direction,
-                            entry_price=closed_order.entry_price,
-                            close_price=price,
-                            realized_pnl=closed_order.realized_pnl or 0.0,
-                            close_reason=decision.close_reason,
-                            balance=account_after.balance,
-                            source="trading",
-                        ))
 
-            # Phase 4a 決済分の振り返りをRAGに保存
-            await _finalize_closed_orders(
-                reviewed_closed, config, store, embed_fn, llm_reflect,
-                adaptive_store, session_store, log_source="[REFLECT/REVIEW]",
-            )
-
-    # Phase 4b: 新規シグナル実行
-    # RAG adjustment setup
+async def _phase_execute_signals(
+    signals: list,
+    macro_ctxs: dict[str, str],
+    config: AppConfig,
+    position_mgr: PositionManager,
+    broker,
+    notifier,
+    store: VectorStore,
+    price_store: PriceStore,
+    hold_store: HoldDecisionStore,
+    session_store,
+    adaptive_store: "AdaptiveParamsStore",
+    embed_fn_adj,
+    price_provider: PriceProvider | None,
+) -> list:
+    """Phase 4b: シグナルにRAG補正を適用し、新規発注 or HOLD保存を実行する。"""
     rag_cfg = RagAdjustmentConfig(
         enabled=config.trading.rag_adjustment_enabled,
         max_adjustment=config.trading.rag_adjustment_max,
@@ -674,125 +794,22 @@ async def trading_cycle(
         forecast_weight_multiplier=config.trading.rag_adjustment_forecast_multiplier,
         hold_weight_multiplier=config.trading.rag_adjustment_hold_multiplier,
     )
-    embed_fn_adj = partial(
-        embed_text,
-        ollama_base_url=config.llm.ollama.base_url,
-        model=config.rag.embedding_model,
-    )
+    deadband = config.trading.signal_deadband
 
     executed_orders = []
     for sig in signals:
-        # RAG score adjustment
-        adjusted_score = sig.combined_score
-        if rag_cfg.enabled and sig.action != "hold":
-            try:
-                query_embedding = await embed_fn_adj(sig.detail_reason)
-                same_dir = "bullish" if sig.combined_score > 0 else "bearish"
-                opposite_dir = "bearish" if sig.combined_score > 0 else "bullish"
-                same_hits = store.directional.query(
-                    query_embedding=query_embedding, direction=same_dir,
-                    top_k=rag_cfg.search_top_n, phase_filter="complete",
-                )
-                opposite_hits = store.directional.query(
-                    query_embedding=query_embedding, direction=opposite_dir,
-                    top_k=rag_cfg.search_top_n, phase_filter="complete",
-                )
-                adjustment = compute_rag_adjustment(
-                    combined_score=sig.combined_score,
-                    same_direction_hits=same_hits,
-                    opposite_direction_hits=opposite_hits,
-                    config=rag_cfg,
-                )
-                adjusted_score = sig.combined_score + adjustment
-                logger.info(f"[RAG ADJ] {sig.pair}: combined={sig.combined_score:+.3f} → adjusted={adjusted_score:+.3f}")
-            except Exception as e:
-                logger.warning(f"[RAG ADJ] {sig.pair}: failed — {e}")
-
-        # Re-evaluate action if score changed
-        if adjusted_score != sig.combined_score:
-            deadband = config.trading.signal_deadband
-            if adjusted_score > deadband:
-                sig.action = "buy"
-            elif adjusted_score < -deadband:
-                sig.action = "sell"
-            else:
-                sig.action = "hold"
-            sig.combined_score = round(adjusted_score, 4)
+        await _adjust_signal_with_rag(sig, rag_cfg, store, embed_fn_adj, deadband)
 
         if sig.action != "hold":
-            sltp_result = _apply_atr_sltp_to_signal(
-                sig, config, position_mgr, price_store, adaptive_store,
+            order = await _execute_one_signal(
+                sig, macro_ctxs.get(sig.pair, ""),
+                config, position_mgr, broker, notifier, store, price_store,
+                session_store, adaptive_store, embed_fn_adj,
                 price_provider=price_provider,
             )
-
-            order = broker.execute_signal(sig, position_mgr, macro_context=macro_ctxs.get(sig.pair, ""))
             if order:
                 executed_orders.append(order)
-                if config.notifier.notify_on_order_open:
-                    await notifier.notify_order_opened(OrderOpenedEvent(
-                        pair=sig.pair,
-                        direction=sig.action,
-                        entry_price=sig.entry_price,
-                        stop_loss=sig.stop_loss,
-                        take_profit=sig.take_profit,
-                        position_size=sig.position_size,
-                        confidence=sig.confidence,
-                        signal_reason=sig.signal_reason,
-                        detail_reason=sig.detail_reason,
-                        source="trading",
-                    ))
-                # Task 6: Create session + RAG entry
-                if session_store:
-                    direction = "bullish" if order.direction == "buy" else "bearish"
-                    # Build comprehensive entry context
-                    entry_ctx = ""
-                    if sltp_result:
-                        entry_ctx = build_entry_context(
-                            combined_score=sig.combined_score,
-                            confidence=sig.confidence,
-                            action=sig.action,
-                            news_weight=config.trading.news_weight,
-                            price_weight=config.trading.price_weight,
-                            news=sig.news,
-                            price=sig.price,
-                            sltp=sltp_result,
-                            macro_context=macro_ctxs.get(sig.pair, ""),
-                        )
-                    session_store.create_session(
-                        session_id=order.order_id,
-                        pair=order.pair,
-                        direction=direction,
-                        entry_price=order.entry_price,
-                        stop_loss=order.stop_loss,
-                        take_profit=order.take_profit,
-                        position_size=order.position_size,
-                        signal_score=sig.combined_score,
-                        signal_confidence=sig.confidence,
-                        macro_context=macro_ctxs.get(sig.pair, ""),
-                        analysis_summary=entry_ctx or sig.detail_reason,
-                        opened_at=order.opened_at,
-                        atr_value=sltp_result.atr_value if sltp_result else None,
-                        sl_atr_mult=sltp_result.sl_atr_mult if sltp_result else None,
-                        tp_atr_mult=sltp_result.tp_atr_mult if sltp_result else None,
-                        computed_sl=sltp_result.computed_sl if sltp_result else None,
-                        computed_tp=sltp_result.computed_tp if sltp_result else None,
-                        llm_sl=sltp_result.llm_sl if sltp_result else None,
-                        llm_tp=sltp_result.llm_tp if sltp_result else None,
-                        key_support=sltp_result.key_support if sltp_result else None,
-                        key_resistance=sltp_result.key_resistance if sltp_result else None,
-                    )
-                    await record_trade_entry(store, embed_fn_adj, order, sig)
-            elif config.notifier.notify_on_signal_skipped:
-                await notifier.notify_signal_skipped(SignalSkippedEvent(
-                    pair=sig.pair,
-                    action=sig.action,
-                    confidence=sig.confidence,
-                    signal_reason=sig.signal_reason,
-                    detail_reason=sig.detail_reason,
-                    source="trading",
-                ))
         else:
-            # sig.action == "hold": シグナル弱く見送り → 次サイクルで結果を検証
             if config.notifier.notify_on_signal_skipped:
                 await notifier.notify_signal_skipped(SignalSkippedEvent(
                     pair=sig.pair,
@@ -804,31 +821,134 @@ async def trading_cycle(
                     source="trading",
                 ))
             hold_store.save_hold(sig.pair, sig)
+    return executed_orders
 
-    # TradingView チャート反映（シグナル + オープンポジション）
-    if config.tradingview.enabled:
+
+async def _phase_render_tradingview(
+    config: AppConfig,
+    analysis_store: AnalysisStore,
+    position_mgr: PositionManager,
+) -> None:
+    """TradingView チャートにシグナル + ポジションを反映する。"""
+    if not config.tradingview.enabled:
+        return
+    try:
+        from src.tradingview.cdp_client import CDPClient
+        from src.tradingview.pine_injector import PineInjector
+        from src.tradingview.tv_payload import build_tv_pine
+
+        pine = build_tv_pine(config, analysis_store, position_mgr)
+        if pine is None:
+            logger.debug("[TV] No signals or positions to render")
+            return
+
+        tv_cdp = CDPClient(host=config.tradingview.cdp_host, port=config.tradingview.cdp_port)
+        if not await tv_cdp.connect():
+            return
         try:
-            from src.tradingview.cdp_client import CDPClient
-            from src.tradingview.pine_injector import PineInjector
-            from src.tradingview.tv_payload import build_tv_pine
-
-            pine = build_tv_pine(config, analysis_store, position_mgr)
-            if pine is None:
-                logger.debug("[TV] No signals or positions to render")
+            injector = PineInjector(tv_cdp)
+            result = await injector.inject_and_compile(pine)
+            if result["success"]:
+                logger.info("[TV] Signals + positions reflected")
             else:
-                tv_cdp = CDPClient(host=config.tradingview.cdp_host, port=config.tradingview.cdp_port)
-                if await tv_cdp.connect():
-                    try:
-                        injector = PineInjector(tv_cdp)
-                        result = await injector.inject_and_compile(pine)
-                        if result["success"]:
-                            logger.info("[TV] Signals + positions reflected")
-                        else:
-                            logger.warning(f"[TV] Pine compile errors: {result['errors']}")
-                    finally:
-                        await tv_cdp.disconnect()
-        except Exception as e:
-            logger.warning(f"[TV] Chart visualization failed: {e}")
+                logger.warning(f"[TV] Pine compile errors: {result['errors']}")
+        finally:
+            await tv_cdp.disconnect()
+    except Exception as e:
+        logger.warning(f"[TV] Chart visualization failed: {e}")
+
+
+def _build_trading_runtime(config: AppConfig):
+    """trading_cycle が必要とするランタイム (broker / adaptive_store / notifier / LLMs) を一括生成する。"""
+    broker = create_broker(config.trading.trading_mode)
+    adaptive_store = AdaptiveParamsStore(
+        state_dir=config.state_dir,
+        defaults={
+            "sl_atr_mult": config.trading.sl_atr_mult_default,
+            "tp_atr_mult": config.trading.tp_atr_mult_default,
+        },
+        limits={
+            "sl_atr_mult_min": config.trading.sl_atr_mult_min,
+            "sl_atr_mult_max": config.trading.sl_atr_mult_max,
+            "tp_atr_mult_min": config.trading.tp_atr_mult_min,
+            "tp_atr_mult_max": config.trading.tp_atr_mult_max,
+        },
+    )
+    notifier = create_notifier(config.notifier.notifier)
+    llm_price = create_llm_client(config, "price_analysis")
+    llm_reflect = create_llm_client(config, "reflection")
+    return broker, adaptive_store, notifier, llm_price, llm_reflect
+
+
+async def trading_cycle(
+    config: AppConfig,
+    position_mgr: PositionManager,
+    store: VectorStore,
+    price_store: PriceStore,
+    analysis_store: AnalysisStore,
+    hold_store: HoldDecisionStore,
+    price_provider: PriceProvider | None = None,
+    session_store=None,
+) -> None:
+    """取引サイクル全体のオーケストレーター。"""
+    run_start = datetime.now(ZoneInfo(config.schedule.timezone))
+    logger.info(f"=== Trading cycle started: {run_start.strftime('%Y-%m-%d %H:%M %Z')} ===")
+
+    broker, adaptive_store, notifier, llm_price, llm_reflect = _build_trading_runtime(config)
+    logger.info(
+        f"[TRADE] mode={config.trading.trading_mode} broker={type(broker).__name__} "
+        f"notifier={type(notifier).__name__} "
+        f"price={type(llm_price).__name__}({llm_price.model_name}) "
+        f"reflect={type(llm_reflect).__name__}({llm_reflect.model_name})"
+    )
+
+    if not is_market_open(run_start):
+        logger.info(f"Market {market_status_label(run_start)}. Skipping trading cycle.")
+        return
+
+    embed_fn = partial(
+        embed_text,
+        ollama_base_url=config.llm.ollama.base_url,
+        model=config.rag.embedding_model,
+    )
+
+    # Phase 1: SL/TP クローズ
+    closed_this_run = await _phase_close_sl_tp(config, position_mgr, broker, notifier, price_provider)
+
+    # Phase 1.5: 決済済オーダーの振り返り + adaptive params 更新 + RAG 蓄積
+    await _finalize_closed_orders(
+        closed_this_run, config, store, embed_fn, llm_reflect,
+        adaptive_store, session_store, log_source="[REFLECT/CLOSE]",
+    )
+
+    # Phase 2: オープンポジションの振り返り生成
+    await _generate_cycle_reflections(config, position_mgr, store, llm_reflect, price_provider=price_provider)
+
+    # Phase 2.5: 前回 HOLD 判断のレビュー
+    await _review_hold_decisions(config, hold_store, store, price_provider=price_provider, price_store=price_store)
+
+    # Phase 3: 並列ペア分析
+    signals, macro_ctxs = await _phase_analyze_pairs(
+        config, position_mgr, store, price_store, analysis_store, llm_price, price_provider,
+    )
+
+    # Phase 4a: position_review (Layer 1-3) → 決済 → 振り返り
+    reviewed_closed = await _phase_review_open_positions(
+        config, position_mgr, signals, notifier, price_provider,
+    )
+    await _finalize_closed_orders(
+        reviewed_closed, config, store, embed_fn, llm_reflect,
+        adaptive_store, session_store, log_source="[REFLECT/REVIEW]",
+    )
+
+    # Phase 4b: 新規シグナル発注
+    executed_orders = await _phase_execute_signals(
+        signals, macro_ctxs, config, position_mgr, broker, notifier, store, price_store,
+        hold_store, session_store, adaptive_store, embed_fn, price_provider,
+    )
+
+    # TradingView チャート反映
+    await _phase_render_tradingview(config, analysis_store, position_mgr)
 
     # Phase 5: レポート
     all_closed = closed_this_run + reviewed_closed
