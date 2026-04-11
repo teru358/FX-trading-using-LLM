@@ -56,6 +56,44 @@ def _get_ohlcv(symbol: str, period: str, interval: str, price_store, price_provi
     return fetch_ohlcv(symbol, period, interval, price_store)
 
 
+def _compute_atr_from_price_data(price_data) -> float | None:
+    """price_data から ATR(14) を計算する。データ不足や例外時は None。"""
+    if not price_data or len(price_data.df) < 14:
+        return None
+    try:
+        import pandas_ta as pta
+        atr_s = pta.atr(
+            price_data.df["High"], price_data.df["Low"], price_data.df["Close"], length=14,
+        )
+        if atr_s is None or atr_s.empty:
+            return None
+        return float(atr_s.iloc[-1])
+    except Exception:
+        return None
+
+
+def _fetch_and_compute_atr(symbol: str, config: AppConfig, price_store) -> float | None:
+    """price_store から OHLCV を取得し ATR(14) を返す。失敗時は None。
+
+    既存呼び出し側との挙動互換のため lookback_days(int) をそのまま fetch_ohlcv に渡している
+    (fetch_ohlcv は period:str を期待するため呼び出しは内部で例外となり None が返る)。
+    significance フィルタの ATR ベース判定はこの helper の戻り値に依存する。
+    """
+    if price_store is None:
+        return None
+    try:
+        from src.data.price_fetcher import fetch_ohlcv as _fetch_ohlcv
+        price_data = _fetch_ohlcv(
+            symbol,
+            config.trading.lookback_days,
+            config.trading.ohlcv_interval,
+            price_store=price_store,
+        )
+        return _compute_atr_from_price_data(price_data)
+    except Exception:
+        return None
+
+
 async def _build_rag_context(
     pair_cfg, config: AppConfig, store: VectorStore
 ) -> tuple[str, str]:
@@ -272,22 +310,7 @@ async def _review_hold_decisions(
         try:
             current_price = _get_price(hold.pair, price_provider)
 
-            # 本物のATR(14)を計算
-            hold_atr = None
-            if price_store:
-                try:
-                    from src.data.price_fetcher import fetch_ohlcv
-                    _pd = fetch_ohlcv(
-                        hold.pair, config.trading.lookback_days,
-                        config.trading.ohlcv_interval, price_store=price_store,
-                    )
-                    if _pd and len(_pd.df) >= 14:
-                        import pandas_ta as _pta
-                        _atr_s = _pta.atr(_pd.df["High"], _pd.df["Low"], _pd.df["Close"], length=14)
-                        if _atr_s is not None and not _atr_s.empty:
-                            hold_atr = float(_atr_s.iloc[-1])
-                except Exception:
-                    pass
+            hold_atr = _fetch_and_compute_atr(hold.pair, config, price_store)
 
             review_text, lesson, worth_storing = build_hold_review(
                 pair=hold.pair,
@@ -766,14 +789,8 @@ async def trading_cycle(
                     config.trading.ohlcv_interval, price_store,
                     price_provider,
                 )
-                if price_data and len(price_data.df) >= 14:
-                    import pandas_ta as pta
-                    atr_series = pta.atr(
-                        price_data.df["High"], price_data.df["Low"],
-                        price_data.df["Close"], length=14,
-                    )
-                    atr_val = float(atr_series.iloc[-1]) if atr_series is not None and not atr_series.empty else None
-                    if atr_val and atr_val > 0:
+                atr_val = _compute_atr_from_price_data(price_data)
+                if atr_val and atr_val > 0:
                         sltp_result = calculate_sl_tp(
                             direction=sig.action,
                             entry_price=sig.entry_price,
@@ -1139,21 +1156,7 @@ async def forecast_cycle(
 
                 review_ts = datetime.now()
 
-                # 本物のATR(14)を計算（significanceフィルタ用）
-                pair_atr = None
-                try:
-                    from src.data.price_fetcher import fetch_ohlcv
-                    _pd = fetch_ohlcv(
-                        pair_cfg.symbol, config.trading.lookback_days,
-                        config.trading.ohlcv_interval, price_store=price_store,
-                    )
-                    if _pd and len(_pd.df) >= 14:
-                        import pandas_ta as _pta
-                        _atr_s = _pta.atr(_pd.df["High"], _pd.df["Low"], _pd.df["Close"], length=14)
-                        if _atr_s is not None and not _atr_s.empty:
-                            pair_atr = float(_atr_s.iloc[-1])
-                except Exception as e:
-                    logger.debug(f"[FORECAST] {pair_cfg.symbol}: ATR calc failed, using fallback — {e}")
+                pair_atr = _fetch_and_compute_atr(pair_cfg.symbol, config, price_store)
 
                 # 各予測のdeltaを更新
                 for fc in recent_forecasts:
