@@ -292,6 +292,99 @@ async def _generate_cycle_reflections(
             logger.warning(f"Reflection failed for {pos.pair}: {e}")
 
 
+async def _finalize_closed_orders(
+    closed_orders: list,
+    config: AppConfig,
+    store: VectorStore,
+    embed_fn,
+    llm_reflect: LLMClient,
+    adaptive_store: "AdaptiveParamsStore",
+    session_store,
+    log_source: str,
+) -> None:
+    """決済済みオーダー群に対し、振り返り生成 → 適応パラメータ更新 → セッション終了 →
+    directional RAG への complete upsert までを実行する。
+
+    log_source は失敗時のログプレフィックス (例: '[REFLECT/CLOSE]', '[REFLECT/REVIEW]')。
+    """
+    if not closed_orders:
+        return
+
+    for closed_order in closed_orders:
+        pair_cfg = next(
+            (p for p in config.tradeable_instruments if p.symbol == closed_order.pair),
+            None,
+        )
+        if pair_cfg is None:
+            continue
+        try:
+            entry_analysis = ""
+            sltp_comparison = ""
+            param_history_text = ""
+            if session_store:
+                sess = session_store.get_session(closed_order.order_id)
+                if sess:
+                    entry_analysis = sess.analysis_summary or ""
+                    if sess.atr_value and sess.computed_sl:
+                        sltp_comparison = (
+                            f"ATR(14)={sess.atr_value:.5f} sl_mult={sess.sl_atr_mult} tp_mult={sess.tp_atr_mult}\n"
+                            f"computed: SL={sess.computed_sl:.5f} TP={sess.computed_tp:.5f}\n"
+                            f"llm: SL={sess.llm_sl:.5f} TP={sess.llm_tp:.5f}\n"
+                            f"Actual close: {(closed_order.close_price or closed_order.entry_price):.5f} ({closed_order.close_reason})"
+                        )
+                    history = adaptive_store.get_history(closed_order.pair, limit=3)
+                    if history:
+                        param_history_text = "\n".join(
+                            f"[{h.get('updated_at', '?')}] sl={h.get('sl_atr_mult')} tp={h.get('tp_atr_mult')} reason={h.get('reason', '')}"
+                            for h in history
+                        )
+
+            reflection = await generate_close_reflection(
+                pair_cfg=pair_cfg,
+                order=closed_order,
+                llm=llm_reflect,
+                temperature=config.llm.reflection.temperature,
+                user_notes=load_user_notes(config.user_notes_path, "reflect"),
+                entry_analysis=entry_analysis,
+                sltp_comparison=sltp_comparison,
+                param_history=param_history_text,
+            )
+
+            if reflection.atr_params_suggestion:
+                suggestion = reflection.atr_params_suggestion
+                new_params = {}
+                if suggestion.get("sl_atr_mult") is not None:
+                    new_params["sl_atr_mult"] = suggestion["sl_atr_mult"]
+                if suggestion.get("tp_atr_mult") is not None:
+                    new_params["tp_atr_mult"] = suggestion["tp_atr_mult"]
+                if new_params:
+                    try:
+                        adaptive_store.update_params(
+                            pair=closed_order.pair,
+                            new_params=new_params,
+                            reason=suggestion.get("reason", "LLM suggestion"),
+                            trade_id=closed_order.order_id,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[ADAPTIVE] {closed_order.pair}: param update failed — {e}")
+
+            if session_store:
+                session_store.close_session(
+                    session_id=closed_order.order_id,
+                    closed_at=closed_order.closed_at or datetime.now(),
+                    close_price=closed_order.close_price or closed_order.entry_price,
+                    close_reason=closed_order.close_reason or "manual",
+                    realized_pnl=closed_order.realized_pnl or 0.0,
+                    reflection_text=reflection.full_text if reflection else "",
+                )
+                await record_trade_complete(
+                    store, embed_fn, closed_order,
+                    reflection.full_text if reflection else "",
+                )
+        except Exception as e:
+            logger.warning(f"{log_source} Failed for {closed_order.pair}: {e}")
+
+
 async def _review_hold_decisions(
     config: AppConfig,
     hold_store: HoldDecisionStore,
@@ -409,85 +502,15 @@ async def trading_cycle(
                 ))
 
     # Phase 1.5: 決済トレードの確定結果ベース振り返りをRAGに保存
-    if closed_this_run:
-        embed_fn = partial(
-            embed_text,
-            ollama_base_url=config.llm.ollama.base_url,
-            model=config.rag.embedding_model,
-        )
-        for closed_order in closed_this_run:
-            pair_cfg = next(
-                (p for p in config.tradeable_instruments if p.symbol == closed_order.pair),
-                None,
-            )
-            if pair_cfg is None:
-                continue
-            try:
-                entry_analysis = ""
-                sltp_comparison = ""
-                param_history_text = ""
-                if session_store:
-                    sess = session_store.get_session(closed_order.order_id)
-                    if sess:
-                        entry_analysis = sess.analysis_summary or ""
-                        if sess.atr_value and sess.computed_sl:
-                            sltp_comparison = (
-                                f"ATR(14)={sess.atr_value:.5f} sl_mult={sess.sl_atr_mult} tp_mult={sess.tp_atr_mult}\n"
-                                f"computed: SL={sess.computed_sl:.5f} TP={sess.computed_tp:.5f}\n"
-                                f"llm: SL={sess.llm_sl:.5f} TP={sess.llm_tp:.5f}\n"
-                                f"Actual close: {(closed_order.close_price or closed_order.entry_price):.5f} ({closed_order.close_reason})"
-                            )
-                        history = adaptive_store.get_history(closed_order.pair, limit=3)
-                        if history:
-                            param_history_text = "\n".join(
-                                f"[{h.get('updated_at', '?')}] sl={h.get('sl_atr_mult')} tp={h.get('tp_atr_mult')} reason={h.get('reason', '')}"
-                                for h in history
-                            )
-                reflection = await generate_close_reflection(
-                    pair_cfg=pair_cfg,
-                    order=closed_order,
-                    llm=llm_reflect,
-                    temperature=config.llm.reflection.temperature,
-                    user_notes=load_user_notes(config.user_notes_path, "reflect"),
-                    entry_analysis=entry_analysis,
-                    sltp_comparison=sltp_comparison,
-                    param_history=param_history_text,
-                )
-                # レガシーfx_reflectionsへの書き込みは停止（方向別RAGに移行済み）
-
-                if reflection.atr_params_suggestion:
-                    suggestion = reflection.atr_params_suggestion
-                    new_params = {}
-                    if suggestion.get("sl_atr_mult") is not None:
-                        new_params["sl_atr_mult"] = suggestion["sl_atr_mult"]
-                    if suggestion.get("tp_atr_mult") is not None:
-                        new_params["tp_atr_mult"] = suggestion["tp_atr_mult"]
-                    if new_params:
-                        try:
-                            adaptive_store.update_params(
-                                pair=closed_order.pair,
-                                new_params=new_params,
-                                reason=suggestion.get("reason", "LLM suggestion"),
-                                trade_id=closed_order.order_id,
-                            )
-                        except Exception as e:
-                            logger.warning(f"[ADAPTIVE] {closed_order.pair}: param update failed — {e}")
-                # Session close + directional RAG complete
-                if session_store:
-                    session_store.close_session(
-                        session_id=closed_order.order_id,
-                        closed_at=closed_order.closed_at or datetime.now(),
-                        close_price=closed_order.close_price or closed_order.entry_price,
-                        close_reason=closed_order.close_reason or "manual",
-                        realized_pnl=closed_order.realized_pnl or 0.0,
-                        reflection_text=reflection.full_text if reflection else "",
-                    )
-                    await record_trade_complete(
-                        store, embed_fn, closed_order,
-                        reflection.full_text if reflection else "",
-                    )
-            except Exception as e:
-                logger.warning(f"[REFLECT/CLOSE] Failed for {closed_order.pair}: {e}")
+    embed_fn = partial(
+        embed_text,
+        ollama_base_url=config.llm.ollama.base_url,
+        model=config.rag.embedding_model,
+    )
+    await _finalize_closed_orders(
+        closed_this_run, config, store, embed_fn, llm_reflect,
+        adaptive_store, session_store, log_source="[REFLECT/CLOSE]",
+    )
 
     # Phase 2: 振り返り生成
     await _generate_cycle_reflections(config, position_mgr, store, llm_reflect, price_provider=price_provider)
@@ -569,85 +592,10 @@ async def trading_cycle(
                         ))
 
             # Phase 4a 決済分の振り返りをRAGに保存
-            if reviewed_closed:
-                embed_fn = partial(
-                    embed_text,
-                    ollama_base_url=config.llm.ollama.base_url,
-                    model=config.rag.embedding_model,
-                )
-                for closed_order in reviewed_closed:
-                    pair_cfg = next(
-                        (p for p in config.tradeable_instruments if p.symbol == closed_order.pair),
-                        None,
-                    )
-                    if pair_cfg is None:
-                        continue
-                    try:
-                        entry_analysis = ""
-                        sltp_comparison = ""
-                        param_history_text = ""
-                        if session_store:
-                            sess = session_store.get_session(closed_order.order_id)
-                            if sess:
-                                entry_analysis = sess.analysis_summary or ""
-                                if sess.atr_value and sess.computed_sl:
-                                    sltp_comparison = (
-                                        f"ATR(14)={sess.atr_value:.5f} sl_mult={sess.sl_atr_mult} tp_mult={sess.tp_atr_mult}\n"
-                                        f"computed: SL={sess.computed_sl:.5f} TP={sess.computed_tp:.5f}\n"
-                                        f"llm: SL={sess.llm_sl:.5f} TP={sess.llm_tp:.5f}\n"
-                                        f"Actual close: {(closed_order.close_price or closed_order.entry_price):.5f} ({closed_order.close_reason})"
-                                    )
-                                history = adaptive_store.get_history(closed_order.pair, limit=3)
-                                if history:
-                                    param_history_text = "\n".join(
-                                        f"[{h.get('updated_at', '?')}] sl={h.get('sl_atr_mult')} tp={h.get('tp_atr_mult')} reason={h.get('reason', '')}"
-                                        for h in history
-                                    )
-                        reflection = await generate_close_reflection(
-                            pair_cfg=pair_cfg,
-                            order=closed_order,
-                            llm=llm_reflect,
-                            temperature=config.llm.reflection.temperature,
-                            user_notes=load_user_notes(config.user_notes_path, "reflect"),
-                            entry_analysis=entry_analysis,
-                            sltp_comparison=sltp_comparison,
-                            param_history=param_history_text,
-                        )
-                        # レガシーfx_reflectionsへの書き込みは停止（方向別RAGに移行済み）
-
-                        if reflection.atr_params_suggestion:
-                            suggestion = reflection.atr_params_suggestion
-                            new_params = {}
-                            if suggestion.get("sl_atr_mult") is not None:
-                                new_params["sl_atr_mult"] = suggestion["sl_atr_mult"]
-                            if suggestion.get("tp_atr_mult") is not None:
-                                new_params["tp_atr_mult"] = suggestion["tp_atr_mult"]
-                            if new_params:
-                                try:
-                                    adaptive_store.update_params(
-                                        pair=closed_order.pair,
-                                        new_params=new_params,
-                                        reason=suggestion.get("reason", "LLM suggestion"),
-                                        trade_id=closed_order.order_id,
-                                    )
-                                except Exception as e:
-                                    logger.warning(f"[ADAPTIVE] {closed_order.pair}: param update failed — {e}")
-                        # Session close + directional RAG complete
-                        if session_store:
-                            session_store.close_session(
-                                session_id=closed_order.order_id,
-                                closed_at=closed_order.closed_at or datetime.now(),
-                                close_price=closed_order.close_price or closed_order.entry_price,
-                                close_reason=closed_order.close_reason or "manual",
-                                realized_pnl=closed_order.realized_pnl or 0.0,
-                                reflection_text=reflection.full_text if reflection else "",
-                            )
-                            await record_trade_complete(
-                                store, embed_fn, closed_order,
-                                reflection.full_text if reflection else "",
-                            )
-                    except Exception as e:
-                        logger.warning(f"[REFLECT/REVIEW] Failed for {closed_order.pair}: {e}")
+            await _finalize_closed_orders(
+                reviewed_closed, config, store, embed_fn, llm_reflect,
+                adaptive_store, session_store, log_source="[REFLECT/REVIEW]",
+            )
 
     # Phase 4b: 新規シグナル実行
     # RAG adjustment setup
