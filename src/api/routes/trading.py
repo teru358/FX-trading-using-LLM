@@ -22,13 +22,42 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+# 通知 OFF 時の blocking 待機の最大時間 = run_trade_soft_timeout_sec × この倍率
+# 取引サイクルは LLM ニュース分析 + テクニカル + ペア並列分析で 1〜3 分かかる想定。
+# 他ジョブを待つ場合も含め、デフォルト 10s × 60 = 600s (10 分) を上限とする。
+_BLOCKING_WAIT_MULTIPLIER = 60
+
+
+def _build_run_trade_response(started_at, status: str = "completed") -> dict[str, Any]:
+    """run_trading_cycle 完了後に返すレスポンス body を組み立てる。"""
+    assert state.config is not None
+    elapsed = (db_now() - started_at).total_seconds()
+    state_store = StateStore(state.config.state_dir)
+    pm = PositionManager(
+        state_store, state.config.trading.initial_balance, context="API_RunTrade",
+    )
+    account = pm.get_account_state()
+    return {
+        "status": status,
+        "elapsed_seconds": round(elapsed, 1),
+        "executed_at": started_at.isoformat(),
+        "balance": account.balance,
+        "open_positions_count": len(account.open_positions),
+        "total_trades": account.total_trades,
+    }
+
+
 @router.post("/run/trade", dependencies=[Depends(verify_api_key)])
 def run_trade() -> dict[str, Any]:
     """取引判定ループを手動実行する。
 
-    soft_timeout 内に完了したら結果を同期返答。超過したら "accepted" を返し、
-    バックグラウンドで継続 + 完了時に Discord webhook で通知する。
-    既に他の LLM ジョブが走行中なら即座に "accepted" を返してキュー待機する。
+    挙動は Discord 通知設定によって分岐する:
+
+    - **通知 ON** (notifier.enabled=true): ``soft_timeout`` 内完了で同期返答、
+      超過で "accepted" 返答 + バックグラウンド継続 + 完了時 Discord 通知。
+    - **通知 OFF**: 走行中ジョブがあれば完了を待ってから順次実行 (最大
+      ``run_trade_soft_timeout_sec * 60`` 秒 = デフォルト 600s)。HTTP リクエストは
+      その間ブロックする。
     """
     assert state.config is not None and state.llm_slot is not None
     assert state.store is not None and state.analysis_store is not None
@@ -44,22 +73,30 @@ def run_trade() -> dict[str, Any]:
             state.config, state.store, state.price_store, state.analysis_store, state.hold_store,
         )
 
+    # ── 通知 OFF: 同期 blocking で順次実行 ─────────────────────
+    if not state.config.notifier.enabled:
+        max_wait = soft_timeout * _BLOCKING_WAIT_MULTIPLIER
+        job_status, result = state.llm_slot.run_user_blocking_with_timeout(
+            _job, timeout=max_wait,
+        )
+        if job_status == "completed":
+            return _build_run_trade_response(started_at)
+        if job_status == "completed_with_error":
+            raise HTTPException(status_code=500, detail=f"run_trade failed: {result}")
+        # timeout
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"他のジョブが走行中で {max_wait:.0f}s 以内にスロットを取得できませんでした。"
+                f"後ほど再試行してください。"
+            ),
+        )
+
+    # ── 通知 ON: 従来通り soft_timeout 内同期、超過で webhook ──
     job_status, result = state.llm_slot.try_run_user_sync(_job, soft_timeout=soft_timeout)
 
     if job_status == "completed":
-        # 同期で完了 → 現在の口座状態を返す
-        elapsed = (db_now() - started_at).total_seconds()
-        state_store = StateStore(state.config.state_dir)
-        pm = PositionManager(state_store, state.config.trading.initial_balance, context="API_RunTrade")
-        account = pm.get_account_state()
-        return {
-            "status": "completed",
-            "elapsed_seconds": round(elapsed, 1),
-            "executed_at": started_at.isoformat(),
-            "balance": account.balance,
-            "open_positions_count": len(account.open_positions),
-            "total_trades": account.total_trades,
-        }
+        return _build_run_trade_response(started_at)
 
     if job_status == "completed_with_error":
         raise HTTPException(status_code=500, detail=f"run_trade failed: {result}")
