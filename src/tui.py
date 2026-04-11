@@ -284,9 +284,9 @@ class TuiApp(App):
         self._write_rich(tbl)
 
     def _cmd_run(self, args: list[str]) -> None:
-        from src.trading_cycle import (
-            run_news_view, run_tech_view, run_analysis_summary,
-            run_forecast_view, run_trading_cycle,
+        from src.trading_cycle import run_trading_cycle
+        from src.views import (
+            run_analysis_summary, run_forecast_view, run_news_view, run_tech_view,
         )
 
         if not args:
@@ -329,7 +329,7 @@ class TuiApp(App):
             self._write(f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | forecast | trade")
 
     def _cmd_ask(self, args: list[str]) -> None:
-        from src.trading_cycle import run_ask
+        from src.views import run_ask
 
         if not args:
             self._write("[red]使い方: ask <メッセージ>[/red]")

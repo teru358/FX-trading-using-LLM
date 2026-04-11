@@ -19,7 +19,8 @@ from src.persistence.state_store import StateStore
 from src.rag.vector_store import VectorStore
 from src.trading.position_manager import PositionManager
 from src.commands.compare_models import run_compare
-from src.trading_cycle import run_analysis_summary, run_ask, run_forecast_view, run_news_view, run_tech_view, run_trading_cycle
+from src.trading_cycle import run_trading_cycle
+from src.views import run_analysis_summary, run_ask, run_forecast_view, run_news_view, run_tech_view
 
 _console = Console()
 

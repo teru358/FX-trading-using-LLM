@@ -649,7 +649,7 @@ def ask(body: _AskRequest) -> dict[str, Any]:
     if not message:
         raise HTTPException(status_code=400, detail="message is required")
 
-    from src.trading_cycle import run_ask as _run_ask
+    from src.views import run_ask as _run_ask
 
     started_at = datetime.now()
     soft_timeout = _config.api.ask_soft_timeout_sec
