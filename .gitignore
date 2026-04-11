@@ -1,4 +1,4 @@
-# Python-generated files
+# Python
 __pycache__/
 *.py[oc]
 build/
@@ -9,17 +9,21 @@ wheels/
 # Virtual environments
 .venv
 
-# Secrets
-CLAUDE.md
+# Secrets / personal docs
 .env
-config/settings.yaml
+CLAUDE.md
+docs/
 
-# State and logs
+# 個人設定 — *.yaml はすべて非公開、*.yaml.example のみ公開
+config/*.yaml
+!config/*.yaml.example
+
+# 状態・ログ・キャッシュ・ベクトルDB (chromadb 含む)
 data/state/
 data/rag/
-prices.db
+data/**/*.db
+*.db
 logs/
-docs/
 compare/
 
 # Backups
@@ -28,4 +32,3 @@ compare/
 
 clear_data.py
 .pid
-data/econ_events.db
