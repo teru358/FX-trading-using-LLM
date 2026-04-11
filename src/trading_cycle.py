@@ -19,6 +19,13 @@ from src.data.price_store import PriceStore
 from src.llm.client import LLMClient
 from src.llm.factory import create_llm_client
 from src.persistence.state_store import StateStore
+from src.rag.directional_writer import (
+    record_forecast_entry,
+    record_forecast_review,
+    record_hold_review,
+    record_trade_complete,
+    record_trade_entry,
+)
 from src.rag.embedder import embed_text
 from src.rag.prompt_formatter import format_macro_context_for_prompt, format_news_for_prompt, format_reflections_for_prompt
 from src.rag.vector_store import VectorStore
@@ -323,34 +330,7 @@ async def _review_hold_decisions(
             logger.info(f"[HOLD REVIEW] {hold.pair}: {review_text}")
 
             if worth_storing:
-                embedding = await embed_fn(review_text)
-                # レガシーfx_reflectionsへの書き込みは停止（方向別RAGに移行済み）
-
-                # Directional RAG: hold review complete
-                hold_direction = hold.predicted_direction
-                if hold_direction in ("long", "bullish"):
-                    hold_direction = "bullish"
-                elif hold_direction in ("short", "bearish"):
-                    hold_direction = "bearish"
-                else:
-                    hold_direction = "bullish" if hold.signal_score > 0 else "bearish"
-
-                try:
-                    store.directional.upsert(
-                        entry_id=f"hold_{hold.pair}_{hold.id}_complete",
-                        text=review_text,
-                        embedding=embedding,
-                        direction=hold_direction,
-                        pair=hold.pair,
-                        session_id=f"hold_{hold.id}",
-                        session_type="hold",
-                        phase="complete",
-                        signal_score=hold.signal_score,
-                        confidence=hold.confidence,
-                        outcome="correct" if "CORRECT" in lesson else "incorrect",
-                    )
-                except Exception as e:
-                    logger.warning(f"[HOLD/DIR] {hold.pair}: {e}")
+                await record_hold_review(store, embed_fn, hold, review_text, lesson)
 
             hold_store.mark_reviewed(hold.id)
         except Exception as e:
@@ -494,7 +474,6 @@ async def trading_cycle(
                             logger.warning(f"[ADAPTIVE] {closed_order.pair}: param update failed — {e}")
                 # Session close + directional RAG complete
                 if session_store:
-                    direction = "bullish" if closed_order.direction == "buy" else "bearish"
                     session_store.close_session(
                         session_id=closed_order.order_id,
                         closed_at=closed_order.closed_at or datetime.now(),
@@ -503,35 +482,10 @@ async def trading_cycle(
                         realized_pnl=closed_order.realized_pnl or 0.0,
                         reflection_text=reflection.full_text if reflection else "",
                     )
-                    try:
-                        complete_text = (
-                            f"{closed_order.pair} {direction} | "
-                            f"{closed_order.signal_reason} | "
-                            f"entry={closed_order.entry_price:.5f} "
-                            f"close={(closed_order.close_price or closed_order.entry_price):.5f} | "
-                            f"result={'win' if (closed_order.realized_pnl or 0) > 0 else 'loss'} "
-                            f"pnl={closed_order.realized_pnl or 0:+.2f} | "
-                            f"reason={closed_order.close_reason} | "
-                            f"{reflection.full_text if reflection else ''}"
-                        )
-                        embedding = await embed_fn(complete_text)
-                        store.directional.upsert(
-                            entry_id=f"{closed_order.order_id}_complete",
-                            text=complete_text,
-                            embedding=embedding,
-                            direction=direction,
-                            pair=closed_order.pair,
-                            session_id=closed_order.order_id,
-                            session_type="trade",
-                            phase="complete",
-                            signal_score=0.0,
-                            confidence=0.0,
-                            outcome="win" if (closed_order.realized_pnl or 0) > 0 else "loss",
-                            realized_pnl=closed_order.realized_pnl or 0.0,
-                            close_reason=closed_order.close_reason,
-                        )
-                    except Exception as e:
-                        logger.warning(f"[SESSION] RAG complete failed for {closed_order.order_id}: {e}")
+                    await record_trade_complete(
+                        store, embed_fn, closed_order,
+                        reflection.full_text if reflection else "",
+                    )
             except Exception as e:
                 logger.warning(f"[REFLECT/CLOSE] Failed for {closed_order.pair}: {e}")
 
@@ -680,7 +634,6 @@ async def trading_cycle(
                                     logger.warning(f"[ADAPTIVE] {closed_order.pair}: param update failed — {e}")
                         # Session close + directional RAG complete
                         if session_store:
-                            direction = "bullish" if closed_order.direction == "buy" else "bearish"
                             session_store.close_session(
                                 session_id=closed_order.order_id,
                                 closed_at=closed_order.closed_at or datetime.now(),
@@ -689,35 +642,10 @@ async def trading_cycle(
                                 realized_pnl=closed_order.realized_pnl or 0.0,
                                 reflection_text=reflection.full_text if reflection else "",
                             )
-                            try:
-                                complete_text = (
-                                    f"{closed_order.pair} {direction} | "
-                                    f"{closed_order.signal_reason} | "
-                                    f"entry={closed_order.entry_price:.5f} "
-                                    f"close={(closed_order.close_price or closed_order.entry_price):.5f} | "
-                                    f"result={'win' if (closed_order.realized_pnl or 0) > 0 else 'loss'} "
-                                    f"pnl={closed_order.realized_pnl or 0:+.2f} | "
-                                    f"reason={closed_order.close_reason} | "
-                                    f"{reflection.full_text if reflection else ''}"
-                                )
-                                embedding = await embed_fn(complete_text)
-                                store.directional.upsert(
-                                    entry_id=f"{closed_order.order_id}_complete",
-                                    text=complete_text,
-                                    embedding=embedding,
-                                    direction=direction,
-                                    pair=closed_order.pair,
-                                    session_id=closed_order.order_id,
-                                    session_type="trade",
-                                    phase="complete",
-                                    signal_score=0.0,
-                                    confidence=0.0,
-                                    outcome="win" if (closed_order.realized_pnl or 0) > 0 else "loss",
-                                    realized_pnl=closed_order.realized_pnl or 0.0,
-                                    close_reason=closed_order.close_reason,
-                                )
-                            except Exception as e:
-                                logger.warning(f"[SESSION] RAG complete failed for {closed_order.order_id}: {e}")
+                            await record_trade_complete(
+                                store, embed_fn, closed_order,
+                                reflection.full_text if reflection else "",
+                            )
                     except Exception as e:
                         logger.warning(f"[REFLECT/REVIEW] Failed for {closed_order.pair}: {e}")
 
@@ -881,33 +809,7 @@ async def trading_cycle(
                         key_support=sltp_result.key_support if sltp_result else None,
                         key_resistance=sltp_result.key_resistance if sltp_result else None,
                     )
-                    try:
-                        entry_text = (
-                            f"{order.pair} {direction} | score={sig.combined_score:+.3f} "
-                            f"conf={sig.confidence:.2f} | entry={order.entry_price:.5f} "
-                            f"SL={order.stop_loss:.5f} TP={order.take_profit:.5f} | "
-                            f"{sig.detail_reason}"
-                        )
-                        embed_fn_local = partial(
-                            embed_text,
-                            ollama_base_url=config.llm.ollama.base_url,
-                            model=config.rag.embedding_model,
-                        )
-                        embedding = await embed_fn_local(entry_text)
-                        store.directional.upsert(
-                            entry_id=f"{order.order_id}_entry",
-                            text=entry_text,
-                            embedding=embedding,
-                            direction=direction,
-                            pair=order.pair,
-                            session_id=order.order_id,
-                            session_type="trade",
-                            phase="entry",
-                            signal_score=sig.combined_score,
-                            confidence=sig.confidence,
-                        )
-                    except Exception as e:
-                        logger.warning(f"[SESSION] RAG entry failed for {order.order_id}: {e}")
+                    await record_trade_entry(store, embed_fn_adj, order, sig)
             elif config.notifier.notify_on_signal_skipped:
                 await notifier.notify_signal_skipped(SignalSkippedEvent(
                     pair=sig.pair,
@@ -1180,37 +1082,18 @@ async def forecast_cycle(
 
                 # Directional RAG: individual forecast reviews
                 for fc in recent_forecasts:
-                    try:
-                        fc_text, _fc_lesson, fc_significant = build_forecast_review(
-                            pair=pair_cfg.symbol,
-                            forecast=fc,
-                            current_price=current_price,
-                            review_ts=review_ts,
-                            significance_atr_ratio=config.analysis.forecast_significance_atr_ratio,
-                            atr_value=pair_atr,
+                    fc_text, _fc_lesson, fc_significant = build_forecast_review(
+                        pair=pair_cfg.symbol,
+                        forecast=fc,
+                        current_price=current_price,
+                        review_ts=review_ts,
+                        significance_atr_ratio=config.analysis.forecast_significance_atr_ratio,
+                        atr_value=pair_atr,
+                    )
+                    if fc_significant:
+                        await record_forecast_review(
+                            store, embed_fn, pair_cfg.symbol, fc, fc_text, current_price,
                         )
-                        if fc_significant:
-                            fc_direction = fc.predicted_direction
-                            if fc_direction not in ("bullish", "bearish"):
-                                fc_direction = "bullish" if fc.combined_score > 0 else "bearish"
-                            fc_embedding = await embed_fn(fc_text)
-                            delta = current_price - fc.current_price
-                            actual_dir = "bullish" if delta > 0 else "bearish"
-                            store.directional.upsert(
-                                entry_id=f"forecast_{fc.id}_complete",
-                                text=fc_text,
-                                embedding=fc_embedding,
-                                direction=fc_direction,
-                                pair=pair_cfg.symbol,
-                                session_id=f"forecast_{fc.id}",
-                                session_type="forecast",
-                                phase="complete",
-                                signal_score=fc.combined_score,
-                                confidence=fc.confidence,
-                                outcome="correct" if fc_direction == actual_dir else "incorrect",
-                            )
-                    except Exception as e:
-                        logger.warning(f"[FORECAST/DIR] {pair_cfg.symbol} fc={fc.id}: {e}")
 
             # Phase 2: 新規予測生成（C: スコア閾値チェック、LLM不使用）
             signal = await _summarize_pair(pair_cfg, config, position_mgr, store, analysis_store, price_provider=price_provider)
@@ -1226,32 +1109,7 @@ async def forecast_cycle(
             macro_ctx = _build_macro_context(config, analysis_store)
             forecast_store.save_forecast(pair_cfg.symbol, signal, macro_context=macro_ctx)
 
-            # Directional RAG: forecast entry
-            try:
-                fc_direction = signal.predicted_direction
-                if fc_direction not in ("bullish", "bearish"):
-                    fc_direction = "bullish" if signal.combined_score > 0 else "bearish"
-                entry_text = (
-                    f"{pair_cfg.symbol} {fc_direction} forecast | "
-                    f"score={signal.combined_score:+.3f} conf={signal.confidence:.2f} | "
-                    f"{signal.detail_reason}"
-                )
-                fc_embedding = await embed_fn(entry_text)
-                ts_str = now.strftime("%Y%m%d_%H%M")
-                store.directional.upsert(
-                    entry_id=f"forecast_{pair_cfg.symbol}_{ts_str}_entry",
-                    text=entry_text,
-                    embedding=fc_embedding,
-                    direction=fc_direction,
-                    pair=pair_cfg.symbol,
-                    session_id=f"forecast_{pair_cfg.symbol}_{ts_str}",
-                    session_type="forecast",
-                    phase="entry",
-                    signal_score=signal.combined_score,
-                    confidence=signal.confidence,
-                )
-            except Exception as e:
-                logger.warning(f"[FORECAST/DIR] {pair_cfg.symbol} entry: {e}")
+            await record_forecast_entry(store, embed_fn, pair_cfg.symbol, signal, now)
 
         except Exception as e:
             logger.warning(f"[FORECAST] {pair_cfg.symbol}: error — {e}", exc_info=True)

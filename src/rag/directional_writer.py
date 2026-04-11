@@ -1,0 +1,212 @@
+"""方向別 RAG (`store.directional`) への書き込み定型ロジックを集約する。
+
+trading_cycle / forecast_cycle / hold_review などから繰り返し呼ばれていた
+upsert 呼び出しを「何を書くか」だけで指定できるようにする。direction の
+正規化、テキスト整形、embed → upsert、例外時のログまでをここに閉じ込める。
+"""
+from __future__ import annotations
+
+import logging
+from datetime import datetime
+from typing import Any, Awaitable, Callable
+
+from src.rag.vector_store import VectorStore
+
+logger = logging.getLogger(__name__)
+
+EmbedFn = Callable[[str], Awaitable[list[float]]]
+
+
+def _normalize_direction(value: str | None, fallback_score: float = 0.0) -> str:
+    """predicted_direction 文字列を bullish/bearish に正規化する。
+
+    long/buy → bullish, short/sell → bearish, それ以外は score 符号で判定。
+    """
+    if value in ("bullish", "long", "buy"):
+        return "bullish"
+    if value in ("bearish", "short", "sell"):
+        return "bearish"
+    return "bullish" if fallback_score >= 0 else "bearish"
+
+
+# ── trade ─────────────────────────────────────────────────────────
+
+
+async def record_trade_entry(
+    store: VectorStore,
+    embed_fn: EmbedFn,
+    order: Any,
+    signal: Any,
+) -> None:
+    """新規約定をエントリーフェーズとして directional RAG に登録する。"""
+    direction = "bullish" if order.direction == "buy" else "bearish"
+    text = (
+        f"{order.pair} {direction} | score={signal.combined_score:+.3f} "
+        f"conf={signal.confidence:.2f} | entry={order.entry_price:.5f} "
+        f"SL={order.stop_loss:.5f} TP={order.take_profit:.5f} | "
+        f"{signal.detail_reason}"
+    )
+    try:
+        embedding = await embed_fn(text)
+        store.directional.upsert(
+            entry_id=f"{order.order_id}_entry",
+            text=text,
+            embedding=embedding,
+            direction=direction,
+            pair=order.pair,
+            session_id=order.order_id,
+            session_type="trade",
+            phase="entry",
+            signal_score=signal.combined_score,
+            confidence=signal.confidence,
+        )
+    except Exception as e:
+        logger.warning(f"[SESSION] RAG entry failed for {order.order_id}: {e}")
+
+
+async def record_trade_complete(
+    store: VectorStore,
+    embed_fn: EmbedFn,
+    closed_order: Any,
+    reflection_text: str,
+) -> None:
+    """決済完了をコンプリートフェーズとして directional RAG に登録する。"""
+    direction = "bullish" if closed_order.direction == "buy" else "bearish"
+    realized = closed_order.realized_pnl or 0.0
+    close_px = closed_order.close_price or closed_order.entry_price
+    text = (
+        f"{closed_order.pair} {direction} | "
+        f"{closed_order.signal_reason} | "
+        f"entry={closed_order.entry_price:.5f} "
+        f"close={close_px:.5f} | "
+        f"result={'win' if realized > 0 else 'loss'} "
+        f"pnl={realized:+.2f} | "
+        f"reason={closed_order.close_reason} | "
+        f"{reflection_text}"
+    )
+    try:
+        embedding = await embed_fn(text)
+        store.directional.upsert(
+            entry_id=f"{closed_order.order_id}_complete",
+            text=text,
+            embedding=embedding,
+            direction=direction,
+            pair=closed_order.pair,
+            session_id=closed_order.order_id,
+            session_type="trade",
+            phase="complete",
+            signal_score=0.0,
+            confidence=0.0,
+            outcome="win" if realized > 0 else "loss",
+            realized_pnl=realized,
+            close_reason=closed_order.close_reason,
+        )
+    except Exception as e:
+        logger.warning(f"[SESSION] RAG complete failed for {closed_order.order_id}: {e}")
+
+
+# ── forecast ──────────────────────────────────────────────────────
+
+
+async def record_forecast_entry(
+    store: VectorStore,
+    embed_fn: EmbedFn,
+    pair: str,
+    signal: Any,
+    now: datetime,
+) -> None:
+    """新規予測をエントリーフェーズとして directional RAG に登録する。"""
+    direction = _normalize_direction(
+        getattr(signal, "predicted_direction", None),
+        fallback_score=signal.combined_score,
+    )
+    text = (
+        f"{pair} {direction} forecast | "
+        f"score={signal.combined_score:+.3f} conf={signal.confidence:.2f} | "
+        f"{signal.detail_reason}"
+    )
+    try:
+        embedding = await embed_fn(text)
+        ts_str = now.strftime("%Y%m%d_%H%M")
+        store.directional.upsert(
+            entry_id=f"forecast_{pair}_{ts_str}_entry",
+            text=text,
+            embedding=embedding,
+            direction=direction,
+            pair=pair,
+            session_id=f"forecast_{pair}_{ts_str}",
+            session_type="forecast",
+            phase="entry",
+            signal_score=signal.combined_score,
+            confidence=signal.confidence,
+        )
+    except Exception as e:
+        logger.warning(f"[FORECAST/DIR] {pair} entry: {e}")
+
+
+async def record_forecast_review(
+    store: VectorStore,
+    embed_fn: EmbedFn,
+    pair: str,
+    forecast: Any,
+    review_text: str,
+    current_price: float,
+) -> None:
+    """既存予測の検証結果を directional RAG に登録する。"""
+    direction = _normalize_direction(
+        getattr(forecast, "predicted_direction", None),
+        fallback_score=forecast.combined_score,
+    )
+    delta = current_price - forecast.current_price
+    actual_dir = "bullish" if delta > 0 else "bearish"
+    try:
+        embedding = await embed_fn(review_text)
+        store.directional.upsert(
+            entry_id=f"forecast_{forecast.id}_complete",
+            text=review_text,
+            embedding=embedding,
+            direction=direction,
+            pair=pair,
+            session_id=f"forecast_{forecast.id}",
+            session_type="forecast",
+            phase="complete",
+            signal_score=forecast.combined_score,
+            confidence=forecast.confidence,
+            outcome="correct" if direction == actual_dir else "incorrect",
+        )
+    except Exception as e:
+        logger.warning(f"[FORECAST/DIR] {pair} fc={forecast.id}: {e}")
+
+
+# ── hold ──────────────────────────────────────────────────────────
+
+
+async def record_hold_review(
+    store: VectorStore,
+    embed_fn: EmbedFn,
+    hold: Any,
+    review_text: str,
+    lesson: str,
+) -> None:
+    """HOLD 判断の検証結果を directional RAG に登録する。"""
+    direction = _normalize_direction(
+        getattr(hold, "predicted_direction", None),
+        fallback_score=hold.signal_score,
+    )
+    try:
+        embedding = await embed_fn(review_text)
+        store.directional.upsert(
+            entry_id=f"hold_{hold.pair}_{hold.id}_complete",
+            text=review_text,
+            embedding=embedding,
+            direction=direction,
+            pair=hold.pair,
+            session_id=f"hold_{hold.id}",
+            session_type="hold",
+            phase="complete",
+            signal_score=hold.signal_score,
+            confidence=hold.confidence,
+            outcome="correct" if "CORRECT" in lesson else "incorrect",
+        )
+    except Exception as e:
+        logger.warning(f"[HOLD/DIR] {hold.pair}: {e}")
