@@ -64,8 +64,9 @@ def _compute_ichimoku(df: pd.DataFrame) -> dict:
     span_a = ((tenkan + kijun) / 2).shift(26)
     # 先行スパンB（52期間の中値、26期間先行）
     span_b = ((high.rolling(52).max() + low.rolling(52).min()) / 2).shift(26)
-    # 遅行スパン（現在の終値を26期間後方にシフト）
-    chikou = close.shift(-26)
+    # 遅行スパンのシリーズ計算は省略: 判定は
+    # 「今日の終値 (= 遅行スパンの現在値)」 vs 「26 期間前の終値」だけで済むため、
+    # 下の past_close_26_ago を直接参照する。
 
     def last(series: pd.Series) -> float:
         val = series.iloc[-1]
@@ -79,8 +80,8 @@ def _compute_ichimoku(df: pd.DataFrame) -> dict:
     k = last(kijun)
     sa = last(span_a)
     sb = last(span_b)
-    # 遅行スパンは26期間前の終値（インデックス -27 が現在の遅行位置）
-    chikou_val = float(close.iloc[-27]) if len(close) >= 27 else 0.0
+    # 遅行スパン判定のための「26 期間前の終値」(遅行スパンの描画位置にある過去の実際価格)
+    past_close_26_ago = float(close.iloc[-27]) if len(close) >= 27 else 0.0
 
     price = float(close.iloc[-1])
     kumo_top = max(sa, sb)
@@ -108,17 +109,22 @@ def _compute_ichimoku(df: pd.DataFrame) -> dict:
     kumo_color = "green" if sa >= sb else "red"
 
     # 総合シグナル（複数条件の合致度）
+    #
+    # 遅行スパン判定: 遅行スパンの値 (= 今日の終値 `price`) が 26 期間前の
+    # 実際の価格 (`past_close_26_ago`) より上なら bullish。
+    #   bullish: price > past_close_26_ago
+    #   bearish: price < past_close_26_ago
     bullish_count = sum([
         price_vs_kumo == "above",
         t > k,
         kumo_color == "green",
-        chikou_val > price,  # 遅行スパンが雲上方
+        price > past_close_26_ago,    # 遅行スパン > 26期間前の価格
     ])
     bearish_count = sum([
         price_vs_kumo == "below",
         t < k,
         kumo_color == "red",
-        chikou_val < price,
+        price < past_close_26_ago,    # 遅行スパン < 26期間前の価格
     ])
 
     if bullish_count >= 3:
@@ -137,7 +143,9 @@ def _compute_ichimoku(df: pd.DataFrame) -> dict:
         "kijun_sen": k,
         "senkou_span_a": sa,
         "senkou_span_b": sb,
-        "chikou_span": chikou_val,
+        # chikou_span の値として「26 期間前の終値」を公開する
+        # (遅行スパン判定で比較対象となる過去の実価格)
+        "chikou_span": past_close_26_ago,
         "kumo_top": kumo_top,
         "kumo_bottom": kumo_bottom,
         "price_vs_kumo": price_vs_kumo,
