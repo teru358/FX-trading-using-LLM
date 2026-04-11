@@ -97,9 +97,9 @@ def test_apply_atr_sltp_to_signal_uses_string_period(monkeypatch):
         captured["period"] = period
         return _make_price_data(symbol)
 
-    # trading_cycle は `from src.data.price_fetcher import fetch_ohlcv` で
-    # ローカル binding しているため、そちらを直接 patch する必要がある。
-    monkeypatch.setattr("src.trading_cycle.fetch_ohlcv", fake_fetch)
+    # _get_ohlcv (helpers) は module-top で `from src.data.price_fetcher import
+    # fetch_ohlcv` を local binding しているため、そちらを直接 patch する必要がある。
+    monkeypatch.setattr("src.cycles._helpers.fetch_ohlcv", fake_fetch)
 
     config = load_config()
 
@@ -381,7 +381,9 @@ async def test_phase_close_sl_tp_notifies_each_close(monkeypatch):
     from src.trading_cycle import _phase_close_sl_tp
 
     # _get_price は価格取得できない環境 (CI 等) でも動くようモック
-    monkeypatch.setattr("src.trading_cycle._get_price", lambda symbol, pp: 150.5)
+    # _phase_close_sl_tp は src.cycles.trading にあり、_get_price をそこへ import
+    # しているため、当該モジュールの binding を patch する。
+    monkeypatch.setattr("src.cycles.trading._get_price", lambda symbol, pp: 150.5)
 
     pos = _FakePosition("USDJPY=X")
     closed = _FakeClosedOrder("USDJPY=X", realized=200.0, reason="take_profit")
@@ -472,7 +474,7 @@ async def test_finalize_closed_orders_empty_list_is_noop(monkeypatch):
         called.append(kwargs)
         return _FakeReflection()
 
-    monkeypatch.setattr("src.trading_cycle.generate_close_reflection", _fake_reflect)
+    monkeypatch.setattr("src.cycles.trading.generate_close_reflection", _fake_reflect)
 
     await _finalize_closed_orders(
         closed_orders=[],
@@ -506,8 +508,8 @@ async def test_finalize_closed_orders_calls_reflection_and_record(monkeypatch):
             "reflection_text": reflection_text,
         })
 
-    monkeypatch.setattr("src.trading_cycle.generate_close_reflection", _fake_reflect)
-    monkeypatch.setattr("src.trading_cycle.record_trade_complete", _fake_record)
+    monkeypatch.setattr("src.cycles.trading.generate_close_reflection", _fake_reflect)
+    monkeypatch.setattr("src.cycles.trading.record_trade_complete", _fake_record)
 
     adaptive = _FakeAdaptiveStore()
     session = _FakeSessionStore()
