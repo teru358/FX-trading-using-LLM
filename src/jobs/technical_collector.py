@@ -73,11 +73,7 @@ def _is_price_data_stale(price_data, max_staleness: timedelta = _MAX_STALENESS) 
 
 
 def _compute_and_log_tech_score(inst: InstrumentConfig, summary, config: AppConfig):
-    """インジケータサマリからテクニカルスコアを計算しログに残す。
-
-    config.analysis の indicator_cfg / pattern_cfg を渡すことで、無効化された
-    指標カテゴリが人工的に bearish 側に倒す挙動を防ぐ。
-    """
+    """単一 TF (短期) の tech_score を計算。MTF 未使用時のフォールバック経路。"""
     from src.signals.technical_scorer import compute_technical_score
 
     tech_score = compute_technical_score(
@@ -93,6 +89,73 @@ def _compute_and_log_tech_score(inst: InstrumentConfig, summary, config: AppConf
         f"BB={tech_score.bb_score:+.2f} PAT={tech_score.pattern_score:+.2f} ADX×{tech_score.adx_factor:.1f})"
     )
     return tech_score
+
+
+def _compute_mtf_and_log(inst: InstrumentConfig, df_1h, config: AppConfig):
+    """MTF 版: 各 TF の summary と合成 TechnicalScore を計算してログに残す。
+
+    戻り値: (summaries dict, multi_tf_score, short_summary)
+    short_summary は既存の compute_indicators(df_1h, full) の結果で、
+    LLM プロンプト用 formatted_data の元データとして使う。
+    """
+    from src.data.mtf import compute_mtf_summaries
+    from src.signals.technical_scorer import (
+        compute_multi_tf_technical_score,
+        compute_technical_score,
+    )
+
+    mtf_cfg = config.analysis.multi_timeframe
+    timeframes = {
+        "long": {
+            "lookback_days": mtf_cfg.long.lookback_days,
+            "interval": mtf_cfg.long.interval,
+            "enabled": mtf_cfg.long.enabled,
+        },
+        "medium": {
+            "lookback_days": mtf_cfg.medium.lookback_days,
+            "interval": mtf_cfg.medium.interval,
+            "enabled": mtf_cfg.medium.enabled,
+        },
+        "short": {
+            "lookback_days": mtf_cfg.short.lookback_days,
+            "interval": mtf_cfg.short.interval,
+            "enabled": mtf_cfg.short.enabled,
+        },
+    }
+    summaries = compute_mtf_summaries(df_1h, config.analysis, timeframes)
+
+    # 各 TF に適用する indicator/pattern cfg は mtf 内部でフィルタされているが、
+    # compute_technical_score にも同じ filtered cfg を渡して disabled 指標の
+    # 疑似 bearish を防ぐ
+    from src.data.mtf import filter_indicator_cfg_for_tf, filter_pattern_cfg_for_tf
+
+    tf_subset_map = {"long": "regime", "medium": "structure", "short": "full"}
+    tf_scores = {}
+    for tf_name, summary in summaries.items():
+        subset = tf_subset_map[tf_name]
+        filtered_ind = filter_indicator_cfg_for_tf(config.analysis.indicators, subset)
+        filtered_pat = filter_pattern_cfg_for_tf(config.analysis.chart_patterns, subset)
+        tf_scores[tf_name] = compute_technical_score(
+            summary,
+            indicator_cfg=filtered_ind,
+            pattern_cfg=filtered_pat,
+        )
+
+    mtf_score = compute_multi_tf_technical_score(tf_scores, mtf_cfg.weights)
+
+    # ログ: 各 TF + 合成結果
+    tf_log_parts = [
+        f"{name}={tf_scores[name].total_score:+.2f}({tf_scores[name].direction[:1].upper()})"
+        for name in ("long", "medium", "short") if name in tf_scores
+    ]
+    logger.info(
+        f"[COLLECT] {inst.display_name}: MTF tech_score={mtf_score.total_score:+.3f} "
+        f"conf={mtf_score.confidence:.2f} dir={mtf_score.direction} "
+        f"align={mtf_score.alignment:.2f} | {' '.join(tf_log_parts)}"
+    )
+
+    short_summary = summaries.get("short")
+    return summaries, mtf_score, short_summary
 
 
 def _build_rag_contexts(
@@ -157,12 +220,40 @@ async def _collect_one(
         return
 
     # Phase 3: インジケータ計算 + テクニカルスコア
-    _, summary = compute_indicators(
-        price_data.df,
-        indicator_cfg=config.analysis.indicators,
-        pattern_cfg=config.analysis.chart_patterns,
-    )
-    tech_score = _compute_and_log_tech_score(inst, summary, config)
+    mtf_cfg = config.analysis.multi_timeframe
+    mtf_score = None
+
+    if mtf_cfg.enabled:
+        # MTF: 各 TF を計算 → 合成 TechnicalScore
+        summaries, mtf_score, short_summary = _compute_mtf_and_log(
+            inst, price_data.df, config,
+        )
+        # short TF summary を使って既存の formatted_data 系を作る
+        # (LLM には短期 TF の詳細 + MTF サマリーを渡す)
+        summary = short_summary
+        if summary is None:
+            # short TF がリサンプル失敗 → 単一 TF にフォールバック
+            logger.warning(
+                f"[COLLECT] {inst.display_name}: MTF short TF unavailable, "
+                "falling back to single TF"
+            )
+            _, summary = compute_indicators(
+                price_data.df,
+                indicator_cfg=config.analysis.indicators,
+                pattern_cfg=config.analysis.chart_patterns,
+            )
+            tech_score = _compute_and_log_tech_score(inst, summary, config)
+        else:
+            # MTF 合成結果を既存インターフェース互換形に変換
+            tech_score = mtf_score.as_technical_score()
+    else:
+        # 従来の単一 TF 動作
+        _, summary = compute_indicators(
+            price_data.df,
+            indicator_cfg=config.analysis.indicators,
+            pattern_cfg=config.analysis.chart_patterns,
+        )
+        tech_score = _compute_and_log_tech_score(inst, summary, config)
 
     # Phase 4: RAG コンテキスト構築
     news_ctx, refl_ctx, prev_ctx = _build_rag_contexts(inst, store, analysis_store, config)
@@ -181,6 +272,7 @@ async def _collect_one(
         macro_context=full_macro,
         user_notes_path=config.user_notes_path,
         tech_score=tech_score,
+        mtf_score=mtf_score,
     )
     analysis_store.upsert_snapshot(price_analysis)
     logger.info(

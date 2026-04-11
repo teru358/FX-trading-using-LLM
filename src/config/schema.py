@@ -303,10 +303,44 @@ class ChartPatternConfig:
 
 
 @dataclass
+class TimeframeConfig:
+    """MTF の 1 つのタイムフレーム設定。"""
+    lookback_days: int
+    interval: str                  # "1h" | "4h" | "8h" | "1d" 等
+    enabled: bool = True
+
+
+@dataclass
+class MultiTimeframeConfig:
+    """選択的 MTF 分析の設定。
+
+    各 TF は compute_indicators() をそれぞれ呼び出し、対応する subset
+    (long=regime / medium=structure / short=full) で user 設定を
+    絞り込んで計算する。weights は rule-based tech_score 合成時に使用
+    (欠落 TF は自動的に除外して再正規化)。
+    """
+    enabled: bool = True             # 全体有効/無効スイッチ
+    long: TimeframeConfig = field(default_factory=lambda: TimeframeConfig(
+        lookback_days=90, interval="1d", enabled=True,
+    ))
+    medium: TimeframeConfig = field(default_factory=lambda: TimeframeConfig(
+        lookback_days=14, interval="4h", enabled=True,
+    ))
+    short: TimeframeConfig = field(default_factory=lambda: TimeframeConfig(
+        lookback_days=2, interval="1h", enabled=True,
+    ))
+    weights: dict[str, float] = field(default_factory=lambda: {
+        "long": 0.40, "medium": 0.35, "short": 0.25,
+    })
+
+
+@dataclass
 class AnalysisConfig:
     """分析手法の有効/無効設定。"""
     indicators: IndicatorToggleConfig = field(default_factory=IndicatorToggleConfig)
     chart_patterns: ChartPatternConfig = field(default_factory=ChartPatternConfig)
+    # 選択的 MTF 分析設定 (enabled=False で従来の単一 TF 動作に fallback)
+    multi_timeframe: MultiTimeframeConfig = field(default_factory=MultiTimeframeConfig)
     forecast_review_interval_hours: int = 8        # B: 予測検証ウィンドウ（時間）
     forecast_start_hour: int = 0                   # 予測サイクル開始時刻オフセット（0〜23）
     forecast_min_combined_score: float = 0.15      # C: 予測生成の最低スコア閾値（±）

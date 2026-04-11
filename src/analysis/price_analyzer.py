@@ -17,7 +17,7 @@ from src.llm.client import LLMClient
 from src.llm.response_parser import extract_json
 
 if TYPE_CHECKING:
-    from src.signals.technical_scorer import TechnicalScore
+    from src.signals.technical_scorer import MultiTfTechnicalScore, TechnicalScore
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +199,7 @@ async def analyze_price_action(
     macro_context: str = "",
     user_notes_path: Path | None = None,
     tech_score: "TechnicalScore | None" = None,
+    mtf_score: "MultiTfTechnicalScore | None" = None,
 ) -> PriceAnalysis:
     formatted_data = format_for_llm(price_data, summary)
 
@@ -213,6 +214,15 @@ async def analyze_price_action(
     if tech_score is not None:
         tech_score_context = tech_score.format_for_prompt()
 
+    mtf_score_context = ""
+    if mtf_score is not None and mtf_score.tf_scores:
+        mtf_score_context = (
+            "=== Multi-Timeframe Alignment (rule-based, treat as constraint) ===\n"
+            f"{mtf_score.format_for_prompt()}\n"
+            "Action: 方向性と confidence は MTF 合成結果を踏襲し、短期 TF 情報を元に\n"
+            "       具体的な entry_zone / stop_loss / take_profit / reasoning_summary を決定してください。"
+        )
+
     user_prompt = render_prompt(
         "price_user.j2",
         formatted_data=formatted_data,
@@ -223,6 +233,7 @@ async def analyze_price_action(
         macro_context=macro_context or "=== Macro Reference ===\nNo macro instrument data available.",
         user_context=user_context,
         tech_score_context=tech_score_context,
+        mtf_score_context=mtf_score_context,
     )
 
     messages = [

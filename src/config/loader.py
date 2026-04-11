@@ -27,6 +27,7 @@ from src.config.schema import (
     LLMConfig,
     LLMRoleConfig,
     LoggingConfig,
+    MultiTimeframeConfig,
     NewsCollectionConfig,
     NewsSourcesConfig,
     NotifierConfig,
@@ -36,6 +37,7 @@ from src.config.schema import (
     PriceProviderConfig,
     RagConfig,
     ScheduleConfig,
+    TimeframeConfig,
     TradingConfig,
     TradingViewConfig,
     TwelveDataConfig,
@@ -346,9 +348,29 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         atr_contraction=cp.get("atr_contraction", False),
         sr_breakout=cp.get("sr_breakout", False),
     )
+    # Multi-timeframe 設定 (省略時は dataclass のデフォルトで補完)
+    mtf = an.get("multi_timeframe", {}) or {}
+    _default_mtf = MultiTimeframeConfig()
+
+    def _parse_tf(node: dict, default: TimeframeConfig) -> TimeframeConfig:
+        return TimeframeConfig(
+            lookback_days=node.get("lookback_days", default.lookback_days),
+            interval=node.get("interval", default.interval),
+            enabled=node.get("enabled", default.enabled),
+        )
+
+    mtf_cfg = MultiTimeframeConfig(
+        enabled=mtf.get("enabled", _default_mtf.enabled),
+        long=_parse_tf(mtf.get("long", {}) or {}, _default_mtf.long),
+        medium=_parse_tf(mtf.get("medium", {}) or {}, _default_mtf.medium),
+        short=_parse_tf(mtf.get("short", {}) or {}, _default_mtf.short),
+        weights=dict(mtf.get("weights", _default_mtf.weights)),
+    )
+
     analysis_cfg = AnalysisConfig(
         indicators=indicator_cfg,
         chart_patterns=pattern_cfg,
+        multi_timeframe=mtf_cfg,
         forecast_review_interval_hours=an.get("forecast_review_interval_hours", 8),
         forecast_start_hour=an.get("forecast_start_hour", 0),
         forecast_min_combined_score=an.get("forecast_min_combined_score", 0.15),

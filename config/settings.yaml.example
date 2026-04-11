@@ -162,6 +162,35 @@ analysis:
     atr_contraction: false    # ATR収縮（ブレイクアウト前兆）
     sr_breakout: false        # サポート/レジスタンス・ブレイク
 
+  # 選択的 Multi-Timeframe (MTF) 分析
+  #   各 TF で compute_indicators() を別々に呼び、規則的に合成してrule-baseで
+  #   bias_score / direction / confidence を決定する。
+  #   LLM には短期 TF の詳細 + 小さな MTF サマリーブロックを渡し、
+  #   エントリー水準 / SL / TP の決定に集中させる。
+  #
+  #   long   (regime):    大局レジーム判定 — Ichimoku + SMA + ADX + 長期パターン
+  #   medium (structure): セットアップ判定  — SMA + ADX + 全パターン
+  #   short  (full):      エントリー判定    — 既存の全指標セット (形状パターンは除外)
+  multi_timeframe:
+    enabled: true                  # false で従来の単一 TF (1h) 動作に fallback
+    long:
+      lookback_days: 90            # 90 本の日足 (原作者設計の Ichimoku 日足レベル)
+      interval: "1d"
+      enabled: true
+    medium:
+      lookback_days: 14            # 14 × 6 = 84 本の 4h 足 (pattern 検出に十分)
+      interval: "4h"
+      enabled: true
+    short:
+      lookback_days: 2             # 48 本の 1h 足 (エントリー timing)
+      interval: "1h"
+      enabled: true
+    # 合成重み (合計 1.0 が推奨。欠落 TF は自動的に再正規化される)
+    weights:
+      long: 0.40
+      medium: 0.35
+      short: 0.25
+
   # 予測サイクル設定（技術+ニュース合成シグナルの定期検証）
   forecast_review_interval_hours: 6    # B: 予測から検証までの時間（6h = 1セッション）
   forecast_start_hour: 2               # 予測サイクル開始時刻オフセット（2 → 02:00/10:00/18:00 JST）

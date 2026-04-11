@@ -150,6 +150,7 @@ def estimate_prompt_size(config: "AppConfig") -> PromptSizeEstimate:
         formatted_data="", pair="",
         news_context="", reflection_context="",
         previous_analysis="", macro_context="", user_context="",
+        tech_score_context="", mtf_score_context="",
     ))
 
     return PromptSizeEstimate(
