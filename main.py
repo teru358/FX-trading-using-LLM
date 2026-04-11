@@ -12,6 +12,8 @@ from rich.rule import Rule
 from rich.table import Table
 
 from src.cli import run_commands
+from src.concurrency.job_guard import JobGuard
+from src.concurrency.priority_job_slot import PriorityJobSlot
 from src.config import BASE_DIR, _DEFAULT_OLLAMA_MODEL, load_config
 from src.data.analysis_store import AnalysisStore
 from src.data.price_store import PriceStore
@@ -28,7 +30,17 @@ from src.analysis.prompt_stats import estimate_prompt_size
 
 _console = Console()
 _stop = threading.Event()
-_job_lock = threading.Lock()  # スケジューラとコマンドの同時実行を防ぐ
+_job_lock = threading.Lock()  # スケジューラとコマンドの同時実行を防ぐ (Task 7で削除予定)
+
+# LLMジョブ用の単一スロット (news/tech/trade/econ/ask/run_trade の排他制御)
+_llm_slot = PriorityJobSlot("llm")
+
+# 個別ジョブのガード (LLM 不使用の軽量ジョブ)
+_guards: dict[str, JobGuard] = {
+    "price_monitor": JobGuard("price_monitor"),
+    "exit_check": JobGuard("exit_check"),
+    "forecast": JobGuard("forecast"),
+}
 
 
 # ── スケジューラスレッド ────────────────────────────────────────────────────
