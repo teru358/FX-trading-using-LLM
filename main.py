@@ -40,19 +40,39 @@ _guards: dict[str, JobGuard] = {
     "price_monitor": JobGuard("price_monitor"),
     "exit_check": JobGuard("exit_check"),
     "forecast": JobGuard("forecast"),
+    "econ": JobGuard("econ_calendar"),
 }
 
 
 # ── スケジューラスレッド ────────────────────────────────────────────────────
 
+def _run_with_guard(guard: JobGuard, fn, *args, **kwargs) -> None:
+    """スケジューラから呼ばれたジョブをガード経由で非同期起動する。"""
+    guard.spawn_if_idle(fn, *args, **kwargs)
+
+
+def _run_with_slot(fn, *args, **kwargs) -> None:
+    """スケジューラから呼ばれたLLMジョブをスロット経由で実行する。
+
+    スレッドで spawn してからスロット取得を試みる (非 blocking)。
+    """
+    def _try() -> None:
+        _llm_slot.try_run_scheduled(fn, *args, **kwargs)
+    threading.Thread(
+        target=_try,
+        name=f"sched-{getattr(fn, '__name__', 'anon')}",
+        daemon=True,
+    ).start()
+
+
 def _scheduler_loop() -> None:
-    """バックグラウンドでスケジュールジョブを定期実行する。"""
+    """バックグラウンドでスケジュールジョブを定期実行する。
+
+    各ジョブは guard/slot 経由で自身の重複判定をするため、
+    スケジューラ自身の排他制御は不要。
+    """
     while not _stop.wait(timeout=10):
-        if _job_lock.acquire(blocking=False):
-            try:
-                schedule.run_pending()
-            finally:
-                _job_lock.release()
+        schedule.run_pending()
 
 
 def main() -> None:
@@ -188,17 +208,22 @@ def main() -> None:
             for m in range(0, 60, monitor_interval)
         ]
         for t in monitor_times:
-            schedule.every().day.at(t, tz).do(run_price_monitor, config, price_provider)
+            schedule.every().day.at(t, tz).do(
+                _run_with_guard, _guards["price_monitor"], run_price_monitor, config, price_provider
+            )
 
     # 2. SL/TP確認・ポジション再評価（毎時:00・LLMなし）
     for t in technical_times:
         schedule.every().day.at(t, news_tz).do(
+            _run_with_guard, _guards["exit_check"],
             run_exit_check_cycle, config, store, analysis_store, price_provider=price_provider
         )
 
     # 3. ニュース収集（LLMあり・時間がかかる）
     for t in news_times:
-        schedule.every().day.at(t, news_tz).do(run_news_collection, config, store)
+        schedule.every().day.at(t, news_tz).do(
+            _run_with_slot, run_news_collection, config, store
+        )
 
     # RAGクリーンアップ（毎日1回、ニュース収集の最初の時刻に実行）
     schedule.every().day.at(news_times[0], news_tz).do(_run_rag_cleanup)
@@ -206,7 +231,9 @@ def main() -> None:
     # 4. テクニカル分析（LLMあり・最も時間がかかる）
     for t in technical_times:
         schedule.every().day.at(t, news_tz).do(
-            run_technical_collection, config, store, price_store, analysis_store, price_provider=price_provider
+            _run_with_slot,
+            run_technical_collection, config, store, price_store, analysis_store,
+            price_provider=price_provider,
         )
 
     # 5. 予測サイクル（LLMなし・取引判定の直前）
@@ -215,13 +242,17 @@ def main() -> None:
     forecast_times_filtered = [t for t in forecast_times if t not in run_times_set]
     for t in forecast_times_filtered:
         schedule.every().day.at(t, news_tz).do(
-            run_forecast_cycle, config, store, analysis_store, forecast_store, price_provider=price_provider, price_store=price_store
+            _run_with_guard, _guards["forecast"],
+            run_forecast_cycle, config, store, analysis_store, forecast_store,
+            price_provider=price_provider, price_store=price_store,
         )
 
     # 6. 取引判定（LLMあり・指定時刻のみ）
     for t in run_times:
         schedule.every().day.at(t, tz).do(
-            run_trading_cycle, config, store, price_store, analysis_store, hold_store, price_provider=price_provider
+            _run_with_slot,
+            run_trading_cycle, config, store, price_store, analysis_store, hold_store,
+            price_provider=price_provider,
         )
 
     # 経済指標カレンダー日次フェッチ (オプション)
@@ -242,7 +273,7 @@ def main() -> None:
         schedule.every().day.at(
             config.economic_calendar.fetch_time,
             config.economic_calendar.fetch_timezone,
-        ).do(_econ_daily)
+        ).do(_run_with_guard, _guards["econ"], _econ_daily)
 
     # REST API サーバー（有効時のみ — Initial collection 前に起動）
     if config.api.enabled:
@@ -253,15 +284,14 @@ def main() -> None:
     # 起動直後にニュース収集+テクニカル分析を1回実行
     # prices.db が存在しない場合（初回起動）は市場時間を無視して強制実行
     _console.print(Rule("[dim]Initial collection[/dim]", style="dim"))
-    with _job_lock:
-        if args.skip_news:
-            _console.print("[dim]--skip-news: 初回ニュース取得をスキップ[/dim]")
-        else:
-            run_news_collection(config, store)
-        if args.skip_tech:
-            _console.print("[dim]--skip-tech: 初回テクニカル収集をスキップ[/dim]")
-        else:
-            run_technical_collection(config, store, price_store, analysis_store, force=is_fresh_start, price_provider=price_provider)
+    if args.skip_news:
+        _console.print("[dim]--skip-news: 初回ニュース取得をスキップ[/dim]")
+    else:
+        run_news_collection(config, store)
+    if args.skip_tech:
+        _console.print("[dim]--skip-tech: 初回テクニカル収集をスキップ[/dim]")
+    else:
+        run_technical_collection(config, store, price_store, analysis_store, force=is_fresh_start, price_provider=price_provider)
 
     # スケジューラをバックグラウンドスレッドで起動
     scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True, name="scheduler")
