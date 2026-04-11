@@ -15,6 +15,15 @@ from src.analysis.economic_calendar import EconEvent
 logger = logging.getLogger(__name__)
 
 
+def _utc_now_naive() -> datetime:
+    """SQLite DateTime 列用の naive UTC datetime を返す。
+
+    _utc_now_naive() は Python 3.12+ で deprecated のため、明示的に
+    UTC aware datetime を作ってから tzinfo を落とす。
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 class _Base(DeclarativeBase):
     pass
 
@@ -33,7 +42,7 @@ class _EconEventRow(_Base):
     previous = Column(Float)
     unit = Column(String)
     analyzed = Column(Integer, default=0, nullable=False)
-    fetched_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    fetched_at = Column(DateTime, default=_utc_now_naive, nullable=False)
 
 
 def _to_naive_utc(dt: datetime) -> datetime:
@@ -82,7 +91,7 @@ class EconEventStore:
                     existing.forecast = ev.forecast
                     existing.previous = ev.previous
                     existing.unit = ev.unit
-                    existing.fetched_at = datetime.utcnow()
+                    existing.fetched_at = _utc_now_naive()
                 else:
                     row = _EconEventRow(
                         event_id=ev.event_id,
@@ -96,7 +105,7 @@ class EconEventStore:
                         previous=ev.previous,
                         unit=ev.unit,
                         analyzed=0,
-                        fetched_at=datetime.utcnow(),
+                        fetched_at=_utc_now_naive(),
                     )
                     session.add(row)
             session.commit()
@@ -118,12 +127,12 @@ class EconEventStore:
 
     def get_recent_published(self, lookback_min: int) -> list[EconEvent]:
         """直近 lookback_min 分以内に発表時刻があったイベントを返す。"""
-        cutoff = datetime.utcnow() - timedelta(minutes=lookback_min)
+        cutoff = _utc_now_naive() - timedelta(minutes=lookback_min)
         with Session(self._engine) as session:
             stmt = (
                 select(_EconEventRow)
                 .where(_EconEventRow.event_time >= cutoff)
-                .where(_EconEventRow.event_time <= datetime.utcnow())
+                .where(_EconEventRow.event_time <= _utc_now_naive())
                 .order_by(_EconEventRow.event_time.desc())
             )
             rows = session.execute(stmt).scalars().all()
@@ -135,12 +144,12 @@ class EconEventStore:
         min_importance: int,
     ) -> list[EconEvent]:
         """actualが埋まっていて未分析のイベントを返す。"""
-        cutoff = datetime.utcnow() - timedelta(minutes=lookback_min)
+        cutoff = _utc_now_naive() - timedelta(minutes=lookback_min)
         with Session(self._engine) as session:
             stmt = (
                 select(_EconEventRow)
                 .where(_EconEventRow.event_time >= cutoff)
-                .where(_EconEventRow.event_time <= datetime.utcnow())
+                .where(_EconEventRow.event_time <= _utc_now_naive())
                 .where(_EconEventRow.actual.is_not(None))
                 .where(_EconEventRow.importance >= min_importance)
                 .where(_EconEventRow.analyzed == 0)
