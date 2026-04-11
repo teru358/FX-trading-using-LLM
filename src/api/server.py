@@ -376,7 +376,6 @@ def schedule_info() -> dict[str, Any]:
     - price_monitor (5分間隔) は除外
     """
     import schedule as sched_mod
-    from datetime import datetime
 
     # ジョブ名 → カテゴリ分類
     _CATEGORY = {

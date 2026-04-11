@@ -9,8 +9,8 @@ from functools import partial
 
 from src.analysis.news_aggregator import aggregate_news_sentiment
 from src.analysis.price_analyzer import analyze_price_action, load_user_notes
-from src.analysis.reflector import generate_close_reflection, generate_reflection, store_reflection
-from src.config import AppConfig, InstrumentConfig
+from src.analysis.reflector import generate_close_reflection
+from src.config import AppConfig
 from src.data.indicators import compute_indicators
 from src.data.price_fetcher import fetch_current_price, fetch_ohlcv
 from src.data.price_provider import PriceProvider
@@ -35,7 +35,7 @@ from src.notifications.notifier import (
     SignalSkippedEvent,
     create_notifier,
 )
-from src.reporting.reporter import print_news_summary, print_run_summary, print_tech_summary
+from src.reporting.reporter import print_run_summary
 from src.signals.rag_adjustment import RagAdjustmentConfig, compute_rag_adjustment
 from src.signals.signal_combiner import combine_signals
 from src.trading.atr_calculator import calculate_sl_tp

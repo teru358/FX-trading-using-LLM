@@ -198,7 +198,6 @@ async def collect_all_technical(
     llm_price = create_llm_client(config, "price_analysis")
     watch_only = config.watch_only_instruments
     tradeable = config.tradeable_instruments
-    all_instruments = watch_only + tradeable
     delay = config.news_collection.inter_pair_delay_seconds
 
     logger.info(

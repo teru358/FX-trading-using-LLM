@@ -5,7 +5,6 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from decimal import Decimal, ROUND_HALF_UP
-from pathlib import Path
 from typing import Optional
 
 from src.persistence.state_store import StateStore

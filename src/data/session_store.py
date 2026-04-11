@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Float, String, Text, select
+from sqlalchemy import Column, DateTime, Float, String, Text
 from sqlalchemy.orm import Session
 
 from src.data.price_store import _Base, _get_engine

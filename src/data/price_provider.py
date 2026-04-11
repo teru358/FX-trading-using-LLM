@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime, date
+from datetime import date
 from typing import TYPE_CHECKING
 
 from src.data.price_fetcher import CurrentPrice, PriceData, fetch_current_price, fetch_ohlcv

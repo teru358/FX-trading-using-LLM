@@ -154,7 +154,6 @@ def build_forecast_review_summary(
     dir_summary = " ".join(f"{d}×{c}" for d, c in direction_counts.items())
 
     oldest_ts = forecasts[0].forecast_ts
-    newest_ts = forecasts[-1].forecast_ts
 
     summary_text = (
         f"[Forecast Summary {pair} "

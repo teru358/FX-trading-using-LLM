@@ -5,7 +5,6 @@ import logging
 import os
 import shutil
 import threading
-from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any

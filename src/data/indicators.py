@@ -5,9 +5,6 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import pandas as pd
-import pandas_ta as ta
-
-from src.data.price_fetcher import PriceData
 
 if TYPE_CHECKING:
     from src.config import ChartPatternConfig, IndicatorToggleConfig

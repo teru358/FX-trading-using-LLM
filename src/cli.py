@@ -7,7 +7,6 @@ import subprocess
 import threading
 
 from prompt_toolkit import prompt as pt_prompt
-from prompt_toolkit.formatted_text import ANSI
 from rich import box
 from rich.console import Console
 from rich.table import Table
