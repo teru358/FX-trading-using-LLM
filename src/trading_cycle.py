@@ -200,7 +200,11 @@ async def _process_pair(
                 pattern_cfg=config.analysis.chart_patterns,
             )
             from src.signals.technical_scorer import compute_technical_score
-            tech_score = compute_technical_score(summary)
+            tech_score = compute_technical_score(
+                summary,
+                indicator_cfg=config.analysis.indicators,
+                pattern_cfg=config.analysis.chart_patterns,
+            )
             news_ctx, refl_ctx = await _build_rag_context(pair_cfg, config, store)
             price = await analyze_price_action(
                 pair_cfg=pair_cfg,

@@ -72,11 +72,19 @@ def _is_price_data_stale(price_data, max_staleness: timedelta = _MAX_STALENESS) 
     return None
 
 
-def _compute_and_log_tech_score(inst: InstrumentConfig, summary):
-    """インジケータサマリからテクニカルスコアを計算しログに残す。"""
+def _compute_and_log_tech_score(inst: InstrumentConfig, summary, config: AppConfig):
+    """インジケータサマリからテクニカルスコアを計算しログに残す。
+
+    config.analysis の indicator_cfg / pattern_cfg を渡すことで、無効化された
+    指標カテゴリが人工的に bearish 側に倒す挙動を防ぐ。
+    """
     from src.signals.technical_scorer import compute_technical_score
 
-    tech_score = compute_technical_score(summary)
+    tech_score = compute_technical_score(
+        summary,
+        indicator_cfg=config.analysis.indicators,
+        pattern_cfg=config.analysis.chart_patterns,
+    )
     logger.info(
         f"[COLLECT] {inst.display_name}: tech_score={tech_score.total_score:+.3f} "
         f"conf={tech_score.confidence:.2f} dir={tech_score.direction} "
@@ -154,7 +162,7 @@ async def _collect_one(
         indicator_cfg=config.analysis.indicators,
         pattern_cfg=config.analysis.chart_patterns,
     )
-    tech_score = _compute_and_log_tech_score(inst, summary)
+    tech_score = _compute_and_log_tech_score(inst, summary, config)
 
     # Phase 4: RAG コンテキスト構築
     news_ctx, refl_ctx, prev_ctx = _build_rag_contexts(inst, store, analysis_store, config)

@@ -6,8 +6,12 @@ LLM による非決定的な推論を置き換え、再現性・高速性を確�
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from src.data.indicators import IndicatorSummary
+
+if TYPE_CHECKING:
+    from src.config import ChartPatternConfig, IndicatorToggleConfig
 
 
 @dataclass
@@ -152,36 +156,99 @@ _WEIGHTS = {
     "bb": 0.10,
     "pattern": 0.15,
 }
-_TOTAL_WEIGHT = sum(_WEIGHTS.values())  # == 1.0
 
 
-def compute_technical_score(ind: IndicatorSummary) -> TechnicalScore:
-    """IndicatorSummary からルールベースで TechnicalScore を計算して返す。"""
+def _any_pattern_enabled(pattern_cfg: "ChartPatternConfig | None") -> bool:
+    """pattern_cfg が None ならデフォルト (有効) 扱い。任意の 1 つでも True なら有効。"""
+    if pattern_cfg is None:
+        return True
+    # ChartPatternConfig の全ブール属性を走査
+    return any(
+        getattr(pattern_cfg, name) is True
+        for name in pattern_cfg.__dataclass_fields__
+        if isinstance(getattr(pattern_cfg, name), bool)
+    )
 
-    sma = _score_sma(ind)
-    rsi = _score_rsi(ind)
-    macd = _score_macd(ind)
-    ichimoku = _score_ichimoku(ind)
-    bb = _score_bb(ind)
-    pattern = _score_pattern(ind)
+
+def compute_technical_score(
+    ind: IndicatorSummary,
+    indicator_cfg: "IndicatorToggleConfig | None" = None,
+    pattern_cfg: "ChartPatternConfig | None" = None,
+) -> TechnicalScore:
+    """IndicatorSummary からルールベースで TechnicalScore を計算して返す。
+
+    indicator_cfg / pattern_cfg を指定すると、無効化されたカテゴリはスコア 0
+    として扱い、残りの weight を動的に再正規化する。これにより
+    `compute_indicators` が disabled 指標に対して返す 0.0 デフォルトが
+    人工的に bearish 側に倒す挙動を防ぐ。
+
+    cfg=None (省略時) は全指標有効と同等の振る舞いで、既存呼び出しと後方互換。
+    """
+
+    # --- カテゴリごとの enable 判定 ---
+    sma_on = indicator_cfg is None or indicator_cfg.moving_averages
+    rsi_on = indicator_cfg is None or indicator_cfg.rsi
+    macd_on = indicator_cfg is None or indicator_cfg.macd
+    bb_on = indicator_cfg is None or indicator_cfg.bollinger_bands
+    ichimoku_on = indicator_cfg is None or indicator_cfg.ichimoku
+    pattern_on = _any_pattern_enabled(pattern_cfg)
+
+    # --- カテゴリスコア (無効カテゴリは 0) ---
+    sma = _score_sma(ind) if sma_on else 0.0
+    rsi = _score_rsi(ind) if rsi_on else 0.0
+    macd = _score_macd(ind) if macd_on else 0.0
+    ichimoku = _score_ichimoku(ind) if ichimoku_on else 0.0
+    bb = _score_bb(ind) if bb_on else 0.0
+    pattern = _score_pattern(ind) if pattern_on else 0.0
+
+    # --- 動的 weight 再正規化 (無効カテゴリの weight を除外) ---
+    enabled_weights = {
+        "sma": _WEIGHTS["sma"] if sma_on else 0.0,
+        "rsi": _WEIGHTS["rsi"] if rsi_on else 0.0,
+        "macd": _WEIGHTS["macd"] if macd_on else 0.0,
+        "ichimoku": _WEIGHTS["ichimoku"] if ichimoku_on else 0.0,
+        "bb": _WEIGHTS["bb"] if bb_on else 0.0,
+        "pattern": _WEIGHTS["pattern"] if pattern_on else 0.0,
+    }
+    total_weight = sum(enabled_weights.values())
+
+    if total_weight <= 0.0:
+        # 全指標 disabled → neutral
+        return TechnicalScore(
+            sma_score=0.0,
+            rsi_score=0.0,
+            macd_score=0.0,
+            ichimoku_score=0.0,
+            bb_score=0.0,
+            pattern_score=0.0,
+            adx_factor=_adx_factor(ind.adx_14),
+            total_score=0.0,
+            confidence=0.5,
+            direction="neutral",
+        )
 
     weighted_sum = (
-        sma * _WEIGHTS["sma"]
-        + rsi * _WEIGHTS["rsi"]
-        + macd * _WEIGHTS["macd"]
-        + ichimoku * _WEIGHTS["ichimoku"]
-        + bb * _WEIGHTS["bb"]
-        + pattern * _WEIGHTS["pattern"]
+        sma * enabled_weights["sma"]
+        + rsi * enabled_weights["rsi"]
+        + macd * enabled_weights["macd"]
+        + ichimoku * enabled_weights["ichimoku"]
+        + bb * enabled_weights["bb"]
+        + pattern * enabled_weights["pattern"]
     )
 
     factor = _adx_factor(ind.adx_14)
-    raw_total = (weighted_sum / _TOTAL_WEIGHT) * factor
+    raw_total = (weighted_sum / total_weight) * factor
     total = _clamp(raw_total)
 
-    # --- Confidence ---
-    scores = [sma, rsi, macd, ichimoku, bb, pattern]
-    positives = sum(1 for s in scores if s > 0)
-    negatives = sum(1 for s in scores if s < 0)
+    # --- Confidence — 有効カテゴリだけで agreement を計算 ---
+    enabled_scores = [
+        s for s, on in [
+            (sma, sma_on), (rsi, rsi_on), (macd, macd_on),
+            (ichimoku, ichimoku_on), (bb, bb_on), (pattern, pattern_on),
+        ] if on
+    ]
+    positives = sum(1 for s in enabled_scores if s > 0)
+    negatives = sum(1 for s in enabled_scores if s < 0)
     non_neutral = positives + negatives
 
     if non_neutral == 0:
