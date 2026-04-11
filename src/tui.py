@@ -55,7 +55,7 @@ class TuiApp(App):
         store=None,
         analysis_store=None,
         stop_event: threading.Event | None = None,
-        job_lock: threading.Lock | None = None,
+        llm_slot=None,  # PriorityJobSlot
         forecast_store=None,
         price_store=None,
         hold_store=None,
@@ -66,7 +66,12 @@ class TuiApp(App):
         self._store = store
         self._analysis_store = analysis_store
         self._stop_event = stop_event
-        self._job_lock = job_lock or threading.Lock()
+        # llm_slot は main.py から渡される PriorityJobSlot
+        # None の場合は fallback (TUI 単体テスト等) として新規作成
+        if llm_slot is None:
+            from src.concurrency.priority_job_slot import PriorityJobSlot
+            llm_slot = PriorityJobSlot("tui-fallback")
+        self._llm_slot = llm_slot
         self._forecast_store = forecast_store
         self._price_store = price_store
         self._hold_store = hold_store
@@ -289,39 +294,39 @@ class TuiApp(App):
             return
 
         sub = args[0].lower()
-        with self._job_lock:
-            if sub in ("news", "n"):
-                self._write("[cyan]最新ニュースセンチメントを表示中...[/cyan]")
-                output = self._capture_output(run_news_view, self._config, self._store)
-                self._write(output)
-            elif sub in ("tech", "t", "technical"):
-                self._write("[cyan]最新テクニカルスナップショットを表示中...[/cyan]")
-                output = self._capture_output(run_tech_view, self._config, self._analysis_store)
-                self._write(output)
-            elif sub in ("analyze", "a", "analysis"):
-                self._write("[cyan]総合分析を表示中...[/cyan]")
-                output = self._capture_output(run_analysis_summary, self._config, self._store, self._analysis_store)
-                self._write(output)
-            elif sub in ("forecast", "f"):
-                if self._forecast_store is None:
-                    self._write("[red]forecast_store が利用できません[/red]")
-                else:
-                    pair_filter = args[1] if len(args) > 1 else None
-                    output = self._capture_output(run_forecast_view, self._config, self._forecast_store, pair_filter)
-                    self._write(output)
-            elif sub in ("trade", "tr"):
-                if self._price_store is None or self._hold_store is None:
-                    self._write("[red]price_store / hold_store が利用できません[/red]")
-                else:
-                    self._write("[cyan]取引判定ループを実行中...[/cyan]")
-                    run_trading_cycle(
-                        self._config, self._store, self._price_store,
-                        self._analysis_store, self._hold_store,
-                        price_provider=self._price_provider,
-                    )
-                    self._write("[green]取引判定完了[/green]")
+        if sub in ("news", "n"):
+            self._write("[cyan]最新ニュースセンチメントを表示中...[/cyan]")
+            output = self._capture_output(run_news_view, self._config, self._store)
+            self._write(output)
+        elif sub in ("tech", "t", "technical"):
+            self._write("[cyan]最新テクニカルスナップショットを表示中...[/cyan]")
+            output = self._capture_output(run_tech_view, self._config, self._analysis_store)
+            self._write(output)
+        elif sub in ("analyze", "a", "analysis"):
+            self._write("[cyan]総合分析を表示中...[/cyan]")
+            output = self._capture_output(run_analysis_summary, self._config, self._store, self._analysis_store)
+            self._write(output)
+        elif sub in ("forecast", "f"):
+            if self._forecast_store is None:
+                self._write("[red]forecast_store が利用できません[/red]")
             else:
-                self._write(f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | forecast | trade")
+                pair_filter = args[1] if len(args) > 1 else None
+                output = self._capture_output(run_forecast_view, self._config, self._forecast_store, pair_filter)
+                self._write(output)
+        elif sub in ("trade", "tr"):
+            if self._price_store is None or self._hold_store is None:
+                self._write("[red]price_store / hold_store が利用できません[/red]")
+            else:
+                self._write("[cyan]取引判定ループを実行中 (LLMスロット取得待機)...[/cyan]")
+                self._llm_slot.run_user_blocking(
+                    run_trading_cycle,
+                    self._config, self._store, self._price_store,
+                    self._analysis_store, self._hold_store,
+                    price_provider=self._price_provider,
+                )
+                self._write("[green]取引判定完了[/green]")
+        else:
+            self._write(f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | forecast | trade")
 
     def _cmd_ask(self, args: list[str]) -> None:
         from src.trading_cycle import run_ask
@@ -330,9 +335,10 @@ class TuiApp(App):
             self._write("[red]使い方: ask <メッセージ>[/red]")
             return
         user_message = " ".join(args)
-        self._write("[cyan]LLMに問い合わせ中...[/cyan]")
-        with self._job_lock:
-            response = run_ask(user_message, self._config, self._store, self._analysis_store)
+        self._write("[cyan]LLMに問い合わせ中 (LLMスロット取得待機)...[/cyan]")
+        response = self._llm_slot.run_user_blocking(
+            run_ask, user_message, self._config, self._store, self._analysis_store
+        )
         self._write(f"\n[bold]LLM回答:[/bold]\n{response}\n")
 
     def _cmd_notify(self) -> None:

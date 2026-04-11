@@ -4,12 +4,29 @@ import json
 import logging
 import os
 import shutil
+import threading
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# state_dir パスごとの書き込みロック。同一プロセス内で複数の StateStore インスタンスが
+# 作られても、同じディレクトリを指すものは同じロックを共有し、read-modify-write の
+# レースを防ぐ。
+_STATE_DIR_LOCKS: dict[Path, threading.RLock] = {}
+_STATE_DIR_LOCKS_GUARD = threading.Lock()
+
+
+def _get_state_lock(state_dir: Path) -> threading.RLock:
+    key = state_dir.resolve()
+    with _STATE_DIR_LOCKS_GUARD:
+        lock = _STATE_DIR_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _STATE_DIR_LOCKS[key] = lock
+        return lock
 
 
 def _serialize(obj: Any) -> Any:
@@ -30,6 +47,8 @@ class StateStore:
     def __init__(self, state_dir: Path) -> None:
         self.state_dir = state_dir
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        # 同じ state_dir を指す全インスタンスで共有されるロック
+        self._lock = _get_state_lock(state_dir)
 
     def _positions_path(self) -> Path:
         return self.state_dir / "positions.json"
@@ -82,7 +101,8 @@ class StateStore:
             "last_updated": datetime.now().isoformat(),
             "open_positions": open_positions,
         }
-        self._atomic_write(self._positions_path(), data)
+        with self._lock:
+            self._atomic_write(self._positions_path(), data)
         logger.debug(f"Saved {len(open_positions)} open positions.")
 
     # --- Trades ---
@@ -94,7 +114,8 @@ class StateStore:
         return data
 
     def append_trade(self, trade_dict: dict) -> None:
-        trades = self.load_trades_raw()
-        trades.append(trade_dict)
-        self._atomic_write(self._trades_path(), trades)
+        with self._lock:
+            trades = self.load_trades_raw()
+            trades.append(trade_dict)
+            self._atomic_write(self._trades_path(), trades)
         logger.debug(f"Appended trade {trade_dict.get('order_id')} to history.")
