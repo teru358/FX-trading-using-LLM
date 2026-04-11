@@ -35,6 +35,96 @@ from src.trading.market_hours import is_market_open, market_status_label
 logger = logging.getLogger(__name__)
 
 
+_MAX_STALENESS = timedelta(hours=6)
+
+
+def _fetch_instrument_ohlcv(
+    inst: InstrumentConfig,
+    config: AppConfig,
+    price_store: PriceStore,
+    price_provider: "PriceProvider | None",
+):
+    """price_provider または fetch_ohlcv で OHLCV を取得する。"""
+    period = f"{config.trading.lookback_days}d"
+    interval = config.trading.ohlcv_interval
+    if price_provider:
+        return price_provider.get_ohlcv(
+            inst.symbol, period=period, interval=interval, price_store=price_store,
+        )
+    from src.data.price_fetcher import fetch_ohlcv
+    return fetch_ohlcv(
+        inst.symbol, period=period, interval=interval, price_store=price_store,
+    )
+
+
+def _is_price_data_stale(price_data, max_staleness: timedelta = _MAX_STALENESS) -> timedelta | None:
+    """最新バーの鮮度をチェック。古すぎる場合は経過時間を返す (スキップ判定用)。"""
+    from datetime import datetime
+
+    latest_bar = price_data.df.index[-1]
+    if hasattr(latest_bar, "to_pydatetime"):
+        latest_bar = latest_bar.to_pydatetime()
+    if hasattr(latest_bar, "tzinfo") and latest_bar.tzinfo is not None:
+        latest_bar = latest_bar.replace(tzinfo=None)
+    staleness = datetime.now() - latest_bar
+    if staleness > max_staleness:
+        return staleness
+    return None
+
+
+def _compute_and_log_tech_score(inst: InstrumentConfig, summary):
+    """インジケータサマリからテクニカルスコアを計算しログに残す。"""
+    from src.signals.technical_scorer import compute_technical_score
+
+    tech_score = compute_technical_score(summary)
+    logger.info(
+        f"[COLLECT] {inst.display_name}: tech_score={tech_score.total_score:+.3f} "
+        f"conf={tech_score.confidence:.2f} dir={tech_score.direction} "
+        f"(SMA={tech_score.sma_score:+.2f} RSI={tech_score.rsi_score:+.2f} "
+        f"MACD={tech_score.macd_score:+.2f} ICH={tech_score.ichimoku_score:+.2f} "
+        f"BB={tech_score.bb_score:+.2f} PAT={tech_score.pattern_score:+.2f} ADX×{tech_score.adx_factor:.1f})"
+    )
+    return tech_score
+
+
+def _build_rag_contexts(
+    inst: InstrumentConfig,
+    store: VectorStore,
+    analysis_store: AnalysisStore,
+    config: AppConfig,
+) -> tuple[str, str, str]:
+    """LLM プロンプト向けの (news_ctx, refl_ctx (+insights), prev_ctx) を構築する。"""
+    news_entries = store.get_recent_category_news(
+        categories=inst.news_categories,
+        lookback_hours=config.rag.news_lookback_hours,
+    )
+    reflections = store.get_recent_reflections(
+        pair=inst.symbol,
+        limit=config.rag.reflection_lookback_count,
+    )
+    news_ctx = format_news_for_prompt(news_entries)
+    refl_ctx = format_reflections_for_prompt(reflections)
+
+    # 過去の ask 洞察を reflection 末尾に結合
+    insights = store.get_recent_insights(pair=inst.symbol, limit=3, lookback_hours=72)
+    insight_ctx = format_insights_for_prompt(insights)
+    if insight_ctx:
+        refl_ctx = f"{refl_ctx}\n\n{insight_ctx}" if refl_ctx else insight_ctx
+
+    prev_snapshots = analysis_store.get_recent_snapshots(inst.symbol, hours=8)
+    prev_ctx = format_previous_analysis_for_prompt(prev_snapshots[0] if prev_snapshots else None)
+    return news_ctx, refl_ctx, prev_ctx
+
+
+def _combine_macro(macro_context: str, correlation_context: str) -> str:
+    """macro と correlation を単一テキストに結合する。空文字列の扱いに注意。"""
+    if not correlation_context:
+        return macro_context
+    if not macro_context:
+        return correlation_context
+    return f"{macro_context}\n\n{correlation_context}"
+
+
 async def _collect_one(
     inst: InstrumentConfig,
     config: AppConfig,
@@ -47,81 +137,30 @@ async def _collect_one(
     price_provider: "PriceProvider | None" = None,
 ) -> None:
     """1銘柄のOHLCVを取得してテクニカル分析を実行し、スナップショットを保存する。"""
-    from datetime import datetime, timedelta
+    # Phase 1: OHLCV 取得
+    price_data = _fetch_instrument_ohlcv(inst, config, price_store, price_provider)
 
-    if price_provider:
-        price_data = price_provider.get_ohlcv(
-            inst.symbol,
-            period=f"{config.trading.lookback_days}d",
-            interval=config.trading.ohlcv_interval,
-            price_store=price_store,
-        )
-    else:
-        from src.data.price_fetcher import fetch_ohlcv
-        price_data = fetch_ohlcv(
-            inst.symbol,
-            period=f"{config.trading.lookback_days}d",
-            interval=config.trading.ohlcv_interval,
-            price_store=price_store,
-        )
-
-    # 価格データの鮮度チェック: 最新バーが古すぎる場合LLM呼び出しをスキップ
-    latest_bar = price_data.df.index[-1]
-    if hasattr(latest_bar, "to_pydatetime"):
-        latest_bar = latest_bar.to_pydatetime()
-    if hasattr(latest_bar, "tzinfo") and latest_bar.tzinfo is not None:
-        latest_bar = latest_bar.replace(tzinfo=None)
-    staleness = datetime.now() - latest_bar
-    max_staleness = timedelta(hours=6)
-    if staleness > max_staleness:
+    # Phase 2: 鮮度チェック (古ければスキップ)
+    staleness = _is_price_data_stale(price_data)
+    if staleness is not None:
         logger.info(
             f"[COLLECT] {inst.display_name}: stale data (latest bar {staleness} ago), skipping LLM analysis"
         )
         return
 
+    # Phase 3: インジケータ計算 + テクニカルスコア
     _, summary = compute_indicators(
         price_data.df,
         indicator_cfg=config.analysis.indicators,
         pattern_cfg=config.analysis.chart_patterns,
     )
+    tech_score = _compute_and_log_tech_score(inst, summary)
 
-    from src.signals.technical_scorer import compute_technical_score
-    tech_score = compute_technical_score(summary)
-    logger.info(
-        f"[COLLECT] {inst.display_name}: tech_score={tech_score.total_score:+.3f} "
-        f"conf={tech_score.confidence:.2f} dir={tech_score.direction} "
-        f"(SMA={tech_score.sma_score:+.2f} RSI={tech_score.rsi_score:+.2f} "
-        f"MACD={tech_score.macd_score:+.2f} ICH={tech_score.ichimoku_score:+.2f} "
-        f"BB={tech_score.bb_score:+.2f} PAT={tech_score.pattern_score:+.2f} ADX×{tech_score.adx_factor:.1f})"
-    )
+    # Phase 4: RAG コンテキスト構築
+    news_ctx, refl_ctx, prev_ctx = _build_rag_contexts(inst, store, analysis_store, config)
+    full_macro = _combine_macro(macro_context, correlation_context)
 
-    # RAGからコンテキストを構築
-    news_entries = store.get_recent_category_news(
-        categories=inst.news_categories,
-        lookback_hours=config.rag.news_lookback_hours,
-    )
-    reflections = store.get_recent_reflections(
-        pair=inst.symbol,
-        limit=config.rag.reflection_lookback_count,
-    )
-    news_ctx = format_news_for_prompt(news_entries)
-    refl_ctx = format_reflections_for_prompt(reflections)
-
-    # 過去のask洞察を取得
-    insights = store.get_recent_insights(pair=inst.symbol, limit=3, lookback_hours=72)
-    insight_ctx = format_insights_for_prompt(insights)
-    if insight_ctx:
-        refl_ctx = f"{refl_ctx}\n\n{insight_ctx}" if refl_ctx else insight_ctx
-
-    # 前回分析スナップショット（直近1件）
-    prev_snapshots = analysis_store.get_recent_snapshots(inst.symbol, hours=8)
-    prev_ctx = format_previous_analysis_for_prompt(prev_snapshots[0] if prev_snapshots else None)
-
-    # マクロコンテキストに相関データを付加
-    full_macro = macro_context
-    if correlation_context:
-        full_macro = f"{macro_context}\n\n{correlation_context}" if macro_context else correlation_context
-
+    # Phase 5: LLM 分析 + 保存
     price_analysis = await analyze_price_action(
         pair_cfg=inst,
         price_data=price_data,
