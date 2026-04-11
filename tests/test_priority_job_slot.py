@@ -224,3 +224,100 @@ def test_run_user_blocking_waits_for_slot():
 
     thread.join(timeout=2.0)
     assert blocking_result == ["second_done"]
+
+
+# ── run_user_blocking_with_timeout ─────────────────────────────
+
+
+def test_blocking_with_timeout_empty_slot_returns_completed():
+    """空きスロットなら即取得して結果を返す。"""
+    slot = PriorityJobSlot("test")
+
+    def _fn() -> str:
+        return "ok"
+
+    status, result = slot.run_user_blocking_with_timeout(_fn, timeout=1.0)
+    assert status == "completed"
+    assert result == "ok"
+
+
+def test_blocking_with_timeout_propagates_exception_status():
+    """fn が例外を投げたら ('completed_with_error', exc) を返し、スロットは解放される。"""
+    slot = PriorityJobSlot("test")
+
+    def _bad_fn() -> str:
+        raise ValueError("boom")
+
+    status, result = slot.run_user_blocking_with_timeout(_bad_fn, timeout=1.0)
+    assert status == "completed_with_error"
+    assert isinstance(result, ValueError)
+    # スロットは解放されている → 次の呼び出しが通る
+    second_status, second_result = slot.run_user_blocking_with_timeout(
+        lambda: "second", timeout=1.0,
+    )
+    assert second_status == "completed"
+    assert second_result == "second"
+
+
+def test_blocking_with_timeout_waits_for_busy_slot_then_runs():
+    """スロット占有中は完了まで待ってから順次実行する。"""
+    slot = PriorityJobSlot("test")
+    release_first = threading.Event()
+    first_started = threading.Event()
+
+    def _slow_first() -> str:
+        first_started.set()
+        release_first.wait(timeout=5.0)
+        return "first_done"
+
+    # 先行ジョブを別スレッドで開始
+    threading.Thread(
+        target=lambda: slot.run_user_blocking(_slow_first),
+        daemon=True,
+    ).start()
+    first_started.wait(timeout=1.0)
+
+    second_result: list = []
+
+    def _call_blocking() -> None:
+        status, result = slot.run_user_blocking_with_timeout(
+            lambda: "second_done", timeout=2.0,
+        )
+        second_result.append((status, result))
+
+    waiter = threading.Thread(target=_call_blocking, daemon=True)
+    waiter.start()
+
+    # まだ第二は走っていない (第一が解放されていない)
+    time.sleep(0.1)
+    assert second_result == []
+
+    release_first.set()
+    waiter.join(timeout=2.0)
+    assert second_result == [("completed", "second_done")]
+
+
+def test_blocking_with_timeout_returns_timeout_when_slot_stays_busy():
+    """timeout 内にスロットが空かなければ ('timeout', None) を返す。"""
+    slot = PriorityJobSlot("test")
+    release = threading.Event()
+    started = threading.Event()
+
+    def _slow_fn() -> None:
+        started.set()
+        release.wait(timeout=5.0)
+
+    threading.Thread(
+        target=lambda: slot.run_user_blocking(_slow_fn),
+        daemon=True,
+    ).start()
+    started.wait(timeout=1.0)
+
+    status, result = slot.run_user_blocking_with_timeout(
+        lambda: "should_not_run", timeout=0.2,
+    )
+    assert status == "timeout"
+    assert result is None
+
+    # 後始末
+    release.set()

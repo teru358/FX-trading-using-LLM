@@ -22,11 +22,21 @@ class _AskRequest(BaseModel):
     message: str
 
 
+# 通知 OFF 時の blocking 待機の最大時間 = ask_soft_timeout_sec × この倍率
+# (例: soft=60s × 5 = 300s = 5分まで前のジョブ完了を待つ)
+_BLOCKING_WAIT_MULTIPLIER = 5
+
+
 @router.post("/ask", dependencies=[Depends(verify_api_key)])
 def ask(body: _AskRequest) -> dict[str, Any]:
     """FX 分析 LLM へ質問する。
 
-    soft_timeout 内に完了したら同期返答、超過したら "accepted" + Discord 通知。
+    挙動はDiscord通知設定によって分岐する:
+
+    - **通知 ON** (notifier.enabled=true): ``soft_timeout`` 内完了で同期返答、
+      超過したら "accepted" を返してバックグラウンド継続 + 完了時に Discord 通知。
+    - **通知 OFF**: 走行中ジョブがあれば完了を待ってから順次実行 (最大
+      ``ask_soft_timeout_sec * 5`` 秒)。HTTP リクエストはその間ブロックする。
     """
     assert state.config is not None and state.llm_slot is not None
     assert state.store is not None and state.analysis_store is not None
@@ -43,6 +53,33 @@ def ask(body: _AskRequest) -> dict[str, Any]:
     def _job() -> str:
         return _run_ask(message, state.config, state.store, state.analysis_store)
 
+    # ── 通知 OFF: 同期 blocking で順次実行 ─────────────────────
+    if not state.config.notifier.enabled:
+        max_wait = soft_timeout * _BLOCKING_WAIT_MULTIPLIER
+        job_status, result = state.llm_slot.run_user_blocking_with_timeout(
+            _job, timeout=max_wait,
+        )
+        if job_status == "completed":
+            elapsed = (db_now() - started_at).total_seconds()
+            return {
+                "message": message,
+                "response": result,
+                "elapsed_seconds": round(elapsed, 1),
+                "status": "completed",
+            }
+        if job_status == "completed_with_error":
+            logger.error(f"[API] /ask failed: {result}", exc_info=isinstance(result, BaseException))
+            raise HTTPException(status_code=504, detail=f"LLM error: {result}")
+        # timeout: 走行中ジョブが max_wait 内に完了しなかった
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"他のジョブが走行中で {max_wait:.0f}s 以内にスロットを取得できませんでした。"
+                f"後ほど再試行してください。"
+            ),
+        )
+
+    # ── 通知 ON: 従来通り soft_timeout 内同期、超過で webhook ──
     job_status, result = state.llm_slot.try_run_user_sync(_job, soft_timeout=soft_timeout)
 
     if job_status == "completed":

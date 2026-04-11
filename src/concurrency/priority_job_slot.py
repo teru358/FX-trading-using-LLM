@@ -14,6 +14,7 @@ from typing import Any, Callable, Literal
 logger = logging.getLogger(__name__)
 
 UserSyncStatus = Literal["completed", "completed_with_error", "promoted", "slot_busy"]
+UserBlockingStatus = Literal["completed", "completed_with_error", "timeout"]
 
 
 class PriorityJobSlot:
@@ -226,3 +227,51 @@ class PriorityJobSlot:
                 elapsed = time.monotonic() - start
                 logger.info(f"[SLOT] {self._name}: user blocking done in {elapsed:.1f}s")
                 self._mark_finished()
+
+    # ── REST API 用: タイムアウト付き同期待機 ─────────────────
+
+    def run_user_blocking_with_timeout(
+        self,
+        fn: Callable[..., Any],
+        *args: Any,
+        timeout: float,
+        **kwargs: Any,
+    ) -> tuple[UserBlockingStatus, Any]:
+        """スロット取得を最大 ``timeout`` 秒待ち、取れたら同期実行する。
+
+        Discord 通知 OFF の REST API から、走行中ジョブの完了を待ってから
+        順次処理したいケースで使う。HTTP リクエストを長時間ブロックするので
+        必ず合理的な ``timeout`` を指定すること。
+
+        戻り値:
+            ``("completed", result)``         → スロット取得 + 実行成功
+            ``("completed_with_error", exc)`` → スロット取得 + 実行例外
+            ``("timeout", None)``             → ``timeout`` 内にスロット取得できず
+        """
+        if not self._slot_lock.acquire(timeout=timeout):
+            logger.info(
+                f"[SLOT] {self._name}: user blocking gave up after {timeout:.0f}s "
+                f"(slot still busy)"
+            )
+            return ("timeout", None)
+        try:
+            self._mark_started()
+            start = time.monotonic()
+            try:
+                result = fn(*args, **kwargs)
+                elapsed = time.monotonic() - start
+                logger.info(
+                    f"[SLOT] {self._name}: user blocking-with-timeout done in {elapsed:.1f}s"
+                )
+                return ("completed", result)
+            except Exception as e:
+                elapsed = time.monotonic() - start
+                logger.warning(
+                    f"[SLOT] {self._name}: user blocking-with-timeout failed in "
+                    f"{elapsed:.1f}s: {e}"
+                )
+                return ("completed_with_error", e)
+            finally:
+                self._mark_finished()
+        finally:
+            self._slot_lock.release()
