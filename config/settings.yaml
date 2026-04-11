@@ -157,15 +157,15 @@ analysis:
     inside_bar: true          # インサイドバー（前足の範囲内に収まる）
 
     # ── チャート形状パターン ──────────────────────────
-    double_top_bottom: false  # ダブルトップ/ダブルボトム
-    head_shoulders: false     # ヘッド＆ショルダー（通常/逆）
-    triangle: false           # 三角保ち合い（上昇/下降/対称）
-    range_bound: false        # レンジ相場検出
+    double_top_bottom: true  # ダブルトップ/ダブルボトム
+    head_shoulders: true     # ヘッド＆ショルダー（通常/逆）
+    triangle: true           # 三角保ち合い（上昇/下降/対称）
+    range_bound: true        # レンジ相場検出
 
     # ── ブレイクアウト系 ──────────────────────────────
-    bb_squeeze: false         # BBスクイーズ（ボラティリティ収縮）
-    atr_contraction: false    # ATR収縮（ブレイクアウト前兆）
-    sr_breakout: false        # サポート/レジスタンス・ブレイク
+    bb_squeeze: true         # BBスクイーズ（ボラティリティ収縮）
+    atr_contraction: true    # ATR収縮（ブレイクアウト前兆）
+    sr_breakout: true        # サポート/レジスタンス・ブレイク
 
   # 予測サイクル設定（技術+ニュース合成シグナルの定期検証）
   forecast_review_interval_hours: 2    # B: 予測から検証までの時間（2h = 1セッション）
