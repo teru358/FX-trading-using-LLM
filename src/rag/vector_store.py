@@ -17,6 +17,45 @@ _INSIGHT_COL = "fx_insights"
 _ECON_ANALYSIS_COL = "fx_econ_event_analysis"
 
 
+# ── 内部ヘルパー ───────────────────────────────────────────────
+
+def _cutoff_ts(*, hours: int | None = None, minutes: int | None = None) -> float:
+    """直近 N 時間 / 分の境界 Unix タイムスタンプを返す。"""
+    if hours is not None:
+        delta = timedelta(hours=hours)
+    elif minutes is not None:
+        delta = timedelta(minutes=minutes)
+    else:
+        raise ValueError("hours または minutes のどちらかを指定してください")
+    return (datetime.now() - delta).timestamp()
+
+
+def _unpack_get(results: dict) -> list[dict]:
+    """chromadb ``collection.get()`` の結果を ``[{"text", "metadata"}]`` に変換する。"""
+    docs = results.get("documents", []) or []
+    metas = results.get("metadatas", []) or []
+    return [{"text": doc, "metadata": meta} for doc, meta in zip(docs, metas)]
+
+
+def _unpack_query(results: dict) -> list[dict]:
+    """chromadb ``collection.query()`` (単一バッチ) の結果を
+    ``[{"text", "metadata", "distance"}]`` に変換する。"""
+    docs_batch = results.get("documents") or [[]]
+    metas_batch = results.get("metadatas") or [[]]
+    dists_batch = results.get("distances") or [[]]
+    docs = docs_batch[0] if docs_batch else []
+    metas = metas_batch[0] if metas_batch else []
+    dists = dists_batch[0] if dists_batch else []
+    entries: list[dict] = []
+    for i, doc in enumerate(docs):
+        entries.append({
+            "text": doc,
+            "metadata": metas[i] if i < len(metas) else {},
+            "distance": dists[i] if i < len(dists) else 0.5,
+        })
+    return entries
+
+
 class VectorStore:
     """ChromaDB によるローカルベクトルストア。
 
@@ -118,32 +157,23 @@ class VectorStore:
         lookback_hours: int = 24,
     ) -> list[dict]:
         """カテゴリ指定で直近ニュース分析を取得する。"""
-        since_ts = (datetime.now() - timedelta(hours=lookback_hours)).timestamp()
+        cat_filter = (
+            {"category": {"$eq": categories[0]}}
+            if len(categories) == 1
+            else {"category": {"$in": categories}}
+        )
+        where = {
+            "$and": [
+                cat_filter,
+                {"collected_ts": {"$gte": _cutoff_ts(hours=lookback_hours)}},
+            ]
+        }
         try:
-            if len(categories) == 1:
-                where = {
-                    "$and": [
-                        {"category": {"$eq": categories[0]}},
-                        {"collected_ts": {"$gte": since_ts}},
-                    ]
-                }
-            else:
-                where = {
-                    "$and": [
-                        {"category": {"$in": categories}},
-                        {"collected_ts": {"$gte": since_ts}},
-                    ]
-                }
-            results = self._news.get(
-                where=where,
-                include=["documents", "metadatas"],
-            )
+            results = self._news.get(where=where, include=["documents", "metadatas"])
         except Exception:
             return []
 
-        entries = []
-        for doc, meta in zip(results.get("documents", []), results.get("metadatas", [])):
-            entries.append({"text": doc, "metadata": meta})
+        entries = _unpack_get(results)
         entries.sort(key=lambda x: x["metadata"].get("collected_ts", 0), reverse=True)
         return entries
 
@@ -188,10 +218,7 @@ class VectorStore:
             )
         except Exception:
             return []
-
-        entries = []
-        for doc, meta in zip(results.get("documents", []), results.get("metadatas", [])):
-            entries.append({"text": doc, "metadata": meta})
+        entries = _unpack_get(results)
         entries.sort(key=lambda x: x["metadata"].get("cycle_ts", 0), reverse=True)
         return entries[:limit]
 
@@ -223,6 +250,13 @@ class VectorStore:
         )
         logger.info(f"[INSIGHT] Stored: {entry_id} | {pair} | {insight_type}")
 
+    def _insights_where(self, pair: str | None, lookback_hours: int) -> dict:
+        """insights 用の where 句 (時間フィルタ + 任意の pair フィルタ) を構築する。"""
+        ts_filter = {"created_ts": {"$gte": _cutoff_ts(hours=lookback_hours)}}
+        if pair:
+            return {"$and": [{"pair": {"$eq": pair}}, ts_filter]}
+        return ts_filter
+
     def get_recent_insights(
         self,
         pair: str | None = None,
@@ -232,27 +266,12 @@ class VectorStore:
         """直近の洞察を取得する。"""
         if self._insights.count() == 0:
             return []
-        cutoff_ts = (datetime.now() - timedelta(hours=lookback_hours)).timestamp()
-        where: dict | None = {"created_ts": {"$gte": cutoff_ts}}
-        if pair:
-            where = {"$and": [
-                {"pair": {"$eq": pair}},
-                {"created_ts": {"$gte": cutoff_ts}},
-            ]}
+        where = self._insights_where(pair, lookback_hours)
         try:
-            results = self._insights.get(
-                where=where,
-                limit=limit,
-            )
+            results = self._insights.get(where=where, limit=limit)
         except Exception:
             results = self._insights.get(limit=limit)
-        entries = []
-        for i, doc in enumerate(results.get("documents", [])):
-            entries.append({
-                "text": doc,
-                "metadata": results["metadatas"][i] if results.get("metadatas") else {},
-            })
-        # Sort by created_ts descending
+        entries = _unpack_get(results)
         entries.sort(key=lambda e: e["metadata"].get("created_ts", 0), reverse=True)
         return entries[:limit]
 
@@ -266,33 +285,17 @@ class VectorStore:
         """セマンティック検索で関連する洞察を取得する。"""
         if self._insights.count() == 0:
             return []
-        cutoff_ts = (datetime.now() - timedelta(hours=lookback_hours)).timestamp()
-        where: dict | None = {"created_ts": {"$gte": cutoff_ts}}
-        if pair:
-            where = {"$and": [
-                {"pair": {"$eq": pair}},
-                {"created_ts": {"$gte": cutoff_ts}},
-            ]}
+        where = self._insights_where(pair, lookback_hours)
         n = min(top_k, self._insights.count())
         try:
             results = self._insights.query(
-                query_embeddings=[query_embedding],
-                n_results=n,
-                where=where,
+                query_embeddings=[query_embedding], n_results=n, where=where,
             )
         except Exception:
             results = self._insights.query(
-                query_embeddings=[query_embedding],
-                n_results=n,
+                query_embeddings=[query_embedding], n_results=n,
             )
-        entries = []
-        for i, doc in enumerate(results.get("documents", [[]])[0]):
-            entries.append({
-                "text": doc,
-                "metadata": results["metadatas"][0][i] if results.get("metadatas") else {},
-                "distance": results["distances"][0][i] if results.get("distances") else 0.5,
-            })
-        return entries
+        return _unpack_query(results)
 
     # ---- Maintenance --------------------------------------------------------
 
@@ -302,10 +305,9 @@ class VectorStore:
         Returns:
             削除したエントリ数
         """
-        cutoff_ts = (datetime.now() - timedelta(hours=max_age_hours)).timestamp()
         try:
             results = self._news.get(
-                where={"collected_ts": {"$lt": cutoff_ts}},
+                where={"collected_ts": {"$lt": _cutoff_ts(hours=max_age_hours)}},
                 include=["metadatas"],
             )
         except Exception:
@@ -365,22 +367,15 @@ class VectorStore:
         """直近の経済指標分析を取得する。"""
         if self._econ_analyses.count() == 0:
             return []
-        cutoff_ts = (datetime.now() - timedelta(minutes=lookback_minutes)).timestamp()
-        where: dict = {"event_ts": {"$gte": cutoff_ts}}
-        if currencies:
-            where = {"$and": [
-                {"currency": {"$in": currencies}},
-                {"event_ts": {"$gte": cutoff_ts}},
-            ]}
+        ts_filter = {"event_ts": {"$gte": _cutoff_ts(minutes=lookback_minutes)}}
+        where: dict = (
+            {"$and": [{"currency": {"$in": currencies}}, ts_filter]}
+            if currencies else ts_filter
+        )
         try:
             results = self._econ_analyses.get(where=where, limit=limit)
         except Exception:
             results = self._econ_analyses.get(limit=limit)
-        entries = []
-        for i, doc in enumerate(results.get("documents", [])):
-            entries.append({
-                "text": doc,
-                "metadata": results["metadatas"][i] if results.get("metadatas") else {},
-            })
+        entries = _unpack_get(results)
         entries.sort(key=lambda e: e["metadata"].get("event_ts", 0), reverse=True)
         return entries[:limit]
