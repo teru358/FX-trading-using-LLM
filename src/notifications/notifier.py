@@ -63,6 +63,48 @@ class PriceAlertEvent:
     source: str = ""          # "trading" | "forecast" | "monitor" など
 
 
+@dataclass
+class SignalRecommendationEvent:
+    """signal_only モードのシグナル推奨通知。"""
+    pair: str
+    direction: str              # "buy" | "sell"
+    entry_price: float
+    stop_loss: float
+    take_profit: float
+    position_size: float        # 推奨ロット
+    combined_score: float
+    confidence: float
+    signal_reason: str
+    detail_reason: str
+    max_loss: float             # 残高 × risk_per_trade
+    portfolio_warning: str      # ガード注記（空文字なら制限なし）
+    existing_positions: int     # 同一ペアの既存 manual ポジション数
+    source: str = ""
+
+
+@dataclass
+class SLTPAlertEvent:
+    """manual ポジションの SL/TP 到達通知（決済は行わない）。"""
+    pair: str
+    direction: str
+    order_id: str
+    entry_price: float
+    current_price: float
+    trigger: str                # "stop_loss" | "take_profit"
+    unrealized_pnl: float
+
+
+@dataclass
+class ReviewAdvisoryEvent:
+    """manual ポジションの Layer 1-3 決済推奨通知。"""
+    pair: str
+    direction: str
+    order_id: str
+    close_reason: str           # "reversal" | "timeout" | "profit_lock"
+    detail: str
+    current_price: float
+
+
 # ── 抽象基底クラス ─────────────────────────────────────────
 
 _SOURCE_LABELS = {
@@ -164,6 +206,53 @@ class NotifierAdapter(ABC):
             msg += f"\n─────────────\n{event.detail_reason}"
         else:
             msg += f"\n根拠: {event.signal_reason}"
+        await self.send(msg)
+
+    async def notify_signal_recommendation(self, event: SignalRecommendationEvent) -> None:
+        direction_emoji = "📈" if event.direction == "buy" else "📉"
+        sl_pips = abs(event.entry_price - event.stop_loss)
+        tp_pips = abs(event.take_profit - event.entry_price)
+        tag = _source_tag(event.source)
+        msg = (
+            f"{direction_emoji} 【シグナル推奨】{tag}{event.pair}\n"
+            f"方向: {event.direction.upper()}  スコア: {event.combined_score:+.3f}  確信度: {event.confidence:.0%}\n"
+            f"エントリー: {event.entry_price:.5f}\n"
+            f"SL: {event.stop_loss:.5f} ({sl_pips:.5f})  TP: {event.take_profit:.5f} (+{tp_pips:.5f})\n"
+            f"推奨ロット: {event.position_size:,.0f}  最大損失: {event.max_loss:,.0f}"
+        )
+        if event.existing_positions > 0:
+            msg += f"\n既存ポジション: {event.existing_positions}件"
+        if event.portfolio_warning:
+            msg += f"\n⚠ {event.portfolio_warning}"
+        if event.detail_reason:
+            msg += f"\n─────────────\n{event.detail_reason}"
+        await self.send(msg)
+
+    async def notify_sltp_alert(self, event: SLTPAlertEvent) -> None:
+        emoji = "🎯" if event.trigger == "take_profit" else "🛑"
+        label = "TP到達" if event.trigger == "take_profit" else "SL到達"
+        pnl_sign = "+" if event.unrealized_pnl >= 0 else ""
+        msg = (
+            f"{emoji} 【{label}】{event.pair} {event.direction.upper()}\n"
+            f"エントリー: {event.entry_price:.5f} → 現在: {event.current_price:.5f}\n"
+            f"未実現損益: {pnl_sign}{event.unrealized_pnl:.2f}\n"
+            f"order_id: {event.order_id}"
+        )
+        await self.send(msg)
+
+    async def notify_review_advisory(self, event: ReviewAdvisoryEvent) -> None:
+        reason_labels = {
+            "reversal": "🔄 反転推奨",
+            "timeout": "⏰ タイムアウト推奨",
+            "profit_lock": "🔒 利益ロック推奨",
+        }
+        label = reason_labels.get(event.close_reason, event.close_reason)
+        msg = (
+            f"{label} {event.pair} {event.direction.upper()}\n"
+            f"現在価格: {event.current_price:.5f}\n"
+            f"{event.detail}\n"
+            f"order_id: {event.order_id}"
+        )
         await self.send(msg)
 
 
