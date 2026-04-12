@@ -22,10 +22,14 @@ from __future__ import annotations
 
 import logging
 import os
+from typing import TYPE_CHECKING
 
 from src.signals.signal_combiner import TradeSignal
 from src.trading.broker_adapter import BrokerAdapter
 from src.trading.position_manager import Order, PositionManager
+
+if TYPE_CHECKING:
+    from src.notifications.notifier import NotifierAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -135,11 +139,15 @@ def create_broker(
     max_total_positions: int = 4,
     max_positions_per_group: int = 2,
     max_same_direction_per_group: int = 2,
+    manual_position_mgr: "PositionManager | None" = None,
+    notifier: "NotifierAdapter | None" = None,
 ) -> BrokerAdapter:
     """trading_mode に応じた BrokerAdapter を返すファクトリ関数。
 
     Args:
-        trading_mode: "paper" | "live"
+        trading_mode: "paper" | "live" | "signal_only"
+        manual_position_mgr: "signal_only" モード時に必須。manual ポジション管理用。
+        notifier: "signal_only" モード時に必須。通知アダプター。
     """
     from src.trading.paper_broker import PaperBrokerAdapter
 
@@ -151,5 +159,22 @@ def create_broker(
         )
     elif trading_mode == "live":
         return LiveBrokerAdapter()
+    elif trading_mode == "signal_only":
+        if manual_position_mgr is None:
+            raise ValueError(
+                "signal_only モードでは manual_position_mgr が必須です。"
+            )
+        if notifier is None:
+            raise ValueError(
+                "signal_only モードでは notifier が必須です。"
+            )
+        from src.trading.signal_only_broker import SignalOnlyBrokerAdapter
+        return SignalOnlyBrokerAdapter(
+            manual_position_mgr=manual_position_mgr,
+            notifier=notifier,
+            max_total_positions=max_total_positions,
+            max_positions_per_group=max_positions_per_group,
+            max_same_direction_per_group=max_same_direction_per_group,
+        )
     else:
-        raise ValueError(f"Unknown trading_mode: {trading_mode!r}. Use 'paper' or 'live'.")
+        raise ValueError(f"Unknown trading_mode: {trading_mode!r}. Use 'paper', 'live', or 'signal_only'.")
