@@ -2,7 +2,7 @@
 
 ## Goal
 
-`trading_mode: "signal_only"` を追加し、LLM 取引判定のシグナルを通知しつつ、内部的には paper 同等の自動運用で RAG を育てる。実際の発注は TradingView ブローカー連携で手動実行し、shadow API で実ポジションを記録・振り返る。
+`trading_mode: "signal_only"` を追加し、LLM 取引判定のシグナルを通知しつつ、内部的には paper 同等の自動運用で RAG を育てる。実際の発注は TradingView ブローカー連携で手動実行し、manual API で実ポジションを記録・振り返る。
 
 ## Architecture
 
@@ -18,11 +18,11 @@
 │   Layer 1-3 推奨 → ReviewAdvisoryEvent
 │   ポートフォリオガード → 情報付加のみ (ブロックしない)
 │
-└── Shadow PositionManager (手動・REST API)
-    /shadow/open → 実ポジション登録
-    /shadow/close → 決済記録 → reflection → RAG 蓄積
-    /shadow/list → 一覧
-    /shadow/balance → 残高補正
+└── Manual PositionManager (手動・REST API)
+    /manual/open → 実ポジション登録
+    /manual/close → 決済記録 → reflection → RAG 蓄積
+    /manual/list → 一覧
+    /manual/balance → 残高補正
 ```
 
 ### Dual PositionManager
@@ -30,9 +30,9 @@
 | 系統 | 用途 | 管理 | 通知 | Reflection |
 |---|---|---|---|---|
 | **internal** | RAG 学習データ蓄積 | 自動 (paper_broker) | なし (ログのみ) | 自動生成 → RAG |
-| **shadow** | 実取引記録 | 手動 (shadow API) | なし (close 時のみログ) | /shadow/close 後に生成 → RAG |
+| **manual** | 実取引記録 | 手動 (manual API) | なし (close 時のみログ) | /manual/close 後に生成 → RAG |
 
-internal は既存の paper_broker をそのまま使う。state_store のパスを分離して shadow と競合させない。
+internal は既存の paper_broker をそのまま使う。state_store のパスを分離して manual と競合させない。
 
 ## SignalOnlyBrokerAdapter
 
@@ -40,20 +40,20 @@ internal は既存の paper_broker をそのまま使う。state_store のパス
 
 ```python
 class SignalOnlyBrokerAdapter(BrokerAdapter):
-    def __init__(self, shadow_position_mgr, notifier, ...):
-        # shadow PositionManager への参照を保持 (ガード判定・既存ポジ数の取得に使用)
+    def __init__(self, manual_position_mgr, notifier, ...):
+        # manual PositionManager への参照を保持 (ガード判定・既存ポジ数の取得に使用)
 
     def execute_signal(self, signal, position_mgr, macro_context=""):
         # NOTE: position_mgr 引数は internal (BrokerAdapter I/F 互換)。使用しない。
-        # 1. ポートフォリオガード判定 (self._shadow_mgr の open_positions 対象)
+        # 1. ポートフォリオガード判定 (self._manual_mgr の open_positions 対象)
         #    → 引っかかる場合は portfolio_warning を設定
-        # 2. 同一ペア既存 shadow ポジション数を取得
+        # 2. 同一ペア既存 manual ポジション数を取得
         # 3. SignalRecommendationEvent を通知
         # 4. return None (注文は発行しない)
 
     def check_and_close_positions(self, open_positions, current_prices, position_mgr):
-        # NOTE: 引数の open_positions は internal。shadow positions は self._shadow_mgr から取得。
-        # shadow positions の SL/TP 到達を検出
+        # NOTE: 引数の open_positions は internal。manual positions は self._manual_mgr から取得。
+        # manual positions の SL/TP 到達を検出
         # → SLTPAlertEvent を通知
         # → close はしない
         # return []
@@ -80,7 +80,7 @@ class SignalRecommendationEvent:
     detail_reason: str
     max_loss: float             # 残高 × risk_per_trade
     portfolio_warning: str      # ガード注記 (空文字なら制限なし)
-    existing_positions: int     # 同一ペアの既存 shadow ポジション数
+    existing_positions: int     # 同一ペアの既存 manual ポジション数
     source: str                 # "trading"
 ```
 
@@ -111,11 +111,11 @@ class ReviewAdvisoryEvent:
     current_price: float
 ```
 
-## Shadow REST API
+## Manual REST API
 
-`src/api/routes/shadow.py` — signal_only モード時のみ有効。`X-API-Key` 認証。
+`src/api/routes/manual.py` — signal_only モード時のみ有効。`X-API-Key` 認証。
 
-### POST /shadow/open
+### POST /manual/open
 
 ```json
 // Request
@@ -140,7 +140,7 @@ class ReviewAdvisoryEvent:
 
 バリデーション: pair が instruments に存在すること、SL/TP が方向と整合すること。1ペア複数ポジ可。
 
-### POST /shadow/close/{order_id}
+### POST /manual/close/{order_id}
 
 ```json
 // Request
@@ -161,7 +161,7 @@ class ReviewAdvisoryEvent:
 
 close 後にバックグラウンドで LLM reflection を生成し RAG に蓄積。レスポンスは即座に返す。
 
-### GET /shadow/list
+### GET /manual/list
 
 ```json
 // Response 200
@@ -182,7 +182,7 @@ close 後にバックグラウンドで LLM reflection を生成し RAG に蓄�
 }
 ```
 
-### POST /shadow/balance
+### POST /manual/balance
 
 ```json
 // Request
@@ -192,11 +192,11 @@ close 後にバックグラウンドで LLM reflection を生成し RAG に蓄�
 {"balance": 500000.0, "previous": 495000.0}
 ```
 
-## Shadow TUI (Interactive Mode)
+## Manual TUI (Interactive Mode)
 
 ```
-> shadow
-=== Shadow Mode ===
+> manual
+=== Manual Mode ===
 
 [Pending Signals]
   1. USDJPY=X BUY  score=+0.32 entry=150.200 SL=149.800 TP=151.200 lot=5000
@@ -228,7 +228,7 @@ Choose action:
 - advisory_only=False (paper/live): Layer 1-3 判定 → close_position → reflection
 - advisory_only=True (signal_only): Layer 1-3 判定 → ReviewAdvisoryEvent 通知のみ
 
-対象は **shadow positions** のみ。internal positions は paper_broker の自動決済に任せる。
+対象は **manual positions** のみ。internal positions は paper_broker の自動決済に任せる。
 
 ### Internal PositionManager
 
@@ -260,12 +260,12 @@ Phase 4b でシグナルが確定した後、signal_only_broker 経由で通知:
 data/state/
   positions.json          # internal (自動運用)
   trades.json             # internal
-  shadow_positions.json   # shadow (手動記録)
-  shadow_trades.json      # shadow
+  manual_positions.json   # manual (手動記録)
+  manual_trades.json      # manual
   adaptive_params.yaml    # 共有
 ```
 
-両方の PositionManager が同じ `initial_balance` で開始するが、shadow 側は `/shadow/balance` で実残高に補正可能。
+両方の PositionManager が同じ `initial_balance` で開始するが、manual 側は `/manual/balance` で実残高に補正可能。
 
 ## Decisions
 
@@ -273,19 +273,19 @@ data/state/
 |---|---|
 | Layer 1 反転推奨 | 全ポジ一斉通知 |
 | 新規シグナル抑制 | 常に通知。判断はユーザー |
-| Reflection 生成 | shadow close 後に生成 + internal 自動生成 |
+| Reflection 生成 | manual close 後に生成 + internal 自動生成 |
 | ポートフォリオガード | 情報付加のみ、ブロックしない |
 | Discord UX | finance は REST API + Webhook ペイロード提供。UI は discord_bot 側 |
 | Internal 動作 | paper 同等の自動運用。通知なし、ログのみ (`[INTERNAL]`) |
 
 ## Implementation Order
 
-1. State 分離 (shadow_positions.json / shadow_trades.json)
+1. State 分離 (manual_positions.json / manual_trades.json)
 2. SignalOnlyBrokerAdapter + create_broker 拡張
 3. Internal PositionManager + NullNotifier 統合
 4. 通知イベント 3 種 (SignalRecommendation, SLTPAlert, ReviewAdvisory)
 5. discord_notifier にハンドラ追加
 6. Phase 4a advisory 分岐
-7. Shadow REST API (/shadow/open, close, list, balance)
-8. Shadow TUI インタラクティブモード
+7. Manual REST API (/manual/open, close, list, balance)
+8. Manual TUI インタラクティブモード
 9. テスト
