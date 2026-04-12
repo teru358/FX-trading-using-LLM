@@ -15,7 +15,6 @@ from src.config import AppConfig
 from src.data.analysis_store import AnalysisStore
 from src.data.price_fetcher import fetch_current_price, fetch_ohlcv
 from src.data.price_provider import PriceProvider
-from src.data.price_store import PriceStore
 from src.rag.prompt_formatter import (
     format_macro_context_for_prompt,
     format_news_for_prompt,

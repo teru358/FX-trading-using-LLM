@@ -196,6 +196,44 @@ def _combine_macro(macro_context: str, correlation_context: str) -> str:
     return f"{macro_context}\n\n{correlation_context}"
 
 
+def _compute_summary_and_score(inst: InstrumentConfig, price_data, config: AppConfig):
+    """インジケータ計算 + テクニカルスコア算出を MTF/単一 TF 分岐込みで一括処理する。
+
+    戻り値: (summary, tech_score, mtf_score)
+      - summary: LLM プロンプトに渡す短期 TF の IndicatorSummary
+      - tech_score: TechnicalScore (MTF 時は合成結果を as_technical_score() で変換)
+      - mtf_score: MultiTfTechnicalScore (単一 TF 時は None)
+    """
+    mtf_cfg = config.analysis.multi_timeframe
+    if not mtf_cfg.enabled:
+        # 従来の単一 TF 動作
+        _, summary = compute_indicators(
+            price_data.df,
+            indicator_cfg=config.analysis.indicators,
+            pattern_cfg=config.analysis.chart_patterns,
+        )
+        tech_score = _compute_and_log_tech_score(inst, summary, config)
+        return summary, tech_score, None
+
+    # MTF: 各 TF を計算 → 合成 TechnicalScore
+    _, mtf_score, short_summary = _compute_mtf_and_log(inst, price_data.df, config)
+    if short_summary is not None:
+        # MTF 合成結果を既存インターフェース互換形に変換
+        return short_summary, mtf_score.as_technical_score(), mtf_score
+
+    # short TF がリサンプル失敗 → 単一 TF にフォールバック
+    logger.warning(
+        f"[COLLECT] {inst.display_name}: MTF short TF unavailable, falling back to single TF"
+    )
+    _, summary = compute_indicators(
+        price_data.df,
+        indicator_cfg=config.analysis.indicators,
+        pattern_cfg=config.analysis.chart_patterns,
+    )
+    tech_score = _compute_and_log_tech_score(inst, summary, config)
+    return summary, tech_score, mtf_score
+
+
 async def _collect_one(
     inst: InstrumentConfig,
     config: AppConfig,
@@ -215,45 +253,13 @@ async def _collect_one(
     staleness = _is_price_data_stale(price_data)
     if staleness is not None:
         logger.info(
-            f"[COLLECT] {inst.display_name}: stale data (latest bar {staleness} ago), skipping LLM analysis"
+            f"[COLLECT] {inst.display_name}: stale data (latest bar {staleness} ago), "
+            f"skipping LLM analysis"
         )
         return
 
-    # Phase 3: インジケータ計算 + テクニカルスコア
-    mtf_cfg = config.analysis.multi_timeframe
-    mtf_score = None
-
-    if mtf_cfg.enabled:
-        # MTF: 各 TF を計算 → 合成 TechnicalScore
-        summaries, mtf_score, short_summary = _compute_mtf_and_log(
-            inst, price_data.df, config,
-        )
-        # short TF summary を使って既存の formatted_data 系を作る
-        # (LLM には短期 TF の詳細 + MTF サマリーを渡す)
-        summary = short_summary
-        if summary is None:
-            # short TF がリサンプル失敗 → 単一 TF にフォールバック
-            logger.warning(
-                f"[COLLECT] {inst.display_name}: MTF short TF unavailable, "
-                "falling back to single TF"
-            )
-            _, summary = compute_indicators(
-                price_data.df,
-                indicator_cfg=config.analysis.indicators,
-                pattern_cfg=config.analysis.chart_patterns,
-            )
-            tech_score = _compute_and_log_tech_score(inst, summary, config)
-        else:
-            # MTF 合成結果を既存インターフェース互換形に変換
-            tech_score = mtf_score.as_technical_score()
-    else:
-        # 従来の単一 TF 動作
-        _, summary = compute_indicators(
-            price_data.df,
-            indicator_cfg=config.analysis.indicators,
-            pattern_cfg=config.analysis.chart_patterns,
-        )
-        tech_score = _compute_and_log_tech_score(inst, summary, config)
+    # Phase 3: インジケータ + tech_score (MTF/単一 TF)
+    summary, tech_score, mtf_score = _compute_summary_and_score(inst, price_data, config)
 
     # Phase 4: RAG コンテキスト構築
     news_ctx, refl_ctx, prev_ctx = _build_rag_contexts(inst, store, analysis_store, config)
