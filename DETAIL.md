@@ -10,16 +10,18 @@
    - バッチ分析: カテゴリ内の全記事を1回のLLM呼び出しで一括分析
    - 方向別RAG（bullish/bearish）から過去の取引教訓を注入
    - JSON出力失敗時は最大2回リトライ
+   - サーキットブレーカー: 連続3回失敗でLLM呼び出しを300秒スキップ（自動復帰）
 
 2. **OHLCV取得 → SQLiteキャッシュ（差分取得）**
    - 期間: `lookback_days`（デフォルト60日）、足種: `ohlcv_interval`（デフォルト1h）
    - 重複タイムスタンプの自動除去
 
-3. **テクニカル指標計算 → LLM分析 → スナップショット保存**
+3. **テクニカル指標計算 → ルールベーススコアリング → スナップショット保存**
    - 2フェーズ実行: Phase 1(watch銘柄) → Phase 1.5(相関計算) → Phase 2(trade銘柄)
    - watch銘柄の分析結果をマクロコンテキストとしてtrade銘柄に付加
    - trade×watch銘柄間の20本ローリング相関係数を算出し、定量データとしてLLMに提供
    - 価格データが6時間以上古い場合はLLM分析をスキップ（閉場時の無駄なコスト抑止）
+   - ルールベーススコアリング: SMA/RSI/MACD/Ichimoku/BB/Pattern の6カテゴリ重み付き合計 × ADXフィルター
 
 ## 予測サイクル（2時間間隔・LLMなし）
 
@@ -33,26 +35,39 @@
 
 ## 取引判定ループ（1日6回）
 
-1. **Phase 1**: SL/TP到達確認・クローズ + ATRパラメータ提案の処理
-2. **Phase 2**: オープンポジションの振り返り生成 → ChromaDB蓄積（方向別bullish/bearish）
-3. **Phase 3**: テクニカルスナップショットを時間加重集約（直近8h）
-   - 重み: `1/(1+経過時間[h])` — 直近ほど重く評価
-   - 方向一致性の時間減衰を信頼度に反映
-4. **Phase 4**: ニュースセンチメント集約 + シグナル統合
+1. **Phase 1**: SL/TP到達確認・クローズ
+2. **Phase 1.5**: 決済済みオーダーの振り返り生成 → マクロコンテキスト注入 → adaptive params更新 → ChromaDB蓄積
+3. **Phase 2.5**: 前回HOLDの検証（LLMなし）
+4. **Phase 3**: テクニカルスナップショットを指数減衰加重で集約（直近8h、最大16件）
+   - 重み: `exp(-0.693 × 経過時間[h] / 2.0)` — 半減期2時間
+   - 方向一致性(consistency)を信頼度に反映
+   - スナップショット不足時はLLM即時分析にフォールバック
+5. **Phase 4**: ニュースセンチメント集約（confidence加重平均） + シグナル統合
    - テクニカル60% + ニュース40%（動的重み調整: ニュース信頼度≥0.80で+0.10）
    - 方向対立時のスケーリングペナルティ（弱い信号の信頼度に基づく）
    - RAG方向別スコア補正（bullish/bearishコレクションから類似パターン検索）
-4. **Phase 4a**: ポジション再評価（Layer 1〜3、オプション）
-5. **Phase 5**: ATRベースSL/TP算出 → 注文執行 → 通知
+6. **Phase 4a**: ポジション再評価（Layer 1〜3、オプション）
+7. **Phase 4b**: ポートフォリオガード → ATRベースSL/TP算出 → 注文執行 → 通知
 
-## ポジション管理（4層リスク制御）
+## ポジション管理（5層リスク制御）
 
 | レイヤー | トリガー | 判定 | 結果 |
 |---|---|---|---|
+| **Portfolio** | 発注前 | 通貨グループ別ポジション集中・全体上限 | 発注スキップ |
 | **Layer 1** | 取引判定時 | シグナル反転 + 信頼度 ≥ 0.70 | 早期決済 |
 | **Layer 2** | 取引判定時 | 保有日数超過 + TP進捗不足 | タイムアウト決済 |
 | **Layer 3** | 取引判定時 | 含み益進捗 + シグナル減衰 | 利益ロック |
 | **Layer 4** | 価格監視(10分) | TP進捗 ≥ 40% | トレーリングストップ |
+
+### ポートフォリオガード
+
+通貨グループ（JPY/USD/EUR/GBP）ごとに相関の高いペアへの過剰集中を防止:
+
+| 設定 | デフォルト | 内容 |
+|---|---|---|
+| `max_total_positions` | 4 | 全体の最大同時ポジション数 |
+| `max_positions_per_currency_group` | 2 | 通貨グループ別の最大ポジション数 |
+| `max_same_direction_per_group` | 2 | グループ内同方向の最大ポジション数 |
 
 ## ATRベースSL/TP
 
@@ -81,8 +96,11 @@ S&P 500 (SPY)    r=+0.350 (weak positive)    prev=+0.380 Δ=-0.030
 ```
 combined_score = テクニカルスコア × price_weight + ニューススコア × news_weight
 
+# ニュースセンチメント集約: confidence 加重平均
+avg_score = Σ(score_i × conf_i) / Σ(conf_i)
+
 # ニュースとテクニカルが逆方向の場合: スケーリングペナルティ
-conflict_penalty = 1.0 - (0.5 × min(news.conf, price.conf))
+conflict_penalty = 1.0 - (0.3 × min(news.conf, price.conf))
 
 # 判定
 score > +signal_deadband かつ confidence >= threshold → BUY
@@ -95,16 +113,16 @@ lot = (残高 × risk_per_trade) ÷ ストップ幅(pips)
 
 ## テクニカル指標
 
-| 指標 | パラメータ | 用途 |
-|---|---|---|
-| SMA | 20/50/200 | トレンド方向 |
-| EMA | 12/26 | MACD計算用 |
-| RSI | 14 | 過熱感 |
-| MACD | 12-26-9 | モメンタム転換 |
-| Bollinger Bands | 20日・2σ | 価格位置（%B） |
-| ATR | 14 | ボラティリティ・SL/TP算出 |
-| ADX | 14 | トレンド強度 |
-| 一目均衡表 | 9/26/52 | トレンド・サポレジ統合判断 |
+| 指標 | パラメータ | 用途 | スコア重み |
+|---|---|---|---|
+| SMA | 20/50/200 | トレンド方向 | 0.20 |
+| RSI | 14 | 過熱感 | 0.15 |
+| MACD | 12-26-9 | モメンタム転換 | 0.15 |
+| 一目均衡表 | 9/26/52 | トレンド・サポレジ統合判断 | 0.25 |
+| Bollinger Bands | 20日・2σ | 価格位置（%B） | 0.10 |
+| チャートパターン | — | 反転・継続シグナル | 0.15 |
+| ATR | 14 | ボラティリティ・SL/TP算出 | — |
+| ADX | 14 | トレンド強度（スコアフィルター） | — |
 
 ### チャートパターン検出（15パターン）
 
@@ -113,6 +131,27 @@ lot = (残高 × risk_per_trade) ÷ ストップ幅(pips)
 | ローソク足 | ハンマー・シューティングスター・エンガルフィング・十字線・明星/宵星・三白兵/三黒兵・ピンバー・インサイドバー | 有効 |
 | チャート形状 | ダブルトップ/ボトム・ヘッドアンドショルダー・三角保ち合い・レンジ | 無効 |
 | ブレイクアウト | BBスクイーズ・ATR収縮・サポレジ抜け | 無効 |
+
+## LLMプロバイダー
+
+| プロバイダー | 設定値 | 必要な環境変数 | デフォルトモデル |
+|---|---|---|---|
+| Ollama | `"ollama"` | なし | `llama3.1:8b` |
+| Gemini | `"gemini"` | `GEMINI_API_KEY` | `gemini-2.0-flash` |
+| OpenAI | `"openai"` | `OPENAI_API_KEY` | `gpt-4o-mini` |
+| Claude | `"claude"` | `ANTHROPIC_API_KEY` | `claude-haiku-4-5-20251001` |
+
+3種類の分析（news/price/reflection）それぞれに異なるプロバイダー・モデルを設定可能。
+
+### LLM耐障害性
+
+各プロバイダーにサーキットブレーカーを装備:
+
+| 状態 | 動作 |
+|---|---|
+| **CLOSED** | 正常。呼び出し許可 |
+| **OPEN** | 連続3回失敗後。300秒間すべての呼び出しをスキップ（`CircuitOpenError`） |
+| **HALF_OPEN** | クールダウン経過。1回だけ試行を許可。成功すればCLOSEDに復帰 |
 
 ## 価格データプロバイダー
 
@@ -131,24 +170,13 @@ watch銘柄はETFシンボルを使用（yfinance安定性のため）:
 | 日経225 | 1321.T | 東証ETF |
 | ドル指数 | UUP | ETF |
 | Gold | GLD | Twelve Data対応 |
-| 長期債ETF | IEF | 独立銘柄（旧^TNX利回りとは非連続） |
-| 短期債ETF | SHY | 独立銘柄（旧^IRX利回りとは非連続） |
+| 長期債ETF | IEF | 7-10Y Treasury Bond ETF |
+| 短期債ETF | SHY | 1-3Y Treasury Bond ETF |
 | 原油 | USO | ETF |
-
-## LLMプロバイダー
-
-| プロバイダー | 設定値 | 必要な環境変数 | デフォルトモデル |
-|---|---|---|---|
-| Ollama | `"ollama"` | なし | `llama3.1:8b` |
-| Gemini | `"gemini"` | `GEMINI_API_KEY` | `gemini-2.0-flash` |
-| OpenAI | `"openai"` | `OPENAI_API_KEY` | `gpt-4o-mini` |
-| Claude | `"claude"` | `ANTHROPIC_API_KEY` | `claude-haiku-4-5-20251001` |
-
-3種類の分析（news/price/reflection）それぞれに異なるプロバイダー・モデルを設定可能。
 
 ## 通知
 
-Discord / None から選択。全通知にサイクル種別ラベル付き。
+Discord Webhook。`notifier.enabled: true` で有効化。
 
 | 通知種別 | トリガー | 内容 |
 |---|---|---|
@@ -173,6 +201,8 @@ curl -H "X-API-Key: $KEY" $HOST/news
 curl -H "X-API-Key: $KEY" $HOST/tech
 curl -H "X-API-Key: $KEY" $HOST/analyze
 curl -X POST -H "X-API-Key: $KEY" "$HOST/close/USDJPY%3DX"
+curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"message":"ドル円の見通しは？"}' $HOST/ask
 ```
 
 ## ディレクトリ構成
@@ -185,19 +215,28 @@ finance/
 │   ├── instruments.yaml            # 銘柄 + price_provider
 │   ├── news_sources.yaml           # キーワード + フィード
 │   └── user_notes.md               # ユーザーメモ（LLMプロンプトに注入）
+├── prompts/                        # LLMプロンプトテンプレート
+│   ├── price_system.txt / price_user.j2
+│   ├── news_system.txt / news_user.j2
+│   ├── ask_system.txt / ask_user.j2
+│   └── econ_impact_system.txt / econ_impact_user.j2
 ├── src/
-│   ├── config.py                   # 設定ローダー（3ファイルマージ）
-│   ├── trading_cycle.py            # 取引サイクル オーケストレータ
-│   ├── llm/                        # LLMクライアント（Ollama/Gemini/OpenAI/Claude）
+│   ├── config/                     # 設定スキーマ (schema.py) + ローダー (loader.py)
+│   ├── cycles/                     # 取引サイクル (trading/exit_check/forecast)
+│   ├── llm/                        # LLMクライアント + サーキットブレーカー
 │   ├── analysis/                   # ニュース・テクニカル分析・振り返り
-│   ├── data/                       # OHLCV・指標・相関・セッション管理
-│   ├── jobs/                       # 収集ジョブ（ニュース/テクニカル/価格監視）
-│   ├── signals/                    # シグナル統合・RAG補正
-│   ├── trading/                    # ブローカー・ATR算出・ポジション管理
+│   ├── signals/                    # ルールベーススコアリング・シグナル統合・RAG補正
+│   ├── data/                       # OHLCV・指標・相関・スナップショット集約
+│   ├── jobs/                       # 収集ジョブ（ニュース/テクニカル/価格監視/経済指標）
+│   ├── trading/                    # ブローカー・ATR算出・ポジション管理・ポートフォリオガード
 │   ├── rag/                        # ChromaDB・方向別ストア・セマンティック検索
-│   ├── api/                        # REST API (FastAPI)
+│   ├── api/                        # REST API (FastAPI) — routes/notifications/state
 │   ├── notifications/              # Discord通知
-│   └── persistence/                # 状態管理・動的パラメータ
+│   ├── persistence/                # 状態管理・動的パラメータ
+│   ├── utils/                      # 時刻ヘルパー (clock.py)
+│   ├── reporting/                  # Rich CLIレポート
+│   └── tradingview/                # TradingView連携（Pine Script生成・CDP注入）
+├── tests/                          # 298テスト (pytest)
 ├── data/
 │   ├── prices.db                   # SQLite（OHLCV + スナップショット + セッション）
 │   ├── state/                      # ポジション・取引履歴 + adaptive_params.yaml
@@ -207,13 +246,24 @@ finance/
     └── activity.log                # 取引・ニュース活動ログ
 ```
 
+## 休場時の動作
+
+MarketStateTracker が市場の開閉状態を管理:
+
+| 状態遷移 | ログ出力 |
+|---|---|
+| 開場→休場 | `Market CLOSED — pausing until market open` (1回のみ) |
+| 休場→開場 | `Market OPEN — resuming normal operations` (1回のみ) |
+| 休場継続 | 6時間ごとのハートビート (`Scheduler alive, jobs paused`) |
+| 休場中 | 取引判定・価格監視は無音スキップ。ニュース収集は継続 |
+
 ## ログプレフィックス
 
 | プレフィックス | 内容 |
 |---|---|
 | `[COLLECT]` | ニュース・OHLCV取得・テクニカル分析 |
 | `[CORR]` | 銘柄間相関計算 |
-| `[AGGREGATE]` | スナップショット時間加重集約 |
+| `[AGGREGATE]` | スナップショット指数減衰集約 |
 | `[NEWS]` | ニュース分析結果 |
 | `[PRICE]` | 価格分析結果 |
 | `[SIGNAL]` | シグナルスコア内訳 |
@@ -221,15 +271,18 @@ finance/
 | `[TRADE]` | 注文実行・決済 |
 | `[REFLECT]` | 振り返り結果 |
 | `[FORECAST]` | 予測サイクル |
-| `[EXIT]` | ポジション再評価決済 (Layer 1-3) |
+| `[REVIEW]` | ポジション再評価決済 (Layer 1-3) |
 | `[MONITOR]` | 価格監視・急変動・トレーリング |
+| `[CB/*]` | サーキットブレーカー状態遷移 |
+| `[RAG ADJ]` | 方向別RAGスコア補正 |
+| `[ECON]` | 経済指標カレンダー・影響分析 |
 
 ## 状態ファイル
 
 | ファイル | 内容 |
 |---|---|
-| `data/prices.db` | OHLCV + スナップショット + 予測 + セッション |
+| `data/prices.db` | OHLCV + スナップショット + 予測 + セッション + HOLD判定 + 経済指標 |
 | `data/state/positions.json` | オープンポジション・残高 |
 | `data/state/trades.json` | クローズ済み取引履歴 |
 | `data/state/adaptive_params.yaml` | ペア別ATR倍率（動的更新） |
-| `data/rag/` | ChromaDB（ニュース・振り返り・方向別） |
+| `data/rag/` | ChromaDB（ニュース・振り返り・洞察・方向別・経済指標分析） |
