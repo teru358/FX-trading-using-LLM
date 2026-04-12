@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import pandas as pd
+import pandas_ta  # noqa: F401 — DataFrame.ta accessor を登録するために必要
 
 if TYPE_CHECKING:
     from src.config import ChartPatternConfig, IndicatorToggleConfig
