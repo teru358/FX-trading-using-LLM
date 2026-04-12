@@ -55,7 +55,7 @@ def test_vector_store_insight_upsert(tmp_path):
         pair="USDJPY=X",
         insight_type="analysis",
         source_question="ドル円の分析をして",
-        created_at=datetime(2026, 4, 7, 18, 0),
+        created_at=datetime.now(),
     )
     results = store.get_recent_insights(pair="USDJPY=X", limit=5)
     assert len(results) == 1
@@ -75,7 +75,7 @@ def test_vector_store_query_insights(tmp_path):
         pair="USDJPY=X",
         insight_type="analysis",
         source_question="ドル円どう？",
-        created_at=datetime(2026, 4, 7, 18, 0),
+        created_at=datetime.now(),
     )
     results = store.query_insights(
         query_embedding=[0.1] * 768,

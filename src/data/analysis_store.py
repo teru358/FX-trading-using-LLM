@@ -118,8 +118,8 @@ class AnalysisStore:
         agg_conf = min(0.9, (w_conf / total_w) * consistency)
 
         direction = (
-            "long"    if agg_bias > 0.1  else
-            "short"   if agg_bias < -0.1 else
+            "long"    if agg_bias > 0.05  else
+            "short"   if agg_bias < -0.05 else
             "neutral"
         )
 

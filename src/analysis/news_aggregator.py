@@ -46,8 +46,9 @@ def aggregate_news_sentiment(
 
     jpy_is_quote = pair_cfg.quote_currency == "JPY"
 
-    scores = []
-    confs = []
+    weighted_score_sum = 0.0
+    total_conf = 0.0
+    confs: list[float] = []
     all_themes: list[str] = []
     summaries: list[str] = []
 
@@ -61,7 +62,8 @@ def aggregate_news_sentiment(
         if cat == "japan" and jpy_is_quote:
             score = -score
 
-        scores.append(score)
+        weighted_score_sum += score * conf
+        total_conf += conf
         confs.append(conf)
 
         themes_raw = meta.get("key_themes", "")
@@ -70,7 +72,7 @@ def aggregate_news_sentiment(
         if summary:
             summaries.append(f"[{cat}] {summary}")
 
-    avg_score = sum(scores) / len(scores)
+    avg_score = weighted_score_sum / total_conf if total_conf > 0 else 0.0
     avg_conf = sum(confs) / len(confs)
     unique_themes = list(dict.fromkeys(all_themes))[:5]
     combined_summary = (

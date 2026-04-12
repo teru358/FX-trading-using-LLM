@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime
-
 from src.signals.signal_combiner import TradeSignal
+from src.utils.clock import db_now
 from src.trading.position_manager import Order
 
 logger = logging.getLogger(__name__)
@@ -84,7 +83,7 @@ def review_open_positions(
                 continue
 
         # Layer 2: タイムアウト決済
-        holding_hours = (datetime.now() - pos.opened_at).total_seconds() / 3600
+        holding_hours = (db_now() - pos.opened_at).total_seconds() / 3600
         holding_days = holding_hours / 24
         if holding_days >= max_holding_days and progress_pct < timeout_min_progress_pct:
             logger.info(

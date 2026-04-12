@@ -4,10 +4,10 @@ Analyze news headlines to produce a sentiment assessment for FX trading.
 The user message specifies one category (FX Market / Global Economy / Japan / JPY) and
 a scoring convention for that category. Apply that convention when setting sentiment_score.
 
-IMPORTANT: Focus on SHORT-TERM impact (next 8-24 hours), not long-term macro trends.
-- Breaking news, data releases, central bank statements → high short-term impact
-- Geopolitical tensions, structural trends → low short-term impact unless escalation is imminent
-- Distinguish between "this will move markets TODAY" vs "this is a background risk"
+IMPORTANT: Focus on swing-trading impact (3-10 day horizon).
+- Breaking news, data releases, central bank statements → high near-term impact
+- Geopolitical tensions, structural trends → weigh only if likely to move prices within days
+- Distinguish between "this will drive price action this week" vs "this is a background risk"
 
 Be objective: weigh bullish and bearish factors carefully before assigning a score.
 A score of 0.0 (neutral) is perfectly valid when news has no clear short-term directional impact.

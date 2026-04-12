@@ -259,10 +259,12 @@ async def _finalize_closed_orders(
             entry_analysis = ""
             sltp_comparison = ""
             param_history_text = ""
+            macro_ctx_at_entry = ""
             if session_store:
                 sess = session_store.get_session(closed_order.order_id)
                 if sess:
                     entry_analysis = sess.analysis_summary or ""
+                    macro_ctx_at_entry = sess.macro_context or ""
                     if sess.atr_value and sess.computed_sl:
                         sltp_comparison = (
                             f"ATR(14)={sess.atr_value:.5f} sl_mult={sess.sl_atr_mult} tp_mult={sess.tp_atr_mult}\n"
@@ -283,6 +285,7 @@ async def _finalize_closed_orders(
                 llm=llm_reflect,
                 temperature=config.llm.reflection.temperature,
                 user_notes=load_user_notes(config.user_notes_path, "reflect"),
+                macro_context_at_entry=macro_ctx_at_entry,
                 entry_analysis=entry_analysis,
                 sltp_comparison=sltp_comparison,
                 param_history=param_history_text,

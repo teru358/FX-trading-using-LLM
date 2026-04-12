@@ -53,7 +53,7 @@ Close reason: {close_reason_label}
 Close price:  {close_price:.5f}
 Realized P&L: {realized_pnl:+.2f}
 Trade duration: {duration_hours:.1f} hours
-Achieved R:R: {achieved_rr:.2f}
+Achieved R:R: {achieved_rr:+.2f}
 
 === Why We Entered ===
 {signal_reason}
@@ -120,7 +120,10 @@ async def generate_close_reflection(
     tp_pips = abs(order.take_profit - order.entry_price) * pip_multiplier
     planned_rr = tp_pips / sl_pips if sl_pips > 0 else 0.0
 
-    actual_move = abs(close_price - order.entry_price) * pip_multiplier
+    if order.direction == "buy":
+        actual_move = (close_price - order.entry_price) * pip_multiplier
+    else:
+        actual_move = (order.entry_price - close_price) * pip_multiplier
     achieved_rr = actual_move / sl_pips if sl_pips > 0 else 0.0
 
     signal_reason = order.signal_reason or "Not recorded."
