@@ -216,36 +216,6 @@ class PineInjector:
             logger.info(f"[TV] Removed {removed} existing signal indicator(s)")
         return removed or 0
 
-    async def _new_indicator(self) -> bool:
-        """Pine Editorで新規インジケーターを作成し、エディタ状態をリセットする。"""
-        result = await self._cdp.evaluate("""
-            (function() {
-                try {
-                    var frame = document.querySelector('iframe[id*="tradingview"]');
-                    var api = window.TradingViewApi;
-                    if (api && api._pineEditor) {
-                        api._pineEditor.newScript('indicator');
-                        return 'api';
-                    }
-                } catch(e) {}
-                // フォールバック: メニューから新規作成
-                var items = document.querySelectorAll('[class*="menu"] [class*="item"], [role="menuitem"]');
-                for (var i = 0; i < items.length; i++) {
-                    var t = items[i].textContent.trim();
-                    if (/new.*indicator|新規.*インジケーター|Open.*New/i.test(t)) {
-                        items[i].click();
-                        return 'menu: ' + t;
-                    }
-                }
-                return null;
-            })()
-        """)
-        if result:
-            await asyncio.sleep(1)
-            logger.debug(f"[TV] New indicator created via {result}")
-            return True
-        return False
-
     async def inject_and_compile(self, source: str) -> dict:
         """Pine Script書き込み→コンパイルを一括実行する。
 

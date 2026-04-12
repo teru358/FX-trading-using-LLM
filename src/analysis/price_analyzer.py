@@ -331,27 +331,3 @@ async def analyze_price_action(
         f"Downgrading to neutral. Last error: {last_error}"
     )
     return _downgrade_to_neutral(analysis, last_error or "unknown validation error")
-
-
-async def chat_with_context(
-    user_message: str,
-    context: str,
-    llm: LLMClient,
-    temperature: float = 0.3,
-) -> str:
-    """ユーザーのコメント・質問にコンテキスト付きで自然言語回答する。"""
-    user_prompt = render_prompt(
-        "ask_user.j2",
-        context=context,
-        user_message=user_message,
-    )
-    messages = [
-        {"role": "system", "content": load_prompt("ask_system.txt")},
-        {"role": "user", "content": user_prompt},
-    ]
-    logger.info(f"[ASK] LLM呼び出し中 ({len(user_message)} chars)...")
-    response = await llm.chat(messages, temperature=temperature)
-    # <think>ブロックを除去（deepseek-r1等のモデル対応）
-    import re
-    response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
-    return response

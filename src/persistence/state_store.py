@@ -34,14 +34,6 @@ def _serialize(obj: Any) -> Any:
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
-def _deserialize_datetime(d: dict) -> dict:
-    dt_fields = {"opened_at", "closed_at"}
-    for key in dt_fields:
-        if key in d and d[key] is not None:
-            d[key] = datetime.fromisoformat(d[key])
-    return d
-
-
 class StateStore:
     def __init__(self, state_dir: Path) -> None:
         self.state_dir = state_dir

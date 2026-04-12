@@ -162,27 +162,16 @@ class AskContextBuilder:
         store = self._store
         all_results: list[dict] = []
 
-        # News collection
+        # News collection: カテゴリ別の最新分析結果を取得 (ニュースはカテゴリ単位でのみ蓄積されている)
         try:
-            if pairs:
-                for pair in pairs:
-                    hits = store.query_news(
-                        query_embedding=query_embedding, pair=pair,
-                        top_k=5, lookback_hours=self._config.rag.news_lookback_hours,
-                    )
-                    for h in hits:
-                        h["source"] = "news"
-                        h["distance"] = h.get("distance", 0.5)
-                    all_results.extend(hits)
-            else:
-                for cat in ("fx", "global", "japan"):
-                    entries = store.get_recent_category_news(
-                        [cat], lookback_hours=self._config.rag.news_lookback_hours,
-                    )
-                    for e in entries[:3]:
-                        e["source"] = "news"
-                        e["distance"] = 0.5
-                        all_results.append(e)
+            for cat in ("fx", "global", "japan"):
+                entries = store.get_recent_category_news(
+                    [cat], lookback_hours=self._config.rag.news_lookback_hours,
+                )
+                for e in entries[:3]:
+                    e["source"] = "news"
+                    e["distance"] = 0.5
+                    all_results.append(e)
         except Exception as e:
             logger.warning(f"[ASK] News search failed: {e}")
 

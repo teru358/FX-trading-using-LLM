@@ -43,20 +43,6 @@ from src.config.schema import (
     TwelveDataConfig,
 )
 
-_SIZE_UNITS = {"b": 1, "kb": 1024, "mb": 1024**2, "gb": 1024**3}
-
-
-def _parse_bytes(value: int | str) -> int:
-    """'10MB' / '512kb' などの文字列、または整数をバイト数に変換する。"""
-    if isinstance(value, int):
-        return value
-    s = str(value).strip()
-    for suffix, mult in sorted(_SIZE_UNITS.items(), key=lambda x: -len(x[0])):
-        if s.lower().endswith(suffix):
-            return int(float(s[: -len(suffix)]) * mult)
-    return int(s)
-
-
 def _merge_split_configs(base: dict, config_dir: Path) -> dict:
     """分割設定ファイルをメイン設定にマージする。
 

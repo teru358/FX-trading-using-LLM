@@ -88,11 +88,6 @@ class VectorStore:
         )
         logger.debug(f"Upserted category news {entry_id} ({category})")
 
-    def get_last_newest_article_ts(self, category: str) -> float | None:
-        """前回収集時の最新記事タイムスタンプを返す（日時不明記事のみだった場合は None）。"""
-        ts, _, _ = self.get_last_analysis_state(category)
-        return ts
-
     def get_last_analysis_state(self, category: str) -> tuple[float | None, str | None, frozenset[str]]:
         """前回収集時の (newest_article_ts, articles_fingerprint, title_hashes) を返す。"""
         try:
@@ -149,89 +144,6 @@ class VectorStore:
         entries = []
         for doc, meta in zip(results.get("documents", []), results.get("metadatas", [])):
             entries.append({"text": doc, "metadata": meta})
-        entries.sort(key=lambda x: x["metadata"].get("collected_ts", 0), reverse=True)
-        return entries
-
-    # ---- News ---------------------------------------------------------------
-
-    def upsert_news(
-        self,
-        entry_id: str,
-        text: str,
-        embedding: list[float],
-        pair: str,
-        sentiment_score: float,
-        confidence: float,
-        key_themes: list[str],
-        summary: str,
-        collected_at: datetime,
-    ) -> None:
-        self._news.upsert(
-            ids=[entry_id],
-            embeddings=[embedding],
-            documents=[text],
-            metadatas=[{
-                "pair": pair,
-                "sentiment_score": sentiment_score,
-                "confidence": confidence,
-                "key_themes": ", ".join(key_themes),
-                "summary": summary,
-                "collected_at": collected_at.isoformat(),
-                "collected_ts": collected_at.timestamp(),
-            }],
-        )
-        logger.debug(f"Upserted news entry {entry_id} for {pair}")
-
-    def query_news(
-        self,
-        query_embedding: list[float],
-        pair: str,
-        top_k: int = 5,
-        lookback_hours: int = 24,
-    ) -> list[dict]:
-        """類似ニュースをベクトル検索（時間フィルタ付き）。"""
-        since_ts = (datetime.now() - timedelta(hours=lookback_hours)).timestamp()
-        try:
-            results = self._news.query(
-                query_embeddings=[query_embedding],
-                n_results=min(top_k, max(self._news.count(), 1)),
-                where={
-                    "$and": [
-                        {"pair": {"$eq": pair}},
-                        {"collected_ts": {"$gte": since_ts}},
-                    ]
-                },
-            )
-        except Exception:
-            # フィルタ結果が0件だとchromadbがエラーを返す場合があるため
-            return []
-
-        entries = []
-        for i, doc in enumerate(results.get("documents", [[]])[0]):
-            meta = results["metadatas"][0][i]
-            entries.append({"text": doc, "metadata": meta})
-        return entries
-
-    def get_recent_news(self, pair: str, lookback_hours: int = 24) -> list[dict]:
-        """時刻ベースで直近ニュースを全件取得（ベクトル検索なし）。"""
-        since_ts = (datetime.now() - timedelta(hours=lookback_hours)).timestamp()
-        try:
-            results = self._news.get(
-                where={
-                    "$and": [
-                        {"pair": {"$eq": pair}},
-                        {"collected_ts": {"$gte": since_ts}},
-                    ]
-                },
-                include=["documents", "metadatas"],
-            )
-        except Exception:
-            return []
-
-        entries = []
-        for doc, meta in zip(results.get("documents", []), results.get("metadatas", [])):
-            entries.append({"text": doc, "metadata": meta})
-        # 新しい順にソート
         entries.sort(key=lambda x: x["metadata"].get("collected_ts", 0), reverse=True)
         return entries
 
