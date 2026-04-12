@@ -1,27 +1,29 @@
-{{ formatted_data }}
 {%- if tech_score_context is defined and tech_score_context %}
-
+=== Rule-Based Technical Score (OVERRIDE — use these values for bias_score/confidence/direction) ===
 {{ tech_score_context }}
 {%- endif %}
 {%- if mtf_score_context is defined and mtf_score_context %}
 
 {{ mtf_score_context }}
 {%- endif %}
+
+=== Price Data & Indicators ===
+{{ formatted_data }}
 {%- if news_context %}
 
 {{ news_context }}
 {%- endif %}
-{%- if reflection_context %}
+{%- if macro_context %}
 
-{{ reflection_context }}
+{{ macro_context }}
 {%- endif %}
 {%- if previous_analysis %}
 
 {{ previous_analysis }}
 {%- endif %}
-{%- if macro_context %}
+{%- if reflection_context %}
 
-{{ macro_context }}
+{{ reflection_context }}
 {%- endif %}
 {%- if user_context %}
 
@@ -46,7 +48,8 @@ Consider in order of priority:
 - LONG:  stop_loss MUST be below entry_zone[0], take_profit MUST be above entry_zone[1]
 - SHORT: stop_loss MUST be above entry_zone[1], take_profit MUST be below entry_zone[0]
 
-After your reasoning, output ONLY this JSON block. NO markdown fences, NO comments inside JSON:
+Output ONLY valid JSON. NO markdown fences, NO comments.
+direction_bias must be exactly one of: "long", "short", "neutral".
 {
   "direction_bias": "long|short|neutral",
   "bias_score": <float -1.0 to 1.0>,

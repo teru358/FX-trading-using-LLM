@@ -20,7 +20,9 @@ Weight more recent news more heavily in your assessment.
 {{ user_context }}
 {%- endif %}
 
-Return ONLY valid JSON (no markdown fences):
+Output ONLY valid JSON. NO markdown fences, NO comments.
+sentiment_score: -1.0 (max bearish) to +1.0 (max bullish), 0.0 = neutral.
+confidence: 0.0 (no signal) to 1.0 (very clear signal). Use ≤0.3 when news is stale or ambiguous.
 {
   "sentiment_score": <float -1.0 to 1.0>,
   "confidence": <float 0.0 to 1.0>,

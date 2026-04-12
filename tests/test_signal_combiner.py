@@ -113,3 +113,79 @@ def test_score_weighting(pair_cfg):
     sig = _call(news, price, pair_cfg)
     expected = 0.5 * 0.40 + 0.5 * 0.60  # = 0.5
     assert abs(sig.combined_score - expected) < 0.001
+
+
+# ── predicted_direction 境界値 ────────────────────────────
+
+
+def test_predicted_direction_bullish_boundary(pair_cfg):
+    """combined_score > 0.05 → predicted_direction = 'bullish'。"""
+    from src.analysis.news_analyzer import NewsSentiment
+    from src.analysis.price_analyzer import PriceAnalysis
+    from datetime import datetime
+
+    news = NewsSentiment(pair="USDJPY=X", sentiment_score=0.1, confidence=0.5)
+    price = PriceAnalysis(
+        pair="USDJPY=X", direction_bias="long", bias_score=0.1, confidence=0.5,
+        entry_zone=(149.5, 150.5), stop_loss=148.0, take_profit=153.0,
+        risk_reward_ratio=2.0, reasoning_summary="", analyzed_at=datetime.now(),
+    )
+    sig = _call(news, price, pair_cfg, confidence_threshold=0.0)
+    # score = 0.1*0.4 + 0.1*0.6 = 0.10 > 0.05
+    assert sig.predicted_direction == "bullish"
+
+
+def test_predicted_direction_neutral_in_deadband(pair_cfg):
+    """combined_score ∈ [-0.05, 0.05] → predicted_direction = 'neutral'。"""
+    from src.analysis.news_analyzer import NewsSentiment
+    from src.analysis.price_analyzer import PriceAnalysis
+    from datetime import datetime
+
+    news = NewsSentiment(pair="USDJPY=X", sentiment_score=0.01, confidence=0.5)
+    price = PriceAnalysis(
+        pair="USDJPY=X", direction_bias="neutral", bias_score=0.01, confidence=0.5,
+        entry_zone=(149.5, 150.5), stop_loss=148.0, take_profit=153.0,
+        risk_reward_ratio=2.0, reasoning_summary="", analyzed_at=datetime.now(),
+    )
+    sig = _call(news, price, pair_cfg, confidence_threshold=0.0)
+    # score = 0.01*0.4 + 0.01*0.6 = 0.01 → deadband
+    assert sig.predicted_direction == "neutral"
+
+
+# ── dynamic weight adjustment ─────────────────────────────
+
+
+def test_dynamic_weight_high_news_confidence(pair_cfg):
+    """news.confidence ≥ 0.80 → news_weight が 0.10 増加する。"""
+    from src.analysis.news_analyzer import NewsSentiment
+    from src.analysis.price_analyzer import PriceAnalysis
+    from datetime import datetime
+
+    news = NewsSentiment(pair="USDJPY=X", sentiment_score=1.0, confidence=0.85)
+    price = PriceAnalysis(
+        pair="USDJPY=X", direction_bias="long", bias_score=0.0, confidence=0.5,
+        entry_zone=(149.5, 150.5), stop_loss=148.0, take_profit=153.0,
+        risk_reward_ratio=2.0, reasoning_summary="", analyzed_at=datetime.now(),
+    )
+    sig = _call(news, price, pair_cfg, confidence_threshold=0.0)
+    # effective_news_weight=0.50, effective_price_weight=0.50
+    # score = 1.0*0.50 + 0.0*0.50 = 0.50
+    assert abs(sig.combined_score - 0.50) < 0.01
+
+
+def test_dynamic_weight_low_news_confidence(pair_cfg):
+    """news.confidence ≤ 0.30 → news_weight が 0.10 減少する。"""
+    from src.analysis.news_analyzer import NewsSentiment
+    from src.analysis.price_analyzer import PriceAnalysis
+    from datetime import datetime
+
+    news = NewsSentiment(pair="USDJPY=X", sentiment_score=1.0, confidence=0.20)
+    price = PriceAnalysis(
+        pair="USDJPY=X", direction_bias="long", bias_score=0.0, confidence=0.5,
+        entry_zone=(149.5, 150.5), stop_loss=148.0, take_profit=153.0,
+        risk_reward_ratio=2.0, reasoning_summary="", analyzed_at=datetime.now(),
+    )
+    sig = _call(news, price, pair_cfg, confidence_threshold=0.0)
+    # effective_news_weight=0.30, effective_price_weight=0.70
+    # score = 1.0*0.30 + 0.0*0.70 = 0.30
+    assert abs(sig.combined_score - 0.30) < 0.01

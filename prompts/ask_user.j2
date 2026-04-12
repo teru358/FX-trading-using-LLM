@@ -1,17 +1,28 @@
+{%- if open_positions %}
 {{ open_positions }}
-
-{{ semantic_results }}
-
-{{ trade_summary }}
-
-{{ forecast_accuracy }}
+{%- endif %}
+{%- if technical_snapshots %}
 
 {{ technical_snapshots }}
+{%- endif %}
+{%- if news_context %}
 
 {{ news_context }}
+{%- endif %}
+{%- if trade_summary %}
+
+{{ trade_summary }}
+{%- endif %}
+{%- if forecast_accuracy %}
+
+{{ forecast_accuracy }}
+{%- endif %}
+{%- if semantic_results %}
+
+{{ semantic_results }}
+{%- endif %}
 
 === User's Question / Comment ===
 {{ user_message }}
 
-上記のコンテキストをもとに、具体的なデータを引用しながら日本語で回答してください。
-過去の類似パターンやトレード実績があれば積極的に参照してください。
+具体的なデータを引用しながら日本語で回答してください。
