@@ -79,7 +79,11 @@ trading:
   signal_deadband: 0.15            # BUY/SELL判定のスコア閾値（±）
   min_lot_size: 1000.0             # 最小ロットサイズ
   lot_unit: 1000.0                 # ロット切り捨て単位
-  trading_mode: "paper"            # "paper"（シミュレーション）| "live"（本取引: OANDA API必須）
+  # trading_mode: "paper" | "signal_only" | "live"
+  # - paper: ペーパートレード（シミュレーション）
+  # - signal_only: シグナル通知 + 内部自動RAG学習 + 手動ポジション管理
+  # - live: OANDA自動発注（未実装）
+  trading_mode: "paper"
   # ポジション再評価（Phase 4a: Layer 1〜3）
   position_review_enabled: false        # true で有効化
   reversal_confidence_min: 0.70         # Layer 1: 反転シグナルの最低信頼度
