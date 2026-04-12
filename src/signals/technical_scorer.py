@@ -45,6 +45,18 @@ class TechnicalScore:
         return "\n".join(lines)
 
 
+_DIRECTION_DEADBAND = 0.05
+
+
+def _direction_from_score(score: float) -> str:
+    """連続スコア (-1..1) を 3 値方向 (long/short/neutral) に分類する。"""
+    if score > _DIRECTION_DEADBAND:
+        return "long"
+    if score < -_DIRECTION_DEADBAND:
+        return "short"
+    return "neutral"
+
+
 def _clamp(value: float, lo: float = -1.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, value))
 
@@ -266,14 +278,6 @@ def compute_technical_score(
 
     confidence = _clamp(agreement + adx_conf_adj, 0.1, 0.95)
 
-    # --- Direction ---
-    if total > 0.05:
-        direction = "long"
-    elif total < -0.05:
-        direction = "short"
-    else:
-        direction = "neutral"
-
     return TechnicalScore(
         sma_score=sma,
         rsi_score=rsi,
@@ -284,7 +288,7 @@ def compute_technical_score(
         adx_factor=factor,
         total_score=total,
         confidence=confidence,
-        direction=direction,
+        direction=_direction_from_score(total),
     )
 
 
@@ -445,14 +449,6 @@ def compute_multi_tf_technical_score(
     )
     confidence = _clamp(weighted_conf * (0.8 + 0.2 * alignment), 0.1, 0.95)
 
-    # 方向判定
-    if final_score > 0.05:
-        direction = "long"
-    elif final_score < -0.05:
-        direction = "short"
-    else:
-        direction = "neutral"
-
     return MultiTfTechnicalScore(
         tf_scores=dict(present),
         tf_weights=active_weights,
@@ -460,5 +456,5 @@ def compute_multi_tf_technical_score(
         raw_score=raw_score,
         total_score=final_score,
         confidence=confidence,
-        direction=direction,
+        direction=_direction_from_score(final_score),
     )
