@@ -449,6 +449,10 @@ class AppConfig:
         return BASE_DIR / "data" / "state"
 
     @property
+    def manual_state_dir(self) -> Path:
+        return BASE_DIR / "data" / "manual_state"
+
+    @property
     def rag_db_path(self) -> Path:
         return BASE_DIR / self.rag.db_path
 
