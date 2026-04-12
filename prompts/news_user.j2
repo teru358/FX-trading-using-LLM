@@ -4,13 +4,22 @@ Sources: {{ sources_list }}
 
 === Recent {{ category_label }} News ({{ news_count }} items, {{ recent_count }} with timestamp) ===
 {{ news_text }}
+{%- if trade_lessons %}
 
 {{ trade_lessons }}
+{%- endif %}
+
 === Task ===
 Assess the {{ category_label }} sentiment outlook for FX swing trading (3-10 day horizon).
+{%- if category_focus %}
 {{ category_focus }}
+{%- endif %}
 Weight more recent news more heavily in your assessment.
+{%- if user_context %}
+
 {{ user_context }}
+{%- endif %}
+
 Return ONLY valid JSON (no markdown fences):
 {
   "sentiment_score": <float -1.0 to 1.0>,

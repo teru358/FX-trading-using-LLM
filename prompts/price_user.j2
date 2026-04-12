@@ -1,25 +1,32 @@
 {{ formatted_data }}
-
-{% if tech_score_context is defined and tech_score_context %}
+{%- if tech_score_context is defined and tech_score_context %}
 
 {{ tech_score_context }}
-
-{% endif %}
-{% if mtf_score_context is defined and mtf_score_context %}
+{%- endif %}
+{%- if mtf_score_context is defined and mtf_score_context %}
 
 {{ mtf_score_context }}
-
-{% endif %}
+{%- endif %}
+{%- if news_context %}
 
 {{ news_context }}
+{%- endif %}
+{%- if reflection_context %}
 
 {{ reflection_context }}
+{%- endif %}
+{%- if previous_analysis %}
 
 {{ previous_analysis }}
+{%- endif %}
+{%- if macro_context %}
 
 {{ macro_context }}
+{%- endif %}
+{%- if user_context %}
 
 {{ user_context }}
+{%- endif %}
 
 Based on ALL of the above, provide your swing trading analysis for {{ pair }}.
 
@@ -47,18 +54,20 @@ Consider:
     - Strong negative r (≤-0.7): inverse relationship — use as contrary confirmation
     - Weak/none r: asset decoupled — reduce weight of that macro signal
 11. Risk/reward ratio (minimum 2:1 required)
-    - For LONG:  stop_loss < entry_zone[0], take_profit > entry_zone[1]
-    - For SHORT: stop_loss > entry_zone[1], take_profit < entry_zone[0]
 12. Identify key support (nearest level below entry) and resistance (nearest level above entry) from swing highs/lows, Ichimoku kumo edges, or Bollinger Bands
 
-After your reasoning, output ONLY this JSON block (no markdown fences):
+=== SL/TP Placement Rules (MANDATORY) ===
+- LONG:  stop_loss MUST be below entry_zone[0], take_profit MUST be above entry_zone[1]
+- SHORT: stop_loss MUST be above entry_zone[1], take_profit MUST be below entry_zone[0]
+
+After your reasoning, output ONLY this JSON block. NO markdown fences, NO comments inside JSON:
 {
   "direction_bias": "long|short|neutral",
   "bias_score": <float -1.0 to 1.0>,
   "confidence": <float 0.0 to 1.0>,
   "entry_zone": [<low_price>, <high_price>],
-  "stop_loss": <price>,   // long: below entry_zone[0] | short: above entry_zone[1]
-  "take_profit": <price>, // long: above entry_zone[1] | short: below entry_zone[0]
+  "stop_loss": <price>,
+  "take_profit": <price>,
   "risk_reward_ratio": <float>,
   "key_support": <nearest_support_price>,
   "key_resistance": <nearest_resistance_price>,

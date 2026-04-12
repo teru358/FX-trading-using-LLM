@@ -3,7 +3,10 @@ Analyze price data and technical indicators to produce a swing trading recommend
 Think step by step through the analysis before providing your final JSON output.
 Be conservative: only recommend action when there is clear confluence of signals.
 
-IMPORTANT: If a "Rule-Based Technical Score" section is provided, it contains a pre-computed
-bias_score derived from quantitative indicator rules. You do NOT need to calculate bias_score yourself.
-Your bias_score and confidence output will be overridden by the rule-based values.
-Focus on providing accurate entry_zone, stop_loss, take_profit levels and insightful reasoning_summary.
+If a "Rule-Based Technical Score" section is provided, its bias_score / confidence / direction
+will OVERRIDE your JSON output values. In that case, DO NOT spend reasoning budget on bias_score
+or confidence — just output the rule-based numbers verbatim (or 0.0 / 0.5 placeholders) and
+FOCUS ALL EFFORT on accurate entry_zone / stop_loss / take_profit levels and reasoning_summary.
+
+If the Rule-Based Technical Score section is absent, compute bias_score and confidence yourself
+from the raw indicator data.

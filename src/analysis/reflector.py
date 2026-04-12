@@ -18,9 +18,14 @@ EmbedFn = Callable[[str], Coroutine[Any, Any, list[float]]]
 
 logger = logging.getLogger(__name__)
 
-_REFLECTION_PROMPT = """You are an FX trading journal analyst reviewing past trading decisions.
+_REFLECTION_SYSTEM = (
+    "You are an FX trading journal analyst reviewing past trading decisions. "
+    "Evaluate each decision objectively, compare expected vs actual outcome, and distill "
+    "one actionable lesson that would improve future trades. Output ONLY valid JSON, no "
+    "markdown fences, no commentary outside the JSON object."
+)
 
-=== Previous Trading Cycle ===
+_REFLECTION_PROMPT = """=== Previous Trading Cycle ===
 Pair: {pair}
 Cycle time: {cycle_time}
 Decision: {action}
@@ -98,7 +103,10 @@ async def generate_reflection(
         user_context=user_context,
     )
 
-    messages = [{"role": "user", "content": prompt}]
+    messages = [
+        {"role": "system", "content": _REFLECTION_SYSTEM},
+        {"role": "user", "content": prompt},
+    ]
     text = await llm.chat(messages, temperature=temperature)
 
     try:
@@ -161,9 +169,15 @@ async def store_reflection(
     logger.info(f"[REFLECT] {reflection.pair}: stored to RAG | id={reflection.entry_id}")
 
 
-_CLOSE_REFLECTION_PROMPT = """You are an FX trading journal analyst reviewing a completed trade.
+_CLOSE_REFLECTION_SYSTEM = (
+    "You are an FX trading journal analyst reviewing a completed trade. "
+    "Compare planned vs actual R:R, evaluate entry timing and SL/TP placement, and distill "
+    "one actionable lesson. If SL/TP comparison data is provided, assess whether the ATR "
+    "multipliers need adjustment. Output ONLY valid JSON, no markdown fences, no commentary "
+    "outside the JSON object."
+)
 
-=== Completed Trade ===
+_CLOSE_REFLECTION_PROMPT = """=== Completed Trade ===
 Pair: {pair}
 Direction: {direction}
 Entry price: {entry_price:.5f}
@@ -289,7 +303,10 @@ async def generate_close_reflection(
         user_context=user_context,
     )
 
-    messages = [{"role": "user", "content": prompt}]
+    messages = [
+        {"role": "system", "content": _CLOSE_REFLECTION_SYSTEM},
+        {"role": "user", "content": prompt},
+    ]
     try:
         text = await llm.chat(messages, temperature=temperature)
         data = extract_json(text)
