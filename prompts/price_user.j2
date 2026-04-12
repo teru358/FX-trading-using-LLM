@@ -30,31 +30,17 @@
 
 Based on ALL of the above, provide your swing trading analysis for {{ pair }}.
 
-Consider:
-1. Trend direction and strength (SMA alignment, ADX)
-2. Momentum (RSI, MACD histogram direction)
-3. Volatility and position within Bollinger Bands
-4. Key support/resistance from recent swing highs/lows
-5. Ichimoku Kinko Hyo: price vs Kumo, TK cross, Kumo color, overall Ichimoku signal
-   - Price above Kumo = bullish bias; below = bearish; inside = consolidation
-   - Bullish TK cross (Tenkan crosses above Kijun) = entry signal
-   - Kumo acts as dynamic support/resistance zone for SL/TP placement
-6. Chart Patterns (if detected): use as entry timing confirmation or early reversal warning
-   - Bullish patterns (hammer, morning_star, bullish_engulfing, etc.) support long bias
-   - Bearish patterns (shooting_star, evening_star, bearish_engulfing, etc.) support short bias
-   - Neutral patterns (doji, inside_bar, bb_squeeze) suggest indecision — wait for confirmation
-   - Require confluence with at least one other indicator before acting on patterns alone
-7. News sentiment and macroeconomic context from the RAG knowledge base
-8. Lessons learned from previous trading reflections
-9. Compare with previous analysis: note any shift in direction or confidence since the last cycle
-10. Macro context: equity index trends as risk sentiment indicators
-    - Use Price Correlation data (rolling r-values) to quantify cross-asset relationships
-    - Flag correlation shifts (Δ≥0.2): diverging correlations may signal regime change
-    - Strong positive r (≥0.7): assets move together — confirm directional bias
-    - Strong negative r (≤-0.7): inverse relationship — use as contrary confirmation
-    - Weak/none r: asset decoupled — reduce weight of that macro signal
-11. Risk/reward ratio (minimum 2:1 required)
-12. Identify key support (nearest level below entry) and resistance (nearest level above entry) from swing highs/lows, Ichimoku kumo edges, or Bollinger Bands
+Consider in order of priority:
+1. Rule-based Technical Score (if provided) — this defines direction & confidence
+2. Multi-TF alignment (if provided) — higher TF regime should constrain entry timing
+3. Entry precision from short-TF indicators — SMA/RSI/MACD/BB/Ichimoku/Patterns
+   - Ichimoku: price vs Kumo = bias; TK cross = timing; Kumo edges are dynamic S/R
+   - Bullish patterns: hammer, morning_star, bullish_engulfing, bullish_pin_bar
+   - Bearish patterns: shooting_star, evening_star, bearish_engulfing, bearish_pin_bar
+   - Neutral patterns (doji, inside_bar, bb_squeeze): wait for confirmation
+4. News sentiment + macro correlation shifts (Δ≥0.2 = regime change signal)
+5. Continuity — compare with previous analysis and past trade reflections
+6. Risk/reward ≥ 2:1 with SL/TP anchored to swing levels, Kumo edges, or BB extremes
 
 === SL/TP Placement Rules (MANDATORY) ===
 - LONG:  stop_loss MUST be below entry_zone[0], take_profit MUST be above entry_zone[1]

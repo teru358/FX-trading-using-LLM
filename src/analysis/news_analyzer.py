@@ -31,22 +31,12 @@ _CATEGORY_LABELS = {
     "japan": "Japan / JPY",
 }
 
+# 各カテゴリの一行フォーカス + スコア規約。news_user.j2 に展開される。
+# 方針自体 (カテゴリ別に分けること) は news_system.txt で宣言済み。
 _CATEGORY_FOCUS = {
-    "fx": (
-        "Focus on direct FX market developments: currency pair movements, "
-        "central bank policies, interest rate expectations, and currency flow dynamics.\n"
-        "Score: positive = risk-on / bullish risk currencies, negative = risk-off / defensive."
-    ),
-    "global": (
-        "Focus on how global macroeconomic and geopolitical events affect "
-        "risk appetite, safe-haven flows, and broad currency market direction.\n"
-        "Score: positive = risk-on / positive economic outlook, negative = risk-off / uncertainty."
-    ),
-    "japan": (
-        "Focus on Japan-specific factors: BOJ monetary policy, Japanese economic data, "
-        "trade dynamics, and geopolitical risks affecting Japan.\n"
-        "Score: positive = bullish JPY (stronger yen), negative = bearish JPY (weaker yen)."
-    ),
+    "fx":     "Focus: FX pairs, central banks, yield diffs. Score += risk-on / -= defensive.",
+    "global": "Focus: macro + geopolitics, safe-haven flows. Score += risk-on / -= uncertainty.",
+    "japan":  "Focus: BoJ, Japan data, JPY flows. Score += bullish JPY / -= bearish JPY.",
 }
 
 # ── データクラス ────────────────────────────────────────────────
