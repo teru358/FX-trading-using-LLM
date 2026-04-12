@@ -1,7 +1,30 @@
 from __future__ import annotations
 
+import logging
 import os
 from abc import ABC, abstractmethod
+
+from src.llm.circuit_breaker import CircuitBreaker
+
+logger = logging.getLogger(__name__)
+
+# プロバイダー別の共有サーキットブレーカー
+_circuit_breakers: dict[str, CircuitBreaker] = {}
+
+
+def get_circuit_breaker(provider: str) -> CircuitBreaker:
+    """プロバイダー名でサーキットブレーカーを取得（シングルトン）。"""
+    if provider not in _circuit_breakers:
+        _circuit_breakers[provider] = CircuitBreaker(
+            failure_threshold=3,
+            cooldown_seconds=300,
+            name=provider,
+        )
+    return _circuit_breakers[provider]
+
+
+class CircuitOpenError(Exception):
+    """サーキットブレーカーが OPEN 状態で呼び出しがスキップされた場合の例外。"""
 
 
 class LLMClient(ABC):
@@ -12,7 +35,19 @@ class LLMClient(ABC):
     def model_name(self) -> str:
         """使用中のモデル名を返す（例: "llama3.1:8b", "gemini-2.0-flash"）。"""
 
+    @property
+    def provider_name(self) -> str:
+        """サーキットブレーカー用のプロバイダー名。サブクラスでオーバーライド可。"""
+        return self.__class__.__name__
+
     @abstractmethod
+    async def _do_chat(
+        self,
+        messages: list[dict],
+        temperature: float = 0.1,
+    ) -> str:
+        """実際の LLM 呼び出し。サブクラスが実装する。"""
+
     async def chat(
         self,
         messages: list[dict],
@@ -20,8 +55,22 @@ class LLMClient(ABC):
     ) -> str:
         """チャット形式でLLMを呼び出し、応答テキストを返す。
 
-        messages: [{"role": "system"|"user"|"assistant", "content": "..."}]
+        サーキットブレーカーが OPEN の場合は CircuitOpenError を投げる。
         """
+        cb = get_circuit_breaker(self.provider_name)
+        if not cb.allow_request():
+            raise CircuitOpenError(
+                f"{self.provider_name} circuit is OPEN — skipping LLM call"
+            )
+        try:
+            result = await self._do_chat(messages, temperature)
+            cb.record_success()
+            return result
+        except CircuitOpenError:
+            raise
+        except Exception:
+            cb.record_failure()
+            raise
 
 
 def require_env(var_name: str, provider: str) -> str:

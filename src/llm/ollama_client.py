@@ -29,7 +29,11 @@ class OllamaClient(LLMClient):
     def model_name(self) -> str:
         return self._model
 
-    async def chat(self, messages: list[dict], temperature: float = 0.1) -> str:
+    @property
+    def provider_name(self) -> str:
+        return "ollama"
+
+    async def _do_chat(self, messages: list[dict], temperature: float = 0.1) -> str:
         payload = {
             "model": self._model,
             "messages": messages,

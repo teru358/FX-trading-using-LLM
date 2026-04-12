@@ -48,7 +48,11 @@ class OpenAIClient(LLMClient):
     def model_name(self) -> str:
         return self._model
 
-    async def chat(self, messages: list[dict], temperature: float = 0.1) -> str:
+    @property
+    def provider_name(self) -> str:
+        return "openai"
+
+    async def _do_chat(self, messages: list[dict], temperature: float = 0.1) -> str:
         # OpenAI は system/user/assistant ロールをそのまま受け付ける
         body = {
             "model": self._model,

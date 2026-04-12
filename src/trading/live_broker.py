@@ -128,7 +128,14 @@ class LiveBrokerAdapter(BrokerAdapter):
         )
 
 
-def create_broker(trading_mode: str, position_mgr: PositionManager | None = None) -> BrokerAdapter:
+def create_broker(
+    trading_mode: str,
+    position_mgr: PositionManager | None = None,
+    *,
+    max_total_positions: int = 4,
+    max_positions_per_group: int = 2,
+    max_same_direction_per_group: int = 2,
+) -> BrokerAdapter:
     """trading_mode に応じた BrokerAdapter を返すファクトリ関数。
 
     Args:
@@ -137,7 +144,11 @@ def create_broker(trading_mode: str, position_mgr: PositionManager | None = None
     from src.trading.paper_broker import PaperBrokerAdapter
 
     if trading_mode == "paper":
-        return PaperBrokerAdapter()
+        return PaperBrokerAdapter(
+            max_total_positions=max_total_positions,
+            max_positions_per_group=max_positions_per_group,
+            max_same_direction_per_group=max_same_direction_per_group,
+        )
     elif trading_mode == "live":
         return LiveBrokerAdapter()
     else:

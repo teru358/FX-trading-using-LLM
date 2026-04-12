@@ -47,7 +47,11 @@ class GeminiClient(LLMClient):
     def model_name(self) -> str:
         return self._model
 
-    async def chat(self, messages: list[dict], temperature: float = 0.1) -> str:
+    @property
+    def provider_name(self) -> str:
+        return "gemini"
+
+    async def _do_chat(self, messages: list[dict], temperature: float = 0.1) -> str:
         # system ロールを system_instruction に分離
         system_parts = [m["content"] for m in messages if m["role"] == "system"]
         contents = [

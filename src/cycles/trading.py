@@ -745,7 +745,12 @@ async def _phase_render_tradingview(
 
 def _build_trading_runtime(config: AppConfig):
     """trading_cycle が必要とするランタイム (broker / adaptive_store / notifier / LLMs) を一括生成する。"""
-    broker = create_broker(config.trading.trading_mode)
+    broker = create_broker(
+        config.trading.trading_mode,
+        max_total_positions=config.trading.max_total_positions,
+        max_positions_per_group=config.trading.max_positions_per_currency_group,
+        max_same_direction_per_group=config.trading.max_same_direction_per_group,
+    )
     adaptive_store = AdaptiveParamsStore(
         state_dir=config.state_dir,
         defaults={

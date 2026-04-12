@@ -79,21 +79,29 @@ class AnalysisStore:
             )
             return list(session.execute(stmt).scalars().all())
 
+    _MAX_SNAPSHOTS = 16  # 集約対象の最大件数（直近N件に限定）
+    _DECAY_HALF_LIFE_H = 2.0  # 指数減衰の半減期（時間）
+
     def aggregate(self, symbol: str, hours: int = 8) -> "PriceAnalysis | None":  # type: ignore[name-defined]
         """
-        直近スナップショットを時間加重平均で集約し PriceAnalysis を返す。
+        直近スナップショットを指数減衰加重で集約し PriceAnalysis を返す。
         データがなければ None を返す。
 
-        重みは 1/(1+経過時間[h]) — 新しいほど重く評価。
-        SL/TP/エントリーゾーンは最新スナップショットの値を使用。
+        重み: exp(-0.693 * hours_ago / half_life) — 半減期で重みが半分に。
+        直近 _MAX_SNAPSHOTS 件に限定し、トレンド転換時の古いノイズを排除する。
+        SL/TP/エントリーゾーンは集約方向に一致する最新スナップショットを採用。
         """
+        import math
         from src.analysis.price_analyzer import PriceAnalysis  # local import
 
         snapshots = self.get_recent_snapshots(symbol, hours)
         if not snapshots:
             return None
 
+        snapshots = snapshots[:self._MAX_SNAPSHOTS]
+
         now = db_now()
+        decay_rate = 0.693 / self._DECAY_HALF_LIFE_H  # ln(2) / half_life
         total_w = 0.0
         w_bias = 0.0
         w_conf = 0.0
@@ -102,7 +110,7 @@ class AnalysisStore:
 
         for snap in snapshots:
             hours_ago = (now - snap.analyzed_at).total_seconds() / 3600
-            w = 1.0 / (1.0 + hours_ago)
+            w = math.exp(-decay_rate * hours_ago)
             total_w += w
             w_bias += w * (snap.bias_score or 0.0)
             w_conf += w * (snap.confidence or 0.5)

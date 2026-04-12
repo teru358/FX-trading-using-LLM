@@ -51,7 +51,11 @@ class ClaudeClient(LLMClient):
     def model_name(self) -> str:
         return self._model
 
-    async def chat(self, messages: list[dict], temperature: float = 0.1) -> str:
+    @property
+    def provider_name(self) -> str:
+        return "claude"
+
+    async def _do_chat(self, messages: list[dict], temperature: float = 0.1) -> str:
         # Anthropic は system を別フィールドに分離する必要がある
         system_parts = [m["content"] for m in messages if m["role"] == "system"]
         conv = [m for m in messages if m["role"] != "system"]

@@ -3,12 +3,20 @@ from __future__ import annotations
 import logging
 
 from src.signals.signal_combiner import TradeSignal
+from src.trading.portfolio_guard import check_portfolio_limits
 from src.trading.position_manager import Order, PositionManager
 
 logger = logging.getLogger(__name__)
 
 
-def execute_signal(signal: TradeSignal, position_mgr: PositionManager, macro_context: str = "") -> Order | None:
+def execute_signal(
+    signal: TradeSignal,
+    position_mgr: PositionManager,
+    macro_context: str = "",
+    max_total_positions: int = 4,
+    max_positions_per_group: int = 2,
+    max_same_direction_per_group: int = 2,
+) -> Order | None:
     if signal.action == "hold":
         return None
 
@@ -22,6 +30,21 @@ def execute_signal(signal: TradeSignal, position_mgr: PositionManager, macro_con
         return None
 
     direction = "buy" if signal.action == "buy" else "sell"
+
+    # Portfolio-level risk check
+    account = position_mgr.get_account_state()
+    rejection = check_portfolio_limits(
+        pair=signal.pair,
+        direction=direction,
+        position_size=signal.position_size,
+        open_positions=account.open_positions,
+        max_total_positions=max_total_positions,
+        max_positions_per_group=max_positions_per_group,
+        max_same_direction_per_group=max_same_direction_per_group,
+    )
+    if rejection:
+        logger.info(f"[SKIP] {signal.pair}: portfolio guard — {rejection}")
+        return None
     order = Order.new(
         pair=signal.pair,
         direction=direction,

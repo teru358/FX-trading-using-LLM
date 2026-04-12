@@ -120,6 +120,10 @@ class TradingConfig:
     # TradingView テクニカルサマリー (矛盾検出)
     tv_summary_enabled: bool = False
     tv_conflict_dampen: float = 0.7    # TV判定と方向が矛盾時のconfidence倍率
+    # ポートフォリオリスク管理
+    max_total_positions: int = 4                 # 全体の最大同時ポジション数
+    max_positions_per_currency_group: int = 2    # 通貨グループ別の最大ポジション数
+    max_same_direction_per_group: int = 2        # グループ内同方向の最大ポジション数
 
 
 @dataclass
