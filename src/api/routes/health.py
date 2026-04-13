@@ -24,20 +24,97 @@ router = APIRouter()
 
 @router.get("/health", dependencies=[Depends(verify_api_key)])
 def health() -> dict[str, Any]:
-    """プロセス死活確認 + スケジューラ状態。"""
+    """プロセス死活確認 + サブシステム状態 (スケジューラ / LLM CB / TV / snapshot freshness)。
+
+    障害時のトリアージを一発で行えるよう、依存サブシステムの状態を集約する。
+    """
     import schedule as sched_mod
 
+    now = db_now()
     jobs = sched_mod.get_jobs()
     next_run = min((j.next_run for j in jobs), default=None) if jobs else None
 
+    # 経過時間
+    uptime_seconds: float | None = None
+    if state.started_at is not None:
+        uptime_seconds = (now - state.started_at).total_seconds()
+
+    # LLM サーキットブレーカー状態
+    cb_states: dict[str, dict[str, Any]] = {}
+    try:
+        from src.llm.client import _circuit_breakers
+        for provider, cb in _circuit_breakers.items():
+            cb_states[provider] = {
+                "state":                cb.state,
+                "consecutive_failures": cb._consecutive_failures,
+            }
+    except Exception:
+        pass
+
+    # TV CDP 接続状態
+    tv_status: dict[str, Any] = {"enabled": False}
+    if state.config is not None and getattr(state.config.tradingview, "enabled", False):
+        tv_status["enabled"] = True
+        try:
+            from src.tradingview.cdp_client import _SHARED_CLIENTS
+            clients = list(_SHARED_CLIENTS.values())
+            tv_status["clients"] = [
+                {"host": c._host, "port": c._port, "connected": c.is_connected}
+                for c in clients
+            ]
+        except Exception:
+            tv_status["clients"] = []
+
+    # price_provider 状態
+    price_provider_status: str | None = None
+    try:
+        if state.config is not None:
+            from src.data.price_provider import PriceProvider
+            pp = PriceProvider(state.config)
+            price_provider_status = pp.status_line()
+    except Exception as e:
+        price_provider_status = f"error: {e}"
+
+    # トレード銘柄の最新スナップショット時刻 (=テクニカル収集の生存確認)
+    snapshots_status: list[dict[str, Any]] = []
+    if state.config is not None and state.analysis_store is not None:
+        for inst in getattr(state.config, "tradeable_instruments", []):
+            try:
+                snaps = state.analysis_store.get_recent_snapshots(inst.symbol, hours=24)
+                if snaps:
+                    latest_at = snaps[0].analyzed_at
+                    age_minutes = (now - latest_at).total_seconds() / 60.0
+                    snapshots_status.append({
+                        "symbol":       inst.symbol,
+                        "latest_at":    latest_at.isoformat(),
+                        "age_minutes":  round(age_minutes, 1),
+                    })
+                else:
+                    snapshots_status.append({
+                        "symbol":       inst.symbol,
+                        "latest_at":    None,
+                        "age_minutes":  None,
+                    })
+            except Exception as e:
+                snapshots_status.append({"symbol": inst.symbol, "error": str(e)})
+
+    # 取引モード
+    trading_mode = state.config.trading.trading_mode if state.config else None
+
     return {
         "status": "ok",
-        "started_at": state.started_at.isoformat() if state.started_at else None,
-        "now": db_now().isoformat(),
+        "trading_mode":   trading_mode,
+        "started_at":     state.started_at.isoformat() if state.started_at else None,
+        "uptime_seconds": uptime_seconds,
+        "now":            now.isoformat(),
         "scheduler": {
             "jobs_count": len(jobs),
-            "next_run": next_run.isoformat() if next_run else None,
+            "next_run":   next_run.isoformat() if next_run else None,
         },
+        "llm_circuit_breakers": cb_states,
+        "tradingview":          tv_status,
+        "price_provider":       price_provider_status,
+        "snapshots":            snapshots_status,
     }
 
 
