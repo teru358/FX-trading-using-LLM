@@ -35,7 +35,13 @@ from src.trading.market_hours import is_market_open
 logger = logging.getLogger(__name__)
 
 
-_MAX_STALENESS = timedelta(hours=6)
+_MAX_STALENESS_FX = timedelta(hours=6)       # FX: 24時間取引
+_MAX_STALENESS_WATCH = timedelta(hours=72)   # ETF/指数: 週末をまたぐため3日
+
+
+def _max_staleness_for(inst: InstrumentConfig) -> timedelta:
+    """銘柄タイプ別の stale 閾値を返す。"""
+    return _MAX_STALENESS_FX if inst.asset_type == "fx" else _MAX_STALENESS_WATCH
 
 
 def _fetch_instrument_ohlcv(
@@ -57,7 +63,10 @@ def _fetch_instrument_ohlcv(
     )
 
 
-def _is_price_data_stale(price_data, max_staleness: timedelta = _MAX_STALENESS) -> timedelta | None:
+def _is_price_data_stale(
+    price_data,
+    max_staleness: timedelta = _MAX_STALENESS_FX,
+) -> timedelta | None:
     """最新バーの鮮度をチェック。古すぎる場合は経過時間を返す (スキップ判定用)。"""
     from src.utils.clock import db_now
 
@@ -250,7 +259,7 @@ async def _collect_one(
     price_data = _fetch_instrument_ohlcv(inst, config, price_store, price_provider)
 
     # Phase 2: 鮮度チェック (古ければスキップ)
-    staleness = _is_price_data_stale(price_data)
+    staleness = _is_price_data_stale(price_data, max_staleness=_max_staleness_for(inst))
     if staleness is not None:
         logger.info(
             f"[COLLECT] {inst.display_name}: stale data (latest bar {staleness} ago), "
