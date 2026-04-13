@@ -5,9 +5,10 @@ import logging
 import os
 import shutil
 import threading
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,17 @@ class StateStore:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         # 同じ state_dir を指す全インスタンスで共有されるロック
         self._lock = _get_state_lock(state_dir)
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """state_dir 単位で排他ロックを取得する context manager。
+
+        read → modify → write の複数ステップを原子的に実行したい呼び出し側で
+        使用する (例: PositionManager.close_position)。RLock なのでネストしても
+        デッドロックしない。
+        """
+        with self._lock:
+            yield
 
     def _positions_path(self) -> Path:
         return self.state_dir / "positions.json"

@@ -227,3 +227,52 @@ def test_initial_stop_loss_preserved_after_trailing(tmp_state_store):
     assert pos is not None
     assert pos.stop_loss == pytest.approx(103.0), "最新 SL は反映"
     assert pos.initial_stop_loss == pytest.approx(99.0), "initial は保持されたまま"
+
+
+# ── Race condition: 複数 PositionManager インスタンスの一貫性 ──────────────
+
+
+def test_concurrent_mutations_sync_across_instances(tmp_state_store, buy_order, sell_order):
+    """同じ state_dir を指す 2 つの PositionManager が相互の変更を取りこぼさない。
+
+    回帰テスト: 以前は __init__ でのみ load していたため、インスタンス A が
+    ポジションを close したあと、古い在メモリ state を持つ B が save すると
+    A の変更が巻き戻っていた。transaction + reload で原子化されたことを検証する。
+    """
+    pm_a = PositionManager(tmp_state_store, initial_balance=100_000.0, context="A")
+    pm_b = PositionManager(tmp_state_store, initial_balance=100_000.0, context="B")
+
+    # A が BUY を open — B はまだ知らない (__init__ 時点の load のみ)
+    pm_a.open_position(buy_order)
+    assert len(pm_b.get_account_state().open_positions) == 0, "B は init 時点の古い state"
+
+    # B が SELL を open — 内部で reload するので A の BUY を取りこぼさない
+    pm_b.open_position(sell_order)
+
+    # disk 上には 2 つのポジションが存在するはず
+    fresh = PositionManager(tmp_state_store, initial_balance=100_000.0, context="fresh")
+    pairs = {p.order_id for p in fresh.get_account_state().open_positions}
+    assert buy_order.order_id in pairs
+    assert sell_order.order_id in pairs
+    assert len(pairs) == 2
+
+
+def test_close_by_stale_instance_does_not_resurrect_other_positions(tmp_state_store, buy_order, sell_order):
+    """B のクローズ操作が A の在メモリ state によって巻き戻らないこと。"""
+    pm_a = PositionManager(tmp_state_store, initial_balance=100_000.0, context="A")
+    pm_a.open_position(buy_order)
+    pm_a.open_position(sell_order)
+
+    pm_b = PositionManager(tmp_state_store, initial_balance=100_000.0, context="B")
+    # A が BUY をクローズ
+    pm_a.close_position(buy_order.order_id, 151.0, "take_profit")
+
+    # B の在メモリ state は古い ([BUY, SELL]) が、close_position は reload するので
+    # 「既にクローズ済み」として見つからないか、または SELL のみをクローズする
+    closed_sell = pm_b.close_position(sell_order.order_id, 149.0, "manual")
+    assert closed_sell is not None
+
+    # disk 上にオープンポジションは残っていない
+    fresh = PositionManager(tmp_state_store, initial_balance=100_000.0, context="fresh")
+    assert len(fresh.get_account_state().open_positions) == 0
+    assert len(fresh.get_account_state().closed_trades) == 2

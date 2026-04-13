@@ -127,6 +127,14 @@ class PositionManager:
         self._load()
 
     def _load(self) -> None:
+        self._reload_from_disk(verbose=True)
+
+    def _reload_from_disk(self, verbose: bool = False) -> None:
+        """positions.json と trades.json から完全に再読込する。
+
+        複数の PositionManager インスタンスが同じ state_dir を共有する状況下で、
+        ミューテーション直前に disk と同期するために使用する。
+        """
         raw_pos = self._store.load_positions_raw()
         self._balance: float = raw_pos.get("account_balance") or self._initial_balance
         self._open: list[Order] = [
@@ -134,10 +142,11 @@ class PositionManager:
         ]
         raw_trades = self._store.load_trades_raw()
         self._closed: list[Order] = [Order.from_dict(t) for t in raw_trades]
-        logger.info(
-            f"[{self._context}] balance=${self._balance:.2f}, "
-            f"open={len(self._open)}, closed={len(self._closed)}"
-        )
+        if verbose:
+            logger.info(
+                f"[{self._context}] balance=${self._balance:.2f}, "
+                f"open={len(self._open)}, closed={len(self._closed)}"
+            )
 
     def _save(self) -> None:
         self._store.save_positions(
@@ -160,8 +169,10 @@ class PositionManager:
         return None
 
     def open_position(self, order: Order) -> None:
-        self._open.append(order)
-        self._save()
+        with self._store.transaction():
+            self._reload_from_disk()
+            self._open.append(order)
+            self._save()
         logger.info(
             f"[TRADE] Opened {order.direction.upper()} {order.pair} "
             f"@ {order.entry_price:.5f} | SL={order.stop_loss:.5f} TP={order.take_profit:.5f} "
@@ -179,52 +190,70 @@ class PositionManager:
         SLは利益方向にのみ移動可能。損失方向への移動は無視される。
         stage: ログ表示用の段階ラベル（例: "half", "breakeven", "follow"）。
         """
-        for pos in self._open:
-            if pos.order_id == order_id:
-                if pos.direction == "buy" and new_stop_loss <= pos.stop_loss:
-                    return False
-                if pos.direction == "sell" and new_stop_loss >= pos.stop_loss:
-                    return False
-                old_sl = pos.stop_loss
-                pos.stop_loss = new_stop_loss
-                self._save()
-                stage_suffix = f" (stage={stage})" if stage else ""
-                logger.info(
-                    f"[TRAIL] {pos.pair} {pos.direction.upper()} SL updated: "
-                    f"{old_sl:.5f} → {new_stop_loss:.5f}{stage_suffix}"
-                )
-                return True
+        with self._store.transaction():
+            self._reload_from_disk()
+            for pos in self._open:
+                if pos.order_id == order_id:
+                    if pos.direction == "buy" and new_stop_loss <= pos.stop_loss:
+                        return False
+                    if pos.direction == "sell" and new_stop_loss >= pos.stop_loss:
+                        return False
+                    old_sl = pos.stop_loss
+                    pos.stop_loss = new_stop_loss
+                    self._save()
+                    stage_suffix = f" (stage={stage})" if stage else ""
+                    logger.info(
+                        f"[TRAIL] {pos.pair} {pos.direction.upper()} SL updated: "
+                        f"{old_sl:.5f} → {new_stop_loss:.5f}{stage_suffix}"
+                    )
+                    return True
         return False
 
+    def set_balance(self, new_balance: float) -> float:
+        """残高を明示的に補正する (manual モードの手動残高調整用)。
+
+        transaction を取得し disk から再読込した上で balance のみ書き換える。
+        open_positions は維持される。旧残高を返す。
+        """
+        with self._store.transaction():
+            self._reload_from_disk()
+            previous = self._balance
+            self._balance = new_balance
+            self._save()
+        logger.info(f"[{self._context}] Balance adjusted: {previous:.2f} → {new_balance:.2f}")
+        return previous
+
     def close_position(self, order_id: str, close_price: float, reason: str) -> Optional[Order]:
-        for i, pos in enumerate(self._open):
-            if pos.order_id == order_id:
-                multiplier = 1 if pos.direction == "buy" else -1
-                # Use Decimal for precision; convert back to float for storage
-                pnl = float(
-                    (Decimal(str(close_price)) - Decimal(str(pos.entry_price)))
-                    * Decimal(str(pos.position_size))
-                    * Decimal(multiplier)
-                )
-                pos.status = "closed"
-                pos.closed_at = db_now()
-                pos.close_price = close_price
-                pos.close_reason = reason
-                pos.realized_pnl = pnl
-                self._balance = float(
-                    (Decimal(str(self._balance)) + Decimal(str(pnl))).quantize(
-                        Decimal("0.01"), rounding=ROUND_HALF_UP
+        with self._store.transaction():
+            self._reload_from_disk()
+            for i, pos in enumerate(self._open):
+                if pos.order_id == order_id:
+                    multiplier = 1 if pos.direction == "buy" else -1
+                    # Use Decimal for precision; convert back to float for storage
+                    pnl = float(
+                        (Decimal(str(close_price)) - Decimal(str(pos.entry_price)))
+                        * Decimal(str(pos.position_size))
+                        * Decimal(multiplier)
                     )
-                )
-                self._open.pop(i)
-                self._closed.append(pos)
-                self._store.append_trade(pos.to_dict())
-                self._save()
-                logger.info(
-                    f"[TRADE] Closed {pos.direction.upper()} {pos.pair} "
-                    f"@ {close_price:.5f} [{reason}] PnL={pnl:+.2f} | "
-                    f"balance=${self._balance:.2f}"
-                )
-                return pos
+                    pos.status = "closed"
+                    pos.closed_at = db_now()
+                    pos.close_price = close_price
+                    pos.close_reason = reason
+                    pos.realized_pnl = pnl
+                    self._balance = float(
+                        (Decimal(str(self._balance)) + Decimal(str(pnl))).quantize(
+                            Decimal("0.01"), rounding=ROUND_HALF_UP
+                        )
+                    )
+                    self._open.pop(i)
+                    self._closed.append(pos)
+                    self._store.append_trade(pos.to_dict())
+                    self._save()
+                    logger.info(
+                        f"[TRADE] Closed {pos.direction.upper()} {pos.pair} "
+                        f"@ {close_price:.5f} [{reason}] PnL={pnl:+.2f} | "
+                        f"balance=${self._balance:.2f}"
+                    )
+                    return pos
         logger.warning(f"close_position: order_id {order_id} not found in open positions")
         return None
