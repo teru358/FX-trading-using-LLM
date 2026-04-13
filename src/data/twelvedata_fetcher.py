@@ -82,12 +82,25 @@ class TwelveDataFetcher:
         self._timeout = timeout
 
     def _get_json(self, endpoint: str, params: dict) -> dict:
-        """APIリクエストを発行して JSON を返す。"""
-        params["apikey"] = self._api_key
-        with httpx.Client(timeout=self._timeout) as client:
-            resp = client.get(f"{_BASE_URL}{endpoint}", params=params)
-            resp.raise_for_status()
-            data = resp.json()
+        """APIリクエストを発行して JSON を返す。
+
+        APIキーは Authorization ヘッダで送信することで、URL・ログ・例外メッセージへの
+        漏洩を防ぐ (Twelve Data は `Authorization: apikey <KEY>` をサポート)。
+        """
+        headers = {"Authorization": f"apikey {self._api_key}"}
+        url = f"{_BASE_URL}{endpoint}"
+        try:
+            with httpx.Client(timeout=self._timeout) as client:
+                resp = client.get(url, params=params, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPStatusError as e:
+            # 例外メッセージに URL が含まれる場合があるのでサニタイズして再送出
+            raise ValueError(
+                f"Twelve Data HTTP {e.response.status_code} for {endpoint}"
+            ) from None
+        except httpx.HTTPError as e:
+            raise ValueError(f"Twelve Data request failed for {endpoint}: {type(e).__name__}") from None
         if "code" in data and data.get("status") == "error":
             raise ValueError(f"Twelve Data error: {data.get('message', data)}")
         return data
