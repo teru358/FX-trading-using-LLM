@@ -35,8 +35,8 @@ from src.trading.market_hours import is_market_open
 logger = logging.getLogger(__name__)
 
 
-_MAX_STALENESS_FX = timedelta(hours=6)       # FX: 24時間取引
-_MAX_STALENESS_WATCH = timedelta(hours=72)   # ETF/指数: 週末をまたぐため3日
+_MAX_STALENESS_FX = timedelta(hours=6)        # FX: 24時間取引
+_MAX_STALENESS_WATCH = timedelta(hours=120)   # ETF/指数: 週末+米国3連休を跨ぐため5日
 
 
 def _max_staleness_for(inst: InstrumentConfig) -> timedelta:
