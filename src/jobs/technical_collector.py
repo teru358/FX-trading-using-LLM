@@ -394,36 +394,17 @@ async def collect_all_technical(
 
     # TradingView チャート反映（シグナル + オープンポジション）
     if config.tradingview.enabled:
-        try:
-            from src.tradingview.cdp_client import CDPClient
-            from src.tradingview.pine_injector import PineInjector
-            from src.tradingview.tv_payload import build_tv_pine
-            from src.persistence.state_store import StateStore
-            from src.trading.position_manager import PositionManager
+        from src.persistence.state_store import StateStore
+        from src.trading.position_manager import PositionManager
+        from src.tradingview.tv_payload import render_tv_chart
 
-            state_store = StateStore(config.state_dir)
-            position_mgr = PositionManager(
-                state_store,
-                config.trading.initial_balance,
-                context="TechnicalCollector",
-            )
-            pine = build_tv_pine(config, analysis_store, position_mgr)
-            if pine is None:
-                logger.debug("[TV] No signals or positions to render")
-            else:
-                tv_cdp = CDPClient(host=config.tradingview.cdp_host, port=config.tradingview.cdp_port)
-                if await tv_cdp.connect():
-                    try:
-                        injector = PineInjector(tv_cdp)
-                        result = await injector.inject_and_compile(pine)
-                        if result["success"]:
-                            logger.info("[TV] Technical snapshots + positions reflected")
-                        else:
-                            logger.warning(f"[TV] Pine compile errors: {result['errors']}")
-                    finally:
-                        await tv_cdp.disconnect()
-        except Exception as e:
-            logger.warning(f"[TV] Chart visualization failed: {e}")
+        state_store = StateStore(config.state_dir)
+        position_mgr = PositionManager(
+            state_store,
+            config.trading.initial_balance,
+            context="TechnicalCollector",
+        )
+        await render_tv_chart(config, analysis_store, position_mgr, reason="technical snapshots")
 
     # Phase 3: 経済指標影響分析 (オプション)
     if config.economic_calendar.enabled:

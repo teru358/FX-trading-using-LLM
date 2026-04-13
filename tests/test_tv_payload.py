@@ -87,8 +87,8 @@ def test_build_tv_pine_with_positions():
     assert "▲" in script  # buy
 
 
-def test_build_tv_pine_empty_returns_none():
-    """シグナルもポジションも空なら None を返す (無駄な注入を防ぐ)。"""
+def test_build_tv_pine_empty_returns_cleared_script():
+    """シグナルもポジションも空なら、空の Pine Script を返して古い線をクリアできる。"""
     cfg = _fake_config()
     analysis_store = MagicMock()
     analysis_store.get_recent_snapshots.return_value = []  # スナップショットなし
@@ -96,7 +96,10 @@ def test_build_tv_pine_empty_returns_none():
     position_mgr.get_account_state.return_value = SimpleNamespace(open_positions=[])
 
     script = build_tv_pine(cfg, analysis_store, position_mgr)
-    assert script is None
+    # 空でも indicator ヘッダは必ず含まれる (古い indicator を上書きクリアする目的)
+    assert script is not None
+    assert "indicator(" in script
+    assert "0 signal(s), 0 position(s)" in script
 
 
 def test_build_tv_pine_opened_at_converted_to_ms():

@@ -116,6 +116,7 @@ async def monitor_open_positions(
     notifier = create_notifier(config.notifier.enabled)
 
     trailing_updated = False  # トレーリングで SL が1つでも更新されたかを追跡
+    closed_any = False        # 緊急決済で1つでもクローズされたかを追跡
 
     for pos in account.open_positions:
         try:
@@ -179,6 +180,8 @@ async def monitor_open_positions(
                 )
                 closed = position_mgr.close_position(pos.order_id, current, "emergency_stop")
                 _alert_state.pop(pos.order_id, None)
+                if closed:
+                    closed_any = True
 
                 if closed and config.notifier.notify_on_order_close:
                     account_after = position_mgr.get_account_state()
@@ -196,30 +199,17 @@ async def monitor_open_positions(
         except Exception as e:
             logger.warning(f"[MONITOR] {pos.pair}: price check failed: {e}")
 
-    # トレーリングでSLが更新された場合、TradingView チャートを再注入
-    if trailing_updated and config.tradingview.enabled:
-        try:
-            from src.tradingview.cdp_client import CDPClient
-            from src.tradingview.pine_injector import PineInjector
-            from src.tradingview.tv_payload import build_tv_pine
-            from src.data.analysis_store import AnalysisStore
+    # トレーリング更新または緊急決済があった場合、TradingView チャートを再描画
+    if (trailing_updated or closed_any) and config.tradingview.enabled:
+        from src.data.analysis_store import AnalysisStore
+        from src.tradingview.tv_payload import render_tv_chart
 
-            analysis_store = AnalysisStore(config.prices_db_path)
-            pine = build_tv_pine(config, analysis_store, position_mgr)
-            if pine is not None:
-                tv_cdp = CDPClient(host=config.tradingview.cdp_host, port=config.tradingview.cdp_port)
-                if await tv_cdp.connect():
-                    try:
-                        injector = PineInjector(tv_cdp)
-                        result = await injector.inject_and_compile(pine)
-                        if result["success"]:
-                            logger.info("[TV] Chart updated after trailing stop adjustment")
-                        else:
-                            logger.warning(f"[TV] Pine compile errors after trailing: {result['errors']}")
-                    finally:
-                        await tv_cdp.disconnect()
-        except Exception as e:
-            logger.warning(f"[TV] Post-trailing chart update failed: {e}")
+        analysis_store = AnalysisStore(config.prices_db_path)
+        reason = "trailing" if trailing_updated and not closed_any else (
+            "emergency close" if closed_any and not trailing_updated else "trailing+close"
+        )
+        # close や trailing は状態変化があるので debounce をバイパスして必ず反映する
+        await render_tv_chart(config, analysis_store, position_mgr, reason=reason, force=True)
 
 
 def run_price_monitor(config: AppConfig, price_provider: PriceProvider) -> None:

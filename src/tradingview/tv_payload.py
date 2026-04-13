@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from typing import Any
 
 from src.tradingview.chart_control import to_tv_ticker
@@ -16,6 +18,15 @@ from src.tradingview.script_generator import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ── デバウンス用の状態 (モジュールグローバル) ──
+# render_tv_chart は複数の asyncio.run() (trading_cycle / exit_check /
+# price_monitor / CLI など) から呼ばれるため、asyncio.Lock は使えない
+# (別イベントループに束縛されるとエラー)。タイムスタンプ比較だけを
+# threading.Lock で守り、実際の CDP 呼び出し直列化は CDPClient._send_lock に任せる。
+_LAST_RENDER_MONOTONIC: float = 0.0
+_DEBOUNCE_LOCK = threading.Lock()
+_DEBOUNCE_SECONDS: float = 5.0
 
 
 def _collect_signals(config: Any, analysis_store: Any, hours: int = 8) -> list[SignalData]:
@@ -80,12 +91,79 @@ def _collect_positions(position_mgr: Any) -> list[PositionData]:
 def build_tv_pine(config: Any, analysis_store: Any, position_mgr: Any) -> str | None:
     """最新シグナルとオープンポジションから Pine Script を生成する。
 
-    どちらも空の場合は None を返す (無駄な注入を防ぐ)。
+    signals / positions が両方空の場合でも、空の Pine Script を返す。
+    これによりチャート上の古いインジケーターが上書きクリアされる。
     """
     signals = _collect_signals(config, analysis_store)
     positions = _collect_positions(position_mgr)
-
-    if not signals and not positions:
-        return None
-
     return generate_multi_signal_pine(signals, positions)
+
+
+async def render_tv_chart(
+    config: Any,
+    analysis_store: Any,
+    position_mgr: Any,
+    reason: str = "",
+    force: bool = False,
+) -> None:
+    """TradingView チャートにシグナル + ポジションを再描画する共通ヘルパー。
+
+    ``config.tradingview.enabled`` が False のときは何もしない。
+    CDP 接続は (host, port) ごとのプロセス singleton を共有し、毎回 connect/
+    disconnect を繰り返さない。送信失敗時は 1 回だけ再接続してリトライする。
+    失敗時は警告ログのみで例外は伝播しない。
+
+    デバウンス: 直近 ``_DEBOUNCE_SECONDS`` 秒以内の再描画は skip する
+    (trading_cycle と exit_check が同時刻に走るケースなど)。``force=True``
+    で明示的に迂回可能 (manual close や CLI 実行など確実に反映したいケース用)。
+    """
+    if not getattr(config.tradingview, "enabled", False):
+        return
+
+    global _LAST_RENDER_MONOTONIC
+
+    with _DEBOUNCE_LOCK:
+        now = time.monotonic()
+        if not force and (now - _LAST_RENDER_MONOTONIC) < _DEBOUNCE_SECONDS:
+            logger.debug(
+                f"[TV] render skipped (debounce {_DEBOUNCE_SECONDS:.0f}s) reason={reason}"
+            )
+            return
+        _LAST_RENDER_MONOTONIC = now
+
+    try:
+        from src.tradingview.cdp_client import get_shared_cdp_client
+        from src.tradingview.pine_injector import PineInjector
+
+        pine = build_tv_pine(config, analysis_store, position_mgr)
+        if pine is None:
+            return
+
+        tv_cdp = get_shared_cdp_client(config.tradingview.cdp_host, config.tradingview.cdp_port)
+
+        async def _attempt() -> dict | None:
+            if not await tv_cdp.ensure_connected():
+                return None
+            injector = PineInjector(tv_cdp)
+            return await injector.inject_and_compile(pine)
+
+        try:
+            result = await _attempt()
+        except Exception as e:
+            logger.info(f"[TV] First attempt failed ({e}); reconnecting and retrying")
+            await tv_cdp.disconnect()
+            try:
+                result = await _attempt()
+            except Exception as e2:
+                logger.warning(f"[TV] Retry also failed: {e2}")
+                return
+
+        if result is None:
+            return
+        if result.get("success"):
+            suffix = f" ({reason})" if reason else ""
+            logger.info(f"[TV] Chart updated{suffix}")
+        else:
+            logger.warning(f"[TV] Pine compile errors: {result.get('errors')}")
+    except Exception as e:
+        logger.warning(f"[TV] Chart render failed: {e}")
