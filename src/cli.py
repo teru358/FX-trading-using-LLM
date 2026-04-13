@@ -35,7 +35,7 @@ _HELP = """\
   [cyan]run trade[/cyan]            — 取引判定ループを今すぐ実行（動作確認用）
   [cyan]compare[/cyan]  (pair)      — 複数モデルで分析を比較  例: compare USDJPY=X
   [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問・コメントを送信
-  [cyan]manual[/cyan]               — 手動ポジション管理 (signal_only モード)
+  [cyan]manual[/cyan]               — 手動ポジション管理 (signal モード)
   [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
   [cyan]tv[/cyan]                   — TradingViewチャートにシグナルを描画更新
   [cyan]feeds[/cyan]                — RSSフィード疎通確認
@@ -101,8 +101,8 @@ def _cmd_status(config: AppConfig) -> None:
 
 def _cmd_manual(config: AppConfig) -> None:
     """Manual ポジション管理のインタラクティブモード。"""
-    if config.trading.trading_mode != "signal_only":
-        _console.print("[red]manual コマンドは signal_only モードでのみ利用可能です[/red]")
+    if config.trading.trading_mode != "signal":
+        _console.print("[red]manual コマンドは signal モードでのみ利用可能です[/red]")
         return
 
     manual_state = StateStore(config.manual_state_dir)
@@ -228,6 +228,12 @@ def _cmd_manual(config: AppConfig) -> None:
                         f"✓ 決済完了 {closed.pair} PnL={closed.realized_pnl:+.2f} "
                         f"残高={manual_mgr.get_account_state().balance:,.2f}"
                     )
+                    # reflection 生成 + directional RAG 登録 (バックグラウンド実行)
+                    from src.rag.vector_store import VectorStore
+                    from src.trading.manual_reflection import run_manual_reflection
+                    store = VectorStore(config.rag_db_path)
+                    _console.print("[dim]reflection 生成中...[/dim]")
+                    asyncio.run(run_manual_reflection(config, store, closed))
             except (ValueError, EOFError, KeyboardInterrupt):
                 _console.print("[red]キャンセルしました[/red]")
         else:
@@ -276,17 +282,24 @@ def _cmd_close(config: AppConfig, pair_arg: str) -> None:
                     balance=pm.get_account_state().balance,
                     source="manual",
                 ))
+            if config.tradingview.enabled:
+                from src.data.analysis_store import AnalysisStore
+                from src.tradingview.tv_payload import render_tv_chart
+                analysis_store = AnalysisStore(config.prices_db_path)
+                await render_tv_chart(config, analysis_store, pm, reason="manual close", force=True)
 
     asyncio.run(_do())
 
 
 async def _update_tv_chart(config: AppConfig, analysis_store) -> None:
-    """シグナル + オープンポジションを TradingView チャートに反映する。"""
-    from src.tradingview.cdp_client import CDPClient
-    from src.tradingview.pine_injector import PineInjector
-    from src.tradingview.tv_payload import build_tv_pine
+    """シグナル + オープンポジションを TradingView チャートに反映する。
+
+    共通ヘルパー ``render_tv_chart`` を使って常に最新状態 (ポジション決済後の
+    空状態も含む) を再描画する。
+    """
     from src.persistence.state_store import StateStore
     from src.trading.position_manager import PositionManager
+    from src.tradingview.tv_payload import render_tv_chart
 
     state_store = StateStore(config.state_dir)
     position_mgr = PositionManager(
@@ -295,28 +308,17 @@ async def _update_tv_chart(config: AppConfig, analysis_store) -> None:
         context="CLI",
     )
 
-    pine = build_tv_pine(config, analysis_store, position_mgr)
-    if pine is None:
-        _console.print("[yellow]シグナル/ポジションが無いため更新しません[/yellow]")
+    if not config.tradingview.enabled:
+        _console.print("[yellow]TradingView 連携が無効です (config.tradingview.enabled=false)[/yellow]")
         return
 
-    tv_cdp = CDPClient(host=config.tradingview.cdp_host, port=config.tradingview.cdp_port)
-    if not await tv_cdp.connect():
-        _console.print("[red]TradingViewに接続できません（Edge CDP起動済み？）[/red]")
-        return
-    try:
-        injector = PineInjector(tv_cdp)
-        result = await injector.inject_and_compile(pine)
-        if result["success"]:
-            account = position_mgr.get_account_state()
-            _console.print(
-                f"[green]チャート更新完了 "
-                f"(positions={len(account.open_positions)})[/green]"
-            )
-        else:
-            _console.print(f"[red]コンパイルエラー: {result['errors']}[/red]")
-    finally:
-        await tv_cdp.disconnect()
+    # CLI tv コマンドはユーザーが明示的に更新したい時に叩くので debounce をバイパス
+    await render_tv_chart(config, analysis_store, position_mgr, reason="tv command", force=True)
+    account = position_mgr.get_account_state()
+    _console.print(
+        f"[green]チャート更新完了 "
+        f"(positions={len(account.open_positions)})[/green]"
+    )
 
 
 def _cmd_notify(config: AppConfig) -> None:

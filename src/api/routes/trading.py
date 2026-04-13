@@ -123,32 +123,30 @@ async def close_position(pair: str) -> dict[str, Any]:
     """ポジションを緊急決済する。"""
     assert state.config is not None
 
-    # state_store のファイルロックを取得してから PositionManager を作成し、
-    # load → close → save の read-modify-write を他のジョブと直列化する。
-    # これにより price_monitor のトレーリング更新や run_trading_cycle の
-    # 決済処理との競合を防ぐ。
+    # PositionManager.close_position は内部で state_store.transaction() を取得し
+    # disk から再読込した上で読み書きするため、呼び出し側で明示的にロックを取る
+    # 必要はない (read-modify-write の原子性は PositionManager が保証する)。
     state_store = StateStore(state.config.state_dir)
-    with state_store._lock:
-        pm = PositionManager(state_store, state.config.trading.initial_balance, context="API_Close")
-        account = pm.get_account_state()
+    pm = PositionManager(state_store, state.config.trading.initial_balance, context="API_Close")
+    account = pm.get_account_state()
 
-        pos = next(
-            (p for p in account.open_positions if p.pair.upper() == pair.upper()),
-            None,
+    pos = next(
+        (p for p in account.open_positions if p.pair.upper() == pair.upper()),
+        None,
+    )
+    if pos is None:
+        open_pairs = [p.pair for p in account.open_positions]
+        raise HTTPException(
+            status_code=404,
+            detail=f"Position not found: {pair}. Open: {open_pairs}",
         )
-        if pos is None:
-            open_pairs = [p.pair for p in account.open_positions]
-            raise HTTPException(
-                status_code=404,
-                detail=f"Position not found: {pair}. Open: {open_pairs}",
-            )
 
-        try:
-            current = fetch_current_price(pos.pair).price
-        except Exception as e:
-            raise HTTPException(status_code=502, detail=f"Price fetch failed: {e}")
+    try:
+        current = fetch_current_price(pos.pair).price
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Price fetch failed: {e}")
 
-        closed = pm.close_position(pos.order_id, current, "manual")
+    closed = pm.close_position(pos.order_id, current, "manual")
 
     if closed is None:
         raise HTTPException(status_code=500, detail="Close failed")
@@ -169,6 +167,14 @@ async def close_position(pair: str) -> dict[str, Any]:
             ))
         except Exception as e:
             logger.warning(f"[API] Close notification failed: {e}")
+
+    # TradingView チャート再描画 (ポジション線をクリア)
+    if state.config.tradingview.enabled:
+        try:
+            from src.tradingview.tv_payload import render_tv_chart
+            await render_tv_chart(state.config, state.analysis_store, pm, reason="API close", force=True)
+        except Exception as e:
+            logger.warning(f"[API] TV chart update failed: {e}")
 
     return {
         "closed":       True,
