@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import threading
 
@@ -31,6 +32,7 @@ from src.analysis.prompt_stats import estimate_prompt_size
 
 _console = Console()
 _stop = threading.Event()
+_logger = logging.getLogger("finance.main")
 # LLMジョブ用の単一スロット (news/tech/trade/econ/ask/run_trade の排他制御)
 _llm_slot = PriorityJobSlot("llm")
 
@@ -92,7 +94,34 @@ def main() -> None:
     config = load_config()
     setup_logging(config.logging, BASE_DIR)
 
+    # 構成サマリを 1 行で出す (起動時の構成を事後解析から辿れるように)
+    def _llm_label(role_cfg) -> str:
+        # ollama の場合のみ default を補う。他の provider はモデル未指定なら "default" と表示。
+        if role_cfg.model:
+            return f"{role_cfg.provider}({role_cfg.model})"
+        if role_cfg.provider == "ollama":
+            return f"ollama({_DEFAULT_OLLAMA_MODEL})"
+        return f"{role_cfg.provider}(default)"
+
+    _trade_n = len(config.tradeable_instruments)
+    _watch_n = len(config.watch_only_instruments)
+    _llm_price = _llm_label(config.llm.price_analysis)
+    _llm_news = _llm_label(config.llm.news_analysis)
+    _llm_reflect = _llm_label(config.llm.reflection)
+    _tv = "on" if config.tradingview.enabled else "off"
+    _api = "on" if config.api.enabled else "off"
+    _pp = config.price_provider.realtime_provider
+    _logger.info(
+        "[SYSTEM] Startup — mode=%s daemon=%s instruments=%dtrade/%dwatch "
+        "LLM price=%s news=%s reflect=%s TV=%s API=%s provider=%s",
+        config.trading.trading_mode, args.daemon,
+        _trade_n, _watch_n,
+        _llm_price, _llm_news, _llm_reflect,
+        _tv, _api, _pp,
+    )
+
     if not startup_checks(config):
+        _logger.error("[SYSTEM] Startup aborted — startup_checks failed")
         sys.exit(1)
 
     is_fresh_start = not config.prices_db_path.exists()
@@ -317,16 +346,30 @@ def main() -> None:
 
     _console.print(Rule("[dim cyan]Scheduler running[/dim cyan]", style="dim cyan"))
 
+    _logger.info("[SYSTEM] Ready — scheduler running, entering main loop")
+
     # メインスレッド: コマンドループ or デーモン待機
-    if args.daemon:
-        _console.print("[dim]daemonモード稼働中 — REST API で操作してください (Ctrl+C で終了)[/dim]")
-        try:
-            _stop.wait()
-        except KeyboardInterrupt:
-            _console.print("\n[dim]終了します...[/dim]")
-            _stop.set()
-    else:
-        run_commands(config, store, analysis_store, _stop, _llm_slot, forecast_store, price_store, hold_store, price_provider=price_provider)
+    try:
+        if args.daemon:
+            _console.print("[dim]daemonモード稼働中 — REST API で操作してください (Ctrl+C で終了)[/dim]")
+            try:
+                _stop.wait()
+            except KeyboardInterrupt:
+                _console.print("\n[dim]終了します...[/dim]")
+                _stop.set()
+        else:
+            run_commands(config, store, analysis_store, _stop, _llm_slot, forecast_store, price_store, hold_store, price_provider=price_provider)
+    finally:
+        _stop.set()
+        # 共有 CDP クライアントを閉じる (描画経路で接続している場合)
+        if config.tradingview.enabled:
+            try:
+                import asyncio as _asyncio
+                from src.tradingview.cdp_client import shutdown_shared_cdp_clients
+                _asyncio.run(shutdown_shared_cdp_clients())
+            except Exception as e:
+                _logger.debug(f"[SYSTEM] CDP shutdown error: {e}")
+        _logger.info("[SYSTEM] Shutdown — FX Paper Trader stopped")
 
 
 if __name__ == "__main__":
