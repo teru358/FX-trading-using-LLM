@@ -1,4 +1,4 @@
-"""signal_only モード用の手動ポジション管理エンドポイント。
+"""signal モード用の手動ポジション管理エンドポイント。
 
 エンドポイント:
 - POST /manual/open          — ポジション登録
@@ -92,10 +92,14 @@ def manual_close(order_id: str, req: CloseRequest, background_tasks: BackgroundT
 
     account = mgr.get_account_state()
 
-    def _run_reflection() -> None:
-        logger.info(f"[MANUAL] Reflection generation would run here for {order_id}")
-
-    background_tasks.add_task(_run_reflection)
+    # 決済後のバックグラウンド処理: reflection 生成 + directional RAG 登録
+    if state.config is not None and state.store is not None:
+        from src.trading.manual_reflection import run_manual_reflection
+        background_tasks.add_task(
+            run_manual_reflection, state.config, state.store, closed,
+        )
+    else:
+        logger.warning(f"[MANUAL] Reflection skipped for {order_id}: config/store unavailable")
 
     return {
         "order_id": closed.order_id,
@@ -117,13 +121,10 @@ def manual_list() -> dict[str, Any]:
 
 @router.post("/balance", dependencies=[Depends(verify_api_key)])
 def manual_balance(req: BalanceRequest) -> dict[str, Any]:
-    """残高を補正する。"""
+    """残高を補正する。transaction 内で reload → 書き換え → save するため
+    同時実行されうる close_position と競合しない。"""
     mgr = _get_mgr()
-    account = mgr.get_account_state()
-    previous = account.balance
-    mgr._balance = req.balance
-    mgr._save()
-    logger.info(f"[MANUAL] Balance adjusted: {previous:.2f} → {req.balance:.2f}")
+    previous = mgr.set_balance(req.balance)
     return {
         "balance": req.balance,
         "previous": previous,

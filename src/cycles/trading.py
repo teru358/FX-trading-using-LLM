@@ -769,32 +769,8 @@ async def _phase_render_tradingview(
     position_mgr: PositionManager,
 ) -> None:
     """TradingView チャートにシグナル + ポジションを反映する。"""
-    if not config.tradingview.enabled:
-        return
-    try:
-        from src.tradingview.cdp_client import CDPClient
-        from src.tradingview.pine_injector import PineInjector
-        from src.tradingview.tv_payload import build_tv_pine
-
-        pine = build_tv_pine(config, analysis_store, position_mgr)
-        if pine is None:
-            logger.debug("[TV] No signals or positions to render")
-            return
-
-        tv_cdp = CDPClient(host=config.tradingview.cdp_host, port=config.tradingview.cdp_port)
-        if not await tv_cdp.connect():
-            return
-        try:
-            injector = PineInjector(tv_cdp)
-            result = await injector.inject_and_compile(pine)
-            if result["success"]:
-                logger.info("[TV] Signals + positions reflected")
-            else:
-                logger.warning(f"[TV] Pine compile errors: {result['errors']}")
-        finally:
-            await tv_cdp.disconnect()
-    except Exception as e:
-        logger.warning(f"[TV] Chart visualization failed: {e}")
+    from src.tradingview.tv_payload import render_tv_chart
+    await render_tv_chart(config, analysis_store, position_mgr, reason="trading cycle")
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -807,7 +783,7 @@ def _build_trading_runtime(config: AppConfig):
     Returns:
         (broker, adaptive_store, notifier, llm_price, llm_reflect, signal_broker, manual_mgr)
         paper/live モード: signal_broker=None, manual_mgr=None
-        signal_only モード: broker=PaperBrokerAdapter (internal), signal_broker=SignalOnlyBrokerAdapter
+        signal モード: broker=PaperBrokerAdapter (internal), signal_broker=SignalBrokerAdapter
     """
     adaptive_store = AdaptiveParamsStore(
         state_dir=config.state_dir,
@@ -828,7 +804,7 @@ def _build_trading_runtime(config: AppConfig):
     signal_broker = None
     manual_mgr = None
 
-    if config.trading.trading_mode == "signal_only":
+    if config.trading.trading_mode == "signal":
         # internal broker: PaperBrokerAdapter (通知なし、ログのみ)
         broker = create_broker(
             "paper",
@@ -845,7 +821,7 @@ def _build_trading_runtime(config: AppConfig):
         # signal_broker: シグナル通知 + manual SL/TP アラート
         notifier = create_notifier(config.notifier.enabled)
         signal_broker = create_broker(
-            "signal_only",
+            "signal",
             manual_position_mgr=manual_mgr,
             notifier=notifier,
             max_total_positions=config.trading.max_total_positions,
@@ -879,7 +855,7 @@ async def trading_cycle(
     logger.info(f"=== Trading cycle started: {run_start.strftime('%Y-%m-%d %H:%M %Z')} ===")
 
     broker, adaptive_store, notifier, llm_price, llm_reflect, signal_broker, manual_mgr = _build_trading_runtime(config)
-    is_signal_only = config.trading.trading_mode == "signal_only"
+    is_signal_mode = config.trading.trading_mode == "signal"
 
     logger.info(
         f"[TRADE] mode={config.trading.trading_mode} broker={type(broker).__name__} "
@@ -892,8 +868,8 @@ async def trading_cycle(
         # 休場中は無音スキップ (MarketStateTracker が遷移/ハートビートのみログ化)
         return
 
-    # internal 用 notifier: signal_only では NullNotifier (通知なし)
-    internal_notifier = NullNotifier() if is_signal_only else notifier
+    # internal 用 notifier: signal モードでは NullNotifier (通知なし)
+    internal_notifier = NullNotifier() if is_signal_mode else notifier
 
     embed_fn = partial(
         embed_text,
@@ -904,8 +880,8 @@ async def trading_cycle(
     # Phase 1: SL/TP クローズ (internal)
     closed_this_run = await _phase_close_sl_tp(config, position_mgr, broker, internal_notifier, price_provider)
 
-    # Phase 1 (signal_only): manual ポジションの SL/TP 到達チェック (通知のみ)
-    if is_signal_only and signal_broker is not None and manual_mgr is not None:
+    # Phase 1 (signal): manual ポジションの SL/TP 到達チェック (通知のみ)
+    if is_signal_mode and signal_broker is not None and manual_mgr is not None:
         manual_positions = manual_mgr.get_account_state().open_positions
         if manual_positions:
             manual_prices: dict[str, float] = {}
@@ -913,7 +889,7 @@ async def trading_cycle(
                 try:
                     manual_prices[pos.pair] = _get_price(pos.pair, price_provider)
                 except Exception as e:
-                    logger.warning(f"[SIGNAL_ONLY] Could not fetch price for {pos.pair}: {e}")
+                    logger.warning(f"[SIGNAL-REC] Could not fetch price for {pos.pair}: {e}")
             signal_broker.check_and_close_positions([], manual_prices, manual_mgr)
 
     # Phase 1.5: 決済済オーダーの振り返り + adaptive params 更新 + RAG 蓄積
@@ -942,8 +918,8 @@ async def trading_cycle(
         adaptive_store, session_store, log_source="[REFLECT/REVIEW]",
     )
 
-    # Phase 4a (signal_only): manual ポジションの Layer 1-3 決済推奨 (通知のみ)
-    if is_signal_only and manual_mgr is not None:
+    # Phase 4a (signal): manual ポジションの Layer 1-3 決済推奨 (通知のみ)
+    if is_signal_mode and manual_mgr is not None:
         await _phase_review_manual_positions(
             config, manual_mgr, signals, notifier, price_provider,
         )
@@ -954,8 +930,8 @@ async def trading_cycle(
         hold_store, session_store, adaptive_store, embed_fn, price_provider,
     )
 
-    # Phase 4b (signal_only): シグナル推奨通知
-    if is_signal_only and signal_broker is not None:
+    # Phase 4b (signal): シグナル推奨通知
+    if is_signal_mode and signal_broker is not None:
         for sig in signals:
             if sig.action != "hold":
                 signal_broker.execute_signal(sig, position_mgr, macro_context=macro_ctxs.get(sig.pair, ""))

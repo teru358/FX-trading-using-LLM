@@ -145,9 +145,9 @@ def create_broker(
     """trading_mode に応じた BrokerAdapter を返すファクトリ関数。
 
     Args:
-        trading_mode: "paper" | "live" | "signal_only"
-        manual_position_mgr: "signal_only" モード時に必須。manual ポジション管理用。
-        notifier: "signal_only" モード時に必須。通知アダプター。
+        trading_mode: "paper" | "live" | "signal"
+        manual_position_mgr: "signal" モード時に必須。manual ポジション管理用。
+        notifier: "signal" モード時に必須。通知アダプター。
     """
     from src.trading.paper_broker import PaperBrokerAdapter
 
@@ -159,17 +159,17 @@ def create_broker(
         )
     elif trading_mode == "live":
         return LiveBrokerAdapter()
-    elif trading_mode == "signal_only":
+    elif trading_mode == "signal":
         if manual_position_mgr is None:
             raise ValueError(
-                "signal_only モードでは manual_position_mgr が必須です。"
+                "signal モードでは manual_position_mgr が必須です。"
             )
         if notifier is None:
             raise ValueError(
-                "signal_only モードでは notifier が必須です。"
+                "signal モードでは notifier が必須です。"
             )
-        from src.trading.signal_only_broker import SignalOnlyBrokerAdapter
-        return SignalOnlyBrokerAdapter(
+        from src.trading.signal_broker import SignalBrokerAdapter
+        return SignalBrokerAdapter(
             manual_position_mgr=manual_position_mgr,
             notifier=notifier,
             max_total_positions=max_total_positions,
@@ -177,4 +177,4 @@ def create_broker(
             max_same_direction_per_group=max_same_direction_per_group,
         )
     else:
-        raise ValueError(f"Unknown trading_mode: {trading_mode!r}. Use 'paper', 'live', or 'signal_only'.")
+        raise ValueError(f"Unknown trading_mode: {trading_mode!r}. Use 'paper', 'live', or 'signal'.")

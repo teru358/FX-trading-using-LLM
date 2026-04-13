@@ -1,4 +1,4 @@
-"""signal_only 用通知イベントのテスト。"""
+"""signal モード用通知イベントのテスト。"""
 from __future__ import annotations
 
 import pytest

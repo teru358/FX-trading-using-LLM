@@ -204,7 +204,7 @@ curl -X POST -H "X-API-Key: $KEY" "$HOST/close/USDJPY%3DX"
 curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   -d '{"message":"ドル円の見通しは？"}' $HOST/ask
 
-# signal_only モード時のみ有効
+# signal モード時のみ有効
 curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   -d '{"pair":"USDJPY=X","direction":"buy","entry_price":150.2,"position_size":5000,"stop_loss":149.8,"take_profit":151.2}' \
   $HOST/manual/open
@@ -239,7 +239,7 @@ finance/
 │   ├── signals/                    # ルールベーススコアリング・シグナル統合・RAG補正
 │   ├── data/                       # OHLCV・指標・相関・スナップショット集約
 │   ├── jobs/                       # 収集ジョブ（ニュース/テクニカル/価格監視/経済指標）
-│   ├── trading/                    # ブローカー・ATR算出・ポジション管理・ポートフォリオガード・signal_only
+│   ├── trading/                    # ブローカー・ATR算出・ポジション管理・ポートフォリオガード・signal
 │   ├── rag/                        # ChromaDB・方向別ストア・セマンティック検索
 │   ├── api/                        # REST API (FastAPI) — routes/notifications/state
 │   ├── notifications/              # Discord通知
@@ -287,8 +287,8 @@ MarketStateTracker が市場の開閉状態を管理:
 | `[CB/*]` | サーキットブレーカー状態遷移 |
 | `[RAG ADJ]` | 方向別RAGスコア補正 |
 | `[ECON]` | 経済指標カレンダー・影響分析 |
-| `[INTERNAL]` | signal_only モードの内部自動運用ログ |
-| `[SIGNAL_ONLY]` | signal_only モードのシグナル推奨・SL/TP到達通知 |
+| `[INTERNAL]` | signal モードの内部自動運用ログ |
+| `[SIGNAL-REC]` | signal モードのシグナル推奨・SL/TP到達通知 |
 | `[REVIEW/MANUAL]` | manual ポジションの Layer 1-3 推奨 |
 | `[MANUAL]` | 手動ポジション操作（REST API / TUI） |
 
@@ -301,4 +301,4 @@ MarketStateTracker が市場の開閉状態を管理:
 | `data/state/trades.json` | クローズ済み取引履歴 |
 | `data/state/adaptive_params.yaml` | ペア別ATR倍率（動的更新） |
 | `data/rag/` | ChromaDB（ニュース・振り返り・洞察・方向別・経済指標分析） |
-| `data/manual_state/` | signal_only モードの手動ポジション・残高 |
+| `data/manual_state/` | signal モードの手動ポジション・残高 |

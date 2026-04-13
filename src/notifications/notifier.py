@@ -65,7 +65,7 @@ class PriceAlertEvent:
 
 @dataclass
 class SignalRecommendationEvent:
-    """signal_only モードのシグナル推奨通知。"""
+    """signal モードのシグナル推奨通知。"""
     pair: str
     direction: str              # "buy" | "sell"
     entry_price: float

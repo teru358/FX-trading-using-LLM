@@ -1,4 +1,4 @@
-"""Signal-only ブローカーアダプター。
+"""Signal ブローカーアダプター。
 
 注文を発注せず、シグナル推奨通知と manual ポジションの SL/TP アラートのみを行う。
 """
@@ -19,10 +19,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_LOG = "[SIGNAL_ONLY]"
+_LOG = "[SIGNAL-REC]"
 
 
-class SignalOnlyBrokerAdapter(BrokerAdapter):
+class SignalBrokerAdapter(BrokerAdapter):
     """注文を発注しないシグナル通知専用ブローカー。
 
     - execute_signal: hold 以外のシグナルを推奨通知として発火し、常に None を返す。
@@ -95,7 +95,7 @@ class SignalOnlyBrokerAdapter(BrokerAdapter):
             max_loss=max_loss,
             portfolio_warning=portfolio_warning,
             existing_positions=existing_positions,
-            source="signal_only",
+            source="signal",
         )
         logger.info("%s シグナル推奨通知: %s %s score=%.3f", _LOG, signal.pair, signal.action, signal.combined_score)
         self._fire(self._notifier.notify_signal_recommendation(event))

@@ -1,4 +1,4 @@
-"""SignalOnlyBrokerAdapter のテスト。"""
+"""SignalBrokerAdapter のテスト。"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -45,9 +45,9 @@ def internal_mgr(tmp_path):
 
 @pytest.fixture
 def broker(manual_mgr):
-    from src.trading.signal_only_broker import SignalOnlyBrokerAdapter
+    from src.trading.signal_broker import SignalBrokerAdapter
     notifier = AsyncMock(spec=NullNotifier)
-    return SignalOnlyBrokerAdapter(
+    return SignalBrokerAdapter(
         manual_position_mgr=manual_mgr,
         notifier=notifier,
     )

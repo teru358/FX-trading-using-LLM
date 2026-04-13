@@ -24,7 +24,7 @@ def client(tmp_path):
 
     cfg = MagicMock(spec=AppConfig)
     cfg.trading = MagicMock(spec=TradingConfig)
-    cfg.trading.trading_mode = "signal_only"
+    cfg.trading.trading_mode = "signal"
     cfg.trading.initial_balance = 500000.0
     cfg.manual_state_dir = tmp_path / "manual"
 

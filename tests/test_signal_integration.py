@@ -1,4 +1,4 @@
-"""signal_only モードの統合テスト。"""
+"""signal モードの統合テスト。"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -46,13 +46,13 @@ def test_manual_close_triggers_balance_update(dual_mgrs):
     assert len(account.open_positions) == 0
 
 
-def test_signal_only_broker_uses_manual_for_guard(dual_mgrs):
-    """SignalOnlyBrokerAdapter が manual ポジションを参照してガード判定する。"""
+def test_signal_broker_uses_manual_for_guard(dual_mgrs):
+    """SignalBrokerAdapter が manual ポジションを参照してガード判定する。"""
     internal, manual = dual_mgrs
-    from src.trading.signal_only_broker import SignalOnlyBrokerAdapter
+    from src.trading.signal_broker import SignalBrokerAdapter
 
     notifier = AsyncMock(spec=NullNotifier)
-    broker = SignalOnlyBrokerAdapter(
+    broker = SignalBrokerAdapter(
         manual_position_mgr=manual, notifier=notifier,
         max_total_positions=1,
     )

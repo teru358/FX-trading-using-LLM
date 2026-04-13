@@ -75,13 +75,13 @@ def start_api_server(
     state.forecast_store = forecast_store
     state.started_at = db_now()
 
-    if config.trading.trading_mode == "signal_only":
+    if config.trading.trading_mode == "signal":
         manual_state = StateStore(config.manual_state_dir)
         state.manual_position_mgr = PositionManager(
             manual_state, config.trading.initial_balance, context="ManualAPI",
         )
         app.include_router(manual.router)
-        logger.info("[API] Manual position routes enabled (signal_only mode)")
+        logger.info("[API] Manual position routes enabled (signal mode)")
 
     def _run() -> None:
         import uvicorn
