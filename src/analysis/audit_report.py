@@ -199,3 +199,103 @@ def render_section5_trade_table(sessions: list, flags_map: dict[str, str]) -> st
         )
 
     return "\n".join(lines)
+
+
+def select_representative_trades(
+    sessions: list,
+    flags_map: dict[str, str],
+    max_wins: int = 5,
+    max_losses: int = 5,
+) -> list:
+    """Section 6 で深掘りする代表 10 件を選定する。
+
+    戦略:
+    - NOISE / INSUFFICIENT_DATA は除外
+    - 勝ち: pnl 降順で max_wins 件 (TIGHT_TP / LATE_EXIT 優先)
+    - 敗:   pnl 昇順で max_losses 件 (CONF_MISS / SL_RECOVER 優先)
+    """
+    excluded_flags = {"NOISE", "INSUFFICIENT_DATA"}
+    candidates = [s for s in sessions if flags_map.get(s.session_id) not in excluded_flags]
+
+    wins = [s for s in candidates if (s.realized_pnl or 0) > 0]
+    losses = [s for s in candidates if (s.realized_pnl or 0) <= 0]
+
+    priority_win_flags = {"TIGHT_TP", "LATE_EXIT"}
+    wins.sort(
+        key=lambda s: (
+            0 if flags_map.get(s.session_id) in priority_win_flags else 1,
+            -(s.realized_pnl or 0),
+        )
+    )
+    selected_wins = wins[:max_wins]
+
+    priority_loss_flags = {"CONF_MISS", "SL_RECOVER"}
+    losses.sort(
+        key=lambda s: (
+            0 if flags_map.get(s.session_id) in priority_loss_flags else 1,
+            s.realized_pnl or 0,
+        )
+    )
+    selected_losses = losses[:max_losses]
+
+    return selected_wins + selected_losses
+
+
+def render_section6_detailed_review(
+    selected: list,
+    review_map: dict[str, dict[str, Any]],
+    accepted_lessons_map: dict[str, list],
+) -> str:
+    """Section 6: 代表 10 件の詳細レビュー。
+
+    review_map: session_id → {flag, mfe_*, mae_*, counterfactual, ...}
+    accepted_lessons_map: session_id → [LessonCandidate] (review mode 承認済み)
+    """
+    lines = ["## Section 6: 詳細レビュー (代表 10 件)", ""]
+    if not selected:
+        lines.append("レビュー対象なし。")
+        return "\n".join(lines)
+
+    for s in selected:
+        data = review_map.get(s.session_id, {})
+        flag = data.get("flag", "?")
+        is_win = (s.realized_pnl or 0) > 0
+        label = "WIN" if is_win else "LOSS"
+
+        lines.append(f"### [{label}] {s.closed_at.strftime('%Y-%m-%d %H:%M')} {s.pair} "
+                     f"{s.direction.upper()} conf={s.signal_confidence:.2f} "
+                     f"pnl={s.realized_pnl:+,.0f} flag={flag}")
+        lines.append("")
+        lines.append("**エントリー時分析**:")
+        lines.append(f"> {s.analysis_summary or '(none)'}")
+        lines.append("")
+        lines.append(f"**Macro at entry**: {s.macro_context or '(none)'}")
+        lines.append("")
+        lines.append("**Post-hoc data**:")
+        lines.append(f"- Close: {s.close_price:.5f} ({s.close_reason})")
+        duration_h = (s.closed_at - s.opened_at).total_seconds() / 3600
+        lines.append(f"- Duration: {duration_h:.1f}h")
+        lines.append(f"- MFE during trade: {data.get('mfe_during', 0):+,.0f}")
+        lines.append(f"- MAE during trade: {data.get('mae_during', 0):+,.0f}")
+        lines.append(f"- MFE after close 24h: {data.get('mfe_after_close', 0):+,.0f}")
+        lines.append(f"- MAE after close 24h: {data.get('mae_after_close', 0):+,.0f}")
+        lines.append(f"- Counterfactual TP +0.5 ATR pnl: {data.get('tp_plus_0_5_atr_pnl', 0):+,.0f}")
+        lines.append(f"- Counterfactual TP +1.0 ATR pnl: {data.get('tp_plus_1_0_atr_pnl', 0):+,.0f}")
+        lines.append(f"- Counterfactual SL -0.5 ATR pnl: {data.get('sl_minus_0_5_atr_pnl', 0):+,.0f}")
+        lines.append("")
+        if s.reflection_text:
+            lines.append("**Reflection (決済時自動生成)**:")
+            lines.append(f"> {s.reflection_text}")
+            lines.append("")
+
+        accepted = accepted_lessons_map.get(s.session_id, [])
+        if accepted:
+            lines.append("**承認された教訓**:")
+            for lesson in accepted:
+                lines.append(f"- [LLM-PROPOSED / USER-APPROVED] {lesson.rule_text}")
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+    return "\n".join(lines)

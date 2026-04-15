@@ -112,3 +112,67 @@ def test_section5_trade_table():
     assert "CLEAN_WIN" in text
     assert "CLEAN_LOSS" in text
     assert "USDJPY" in text
+
+
+from src.analysis.audit_report import (
+    render_section6_detailed_review,
+    select_representative_trades,
+)
+
+
+def test_select_representative_trades_win_loss_mix():
+    """勝ち 5 + 敗 5 が選定される、NOISE は除外。"""
+    now = datetime(2026, 4, 14, 12, 0)
+    sessions = []
+    # 勝ち 7 件
+    for i in range(7):
+        sessions.append(make_fake_session(f"w{i}", pnl=1000 + i * 100, opened_at=now))
+    # 敗 7 件
+    for i in range(7):
+        sessions.append(make_fake_session(f"l{i}", pnl=-1000 - i * 100, opened_at=now))
+    # NOISE (< 500)
+    sessions.append(make_fake_session("n1", pnl=100, opened_at=now))
+
+    flags_map = {}
+    for s in sessions:
+        if "n" in s.session_id:
+            flags_map[s.session_id] = "NOISE"
+        elif "w" in s.session_id:
+            flags_map[s.session_id] = "CLEAN_WIN"
+        else:
+            flags_map[s.session_id] = "CLEAN_LOSS"
+
+    selected = select_representative_trades(sessions, flags_map)
+    sids = [s.session_id for s in selected]
+    assert len(selected) == 10
+    assert all("n" not in sid for sid in sids)  # NOISE 除外
+    # 勝ち 5 + 敗 5
+    wins_selected = [s for s in selected if s.realized_pnl > 0]
+    losses_selected = [s for s in selected if s.realized_pnl <= 0]
+    assert len(wins_selected) == 5
+    assert len(losses_selected) == 5
+
+
+def test_section6_renders_entry_analysis_and_postHoc():
+    """Section 6 のトレード詳細に analysis_summary と flag が含まれる。"""
+    now = datetime(2026, 4, 14, 12, 0)
+    s = make_fake_session("r1", pnl=-2000, conf=0.82, opened_at=now)
+    s.analysis_summary = "Test entry reasoning here."
+    s.reflection_text = "Test reflection here."
+
+    review_map = {"r1": {
+        "flag": "CONF_MISS",
+        "mfe_during": 100,
+        "mae_during": -2000,
+        "mfe_after_close": 300,
+        "mae_after_close": -500,
+        "tp_plus_0_5_atr_pnl": 800,
+        "tp_plus_1_0_atr_pnl": 1200,
+        "sl_minus_0_5_atr_pnl": -1500,
+        "tighter_sl_would_recover": False,
+    }}
+    text = render_section6_detailed_review([s], review_map, accepted_lessons_map={})
+    assert "## Section 6" in text
+    assert "Test entry reasoning" in text
+    assert "CONF_MISS" in text
+    assert "Test reflection" in text
