@@ -162,3 +162,97 @@ def compute_mfe_mae(
         duration_seconds=duration_seconds,
         has_post_close_data=has_post,
     )
+
+
+def compute_counterfactuals(
+    direction: str,
+    entry_price: float,
+    stop_loss: float,
+    take_profit: float,
+    position_size: float,
+    atr_value: float,
+    opened_at: datetime,
+    closed_at: datetime,
+    ohlcv_df,
+) -> Counterfactuals:
+    """仮想 TP/SL で決済していた場合の結果を計算する。
+
+    - tp_plus_0_5_atr / tp_plus_1_0_atr: TP を ATR * 0.5 / 1.0 広げた場合
+    - sl_minus_0_5_atr: SL を ATR * 0.5 タイト (不利方向に狭める) にした場合
+    - tighter_sl_would_recover: SL タイト化でヒットした後に最終的に順行方向へ戻ったか
+    """
+    import pandas as pd
+
+    if direction not in ("buy", "sell"):
+        raise ValueError(f"direction must be 'buy' or 'sell', got {direction!r}")
+
+    direction_sign = 1 if direction == "buy" else -1
+    if ohlcv_df is None or ohlcv_df.empty:
+        return Counterfactuals(
+            tp_plus_0_5_atr_hit=False, tp_plus_0_5_atr_pnl=0.0,
+            tp_plus_1_0_atr_hit=False, tp_plus_1_0_atr_pnl=0.0,
+            sl_minus_0_5_atr_hit=False, sl_minus_0_5_atr_pnl=0.0,
+            tighter_sl_would_recover=False,
+        )
+
+    # 重複 index を除去 (concat などで発生しうる)
+    ohlcv_df = ohlcv_df[~ohlcv_df.index.duplicated(keep="last")]
+
+    opened_ts = pd.Timestamp(opened_at)
+    closed_ts = pd.Timestamp(closed_at)
+    intra = ohlcv_df[(ohlcv_df.index >= opened_ts) & (ohlcv_df.index <= closed_ts)]
+    if intra.empty:
+        return Counterfactuals(
+            tp_plus_0_5_atr_hit=False, tp_plus_0_5_atr_pnl=0.0,
+            tp_plus_1_0_atr_hit=False, tp_plus_1_0_atr_pnl=0.0,
+            sl_minus_0_5_atr_hit=False, sl_minus_0_5_atr_pnl=0.0,
+            tighter_sl_would_recover=False,
+        )
+
+    highs = intra["High"]
+    lows = intra["Low"]
+
+    # wider TP (順行方向に広げる)
+    def tp_hit(offset: float) -> tuple[bool, float]:
+        new_tp = take_profit + (offset * direction_sign)
+        if direction == "buy":
+            hit = (highs >= new_tp).any()
+        else:
+            hit = (lows <= new_tp).any()
+        pnl = (new_tp - entry_price) * direction_sign * position_size if hit else 0.0
+        return bool(hit), pnl
+
+    tp05_hit, tp05_pnl = tp_hit(0.5 * atr_value)
+    tp10_hit, tp10_pnl = tp_hit(1.0 * atr_value)
+
+    # tighter SL (逆行方向に狭める = entry に近づける)
+    new_sl = stop_loss + (0.5 * atr_value * direction_sign)  # entry に近づく
+    if direction == "buy":
+        sl_hit_mask = (lows <= new_sl)
+    else:
+        sl_hit_mask = (highs >= new_sl)
+    sl_hit_time = None
+    if sl_hit_mask.any():
+        sl_hit_time = sl_hit_mask.idxmax()  # 最初に hit した時刻
+    sl_hit_val = bool(sl_hit_mask.any())
+    sl_pnl = (new_sl - entry_price) * direction_sign * position_size if sl_hit_val else 0.0
+
+    # tighter_sl_would_recover: SL hit 後に順行方向へ戻ったか (entry 以上に戻ったか)
+    recover = False
+    if sl_hit_val and sl_hit_time is not None:
+        after_hit = intra[intra.index > sl_hit_time]
+        if not after_hit.empty:
+            if direction == "buy":
+                recover = bool((after_hit["High"] >= entry_price).any())
+            else:
+                recover = bool((after_hit["Low"] <= entry_price).any())
+
+    return Counterfactuals(
+        tp_plus_0_5_atr_hit=tp05_hit,
+        tp_plus_0_5_atr_pnl=tp05_pnl,
+        tp_plus_1_0_atr_hit=tp10_hit,
+        tp_plus_1_0_atr_pnl=tp10_pnl,
+        sl_minus_0_5_atr_hit=sl_hit_val,
+        sl_minus_0_5_atr_pnl=sl_pnl,
+        tighter_sl_would_recover=recover,
+    )

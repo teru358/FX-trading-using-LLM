@@ -10,6 +10,7 @@ from src.analysis.audit_post_hoc import (
     LessonCandidate,
     PostHocResult,
     TradeReview,
+    compute_counterfactuals,
     compute_mfe_mae,
 )
 
@@ -162,3 +163,51 @@ def test_compute_mfe_mae_invalid_direction_raises():
             closed_at=closed,
             ohlcv_df=df,
         )
+
+
+def test_counterfactuals_wider_tp_hits():
+    """TP を +0.5 ATR 広げた場合、到達していれば改善と判定。"""
+    opened = datetime(2026, 4, 1, 10, 0)
+    closed = datetime(2026, 4, 1, 14, 0)
+    # entry=150.0, TP=150.5 (実際 hit), ATR=0.3
+    # wider TP = 150.5 + 0.15 = 150.65 / 150.5 + 0.30 = 150.80
+    # 期間中 High が 150.70 まで到達 → +0.5 ATR (150.65) は hit, +1.0 ATR (150.80) は not
+    df = _make_ohlcv([150.0, 150.3, 150.6, 150.7, 150.5], opened)
+
+    cf = compute_counterfactuals(
+        direction="buy",
+        entry_price=150.0,
+        stop_loss=149.5,
+        take_profit=150.5,
+        position_size=10000,
+        atr_value=0.3,
+        opened_at=opened,
+        closed_at=closed,
+        ohlcv_df=df,
+    )
+    assert cf.tp_plus_0_5_atr_hit is True
+    assert cf.tp_plus_0_5_atr_pnl > 0
+    assert cf.tp_plus_1_0_atr_hit is False
+
+
+def test_counterfactuals_tighter_sl_would_recover():
+    """SL を 0.5 ATR タイトにしても最終的に回復しない場合は False。"""
+    opened = datetime(2026, 4, 1, 10, 0)
+    closed = datetime(2026, 4, 1, 14, 0)
+    # BUY entry=150.0, SL=149.5, ATR=0.3 → tighter SL = 149.65
+    # 期間中 Low が 149.60 (tighter SL にヒット) だが最終的に 149.45 で SL hit
+    df = _make_ohlcv([150.0, 149.80, 149.60, 149.55, 149.45], opened)
+
+    cf = compute_counterfactuals(
+        direction="buy",
+        entry_price=150.0,
+        stop_loss=149.5,
+        take_profit=150.5,
+        position_size=10000,
+        atr_value=0.3,
+        opened_at=opened,
+        closed_at=closed,
+        ohlcv_df=df,
+    )
+    assert cf.sl_minus_0_5_atr_hit is True
+    assert cf.tighter_sl_would_recover is False
