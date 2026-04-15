@@ -39,7 +39,7 @@ _HELP = """\
   [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問・コメントを送信
   [cyan]manual[/cyan]               — 手動ポジション管理 (signal モード)
   [cyan]audit[/cyan] (days)         — 過去トレードの統計診断レポート生成
-  [cyan]audit review[/cyan] (days)  — audit + 対話 review で教訓選別 (未実装は Task 20)
+  [cyan]audit review[/cyan] (days)  — audit + LLM 改善候補の対話選別 (教訓を audit_lessons.md に蓄積)
   [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
   [cyan]tv[/cyan]                   — TradingViewチャートにシグナルを描画更新
   [cyan]feeds[/cyan]                — RSSフィード疎通確認
