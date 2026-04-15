@@ -256,3 +256,55 @@ def compute_counterfactuals(
         sl_minus_0_5_atr_pnl=sl_pnl,
         tighter_sl_would_recover=recover,
     )
+
+
+def compute_vol_percentile(
+    atr_pct: float,
+    distribution: list[float],
+) -> float | None:
+    """atr_pct が分布の何 percentile にあるかを返す (0-100)。
+
+    Args:
+        atr_pct: エントリー時の ATR / price 比 (例: 0.005 = 0.5%)
+        distribution: 過去 90 日分の atr_pct サンプル
+    Returns:
+        0.0〜100.0 の percentile、分布が空なら None
+    """
+    if not distribution:
+        return None
+    sorted_d = sorted(distribution)
+    n = len(sorted_d)
+    # 境界処理
+    if atr_pct < sorted_d[0]:
+        return 0.0
+    if atr_pct > sorted_d[-1]:
+        return 100.0
+    # atr_pct 未満の要素数 + 等値の半分
+    below = sum(1 for x in sorted_d if x < atr_pct)
+    equal = sum(1 for x in sorted_d if x == atr_pct)
+    return (below + equal / 2) / n * 100
+
+
+def build_atr_pct_distribution(ohlcv_df, atr_period: int = 14) -> list[float]:
+    """過去 OHLCV から ATR% (= ATR / Close) の分布を作る。
+
+    audit での vol_percentile 計算のベース分布として使用する。
+    """
+    import pandas as pd
+
+    if ohlcv_df is None or len(ohlcv_df) < atr_period + 1:
+        return []
+
+    high = ohlcv_df["High"]
+    low = ohlcv_df["Low"]
+    close = ohlcv_df["Close"]
+    prev_close = close.shift(1)
+
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    atr = tr.rolling(atr_period).mean()
+    atr_pct = (atr / close).dropna()
+    return [float(v) for v in atr_pct.tolist() if v > 0]

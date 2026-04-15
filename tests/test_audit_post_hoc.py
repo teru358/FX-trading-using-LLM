@@ -211,3 +211,32 @@ def test_counterfactuals_tighter_sl_would_recover():
     )
     assert cf.sl_minus_0_5_atr_hit is True
     assert cf.tighter_sl_would_recover is False
+
+
+from src.analysis.audit_post_hoc import compute_vol_percentile
+
+
+def test_vol_percentile_middle():
+    """atr_pct が分布の中央値なら ≒ 50 を返す。"""
+    distribution = [0.001 * i for i in range(1, 11)]  # [0.001, 0.002, ..., 0.010]
+    pct = compute_vol_percentile(atr_pct=0.0055, distribution=distribution)
+    assert 40 <= pct <= 60
+
+
+def test_vol_percentile_below_min():
+    """分布の最小値未満なら 0。"""
+    distribution = [0.005, 0.006, 0.007, 0.008, 0.009]
+    pct = compute_vol_percentile(atr_pct=0.001, distribution=distribution)
+    assert pct == 0.0
+
+
+def test_vol_percentile_above_max():
+    """分布の最大値超なら 100。"""
+    distribution = [0.005, 0.006, 0.007, 0.008, 0.009]
+    pct = compute_vol_percentile(atr_pct=0.015, distribution=distribution)
+    assert pct == 100.0
+
+
+def test_vol_percentile_empty_distribution():
+    """空分布は None を返す。"""
+    assert compute_vol_percentile(atr_pct=0.005, distribution=[]) is None
