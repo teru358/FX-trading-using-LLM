@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Float, String, Text
+from sqlalchemy import Column, DateTime, Float, String, Text, and_, select
 from sqlalchemy.orm import Session
 
 from src.data.price_store import _Base, _get_engine
@@ -172,8 +172,6 @@ class SessionStore:
         Returns:
             closed_at が [since, until] 範囲内のセッション一覧 (closed_at 降順)
         """
-        from sqlalchemy import and_, select
-
         with Session(self._engine) as session:
             stmt = (
                 select(_TradingSession)

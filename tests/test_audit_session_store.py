@@ -32,20 +32,26 @@ def _make_session(store: SessionStore, sid: str, opened_at: datetime) -> None:
 
 
 def test_get_closed_sessions_in_range(store):
-    """クローズ済みセッションを期間指定で取得できる。"""
+    """クローズ済みセッションを期間指定で取得できる + closed_at 降順で返る。"""
     now = datetime.now()
     _make_session(store, "s1", now - timedelta(days=5))
     _make_session(store, "s2", now - timedelta(days=3))
     _make_session(store, "s3", now - timedelta(days=1))
 
+    # s1 は days-4 でクローズ、s2 は days-2 でクローズ (s2 の方が新しい)
     store.close_session("s1", now - timedelta(days=4), 151.0, "take_profit", 1000.0)
     store.close_session("s2", now - timedelta(days=2), 149.5, "stop_loss", -500.0)
 
     since = now - timedelta(days=7)
     until = now
     results = store.get_closed_sessions(since, until)
-    sids = sorted(r.session_id for r in results)
-    assert sids == ["s1", "s2"]
+
+    # 両方返る
+    sids = {r.session_id for r in results}
+    assert sids == {"s1", "s2"}
+    # 新しい順 (closed_at 降順) で s2 → s1
+    assert results[0].session_id == "s2"
+    assert results[1].session_id == "s1"
 
 
 def test_get_closed_sessions_empty(store):
@@ -65,3 +71,18 @@ def test_get_closed_sessions_outside_range(store):
     until = now
     results = store.get_closed_sessions(since, until)
     assert results == []
+
+
+def test_get_closed_sessions_boundary_inclusive(store):
+    """since / until と closed_at が完全に一致するケースも含まれる (inclusive)。"""
+    now = datetime.now()
+    opened = now - timedelta(days=2)
+    closed_exact = now - timedelta(days=1)
+
+    _make_session(store, "boundary", opened)
+    store.close_session("boundary", closed_exact, 151.0, "take_profit", 500.0)
+
+    # since = until = closed_exact で取得 → inclusive なので 1 件取れる
+    results = store.get_closed_sessions(closed_exact, closed_exact)
+    assert len(results) == 1
+    assert results[0].session_id == "boundary"
