@@ -82,3 +82,73 @@ class TradeReview:
     flag: str
     lesson_candidates: list[LessonCandidate] = field(default_factory=list)
     accepted_lessons: list[LessonCandidate] = field(default_factory=list)
+
+
+def compute_mfe_mae(
+    direction: str,
+    entry_price: float,
+    close_price: float,
+    position_size: float,
+    opened_at: datetime,
+    closed_at: datetime,
+    ohlcv_df,  # pandas.DataFrame (index=datetime)
+    post_close_hours: int = 24,
+) -> PostHocResult:
+    """トレード期間と決済後 24h の MFE/MAE を計算する。
+
+    MFE/MAE は「方向に順行した場合の最大利益 / 損失」を pnl 相当で返す。
+    OHLCV の High/Low を参照し、direction に応じて符号を調整する。
+    """
+    import pandas as pd
+
+    direction_sign = 1 if direction == "buy" else -1
+    duration_seconds = (closed_at - opened_at).total_seconds()
+
+    if ohlcv_df is None or ohlcv_df.empty:
+        return PostHocResult(
+            mfe_during_trade=0.0, mae_during_trade=0.0,
+            mfe_after_close_24h=0.0, mae_after_close_24h=0.0,
+            duration_seconds=duration_seconds, has_post_close_data=False,
+        )
+
+    opened_ts = pd.Timestamp(opened_at)
+    closed_ts = pd.Timestamp(closed_at)
+
+    intra = ohlcv_df[(ohlcv_df.index >= opened_ts) & (ohlcv_df.index <= closed_ts)]
+    if intra.empty:
+        mfe_intra = 0.0
+        mae_intra = 0.0
+    else:
+        if direction == "buy":
+            best = float(intra["High"].max())
+            worst = float(intra["Low"].min())
+        else:
+            best = float(intra["Low"].min())
+            worst = float(intra["High"].max())
+        mfe_intra = (best - entry_price) * direction_sign * position_size
+        mae_intra = (worst - entry_price) * direction_sign * position_size
+
+    post_end = closed_ts + pd.Timedelta(hours=post_close_hours)
+    post = ohlcv_df[(ohlcv_df.index > closed_ts) & (ohlcv_df.index <= post_end)]
+    has_post = not post.empty
+    if has_post:
+        if direction == "buy":
+            best_post = float(post["High"].max())
+            worst_post = float(post["Low"].min())
+        else:
+            best_post = float(post["Low"].min())
+            worst_post = float(post["High"].max())
+        mfe_after = (best_post - close_price) * direction_sign * position_size
+        mae_after = (worst_post - close_price) * direction_sign * position_size
+    else:
+        mfe_after = 0.0
+        mae_after = 0.0
+
+    return PostHocResult(
+        mfe_during_trade=mfe_intra,
+        mae_during_trade=mae_intra,
+        mfe_after_close_24h=mfe_after,
+        mae_after_close_24h=mae_after,
+        duration_seconds=duration_seconds,
+        has_post_close_data=has_post,
+    )
