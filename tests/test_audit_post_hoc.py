@@ -288,3 +288,87 @@ def test_build_atr_pct_distribution_happy_path():
     expected = 1.0 / 150.0
     for v in distribution:
         assert abs(v - expected) < 1e-9
+
+
+from src.analysis.audit_post_hoc import assign_flag
+
+
+def _mk_ph(mfe_intra=0, mae_intra=0, mfe_after=0, mae_after=0, has=True) -> PostHocResult:
+    return PostHocResult(
+        mfe_during_trade=mfe_intra, mae_during_trade=mae_intra,
+        mfe_after_close_24h=mfe_after, mae_after_close_24h=mae_after,
+        duration_seconds=3600, has_post_close_data=has,
+    )
+
+
+def _mk_cf(recover=False) -> Counterfactuals:
+    return Counterfactuals(
+        tp_plus_0_5_atr_hit=False, tp_plus_0_5_atr_pnl=0.0,
+        tp_plus_1_0_atr_hit=False, tp_plus_1_0_atr_pnl=0.0,
+        sl_minus_0_5_atr_hit=False, sl_minus_0_5_atr_pnl=0.0,
+        tighter_sl_would_recover=recover,
+    )
+
+
+def test_assign_flag_noise():
+    """絶対値小 → NOISE。"""
+    assert assign_flag(
+        realized_pnl=300, signal_confidence=0.8, close_reason="take_profit",
+        ph=_mk_ph(), cf=_mk_cf(),
+    ) == "NOISE"
+
+
+def test_assign_flag_clean_win():
+    """勝ち + TP hit + MFE 小 (< 50% of realized) → CLEAN_WIN。"""
+    assert assign_flag(
+        realized_pnl=2000, signal_confidence=0.7, close_reason="take_profit",
+        ph=_mk_ph(mfe_after=500), cf=_mk_cf(),
+    ) == "CLEAN_WIN"
+
+
+def test_assign_flag_tight_tp():
+    """勝ち + MFE > 1.5 × realized → TIGHT_TP。"""
+    assert assign_flag(
+        realized_pnl=2000, signal_confidence=0.7, close_reason="take_profit",
+        ph=_mk_ph(mfe_after=4000), cf=_mk_cf(),
+    ) == "TIGHT_TP"
+
+
+def test_assign_flag_late_exit():
+    """勝ち + TP 以外で close + intra MFE > 1.5× → LATE_EXIT。"""
+    assert assign_flag(
+        realized_pnl=2000, signal_confidence=0.7, close_reason="manual",
+        ph=_mk_ph(mfe_intra=4000), cf=_mk_cf(),
+    ) == "LATE_EXIT"
+
+
+def test_assign_flag_sl_recover():
+    """負け + SL hit + tighter SL なら回復 → SL_RECOVER。"""
+    assert assign_flag(
+        realized_pnl=-2000, signal_confidence=0.7, close_reason="stop_loss",
+        ph=_mk_ph(), cf=_mk_cf(recover=True),
+    ) == "SL_RECOVER"
+
+
+def test_assign_flag_conf_miss():
+    """負け + 高 conf + 大損 → CONF_MISS。"""
+    assert assign_flag(
+        realized_pnl=-2000, signal_confidence=0.85, close_reason="manual",
+        ph=_mk_ph(), cf=_mk_cf(),
+    ) == "CONF_MISS"
+
+
+def test_assign_flag_clean_loss():
+    """負け + SL hit + 高 conf 以下 → CLEAN_LOSS。"""
+    assert assign_flag(
+        realized_pnl=-2000, signal_confidence=0.65, close_reason="stop_loss",
+        ph=_mk_ph(), cf=_mk_cf(),
+    ) == "CLEAN_LOSS"
+
+
+def test_assign_flag_insufficient_data():
+    """post-close データなし → INSUFFICIENT_DATA。"""
+    assert assign_flag(
+        realized_pnl=2000, signal_confidence=0.7, close_reason="take_profit",
+        ph=_mk_ph(has=False), cf=_mk_cf(),
+    ) == "INSUFFICIENT_DATA"

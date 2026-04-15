@@ -285,6 +285,51 @@ def compute_vol_percentile(
     return (below + equal / 2) / n * 100
 
 
+def assign_flag(
+    realized_pnl: float,
+    signal_confidence: float,
+    close_reason: str,
+    ph: PostHocResult,
+    cf: Counterfactuals,
+) -> str:
+    """rule-based の flag を返す。
+
+    判定順:
+    1. NOISE: 絶対値が閾値未満 (統計的に無視)
+    2. INSUFFICIENT_DATA: post-close OHLCV なし
+    3. 勝ち: CLEAN_WIN / TIGHT_TP / LATE_EXIT
+    4. 敗け: SL_RECOVER / CONF_MISS / CLEAN_LOSS
+    5. それ以外: NEUTRAL
+    """
+    if abs(realized_pnl) < _NOISE_PNL_THRESHOLD:
+        return "NOISE"
+    if not ph.has_post_close_data:
+        return "INSUFFICIENT_DATA"
+
+    win = realized_pnl > 0
+    tp_hit = close_reason == "take_profit"
+    sl_hit = close_reason == "stop_loss"
+    conf_high = signal_confidence >= _CONF_MISS_CONFIDENCE
+
+    if win:
+        if tp_hit and ph.mfe_after_close_24h < 0.5 * abs(realized_pnl):
+            return "CLEAN_WIN"
+        if ph.mfe_after_close_24h > _TIGHT_TP_MFE_RATIO * abs(realized_pnl):
+            return "TIGHT_TP"
+        if not tp_hit and ph.mfe_during_trade > _LATE_EXIT_INTRA_MFE_RATIO * abs(realized_pnl):
+            return "LATE_EXIT"
+        return "CLEAN_WIN"
+
+    # loss
+    if sl_hit and cf.tighter_sl_would_recover:
+        return "SL_RECOVER"
+    if conf_high and abs(realized_pnl) > _CONF_MISS_PNL_MIN:
+        return "CONF_MISS"
+    if sl_hit:
+        return "CLEAN_LOSS"
+    return "NEUTRAL"
+
+
 def build_atr_pct_distribution(ohlcv_df, atr_period: int = 14) -> list[float]:
     """過去 OHLCV から ATR% (= ATR / Close) の分布を作る。
 
