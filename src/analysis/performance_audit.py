@@ -86,6 +86,9 @@ def run_audit(
     global _price_store_singleton
     from src.data.price_store import PriceStore
 
+    # 出力ディレクトリを確保
+    config.audit_output_dir.mkdir(parents=True, exist_ok=True)
+
     _price_store_singleton = PriceStore(config.prices_db_path)
     session_store = SessionStore(config.prices_db_path)
 
@@ -168,11 +171,7 @@ def run_audit(
 
     if review:
         llm_client = create_llm_client(config, "reflection")
-        audit_lessons_path = getattr(
-            config,
-            "audit_lessons_path",
-            config.config_dir / "audit_lessons.md",
-        )
+        audit_lessons_path = config.audit_lessons_path
 
         # 対象トレードに対する候補 eager 生成 + キャッシュ
         review_items = []

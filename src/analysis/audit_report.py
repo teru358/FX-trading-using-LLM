@@ -259,12 +259,15 @@ def render_section6_detailed_review(
     for s in selected:
         data = review_map.get(s.session_id, {})
         flag = data.get("flag", "?")
-        is_win = (s.realized_pnl or 0) > 0
+        pnl_val = s.realized_pnl or 0
+        close_px = s.close_price or 0.0
+        conf_val = s.signal_confidence or 0.0
+        is_win = pnl_val > 0
         label = "WIN" if is_win else "LOSS"
 
         lines.append(f"### [{label}] {s.closed_at.strftime('%Y-%m-%d %H:%M')} {s.pair} "
-                     f"{s.direction.upper()} conf={s.signal_confidence:.2f} "
-                     f"pnl={s.realized_pnl:+,.0f} flag={flag}")
+                     f"{s.direction.upper()} conf={conf_val:.2f} "
+                     f"pnl={pnl_val:+,.0f} flag={flag}")
         lines.append("")
         lines.append("**エントリー時分析**:")
         lines.append(f"> {s.analysis_summary or '(none)'}")
@@ -272,7 +275,7 @@ def render_section6_detailed_review(
         lines.append(f"**Macro at entry**: {s.macro_context or '(none)'}")
         lines.append("")
         lines.append("**Post-hoc data**:")
-        lines.append(f"- Close: {s.close_price:.5f} ({s.close_reason})")
+        lines.append(f"- Close: {close_px:.5f} ({s.close_reason})")
         duration_h = (s.closed_at - s.opened_at).total_seconds() / 3600
         lines.append(f"- Duration: {duration_h:.1f}h")
         lines.append(f"- MFE during trade: {data.get('mfe_during', 0):+,.0f}")
