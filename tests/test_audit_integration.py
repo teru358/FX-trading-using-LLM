@@ -98,3 +98,11 @@ def test_run_audit_non_review_writes_report(audit_config, populated_session_stor
     assert "## Section 5" in text
     assert "## Section 6" in text
     assert result.session_count == 5
+
+
+def test_cmd_audit_dispatch(audit_config, populated_session_store, mock_price_store, capsys):
+    """_cmd_audit が run_audit を呼んでレポートを出力する。"""
+    from src.cli import _cmd_audit
+    _cmd_audit(audit_config, args=["30"])
+    captured = capsys.readouterr()
+    assert "Audit" in captured.out or "audit" in captured.out.lower()

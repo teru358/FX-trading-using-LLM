@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import subprocess
 import threading
 
@@ -22,6 +23,7 @@ from src.trading_cycle import run_trading_cycle
 from src.views import run_analysis_summary, run_ask, run_forecast_view, run_news_view, run_tech_view
 
 _console = Console()
+logger = logging.getLogger(__name__)
 
 _pending_signals: list = []  # モジュールレベルで保持
 
@@ -36,6 +38,8 @@ _HELP = """\
   [cyan]compare[/cyan]  (pair)      — 複数モデルで分析を比較  例: compare USDJPY=X
   [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問・コメントを送信
   [cyan]manual[/cyan]               — 手動ポジション管理 (signal モード)
+  [cyan]audit[/cyan] (days)         — 過去トレードの統計診断レポート生成
+  [cyan]audit review[/cyan] (days)  — audit + 対話 review で教訓選別 (未実装は Task 20)
   [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
   [cyan]tv[/cyan]                   — TradingViewチャートにシグナルを描画更新
   [cyan]feeds[/cyan]                — RSSフィード疎通確認
@@ -291,6 +295,47 @@ def _cmd_close(config: AppConfig, pair_arg: str) -> None:
     asyncio.run(_do())
 
 
+def _cmd_audit(config: AppConfig, args: list[str]) -> None:
+    """audit [days] / audit review [days] を実行する。"""
+    from src.analysis.performance_audit import run_audit
+
+    review = False
+    days = 30
+    if args:
+        if args[0] == "review":
+            review = True
+            if len(args) > 1:
+                try:
+                    days = int(args[1])
+                except ValueError:
+                    _console.print(f"[red]days が数値ではありません: {args[1]}[/red]")
+                    return
+        else:
+            try:
+                days = int(args[0])
+            except ValueError:
+                _console.print(f"[red]引数が不正: {args[0]}[/red]")
+                return
+
+    _console.print(f"[cyan]audit 実行中 (days={days}, review={review})...[/cyan]")
+    try:
+        result = run_audit(config, days=days, review=review)
+    except Exception as e:
+        _console.print(f"[red]audit 失敗: {type(e).__name__}: {e}[/red]")
+        logger.exception("[AUDIT] run_audit failed")
+        return
+
+    from rich.panel import Panel
+    from rich.table import Table
+    tbl = Table(show_header=False, box=None)
+    tbl.add_row("Sessions", str(result.session_count))
+    tbl.add_row("Lessons added", str(result.lessons_added))
+    tbl.add_row("Report", str(result.report_path))
+    if result.flag_counts:
+        tbl.add_row("Flags", ", ".join(f"{k}:{v}" for k, v in result.flag_counts.items()))
+    _console.print(Panel(tbl, title="Audit Summary", border_style="cyan"))
+
+
 async def _update_tv_chart(config: AppConfig, analysis_store) -> None:
     """シグナル + オープンポジションを TradingView チャートに反映する。
 
@@ -476,6 +521,8 @@ def run_commands(
                     _console.print("[red]使い方: close <pair>  例: close USDJPY=X[/red]")
                     continue
                 _cmd_close(config, args[0])
+            elif cmd == "audit":
+                _cmd_audit(config, args)
             else:
                 _console.print(
                     f"[red]不明なコマンド: {cmd!r}[/red]  ([cyan]help[/cyan] で一覧)"
