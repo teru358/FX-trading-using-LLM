@@ -76,6 +76,9 @@ def test_compute_mfe_mae_buy_normal():
     # post-close は上昇継続 → mfe_after_close_24h > 0
     assert result.mfe_after_close_24h > 0
     assert result.duration_seconds == 4 * 3600
+    # MAE sign contract: non-positive (0 allowed when price never went adverse)
+    assert result.mae_during_trade <= 0
+    assert result.mae_after_close_24h <= 0
 
 
 def test_compute_mfe_mae_no_post_close_data():
@@ -117,3 +120,45 @@ def test_compute_mfe_mae_sell_direction():
     assert result.has_post_close_data is True
     assert result.mfe_during_trade > 0
     assert result.mfe_after_close_24h > 0
+    # MAE sign contract: non-positive (0 allowed when price never went adverse)
+    assert result.mae_during_trade <= 0
+    assert result.mae_after_close_24h <= 0
+
+
+def test_compute_mfe_mae_mae_clamp_never_adverse_buy():
+    """BUY で Low が entry を下回らない場合、MAE は 0 にクランプされる。"""
+    opened = datetime(2026, 4, 1, 10, 0)
+    closed = datetime(2026, 4, 1, 14, 0)
+    # 150.0 entry, すべての bar で Low > 150 (Low = close - 0.1, close >= 150.2)
+    df = _make_ohlcv([150.2, 150.3, 150.4, 150.5, 150.6], opened)
+
+    result = compute_mfe_mae(
+        direction="buy",
+        entry_price=150.0,
+        close_price=150.5,
+        position_size=10000,
+        opened_at=opened,
+        closed_at=closed,
+        ohlcv_df=df,
+    )
+    # Low.min = 150.1, still > 150.0, so adverse excursion is 0 (positive raw value clamped)
+    assert result.mae_during_trade == 0.0
+    assert result.mfe_during_trade > 0
+
+
+def test_compute_mfe_mae_invalid_direction_raises():
+    """無効な direction は ValueError。"""
+    import pytest
+    opened = datetime(2026, 4, 1, 10, 0)
+    closed = datetime(2026, 4, 1, 14, 0)
+    df = _make_ohlcv([150.0, 150.2], opened)
+    with pytest.raises(ValueError, match="direction"):
+        compute_mfe_mae(
+            direction="BUY",  # uppercase, not accepted
+            entry_price=150.0,
+            close_price=150.2,
+            position_size=10000,
+            opened_at=opened,
+            closed_at=closed,
+            ohlcv_df=df,
+        )

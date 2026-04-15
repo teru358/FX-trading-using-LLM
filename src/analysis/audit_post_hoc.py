@@ -101,6 +101,9 @@ def compute_mfe_mae(
     """
     import pandas as pd
 
+    if direction not in ("buy", "sell"):
+        raise ValueError(f"direction must be 'buy' or 'sell', got {direction!r}")
+
     direction_sign = 1 if direction == "buy" else -1
     duration_seconds = (closed_at - opened_at).total_seconds()
 
@@ -110,6 +113,10 @@ def compute_mfe_mae(
             mfe_after_close_24h=0.0, mae_after_close_24h=0.0,
             duration_seconds=duration_seconds, has_post_close_data=False,
         )
+
+    # 重複 timestamp (pd.concat などで発生) を除去して duplicate index 問題を防ぐ。
+    # 最後の出現を残すことで「close バーは intra 期間の最終バー」の意味を維持。
+    ohlcv_df = ohlcv_df[~ohlcv_df.index.duplicated(keep="last")]
 
     opened_ts = pd.Timestamp(opened_at)
     closed_ts = pd.Timestamp(closed_at)
@@ -127,6 +134,8 @@ def compute_mfe_mae(
             worst = float(intra["High"].max())
         mfe_intra = (best - entry_price) * direction_sign * position_size
         mae_intra = (worst - entry_price) * direction_sign * position_size
+        # MAE must be non-positive per contract; clamp to 0 when price never moved adverse
+        mae_intra = min(mae_intra, 0.0)
 
     post_end = closed_ts + pd.Timedelta(hours=post_close_hours)
     post = ohlcv_df[(ohlcv_df.index > closed_ts) & (ohlcv_df.index <= post_end)]
@@ -140,6 +149,7 @@ def compute_mfe_mae(
             worst_post = float(post["High"].max())
         mfe_after = (best_post - close_price) * direction_sign * position_size
         mae_after = (worst_post - close_price) * direction_sign * position_size
+        mae_after = min(mae_after, 0.0)
     else:
         mfe_after = 0.0
         mae_after = 0.0
