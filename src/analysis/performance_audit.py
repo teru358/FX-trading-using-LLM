@@ -6,13 +6,17 @@ review mode 時は LLM 候補生成 + 対話選別を行う (review mode は Tas
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from src.analysis.audit_lesson_generator import generate_candidates
 from src.analysis.audit_post_hoc import (
+    LessonCandidate,
     assign_flag,
     build_atr_pct_distribution,
     compute_counterfactuals,
@@ -28,7 +32,9 @@ from src.analysis.audit_report import (
     render_section6_detailed_review,
     select_representative_trades,
 )
+from src.analysis.audit_reviewer import interactive_review
 from src.data.session_store import SessionStore
+from src.llm.factory import create_llm_client
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +48,11 @@ class AuditResult:
 
 
 _price_store_singleton = None
+
+
+def _default_input_reader(prompt: str = "") -> str:
+    """標準 stdin からの read ラッパー (テストで mock 可能)。"""
+    return input(prompt)
 
 
 def _load_pair_ohlcv(pair: str, since: datetime, until: datetime | None = None):
@@ -152,8 +163,114 @@ def run_audit(
     # 選定
     selected = select_representative_trades(sessions, flags_map)
 
-    # review mode は Task 20 で実装
+    lessons_added = 0
     accepted_lessons_map: dict[str, list] = {}
+
+    if review:
+        llm_client = create_llm_client(config, "reflection")
+        audit_lessons_path = getattr(
+            config,
+            "audit_lessons_path",
+            config.config_dir / "audit_lessons.md",
+        )
+
+        # 対象トレードに対する候補 eager 生成 + キャッシュ
+        review_items = []
+        for s in selected:
+            ohlcv_for_llm = _load_pair_ohlcv(
+                s.pair,
+                since=s.opened_at - timedelta(hours=1),
+                until=s.closed_at + timedelta(hours=48),
+            )
+            ph = compute_mfe_mae(
+                direction=s.direction,
+                entry_price=s.entry_price,
+                close_price=s.close_price or s.entry_price,
+                position_size=s.position_size or 0,
+                opened_at=s.opened_at,
+                closed_at=s.closed_at,
+                ohlcv_df=ohlcv_for_llm,
+            )
+            cf = compute_counterfactuals(
+                direction=s.direction,
+                entry_price=s.entry_price,
+                stop_loss=s.stop_loss or s.entry_price,
+                take_profit=s.take_profit or s.entry_price,
+                position_size=s.position_size or 0,
+                atr_value=s.atr_value or 0.01,
+                opened_at=s.opened_at,
+                closed_at=s.closed_at,
+                ohlcv_df=ohlcv_for_llm,
+            )
+
+            # LOSS のみ候補生成 (Phase 1 スコープ)
+            if (s.realized_pnl or 0) >= 0:
+                candidates = []
+            else:
+                cached = session_store.get_post_hoc_cache(s.session_id)
+                if cached:
+                    try:
+                        cached_data = json.loads(cached)
+                        candidates = [
+                            LessonCandidate(**c) for c in cached_data.get("candidates", [])
+                        ]
+                    except Exception:
+                        candidates = []
+                else:
+                    candidates = asyncio.run(generate_candidates(
+                        session=s,
+                        post_hoc=ph,
+                        counterfactuals=cf,
+                        vol_percentile=vol_percentile_map.get(s.session_id),
+                        llm=llm_client,
+                        hint="",
+                    ))
+                    # キャッシュ保存 (rule_text, rationale, applicability のみ)
+                    session_store.set_post_hoc_cache(
+                        s.session_id,
+                        json.dumps({
+                            "candidates": [
+                                {
+                                    "rule_text": c.rule_text,
+                                    "rationale": c.rationale,
+                                    "applicability": c.applicability,
+                                }
+                                for c in candidates
+                            ],
+                        }),
+                    )
+
+            review_items.append({
+                "session": s,
+                "post_hoc": ph,
+                "counterfactuals": cf,
+                "vol_percentile": vol_percentile_map.get(s.session_id),
+                "candidates": candidates,
+                "flag": flags_map[s.session_id],
+            })
+
+        async def _regen_wrapper(session, hint=""):
+            match = next(
+                (x for x in review_items if x["session"].session_id == session.session_id),
+                None,
+            )
+            if match is None:
+                return []
+            return await generate_candidates(
+                session=session,
+                post_hoc=match["post_hoc"],
+                counterfactuals=match["counterfactuals"],
+                vol_percentile=match["vol_percentile"],
+                llm=llm_client,
+                hint=hint,
+            )
+
+        lessons_added = asyncio.run(interactive_review(
+            items=review_items,
+            lessons_path=audit_lessons_path,
+            input_reader=_default_input_reader,
+            regen_fn=_regen_wrapper,
+        ))
 
     # markdown 生成
     parts = [
@@ -192,6 +309,7 @@ def run_audit(
         report_path=report_path,
         session_count=len(sessions),
         flag_counts=flag_counts,
+        lessons_added=lessons_added,
     )
 
 
