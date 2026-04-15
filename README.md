@@ -92,6 +92,8 @@ config/
 | `ask <質問>` | | 全データソース横断のセマンティック検索で回答 |
 | `compare [pair]` | | LLMモデル比較分析 |
 | `manual` | | 手動ポジション管理 (signal モード) |
+| `audit` (days) | | 過去トレードの統計診断レポート生成 (デフォルト 30 日) |
+| `audit review` (days) | | audit + LLM 改善候補の対話選別 |
 | `close <pair>` | | ポジション手動決済 |
 | `help` | `h` | コマンド一覧 |
 
