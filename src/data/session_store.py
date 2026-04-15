@@ -48,6 +48,7 @@ class _TradingSession(_Base):
     llm_tp          = Column(Float)
     key_support     = Column(Float)
     key_resistance  = Column(Float)
+    post_hoc_cache = Column(Text)  # audit で計算した post-hoc 結果 + LLM 候補の JSON
 
 
 class SessionStore:
@@ -58,20 +59,25 @@ class SessionStore:
         self._migrate()
 
     def _migrate(self) -> None:
-        new_columns = [
+        new_real_columns = [
             "atr_value", "sl_atr_mult", "tp_atr_mult",
             "computed_sl", "computed_tp", "llm_sl", "llm_tp",
             "key_support", "key_resistance",
         ]
+        new_text_columns = ["post_hoc_cache"]
         from sqlalchemy import text, inspect
         insp = inspect(self._engine)
         if "trading_sessions" not in insp.get_table_names():
             return
         existing = {c["name"] for c in insp.get_columns("trading_sessions")}
         with self._engine.begin() as conn:
-            for col in new_columns:
+            for col in new_real_columns:
                 if col not in existing:
                     conn.execute(text(f"ALTER TABLE trading_sessions ADD COLUMN {col} REAL"))
+                    logger.info(f"[SESSION] Migration: added column {col}")
+            for col in new_text_columns:
+                if col not in existing:
+                    conn.execute(text(f"ALTER TABLE trading_sessions ADD COLUMN {col} TEXT"))
                     logger.info(f"[SESSION] Migration: added column {col}")
 
     def create_session(
@@ -195,3 +201,19 @@ class SessionStore:
             if rec:
                 rec.reflection_text = reflection_text
                 session.commit()
+
+    def set_post_hoc_cache(self, session_id: str, cache_json: str) -> None:
+        """post_hoc 計算結果 + LLM 候補の JSON を保存する。"""
+        with Session(self._engine) as session:
+            rec = session.get(_TradingSession, session_id)
+            if rec is None:
+                logger.warning(f"[SESSION] set_post_hoc_cache: {session_id} not found")
+                return
+            rec.post_hoc_cache = cache_json
+            session.commit()
+
+    def get_post_hoc_cache(self, session_id: str) -> str | None:
+        """post_hoc_cache の JSON 文字列を取得。未設定なら None。"""
+        with Session(self._engine) as session:
+            rec = session.get(_TradingSession, session_id)
+            return rec.post_hoc_cache if rec else None
