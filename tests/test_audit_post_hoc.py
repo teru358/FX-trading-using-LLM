@@ -240,3 +240,51 @@ def test_vol_percentile_above_max():
 def test_vol_percentile_empty_distribution():
     """空分布は None を返す。"""
     assert compute_vol_percentile(atr_pct=0.005, distribution=[]) is None
+
+
+from src.analysis.audit_post_hoc import build_atr_pct_distribution
+
+
+def test_build_atr_pct_distribution_none_input():
+    """None 入力は空リストを返す。"""
+    assert build_atr_pct_distribution(None) == []
+
+
+def test_build_atr_pct_distribution_too_short():
+    """atr_period + 1 本未満なら空リストを返す。"""
+    import pandas as pd
+    # atr_period=14 デフォルト、14 本以下は不足
+    idx = pd.date_range("2026-04-01", periods=10, freq="1h")
+    df = pd.DataFrame({
+        "Open":  [150.0] * 10,
+        "High":  [150.5] * 10,
+        "Low":   [149.5] * 10,
+        "Close": [150.0] * 10,
+        "Volume": [0] * 10,
+    }, index=idx)
+    assert build_atr_pct_distribution(df) == []
+
+
+def test_build_atr_pct_distribution_happy_path():
+    """一定レンジの OHLCV で ATR% が期待値付近になる。"""
+    import pandas as pd
+    # 20 本の OHLCV、すべて High-Low=1.0, Close=150.0
+    # TR = 1.0 (High-Low が最大)
+    # ATR(14) = 1.0
+    # ATR% = 1.0 / 150.0 ≈ 0.00667
+    idx = pd.date_range("2026-04-01", periods=20, freq="1h")
+    df = pd.DataFrame({
+        "Open":  [150.0] * 20,
+        "High":  [150.5] * 20,
+        "Low":   [149.5] * 20,
+        "Close": [150.0] * 20,
+        "Volume": [0] * 20,
+    }, index=idx)
+    distribution = build_atr_pct_distribution(df, atr_period=14)
+
+    # 20 本 - 13 本の rolling warmup (NaN) = 7 点残る
+    assert len(distribution) == 7
+    # すべて ≈ 1.0 / 150.0
+    expected = 1.0 / 150.0
+    for v in distribution:
+        assert abs(v - expected) < 1e-9
