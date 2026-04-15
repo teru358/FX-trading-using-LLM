@@ -161,6 +161,36 @@ class SessionStore:
             f"pnl={realized_pnl:+.2f} outcome={'win' if realized_pnl > 0 else 'loss'}"
         )
 
+    def get_closed_sessions(
+        self, since: datetime, until: datetime
+    ) -> list[_TradingSession]:
+        """指定期間内にクローズされたセッションを新しい順で返す。
+
+        Args:
+            since: 取得開始時刻 (inclusive)
+            until: 取得終了時刻 (inclusive)
+        Returns:
+            closed_at が [since, until] 範囲内のセッション一覧 (closed_at 降順)
+        """
+        from sqlalchemy import and_, select
+
+        with Session(self._engine) as session:
+            stmt = (
+                select(_TradingSession)
+                .where(
+                    and_(
+                        _TradingSession.closed_at.is_not(None),
+                        _TradingSession.closed_at >= since,
+                        _TradingSession.closed_at <= until,
+                    )
+                )
+                .order_by(_TradingSession.closed_at.desc())
+            )
+            rows = list(session.execute(stmt).scalars().all())
+            for r in rows:
+                session.expunge(r)
+            return rows
+
     def update_reflection(self, session_id: str, reflection_text: str) -> None:
         with Session(self._engine) as session:
             rec = session.get(_TradingSession, session_id)
