@@ -22,6 +22,26 @@ _TIGHT_TP_MFE_RATIO = 1.5           # MFE > realized * この比率で TIGHT_TP
 _LATE_EXIT_INTRA_MFE_RATIO = 1.5    # エントリー中 MFE > realized * この比率で LATE_EXIT
 _COUNTERFACTUAL_ATR_STEPS = (0.5, 1.0)  # TP wider, SL tighter に使う ATR 倍率
 
+_BUY_DIRECTIONS = frozenset({"buy", "bullish", "long"})
+_SELL_DIRECTIONS = frozenset({"sell", "bearish", "short"})
+
+
+def _normalize_direction(direction: str) -> str:
+    """direction を 'buy' / 'sell' に正規化する。
+
+    trading.py は 'bullish'/'bearish' を使い、audit テストは 'buy'/'sell' を
+    使うため、両方を受け入れて内部では 'buy'/'sell' に統一する。
+    未知の値は ValueError を投げる。
+    """
+    d = (direction or "").lower().strip()
+    if d in _BUY_DIRECTIONS:
+        return "buy"
+    if d in _SELL_DIRECTIONS:
+        return "sell"
+    raise ValueError(
+        f"direction must be one of buy/bullish/long/sell/bearish/short, got {direction!r}"
+    )
+
 
 @dataclass
 class PostHocResult:
@@ -101,9 +121,7 @@ def compute_mfe_mae(
     """
     import pandas as pd
 
-    if direction not in ("buy", "sell"):
-        raise ValueError(f"direction must be 'buy' or 'sell', got {direction!r}")
-
+    direction = _normalize_direction(direction)
     direction_sign = 1 if direction == "buy" else -1
     duration_seconds = (closed_at - opened_at).total_seconds()
 
@@ -183,9 +201,7 @@ def compute_counterfactuals(
     """
     import pandas as pd
 
-    if direction not in ("buy", "sell"):
-        raise ValueError(f"direction must be 'buy' or 'sell', got {direction!r}")
-
+    direction = _normalize_direction(direction)
     direction_sign = 1 if direction == "buy" else -1
     if ohlcv_df is None or ohlcv_df.empty:
         return Counterfactuals(

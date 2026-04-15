@@ -155,7 +155,7 @@ def test_compute_mfe_mae_invalid_direction_raises():
     df = _make_ohlcv([150.0, 150.2], opened)
     with pytest.raises(ValueError, match="direction"):
         compute_mfe_mae(
-            direction="BUY",  # uppercase, not accepted
+            direction="invalid",  # 完全に未知の値
             entry_price=150.0,
             close_price=150.2,
             position_size=10000,
@@ -372,3 +372,58 @@ def test_assign_flag_insufficient_data():
         realized_pnl=2000, signal_confidence=0.7, close_reason="take_profit",
         ph=_mk_ph(has=False), cf=_mk_cf(),
     ) == "INSUFFICIENT_DATA"
+
+
+def test_compute_mfe_mae_accepts_bullish_alias():
+    """direction='bullish' は 'buy' と同じ扱い。"""
+    opened = datetime(2026, 4, 1, 10, 0)
+    closed = datetime(2026, 4, 1, 14, 0)
+    df = _make_ohlcv([150.0, 150.3, 150.6, 150.5, 150.5], opened)
+
+    result_bullish = compute_mfe_mae(
+        direction="bullish",
+        entry_price=150.0, close_price=150.5, position_size=10000,
+        opened_at=opened, closed_at=closed, ohlcv_df=df,
+    )
+    result_buy = compute_mfe_mae(
+        direction="buy",
+        entry_price=150.0, close_price=150.5, position_size=10000,
+        opened_at=opened, closed_at=closed, ohlcv_df=df,
+    )
+    assert result_bullish.mfe_during_trade == result_buy.mfe_during_trade
+    assert result_bullish.mae_during_trade == result_buy.mae_during_trade
+
+
+def test_compute_mfe_mae_accepts_bearish_alias():
+    """direction='bearish' は 'sell' と同じ扱い。"""
+    opened = datetime(2026, 4, 1, 10, 0)
+    closed = datetime(2026, 4, 1, 14, 0)
+    df = _make_ohlcv([150.0, 149.7, 149.4, 149.5, 149.5], opened)
+
+    result_bearish = compute_mfe_mae(
+        direction="bearish",
+        entry_price=150.0, close_price=149.5, position_size=10000,
+        opened_at=opened, closed_at=closed, ohlcv_df=df,
+    )
+    result_sell = compute_mfe_mae(
+        direction="sell",
+        entry_price=150.0, close_price=149.5, position_size=10000,
+        opened_at=opened, closed_at=closed, ohlcv_df=df,
+    )
+    assert result_bearish.mfe_during_trade == result_sell.mfe_during_trade
+
+
+def test_compute_counterfactuals_accepts_bullish_alias():
+    """compute_counterfactuals も bullish を受け入れる。"""
+    opened = datetime(2026, 4, 1, 10, 0)
+    closed = datetime(2026, 4, 1, 14, 0)
+    df = _make_ohlcv([150.0, 150.3, 150.6, 150.7, 150.5], opened)
+
+    cf = compute_counterfactuals(
+        direction="bullish",
+        entry_price=150.0, stop_loss=149.5, take_profit=150.5,
+        position_size=10000, atr_value=0.3,
+        opened_at=opened, closed_at=closed, ohlcv_df=df,
+    )
+    # bullish==buy なので既存 buy テストと同じ結果が期待される
+    assert cf.tp_plus_0_5_atr_hit is True
