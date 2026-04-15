@@ -188,6 +188,22 @@ def load_user_notes(notes_path: Path, section: str = "price") -> str:
     return ""
 
 
+def load_audit_lessons(path: Path) -> str:
+    """audit_lessons.md から承認済みルールのテキストを返す。
+
+    ファイル本体に `[LLM-PROPOSED / USER-APPROVED]` タグを含む見出しがない場合は
+    空文字を返す (ヘッダーのみで意味のある教訓ゼロなら注入しない)。
+    """
+    if not path.exists():
+        return ""
+    content = path.read_text(encoding="utf-8").strip()
+    if not content:
+        return ""
+    if "[LLM-PROPOSED / USER-APPROVED]" not in content:
+        return ""
+    return content
+
+
 async def analyze_price_action(
     pair_cfg,
     price_data: PriceData,
@@ -210,6 +226,22 @@ async def analyze_price_action(
         logger.info(f"[PRICE] {pair_cfg.display_name}: user_notes injected ({len(user_notes)} chars)")
     else:
         user_context = ""
+
+    # Audit lessons 注入 (Learned rules from past audits)
+    audit_lessons_path = (
+        user_notes_path.parent / "audit_lessons.md"
+        if user_notes_path is not None else None
+    )
+    audit_lessons_text = load_audit_lessons(audit_lessons_path) if audit_lessons_path else ""
+    if audit_lessons_text:
+        audit_lessons_section = (
+            "\n\n=== Learned Rules from Past Audits ===\n"
+            "以下は過去取引から導出され、人間が承認した取引改善ルールです。\n"
+            "該当条件をチェックし、取引判断に適用してください。\n\n"
+            + audit_lessons_text
+        )
+        user_context = (user_context + audit_lessons_section) if user_context else audit_lessons_section.lstrip()
+        logger.info(f"[PRICE] {pair_cfg.display_name}: audit_lessons injected ({len(audit_lessons_text)} chars)")
 
     tech_score_context = ""
     if tech_score is not None:

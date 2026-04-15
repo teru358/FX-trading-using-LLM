@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Float, String, Text
+from sqlalchemy import Column, DateTime, Float, String, Text, and_, select
 from sqlalchemy.orm import Session
 
 from src.data.price_store import _Base, _get_engine
@@ -48,6 +48,7 @@ class _TradingSession(_Base):
     llm_tp          = Column(Float)
     key_support     = Column(Float)
     key_resistance  = Column(Float)
+    post_hoc_cache = Column(Text)  # audit で計算した post-hoc 結果 + LLM 候補の JSON
 
 
 class SessionStore:
@@ -58,20 +59,25 @@ class SessionStore:
         self._migrate()
 
     def _migrate(self) -> None:
-        new_columns = [
+        new_real_columns = [
             "atr_value", "sl_atr_mult", "tp_atr_mult",
             "computed_sl", "computed_tp", "llm_sl", "llm_tp",
             "key_support", "key_resistance",
         ]
+        new_text_columns = ["post_hoc_cache"]
         from sqlalchemy import text, inspect
         insp = inspect(self._engine)
         if "trading_sessions" not in insp.get_table_names():
             return
         existing = {c["name"] for c in insp.get_columns("trading_sessions")}
         with self._engine.begin() as conn:
-            for col in new_columns:
+            for col in new_real_columns:
                 if col not in existing:
                     conn.execute(text(f"ALTER TABLE trading_sessions ADD COLUMN {col} REAL"))
+                    logger.info(f"[SESSION] Migration: added column {col}")
+            for col in new_text_columns:
+                if col not in existing:
+                    conn.execute(text(f"ALTER TABLE trading_sessions ADD COLUMN {col} TEXT"))
                     logger.info(f"[SESSION] Migration: added column {col}")
 
     def create_session(
@@ -161,9 +167,53 @@ class SessionStore:
             f"pnl={realized_pnl:+.2f} outcome={'win' if realized_pnl > 0 else 'loss'}"
         )
 
+    def get_closed_sessions(
+        self, since: datetime, until: datetime
+    ) -> list[_TradingSession]:
+        """指定期間内にクローズされたセッションを新しい順で返す。
+
+        Args:
+            since: 取得開始時刻 (inclusive)
+            until: 取得終了時刻 (inclusive)
+        Returns:
+            closed_at が [since, until] 範囲内のセッション一覧 (closed_at 降順)
+        """
+        with Session(self._engine) as session:
+            stmt = (
+                select(_TradingSession)
+                .where(
+                    and_(
+                        _TradingSession.closed_at.is_not(None),
+                        _TradingSession.closed_at >= since,
+                        _TradingSession.closed_at <= until,
+                    )
+                )
+                .order_by(_TradingSession.closed_at.desc())
+            )
+            rows = list(session.execute(stmt).scalars().all())
+            for r in rows:
+                session.expunge(r)
+            return rows
+
     def update_reflection(self, session_id: str, reflection_text: str) -> None:
         with Session(self._engine) as session:
             rec = session.get(_TradingSession, session_id)
             if rec:
                 rec.reflection_text = reflection_text
                 session.commit()
+
+    def set_post_hoc_cache(self, session_id: str, cache_json: str) -> None:
+        """post_hoc 計算結果 + LLM 候補の JSON を保存する。"""
+        with Session(self._engine) as session:
+            rec = session.get(_TradingSession, session_id)
+            if rec is None:
+                logger.warning(f"[SESSION] set_post_hoc_cache: {session_id} not found")
+                return
+            rec.post_hoc_cache = cache_json
+            session.commit()
+
+    def get_post_hoc_cache(self, session_id: str) -> str | None:
+        """post_hoc_cache の JSON 文字列を取得。未設定なら None。"""
+        with Session(self._engine) as session:
+            rec = session.get(_TradingSession, session_id)
+            return rec.post_hoc_cache if rec else None

@@ -248,6 +248,9 @@ finance/
 │   ├── reporting/                  # Rich CLIレポート
 │   └── tradingview/                # TradingView連携（Pine Script生成・CDP注入）
 ├── tests/                          # 298テスト (pytest)
+├── docs/
+│   └── audit/                      # audit レポート出力先 (gitignore 可)
+│       └── YYYY-MM-DD-performance.md
 ├── data/
 │   ├── prices.db                   # SQLite（OHLCV + スナップショット + セッション）
 │   ├── state/                      # ポジション・取引履歴 + adaptive_params.yaml
@@ -288,6 +291,7 @@ MarketStateTracker が市場の開閉状態を管理:
 | `[RAG ADJ]` | 方向別RAGスコア補正 |
 | `[ECON]` | 経済指標カレンダー・影響分析 |
 | `[INTERNAL]` | signal モードの内部自動運用ログ |
+| `[AUDIT]` | Performance audit 実行・候補生成・教訓追記 |
 | `[SIGNAL-REC]` | signal モードのシグナル推奨・SL/TP到達通知 |
 | `[REVIEW/MANUAL]` | manual ポジションの Layer 1-3 推奨 |
 | `[MANUAL]` | 手動ポジション操作（REST API / TUI） |
@@ -302,3 +306,4 @@ MarketStateTracker が市場の開閉状態を管理:
 | `data/state/adaptive_params.yaml` | ペア別ATR倍率（動的更新） |
 | `data/rag/` | ChromaDB（ニュース・振り返り・洞察・方向別・経済指標分析） |
 | `data/manual_state/` | signal モードの手動ポジション・残高 |
+| `config/audit_lessons.md` | audit で承認された改善ルール (LLM プロンプト注入) |
