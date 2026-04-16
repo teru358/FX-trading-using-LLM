@@ -191,6 +191,7 @@ async def _summarize_pair(
             signal_deadband=config.trading.signal_deadband,
             min_lot_size=config.trading.min_lot_size,
             lot_unit=config.trading.lot_unit,
+            min_rr_ratio=config.trading.min_rr_ratio,
         )
     except Exception as e:
         logger.error(f"Failed to summarize {pair_cfg.display_name}: {e}", exc_info=True)

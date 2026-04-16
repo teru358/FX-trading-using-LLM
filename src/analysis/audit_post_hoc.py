@@ -15,9 +15,15 @@ from datetime import datetime
 logger = logging.getLogger(__name__)
 
 # flag 判定用の閾値 (tune 可能な定数として module 先頭に置く)
-_NOISE_PNL_THRESHOLD = 500.0        # 絶対値がこの値未満は NOISE (JPY ベース想定)
+#
+# 【通貨非依存設計】
+# PnL 絶対値 (500 JPY など) を直接 hardcode しないこと。口座通貨やロットサイズが
+# 変わると破綻する (例: EURUSD 5000 通貨 ≠ USDJPY 5000 通貨)。
+# 代わりに 1R = risk_per_trade × account_balance (= 想定最大損失/トレード) を基準に
+# 比率で判定する。assign_flag() の呼び出し側で risk_budget を渡す。
+_NOISE_R_RATIO = 0.10               # |pnl| < 0.10R は NOISE (リスクの 10% 未満しか動いていない)
 _CONF_MISS_CONFIDENCE = 0.75        # confidence がこの値以上 + 大損で CONF_MISS
-_CONF_MISS_PNL_MIN = 1000.0         # CONF_MISS 判定に必要な最低損失絶対値
+_CONF_MISS_R_RATIO = 0.50           # |pnl| > 0.50R かつ高 conf で CONF_MISS
 _TIGHT_TP_MFE_RATIO = 1.5           # MFE > realized * この比率で TIGHT_TP
 _LATE_EXIT_INTRA_MFE_RATIO = 1.5    # エントリー中 MFE > realized * この比率で LATE_EXIT
 _COUNTERFACTUAL_ATR_STEPS = (0.5, 1.0)  # TP wider, SL tighter に使う ATR 倍率
@@ -307,24 +313,31 @@ def assign_flag(
     close_reason: str,
     ph: PostHocResult,
     cf: Counterfactuals,
+    risk_budget: float = 0.0,
 ) -> str:
     """rule-based の flag を返す。
 
     判定順:
-    1. NOISE: 絶対値が閾値未満 (統計的に無視)
+    1. NOISE: |pnl| < NOISE_R_RATIO × risk_budget (リスク予算の一部しか動いていない)
     2. INSUFFICIENT_DATA: post-close OHLCV なし
     3. 勝ち: CLEAN_WIN / TIGHT_TP / LATE_EXIT
     4. 敗け: SL_RECOVER / CONF_MISS / CLEAN_LOSS
     5. それ以外: NEUTRAL
+
+    Args:
+        risk_budget: 1R = risk_per_trade × account_balance。0 なら NOISE/CONF_MISS
+            の絶対値判定を skip (後方互換: 閾値なしで動作)。
     """
-    if abs(realized_pnl) < _NOISE_PNL_THRESHOLD:
+    # 通貨非依存: |pnl| を risk_budget (1R) に対する比率で評価する
+    if risk_budget > 0 and abs(realized_pnl) < _NOISE_R_RATIO * risk_budget:
         return "NOISE"
     if not ph.has_post_close_data:
         return "INSUFFICIENT_DATA"
 
     win = realized_pnl > 0
     tp_hit = close_reason == "take_profit"
-    sl_hit = close_reason == "stop_loss"
+    # stop_loss / emergency_stop はどちらも逆行による決済 → SL 系として統一判定
+    sl_hit = close_reason in ("stop_loss", "emergency_stop")
     conf_high = signal_confidence >= _CONF_MISS_CONFIDENCE
 
     if win:
@@ -339,7 +352,8 @@ def assign_flag(
     # loss
     if sl_hit and cf.tighter_sl_would_recover:
         return "SL_RECOVER"
-    if conf_high and abs(realized_pnl) > _CONF_MISS_PNL_MIN:
+    conf_miss_threshold = _CONF_MISS_R_RATIO * risk_budget if risk_budget > 0 else 0.0
+    if conf_high and abs(realized_pnl) > conf_miss_threshold:
         return "CONF_MISS"
     if sl_hit:
         return "CLEAN_LOSS"

@@ -137,8 +137,8 @@ class AnalysisStore:
             d = snap.direction_bias or "neutral"
             dir_counts[d] = dir_counts.get(d, 0) + 1
 
-        # SL/TP は集約方向に一致する最新スナップショットを採用。
-        # 一致するものがなければ最新スナップショットを使用する（安全ネットは signal_combiner 側に別途実装）。
+        # SL/TP は集約方向に一致する最新スナップショットを採用 (後方互換)。
+        # 新規スナップショットでは 0.0 が入る (ATR で上書きされるため LLM は SL/TP を出力しない)。
         latest = snapshots[0]
         ref = next((s for s in snapshots if s.direction_bias == direction), latest)
 

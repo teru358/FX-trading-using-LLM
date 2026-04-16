@@ -210,9 +210,11 @@ def select_representative_trades(
     """Section 6 で深掘りする代表 10 件を選定する。
 
     戦略:
-    - NOISE / INSUFFICIENT_DATA は除外
+    - 非 NOISE / 非 INSUFFICIENT_DATA を優先
     - 勝ち: pnl 降順で max_wins 件 (TIGHT_TP / LATE_EXIT 優先)
     - 敗:   pnl 昇順で max_losses 件 (CONF_MISS / SL_RECOVER 優先)
+    - 上記で枠が埋まらなければ NOISE/INSUFFICIENT_DATA から |pnl| 順に補充
+      (全トレードが小粒でも必ず代表トレードをレビューに含めるため)
     """
     excluded_flags = {"NOISE", "INSUFFICIENT_DATA"}
     candidates = [s for s in sessions if flags_map.get(s.session_id) not in excluded_flags]
@@ -237,6 +239,28 @@ def select_representative_trades(
         )
     )
     selected_losses = losses[:max_losses]
+
+    need_wins = max_wins - len(selected_wins)
+    need_losses = max_losses - len(selected_losses)
+    if need_wins > 0 or need_losses > 0:
+        already = {s.session_id for s in selected_wins + selected_losses}
+        fallback_pool = [
+            s for s in sessions
+            if s.session_id not in already
+            and flags_map.get(s.session_id) in excluded_flags
+        ]
+        if need_wins > 0:
+            fb_wins = sorted(
+                (s for s in fallback_pool if (s.realized_pnl or 0) > 0),
+                key=lambda s: -(s.realized_pnl or 0),
+            )
+            selected_wins.extend(fb_wins[:need_wins])
+        if need_losses > 0:
+            fb_losses = sorted(
+                (s for s in fallback_pool if (s.realized_pnl or 0) <= 0),
+                key=lambda s: (s.realized_pnl or 0),
+            )
+            selected_losses.extend(fb_losses[:need_losses])
 
     return selected_wins + selected_losses
 

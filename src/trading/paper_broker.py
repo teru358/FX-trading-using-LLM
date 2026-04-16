@@ -14,10 +14,16 @@ class PaperBrokerAdapter(BrokerAdapter):
         max_total_positions: int = 4,
         max_positions_per_group: int = 2,
         max_same_direction_per_group: int = 2,
+        drawdown_kill_switch_enabled: bool = False,
+        drawdown_kill_switch_max_pct: float = 0.10,
+        drawdown_kill_switch_lookback_days: int = 0,
     ) -> None:
         self._max_total = max_total_positions
         self._max_per_group = max_positions_per_group
         self._max_same_dir = max_same_direction_per_group
+        self._dd_enabled = drawdown_kill_switch_enabled
+        self._dd_max_pct = drawdown_kill_switch_max_pct
+        self._dd_lookback = drawdown_kill_switch_lookback_days
 
     def execute_signal(
         self,
@@ -30,6 +36,9 @@ class PaperBrokerAdapter(BrokerAdapter):
             max_total_positions=self._max_total,
             max_positions_per_group=self._max_per_group,
             max_same_direction_per_group=self._max_same_dir,
+            drawdown_kill_switch_enabled=self._dd_enabled,
+            drawdown_kill_switch_max_pct=self._dd_max_pct,
+            drawdown_kill_switch_lookback_days=self._dd_lookback,
         )
 
     def check_and_close_positions(

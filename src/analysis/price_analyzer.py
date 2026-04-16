@@ -32,119 +32,6 @@ def _to_float(val, default: float) -> float:
         return default
 
 
-# SL/TP が entry_zone からこの割合以内なら自動補正する閾値 (0.2%)
-# これを超える大きな逸脱は LLM のロジックエラーとみなし補正しない
-_AUTO_CORRECT_TOLERANCE_PCT = 0.002
-
-
-def _validate_sl_tp(analysis: "PriceAnalysis") -> str | None:
-    """SL/TPが発注方向と矛盾していないか検証する。
-
-    entry_zone 境界からの逸脱が _AUTO_CORRECT_TOLERANCE_PCT 以内なら
-    micro-margin (0.02%) で算術補正する。それを超える逸脱は LLM の
-    ロジックエラーとしてエラーメッセージを返しリトライに回す。
-    問題なければNone、補正しきれなければエラー文字列を返す。
-    """
-    direction = analysis.direction_bias
-    if direction == "neutral":
-        return None
-    entry_low, entry_high = analysis.entry_zone
-    sl = analysis.stop_loss
-    tp = analysis.take_profit
-    margin = entry_high * 0.0002  # 0.02% の補正マージン
-    tolerance_sl = entry_low * _AUTO_CORRECT_TOLERANCE_PCT
-    tolerance_tp = entry_high * _AUTO_CORRECT_TOLERANCE_PCT
-
-    if direction == "long":
-        # SL: entry_low 未満にあるべき
-        if sl >= entry_low:
-            if sl - entry_low <= tolerance_sl:
-                corrected = entry_low - margin
-                logger.warning(
-                    f"[PRICE] SL auto-corrected for LONG: {sl:.5f} → {corrected:.5f} "
-                    f"(was >= entry_zone[0]={entry_low:.5f})"
-                )
-                analysis.stop_loss = sl = corrected
-            else:
-                return f"LONG requires stop_loss < entry_zone[0]={entry_low:.5f}, got stop_loss={sl:.5f}"
-        # TP: entry_high 超過にあるべき
-        if tp <= entry_high:
-            if entry_high - tp <= tolerance_tp:
-                corrected = entry_high + margin
-                logger.warning(
-                    f"[PRICE] TP auto-corrected for LONG: {tp:.5f} → {corrected:.5f} "
-                    f"(was <= entry_zone[1]={entry_high:.5f})"
-                )
-                analysis.take_profit = tp = corrected
-            else:
-                return f"LONG requires take_profit > entry_zone[1]={entry_high:.5f}, got take_profit={tp:.5f}"
-    elif direction == "short":
-        # SL: entry_high 超過にあるべき
-        if sl <= entry_high:
-            if entry_high - sl <= tolerance_sl:
-                corrected = entry_high + margin
-                logger.warning(
-                    f"[PRICE] SL auto-corrected for SHORT: {sl:.5f} → {corrected:.5f} "
-                    f"(was <= entry_zone[1]={entry_high:.5f})"
-                )
-                analysis.stop_loss = sl = corrected
-            else:
-                return f"SHORT requires stop_loss > entry_zone[1]={entry_high:.5f}, got stop_loss={sl:.5f}"
-        # TP: entry_low 未満にあるべき
-        if tp >= entry_low:
-            if tp - entry_low <= tolerance_tp:
-                corrected = entry_low - margin
-                logger.warning(
-                    f"[PRICE] TP auto-corrected for SHORT: {tp:.5f} → {corrected:.5f} "
-                    f"(was >= entry_zone[0]={entry_low:.5f})"
-                )
-                analysis.take_profit = tp = corrected
-            else:
-                return f"SHORT requires take_profit < entry_zone[0]={entry_low:.5f}, got take_profit={tp:.5f}"
-    return None
-
-
-def _downgrade_to_neutral(analysis: "PriceAnalysis", reason: str) -> "PriceAnalysis":
-    """SL/TP バリデーション全滅時に direction を neutral に降格させる。
-
-    bias_score / trend_direction / support / resistance などのテクニカル情報は維持し、
-    entry_zone / stop_loss / take_profit だけを current price 中心にクリアする。
-    reasoning_summary に降格理由を追記する。
-    """
-    entry_low, entry_high = analysis.entry_zone
-    mid = (entry_low + entry_high) / 2.0
-    analysis.direction_bias = "neutral"
-    analysis.entry_zone = (mid, mid)
-    analysis.stop_loss = 0.0
-    analysis.take_profit = 0.0
-    analysis.risk_reward_ratio = 0.0
-    suffix = f" [neutral降格: {reason}]"
-    if suffix not in analysis.reasoning_summary:
-        analysis.reasoning_summary = (analysis.reasoning_summary or "") + suffix
-    return analysis
-
-
-def _build_feedback(error: str, analysis: "PriceAnalysis") -> str:
-    """バリデーション失敗時にLLMへ返すフィードバックメッセージを生成する。"""
-    direction = analysis.direction_bias
-    entry_low, entry_high = analysis.entry_zone
-    if direction == "long":
-        sl_rule = f"must be BELOW entry_zone[0] ({entry_low:.5f})"
-        tp_rule = f"must be ABOVE entry_zone[1] ({entry_high:.5f})"
-    else:
-        sl_rule = f"must be ABOVE entry_zone[1] ({entry_high:.5f})"
-        tp_rule = f"must be BELOW entry_zone[0] ({entry_low:.5f})"
-    return (
-        f"Your previous answer had an error in SL/TP values.\n\n"
-        f"direction_bias: {direction}\n"
-        f"entry_zone: [{entry_low:.5f}, {entry_high:.5f}]\n"
-        f"stop_loss: {analysis.stop_loss:.5f}  <- {sl_rule}\n"
-        f"take_profit: {analysis.take_profit:.5f}  <- {tp_rule}\n\n"
-        f"Error: {error}\n\n"
-        f"Please correct stop_loss and take_profit and output the full JSON again."
-    )
-
-
 @dataclass
 class PriceAnalysis:
     pair: str
@@ -152,13 +39,14 @@ class PriceAnalysis:
     bias_score: float  # -1.0 to +1.0
     confidence: float  # 0.0 to 1.0
     entry_zone: tuple[float, float]
-    stop_loss: float
-    take_profit: float
-    risk_reward_ratio: float
     reasoning_summary: str
     analyzed_at: datetime
     key_support: float | None = None
     key_resistance: float | None = None
+    # 後方互換: 旧LLM出力・snapshot aggが stop_loss/take_profit を含む場合に受容
+    stop_loss: float = 0.0
+    take_profit: float = 0.0
+    risk_reward_ratio: float = 0.0
 
 
 def load_user_notes(notes_path: Path, section: str = "price") -> str:
@@ -304,15 +192,13 @@ async def analyze_price_action(
         entry_zone_raw = data.get("entry_zone", [summary.current_price, summary.current_price])
         if not isinstance(entry_zone_raw, (list, tuple)) or len(entry_zone_raw) < 2:
             entry_zone_raw = [summary.current_price, summary.current_price]
-        if direction == "short":
-            stop_loss = _to_float(data.get("stop_loss"), summary.current_price * 1.01)
-            take_profit = _to_float(data.get("take_profit"), summary.current_price * 0.98)
-        else:
-            stop_loss = _to_float(data.get("stop_loss"), summary.current_price * 0.99)
-            take_profit = _to_float(data.get("take_profit"), summary.current_price * 1.02)
-        rr = _to_float(data.get("risk_reward_ratio"), 2.0)
         key_support = _to_float(data.get("key_support"), 0.0) or None
         key_resistance = _to_float(data.get("key_resistance"), 0.0) or None
+
+        # 後方互換: LLM が旧フォーマットで SL/TP を返した場合は受容するが使わない
+        stop_loss = _to_float(data.get("stop_loss"), 0.0)
+        take_profit = _to_float(data.get("take_profit"), 0.0)
+        rr = _to_float(data.get("risk_reward_ratio"), 0.0)
 
         analysis = PriceAnalysis(
             pair=pair_cfg.symbol,
@@ -323,18 +209,18 @@ async def analyze_price_action(
                 _to_float(entry_zone_raw[0], summary.current_price),
                 _to_float(entry_zone_raw[1], summary.current_price),
             ),
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            risk_reward_ratio=rr,
             reasoning_summary=data.get("reasoning_summary", ""),
             analyzed_at=db_now(),
             key_support=key_support,
             key_resistance=key_resistance,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            risk_reward_ratio=rr,
         )
 
         logger.info(
             f"[PRICE] {pair_cfg.display_name}: {direction} bias={bias_score:+.2f} "
-            f"conf={confidence:.2f} RR={rr:.1f}"
+            f"conf={confidence:.2f}"
         )
 
         if tech_score is not None:
@@ -347,19 +233,9 @@ async def analyze_price_action(
                 f"LLM={llm_bias:+.2f} → Rule={tech_score.total_score:+.2f}"
             )
 
-        validation_error = _validate_sl_tp(analysis)
-        if validation_error is None:
-            return analysis
+        return analysis
 
-        last_error = validation_error
-        logger.warning(
-            f"[PRICE] {pair_cfg.display_name}: SL/TP validation failed (attempt {attempt + 1}): {validation_error}"
-        )
-        messages.append({"role": "assistant", "content": response_text})
-        messages.append({"role": "user", "content": _build_feedback(validation_error, analysis)})
-
-    logger.error(
-        f"[PRICE] {pair_cfg.display_name}: SL/TP validation failed after {MAX_RETRIES} attempts. "
-        f"Downgrading to neutral. Last error: {last_error}"
+    # ここに到達するのは全リトライで JSON パース失敗した場合のみ
+    raise RuntimeError(
+        f"[PRICE] {pair_cfg.display_name}: LLM analysis failed after {MAX_RETRIES} attempts"
     )
-    return _downgrade_to_neutral(analysis, last_error or "unknown validation error")

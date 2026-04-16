@@ -30,6 +30,11 @@ def audit_config(tmp_path: Path):
     cfg.llm = MagicMock()
     cfg.llm.reflection = MagicMock(provider="ollama", model="test", temperature=0.1)
 
+    # trading 設定 — risk_budget (= initial_balance × risk_per_trade) の計算に使う
+    cfg.trading = MagicMock()
+    cfg.trading.initial_balance = 10000.0
+    cfg.trading.risk_per_trade = 0.02
+
     return cfg
 
 

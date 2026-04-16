@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 
 from src.signals.signal_combiner import TradeSignal
-from src.trading.portfolio_guard import check_portfolio_limits
+from src.trading.portfolio_guard import check_drawdown_kill_switch, check_portfolio_limits
 from src.trading.position_manager import Order, PositionManager
 
 logger = logging.getLogger(__name__)
@@ -16,6 +16,9 @@ def execute_signal(
     max_total_positions: int = 4,
     max_positions_per_group: int = 2,
     max_same_direction_per_group: int = 2,
+    drawdown_kill_switch_enabled: bool = False,
+    drawdown_kill_switch_max_pct: float = 0.10,
+    drawdown_kill_switch_lookback_days: int = 0,
 ) -> Order | None:
     if signal.action == "hold":
         return None
@@ -45,6 +48,19 @@ def execute_signal(
     if rejection:
         logger.info(f"[SKIP] {signal.pair}: portfolio guard — {rejection}")
         return None
+
+    # Drawdown kill switch (新規エントリーのみ停止)
+    dd_rejection = check_drawdown_kill_switch(
+        initial_balance=account.initial_balance,
+        closed_trades=account.closed_trades,
+        enabled=drawdown_kill_switch_enabled,
+        max_drawdown_pct=drawdown_kill_switch_max_pct,
+        lookback_days=drawdown_kill_switch_lookback_days,
+    )
+    if dd_rejection:
+        logger.warning(f"[SKIP] {signal.pair}: {dd_rejection}")
+        return None
+
     order = Order.new(
         pair=signal.pair,
         direction=direction,

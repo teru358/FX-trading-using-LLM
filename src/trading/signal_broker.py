@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from src.notifications.notifier import SignalRecommendationEvent, SLTPAlertEvent
 from src.signals.signal_combiner import TradeSignal
 from src.trading.broker_adapter import BrokerAdapter
-from src.trading.portfolio_guard import check_portfolio_limits
+from src.trading.portfolio_guard import check_drawdown_kill_switch, check_portfolio_limits
 from src.trading.position_manager import Order, PositionManager
 
 if TYPE_CHECKING:
@@ -36,12 +36,18 @@ class SignalBrokerAdapter(BrokerAdapter):
         max_total_positions: int = 4,
         max_positions_per_group: int = 2,
         max_same_direction_per_group: int = 2,
+        drawdown_kill_switch_enabled: bool = False,
+        drawdown_kill_switch_max_pct: float = 0.10,
+        drawdown_kill_switch_lookback_days: int = 0,
     ) -> None:
         self._manual_mgr = manual_position_mgr
         self._notifier = notifier
         self._max_total = max_total_positions
         self._max_per_group = max_positions_per_group
         self._max_same_dir = max_same_direction_per_group
+        self._dd_enabled = drawdown_kill_switch_enabled
+        self._dd_max_pct = drawdown_kill_switch_max_pct
+        self._dd_lookback = drawdown_kill_switch_lookback_days
 
     def _fire(self, coro) -> None:
         """非同期コルーチンをイベントループに投げる。ループがなければ無視する。"""
@@ -63,7 +69,8 @@ class SignalBrokerAdapter(BrokerAdapter):
             return None
 
         # manual ポジションを対象にポートフォリオガード判定
-        manual_positions = self._manual_mgr.get_account_state().open_positions
+        manual_account = self._manual_mgr.get_account_state()
+        manual_positions = manual_account.open_positions
         portfolio_warning = check_portfolio_limits(
             pair=signal.pair,
             direction=signal.action,
@@ -73,6 +80,19 @@ class SignalBrokerAdapter(BrokerAdapter):
             max_total_positions=self._max_total,
             max_same_direction_per_group=self._max_same_dir,
         ) or ""
+
+        # Drawdown kill switch — 警告メッセージに追加するのみ (signal モードは発注しないため)
+        dd_warning = check_drawdown_kill_switch(
+            initial_balance=manual_account.initial_balance,
+            closed_trades=manual_account.closed_trades,
+            enabled=self._dd_enabled,
+            max_drawdown_pct=self._dd_max_pct,
+            lookback_days=self._dd_lookback,
+        )
+        if dd_warning:
+            portfolio_warning = (
+                f"{portfolio_warning} | {dd_warning}" if portfolio_warning else dd_warning
+            )
 
         # 同一ペアの既存 manual ポジション数
         existing_positions = sum(1 for p in manual_positions if p.pair == signal.pair)

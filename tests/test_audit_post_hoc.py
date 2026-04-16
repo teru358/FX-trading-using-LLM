@@ -310,19 +310,49 @@ def _mk_cf(recover=False) -> Counterfactuals:
     )
 
 
+# 以下の flag 判定テストは risk_budget=2000 (= 1R) を基準にする。
+# NOISE: |pnl| < 0.1R = 200、CONF_MISS: |pnl| > 0.5R = 1000
+_TEST_RISK_BUDGET = 2000.0
+
+
 def test_assign_flag_noise():
-    """絶対値小 → NOISE。"""
+    """|pnl| < 0.1R → NOISE。"""
     assert assign_flag(
-        realized_pnl=300, signal_confidence=0.8, close_reason="take_profit",
-        ph=_mk_ph(), cf=_mk_cf(),
+        realized_pnl=100, signal_confidence=0.8, close_reason="take_profit",
+        ph=_mk_ph(), cf=_mk_cf(), risk_budget=_TEST_RISK_BUDGET,
     ) == "NOISE"
+
+
+def test_assign_flag_noise_disabled_without_risk_budget():
+    """risk_budget=0 なら NOISE 判定は skip される (後方互換)。"""
+    result = assign_flag(
+        realized_pnl=100, signal_confidence=0.8, close_reason="take_profit",
+        ph=_mk_ph(), cf=_mk_cf(),  # risk_budget 省略 → 0
+    )
+    assert result != "NOISE"
+
+
+def test_assign_flag_noise_scales_with_risk_budget():
+    """同じ pnl でも口座サイズが変われば NOISE 判定が変わる。"""
+    # pnl=100 は risk_budget=2000 (0.1R=200) では NOISE
+    flag_small_account = assign_flag(
+        realized_pnl=100, signal_confidence=0.7, close_reason="take_profit",
+        ph=_mk_ph(mfe_after=0), cf=_mk_cf(), risk_budget=2000,
+    )
+    assert flag_small_account == "NOISE"
+    # pnl=100 は risk_budget=500 (0.1R=50) では NOISE ではない
+    flag_tiny_account = assign_flag(
+        realized_pnl=100, signal_confidence=0.7, close_reason="take_profit",
+        ph=_mk_ph(mfe_after=0), cf=_mk_cf(), risk_budget=500,
+    )
+    assert flag_tiny_account != "NOISE"
 
 
 def test_assign_flag_clean_win():
     """勝ち + TP hit + MFE 小 (< 50% of realized) → CLEAN_WIN。"""
     assert assign_flag(
         realized_pnl=2000, signal_confidence=0.7, close_reason="take_profit",
-        ph=_mk_ph(mfe_after=500), cf=_mk_cf(),
+        ph=_mk_ph(mfe_after=500), cf=_mk_cf(), risk_budget=_TEST_RISK_BUDGET,
     ) == "CLEAN_WIN"
 
 
@@ -330,7 +360,7 @@ def test_assign_flag_tight_tp():
     """勝ち + MFE > 1.5 × realized → TIGHT_TP。"""
     assert assign_flag(
         realized_pnl=2000, signal_confidence=0.7, close_reason="take_profit",
-        ph=_mk_ph(mfe_after=4000), cf=_mk_cf(),
+        ph=_mk_ph(mfe_after=4000), cf=_mk_cf(), risk_budget=_TEST_RISK_BUDGET,
     ) == "TIGHT_TP"
 
 
@@ -338,7 +368,7 @@ def test_assign_flag_late_exit():
     """勝ち + TP 以外で close + intra MFE > 1.5× → LATE_EXIT。"""
     assert assign_flag(
         realized_pnl=2000, signal_confidence=0.7, close_reason="manual",
-        ph=_mk_ph(mfe_intra=4000), cf=_mk_cf(),
+        ph=_mk_ph(mfe_intra=4000), cf=_mk_cf(), risk_budget=_TEST_RISK_BUDGET,
     ) == "LATE_EXIT"
 
 
@@ -346,15 +376,15 @@ def test_assign_flag_sl_recover():
     """負け + SL hit + tighter SL なら回復 → SL_RECOVER。"""
     assert assign_flag(
         realized_pnl=-2000, signal_confidence=0.7, close_reason="stop_loss",
-        ph=_mk_ph(), cf=_mk_cf(recover=True),
+        ph=_mk_ph(), cf=_mk_cf(recover=True), risk_budget=_TEST_RISK_BUDGET,
     ) == "SL_RECOVER"
 
 
 def test_assign_flag_conf_miss():
-    """負け + 高 conf + 大損 → CONF_MISS。"""
+    """負け + 高 conf + |pnl| > 0.5R → CONF_MISS。"""
     assert assign_flag(
         realized_pnl=-2000, signal_confidence=0.85, close_reason="manual",
-        ph=_mk_ph(), cf=_mk_cf(),
+        ph=_mk_ph(), cf=_mk_cf(), risk_budget=_TEST_RISK_BUDGET,
     ) == "CONF_MISS"
 
 
@@ -362,7 +392,7 @@ def test_assign_flag_clean_loss():
     """負け + SL hit + 高 conf 以下 → CLEAN_LOSS。"""
     assert assign_flag(
         realized_pnl=-2000, signal_confidence=0.65, close_reason="stop_loss",
-        ph=_mk_ph(), cf=_mk_cf(),
+        ph=_mk_ph(), cf=_mk_cf(), risk_budget=_TEST_RISK_BUDGET,
     ) == "CLEAN_LOSS"
 
 
@@ -370,7 +400,7 @@ def test_assign_flag_insufficient_data():
     """post-close データなし → INSUFFICIENT_DATA。"""
     assert assign_flag(
         realized_pnl=2000, signal_confidence=0.7, close_reason="take_profit",
-        ph=_mk_ph(has=False), cf=_mk_cf(),
+        ph=_mk_ph(has=False), cf=_mk_cf(), risk_budget=_TEST_RISK_BUDGET,
     ) == "INSUFFICIENT_DATA"
 
 

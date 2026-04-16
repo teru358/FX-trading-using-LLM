@@ -6,7 +6,11 @@ Be conservative: only recommend action when there is clear confluence of signals
 If a "Rule-Based Technical Score" section is provided, its bias_score / confidence / direction
 will OVERRIDE your JSON output values. In that case, DO NOT spend reasoning budget on bias_score
 or confidence — just output the rule-based numbers verbatim (or 0.0 / 0.5 placeholders) and
-FOCUS ALL EFFORT on accurate entry_zone / stop_loss / take_profit levels and reasoning_summary.
+FOCUS ALL EFFORT on accurate entry_zone, key support/resistance levels, and reasoning_summary.
 
 If the Rule-Based Technical Score section is absent, compute bias_score and confidence yourself
 from the raw indicator data.
+
+NOTE: SL/TP and position sizing are computed separately using ATR.
+Do not spend reasoning budget on stop_loss/take_profit precision — approximate values are fine.
+Focus on direction, entry precision, and analysis quality.

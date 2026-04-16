@@ -153,6 +153,67 @@ def test_select_representative_trades_win_loss_mix():
     assert len(losses_selected) == 5
 
 
+def test_select_representative_trades_noise_fallback():
+    """全件 NOISE でも |pnl| 順に補充されレビュー対象が空にならない。"""
+    now = datetime(2026, 4, 14, 12, 0)
+    sessions = []
+    # 勝ち 6 件 (全て NOISE: |pnl| < 500)
+    for i in range(6):
+        sessions.append(make_fake_session(f"w{i}", pnl=50 + i * 10, opened_at=now))
+    # 敗 6 件 (全て NOISE)
+    for i in range(6):
+        sessions.append(make_fake_session(f"l{i}", pnl=-50 - i * 10, opened_at=now))
+
+    flags_map = {s.session_id: "NOISE" for s in sessions}
+
+    selected = select_representative_trades(sessions, flags_map)
+    assert len(selected) == 10
+    wins_selected = [s for s in selected if s.realized_pnl > 0]
+    losses_selected = [s for s in selected if s.realized_pnl <= 0]
+    assert len(wins_selected) == 5
+    assert len(losses_selected) == 5
+    # 大きい |pnl| から採用される
+    assert wins_selected[0].realized_pnl == 100  # 50 + 5*10
+    assert losses_selected[0].realized_pnl == -100
+
+
+def test_select_representative_trades_partial_fallback():
+    """非 NOISE で枠が足りない場合だけ NOISE から補充。"""
+    now = datetime(2026, 4, 14, 12, 0)
+    sessions = []
+    # 非 NOISE 勝ち 2 件
+    for i in range(2):
+        sessions.append(make_fake_session(f"cw{i}", pnl=2000 + i, opened_at=now))
+    # NOISE 勝ち 5 件
+    for i in range(5):
+        sessions.append(make_fake_session(f"nw{i}", pnl=100 + i * 10, opened_at=now))
+    # 非 NOISE 敗 5 件
+    for i in range(5):
+        sessions.append(make_fake_session(f"cl{i}", pnl=-2000 - i, opened_at=now))
+
+    flags_map = {}
+    for s in sessions:
+        if s.session_id.startswith("n"):
+            flags_map[s.session_id] = "NOISE"
+        elif s.realized_pnl > 0:
+            flags_map[s.session_id] = "CLEAN_WIN"
+        else:
+            flags_map[s.session_id] = "CLEAN_LOSS"
+
+    selected = select_representative_trades(sessions, flags_map)
+    wins_selected = [s for s in selected if s.realized_pnl > 0]
+    losses_selected = [s for s in selected if s.realized_pnl <= 0]
+    # 勝ちは 2 件の非 NOISE + 3 件の NOISE フォールバック
+    assert len(wins_selected) == 5
+    clean_win_ids = {s.session_id for s in wins_selected if s.session_id.startswith("cw")}
+    fallback_win_ids = {s.session_id for s in wins_selected if s.session_id.startswith("nw")}
+    assert len(clean_win_ids) == 2
+    assert len(fallback_win_ids) == 3
+    # 敗けはそのまま 5 件 (フォールバック不要)
+    assert len(losses_selected) == 5
+    assert all(s.session_id.startswith("cl") for s in losses_selected)
+
+
 def test_section6_renders_entry_analysis_and_postHoc():
     """Section 6 のトレード詳細に analysis_summary と flag が含まれる。"""
     now = datetime(2026, 4, 14, 12, 0)

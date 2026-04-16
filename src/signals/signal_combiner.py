@@ -44,6 +44,7 @@ def combine_signals(
     lot_unit: float = 1000.0,
     tv_summary=None,  # TVSummary | None (矛盾検出用)
     tv_conflict_dampen: float = 0.7,  # TV方向矛盾時のconfidence減衰率
+    min_rr_ratio: float = 0.0,        # 未使用 (ATR後に _apply_atr_sltp_to_signal で判定)
 ) -> TradeSignal:
     # Dynamic weight adjustment based on news confidence
     if news.confidence >= 0.80:
@@ -103,6 +104,9 @@ def combine_signals(
         action = "hold"
         reason = f"score in deadband ({combined_score:+.3f})"
 
+    # R:R チェックは ATR SL/TP 算出後に実施 (_apply_atr_sltp_to_signal 内)
+    # LLM の SL/TP は信頼性が低いため、combine_signals 段階では判定しない
+
     if alignment < 0:
         reason += " [NEWS/PRICE conflict]"
 
@@ -121,34 +125,11 @@ def combine_signals(
     elif action == "sell":
         entry_price = price.entry_zone[1]  # sell near the top of the zone
 
+    # SL/TP と position_size は ATR ベースで後から算出される (_apply_atr_sltp_to_signal)
+    # ここではプレースホルダーを設定し、ATR 未通過時のフォールバックとする
     stop_loss = price.stop_loss
     take_profit = price.take_profit
-
-    # 安全ネット: action と SL/TP の方向が逆転している場合はスワップして修正する。
-    # （aggregate() で方向不一致スナップショットの SL/TP が混入した場合の最終防御）
-    if action == "sell" and stop_loss < entry_price < take_profit:
-        stop_loss, take_profit = take_profit, stop_loss
-        logger.warning(
-            f"[SIGNAL] {pair_cfg.symbol}: SL/TP direction mismatch for SELL — swapped "
-            f"(SL={stop_loss:.5f} TP={take_profit:.5f})"
-        )
-    elif action == "buy" and take_profit < entry_price < stop_loss:
-        stop_loss, take_profit = take_profit, stop_loss
-        logger.warning(
-            f"[SIGNAL] {pair_cfg.symbol}: SL/TP direction mismatch for BUY — swapped "
-            f"(SL={stop_loss:.5f} TP={take_profit:.5f})"
-        )
-
-    # Position sizing: risk_amount / pips_at_risk
-    position_size = _calculate_position_size(
-        balance=account_balance,
-        risk_pct=risk_per_trade,
-        entry=entry_price,
-        stop_loss=stop_loss,
-        pip_value=pair_cfg.pip_value,
-        min_lot_size=min_lot_size,
-        lot_unit=lot_unit,
-    )
+    position_size = min_lot_size  # ATR で再計算される前のフォールバック値
 
     # 通知用の詳細理由を構築
     news_themes = ", ".join(news.key_themes[:3]) if news.key_themes else "N/A"
@@ -193,8 +174,7 @@ def combine_signals(
     if action != "hold":
         logger.info(
             f"[SIGNAL] {pair_cfg.display_name}: entry={entry_price:.5f} "
-            f"SL={stop_loss:.5f} TP={take_profit:.5f} "
-            f"RR={price.risk_reward_ratio:.1f} size={position_size:,.0f}"
+            f"(SL/TP/size は ATR 後に算出)"
         )
     return signal
 

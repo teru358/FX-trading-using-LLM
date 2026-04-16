@@ -71,11 +71,14 @@ claude:
 trading:
   initial_balance: 10000.0
   risk_per_trade: 0.02
-  signal_confidence_threshold: 0.55
+  signal_confidence_threshold: 0.55     # この confidence 未満は hold
+  # min_rr_ratio — planned R:R がこの値未満なら hold に差し戻す (0 = 無効)
+  # 新規運用では 0 のまま、audit で 30 件以上溜まってから tiny TP が目立つなら 1.2〜1.5 を検討
+  min_rr_ratio: 0.0
   lookback_days: 90
   ohlcv_interval: "1h"             # yfinance の足種（1h足で毎時:00のテクニカル分析に対応）
-  news_weight: 0.40
-  price_weight: 0.60
+  news_weight: 0.20                     # テクニカル主導 (LLM ニュース分析はノイジーなため price 側を厚く)
+  price_weight: 0.80
   signal_deadband: 0.15            # BUY/SELL判定のスコア閾値（±）
   min_lot_size: 1000.0             # 最小ロットサイズ
   lot_unit: 1000.0                 # ロット切り捨て単位
@@ -112,6 +115,22 @@ trading:
   # TradingView テクニカルサマリー (矛盾検出)
   tv_summary_enabled: false      # TV判定と方向矛盾時にconfidence減衰
   tv_conflict_dampen: 0.7        # 矛盾時のconfidence倍率
+  # ポートフォリオリスク管理
+  max_total_positions: 4                 # 全体の最大同時ポジション数
+  max_positions_per_currency_group: 2    # 通貨グループ (JPY/USD/EUR/GBP) 別の最大ポジション数
+  max_same_direction_per_group: 2        # グループ内の同方向ポジション数上限
+  # Drawdown kill switch — 新規エントリーのみ停止 (既存ポジションは維持)
+  # 運用保険。新規運用時は false のままで OK、audit で DD 履歴を確認してから有効化を検討
+  drawdown_kill_switch_enabled: false
+  drawdown_kill_switch_max_pct: 0.10    # peak equity からこの割合以上落ちたら新規停止 (0.10 = 10%)
+  drawdown_kill_switch_lookback_days: 0 # 0 = 全期間、>0 = 直近 N 日のクローズトレードのみで peak/DD 計算
+  # ボラレジーム (EWMA ベース position sizing)
+  vol_regime_enabled: false
+  vol_regime_ewma_span: 20              # ATR(14) の EWMA 期間 (bar 数)
+  vol_regime_high_threshold: 1.3        # ATR/EWMA > 1.3 → high vol (risk 縮小)
+  vol_regime_low_threshold: 0.7         # ATR/EWMA < 0.7 → low vol
+  vol_regime_high_risk_scale: 0.5       # high vol 時の risk_per_trade 倍率
+  vol_regime_low_risk_scale: 1.0        # low vol 時 (= 通常と同じ。拡大はリスク増なので慎重に)
 
 price_monitor:
   enabled: true

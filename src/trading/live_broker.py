@@ -141,6 +141,9 @@ def create_broker(
     max_same_direction_per_group: int = 2,
     manual_position_mgr: "PositionManager | None" = None,
     notifier: "NotifierAdapter | None" = None,
+    drawdown_kill_switch_enabled: bool = False,
+    drawdown_kill_switch_max_pct: float = 0.10,
+    drawdown_kill_switch_lookback_days: int = 0,
 ) -> BrokerAdapter:
     """trading_mode に応じた BrokerAdapter を返すファクトリ関数。
 
@@ -148,6 +151,7 @@ def create_broker(
         trading_mode: "paper" | "live" | "signal"
         manual_position_mgr: "signal" モード時に必須。manual ポジション管理用。
         notifier: "signal" モード時に必須。通知アダプター。
+        drawdown_kill_switch_*: 新規エントリーの DD kill switch 設定。
     """
     from src.trading.paper_broker import PaperBrokerAdapter
 
@@ -156,6 +160,9 @@ def create_broker(
             max_total_positions=max_total_positions,
             max_positions_per_group=max_positions_per_group,
             max_same_direction_per_group=max_same_direction_per_group,
+            drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
+            drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
+            drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
         )
     elif trading_mode == "live":
         return LiveBrokerAdapter()
@@ -175,6 +182,9 @@ def create_broker(
             max_total_positions=max_total_positions,
             max_positions_per_group=max_positions_per_group,
             max_same_direction_per_group=max_same_direction_per_group,
+            drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
+            drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
+            drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
         )
     else:
         raise ValueError(f"Unknown trading_mode: {trading_mode!r}. Use 'paper', 'live', or 'signal'.")

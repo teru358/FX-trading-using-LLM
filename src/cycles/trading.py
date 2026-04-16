@@ -157,6 +157,7 @@ async def _process_pair(
             lot_unit=config.trading.lot_unit,
             tv_summary=tv_summary,
             tv_conflict_dampen=config.trading.tv_conflict_dampen,
+            min_rr_ratio=config.trading.min_rr_ratio,
         )
         return signal, macro_ctx
     except Exception as e:
@@ -208,6 +209,43 @@ def _apply_atr_sltp_to_signal(
         sig.stop_loss = sltp_result.computed_sl
         sig.take_profit = sltp_result.computed_tp
 
+        # ATR 上書き後の R:R 再チェック (combine_signals の LLM R:R チェックを通過した後に
+        # ATR で SL/TP が変わるため、最終 R:R が min_rr_ratio を下回る可能性がある)
+        if config.trading.min_rr_ratio > 0 and sig.action in ("buy", "sell"):
+            sl_dist = abs(sig.entry_price - sltp_result.computed_sl)
+            tp_dist = abs(sltp_result.computed_tp - sig.entry_price)
+            actual_rr = tp_dist / sl_dist if sl_dist > 0 else 0
+            if actual_rr < config.trading.min_rr_ratio:
+                logger.info(
+                    f"[SIGNAL] {sig.pair}: ATR R:R too low "
+                    f"({actual_rr:.2f} < {config.trading.min_rr_ratio:.2f}) → hold"
+                )
+                sig.action = "hold"
+                sig.signal_reason = (
+                    f"ATR R:R too low ({actual_rr:.2f} < {config.trading.min_rr_ratio:.2f})"
+                )
+                return sltp_result
+
+        # ボラレジームによるリスク倍率適用
+        effective_risk_pct = config.trading.risk_per_trade
+        if config.trading.vol_regime_enabled:
+            from src.signals.vol_regime import compute_vol_regime
+            vr = compute_vol_regime(
+                price_data.df,
+                ewma_span=config.trading.vol_regime_ewma_span,
+                high_threshold=config.trading.vol_regime_high_threshold,
+                low_threshold=config.trading.vol_regime_low_threshold,
+                high_risk_scale=config.trading.vol_regime_high_risk_scale,
+                low_risk_scale=config.trading.vol_regime_low_risk_scale,
+            )
+            if vr:
+                effective_risk_pct *= vr.risk_scale
+                logger.info(
+                    f"[VOL-REGIME] {sig.pair}: {vr.regime} "
+                    f"(ATR={vr.atr:.5f} EWMA={vr.ewma_atr:.5f} ratio={vr.ratio:.3f}) "
+                    f"risk×{vr.risk_scale:.2f}"
+                )
+
         from src.signals.signal_combiner import _calculate_position_size
         pair_cfg_for_size = next(
             (p for p in config.tradeable_instruments if p.symbol == sig.pair), None
@@ -215,7 +253,7 @@ def _apply_atr_sltp_to_signal(
         if pair_cfg_for_size:
             sig.position_size = _calculate_position_size(
                 balance=position_mgr.get_account_state().balance,
-                risk_pct=config.trading.risk_per_trade,
+                risk_pct=effective_risk_pct,
                 entry=sig.entry_price,
                 stop_loss=sltp_result.computed_sl,
                 pip_value=pair_cfg_for_size.pip_value,
@@ -637,6 +675,14 @@ async def _execute_one_signal(
         price_provider=price_provider,
     )
 
+    # ATR SL/TP 算出に失敗した場合はエントリーしない (SL/TP=0 で約定すると即決済になる)
+    if sltp_result is None and sig.action in ("buy", "sell"):
+        logger.warning(
+            f"[SIGNAL] {sig.pair}: ATR SL/TP unavailable — skipping entry"
+        )
+        sig.action = "hold"
+        sig.signal_reason = "ATR SL/TP calculation failed"
+
     order = broker.execute_signal(sig, position_mgr, macro_context=macro_ctx)
     if not order:
         if config.notifier.notify_on_signal_skipped:
@@ -804,6 +850,12 @@ def _build_trading_runtime(config: AppConfig):
     signal_broker = None
     manual_mgr = None
 
+    _dd_kwargs = {
+        "drawdown_kill_switch_enabled": config.trading.drawdown_kill_switch_enabled,
+        "drawdown_kill_switch_max_pct": config.trading.drawdown_kill_switch_max_pct,
+        "drawdown_kill_switch_lookback_days": config.trading.drawdown_kill_switch_lookback_days,
+    }
+
     if config.trading.trading_mode == "signal":
         # internal broker: PaperBrokerAdapter (通知なし、ログのみ)
         broker = create_broker(
@@ -811,6 +863,7 @@ def _build_trading_runtime(config: AppConfig):
             max_total_positions=config.trading.max_total_positions,
             max_positions_per_group=config.trading.max_positions_per_currency_group,
             max_same_direction_per_group=config.trading.max_same_direction_per_group,
+            **_dd_kwargs,
         )
         # manual PositionManager (ユーザーの実取引記録用)
         manual_mgr = PositionManager(
@@ -827,6 +880,7 @@ def _build_trading_runtime(config: AppConfig):
             max_total_positions=config.trading.max_total_positions,
             max_positions_per_group=config.trading.max_positions_per_currency_group,
             max_same_direction_per_group=config.trading.max_same_direction_per_group,
+            **_dd_kwargs,
         )
     else:
         broker = create_broker(
@@ -834,6 +888,7 @@ def _build_trading_runtime(config: AppConfig):
             max_total_positions=config.trading.max_total_positions,
             max_positions_per_group=config.trading.max_positions_per_currency_group,
             max_same_direction_per_group=config.trading.max_same_direction_per_group,
+            **_dd_kwargs,
         )
         notifier = create_notifier(config.notifier.enabled)
 

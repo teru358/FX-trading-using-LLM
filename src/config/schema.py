@@ -84,6 +84,7 @@ class TradingConfig:
     initial_balance: float = 10000.0
     risk_per_trade: float = 0.02
     signal_confidence_threshold: float = 0.55
+    min_rr_ratio: float = 0.0           # >0 で有効化: planned R:R がこの値未満なら hold
     lookback_days: int = 90
     ohlcv_interval: str = "1h"
     news_weight: float = 0.20
@@ -124,6 +125,17 @@ class TradingConfig:
     max_total_positions: int = 4                 # 全体の最大同時ポジション数
     max_positions_per_currency_group: int = 2    # 通貨グループ別の最大ポジション数
     max_same_direction_per_group: int = 2        # グループ内同方向の最大ポジション数
+    # Drawdown kill switch (新規エントリーのみ停止、既存ポジションは保持)
+    drawdown_kill_switch_enabled: bool = False
+    drawdown_kill_switch_max_pct: float = 0.10   # peak からこの割合以上落ちたら新規停止 (例: 0.10 = 10%)
+    drawdown_kill_switch_lookback_days: int = 0  # 0 = 全期間、>0 = 直近 N 日のクローズトレードのみ参照
+    # ボラレジーム (EWMA ベース position sizing)
+    vol_regime_enabled: bool = False
+    vol_regime_ewma_span: int = 20           # ATR の EWMA 期間 (bar 数)
+    vol_regime_high_threshold: float = 1.3   # ATR/EWMA > この値 → high vol
+    vol_regime_low_threshold: float = 0.7    # ATR/EWMA < この値 → low vol
+    vol_regime_high_risk_scale: float = 0.5  # high vol 時の risk_per_trade 倍率
+    vol_regime_low_risk_scale: float = 1.0   # low vol 時 (デフォルト = 等倍、拡大はリスク増なので慎重に)
 
 
 @dataclass

@@ -101,6 +101,9 @@ def run_audit(
         report_path = _write_empty_report(config, days, now)
         return AuditResult(report_path=report_path, session_count=0)
 
+    # 通貨非依存の NOISE/CONF_MISS 判定用リスク予算 (1R = risk_per_trade × initial_balance)
+    risk_budget = config.trading.initial_balance * config.trading.risk_per_trade
+
     # post_hoc 計算
     pair_distributions: dict[str, list[float]] = {}
     for inst in config.tradeable_instruments:
@@ -147,6 +150,7 @@ def run_audit(
             signal_confidence=s.signal_confidence or 0,
             close_reason=s.close_reason or "",
             ph=ph, cf=cf,
+            risk_budget=risk_budget,
         )
         flags_map[s.session_id] = flag
 
