@@ -6,7 +6,7 @@ import logging
 from datetime import timedelta
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Column, DateTime, Float, Integer, String, select
+from sqlalchemy import Column, DateTime, Float, Integer, String, select, text
 from sqlalchemy.orm import Session
 
 from src.data.price_store import _Base, _get_engine
@@ -34,6 +34,8 @@ class _TechnicalSnapshot(_Base):
     entry_zone_high = Column(Float)
     risk_reward_ratio = Column(Float)
     reasoning_summary = Column(String)
+    market_regime     = Column(String)
+    confidence_modifier = Column(Float)
 
 
 class AnalysisStore:
@@ -43,6 +45,22 @@ class AnalysisStore:
 
     def __init__(self, db_path) -> None:
         self._engine = _get_engine(db_path)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """既存テーブルに新カラムを追加する (ALTER TABLE、既にあれば何もしない)。"""
+        migrations = [
+            ("technical_snapshots", "market_regime", "VARCHAR"),
+            ("technical_snapshots", "confidence_modifier", "FLOAT"),
+        ]
+        with self._engine.connect() as conn:
+            for table, col, col_type in migrations:
+                try:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
+                    conn.commit()
+                    logger.info(f"[MIGRATE] Added {table}.{col}")
+                except Exception:
+                    pass  # カラムが既に存在
 
     def upsert_snapshot(self, analysis: "PriceAnalysis") -> None:  # type: ignore[name-defined]
         """PriceAnalysis をスナップショットとして保存する。"""
@@ -59,6 +77,8 @@ class AnalysisStore:
                 entry_zone_high=analysis.entry_zone[1],
                 risk_reward_ratio=analysis.risk_reward_ratio,
                 reasoning_summary=analysis.reasoning_summary,
+                market_regime=analysis.market_regime,
+                confidence_modifier=analysis.confidence_modifier,
             )
             session.add(snap)
             session.commit()
@@ -165,6 +185,8 @@ class AnalysisStore:
                 f"latest: {latest.reasoning_summary or ''})"
             ),
             analyzed_at=db_now(),
+            market_regime=latest.market_regime or "unknown",
+            confidence_modifier=latest.confidence_modifier or 0.0,
         )
 
     def _prune_old(self, symbol: str) -> None:

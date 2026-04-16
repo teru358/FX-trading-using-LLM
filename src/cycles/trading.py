@@ -189,7 +189,9 @@ def _apply_atr_sltp_to_signal(
             config.trading.ohlcv_interval, price_store,
             price_provider,
         )
-        atr_val = _compute_atr_from_price_data(price_data)
+        atr_val = _compute_atr_from_price_data(
+            price_data, resample_tf=config.trading.atr_timeframe,
+        )
         if not atr_val or atr_val <= 0:
             return None
 
@@ -230,8 +232,16 @@ def _apply_atr_sltp_to_signal(
         effective_risk_pct = config.trading.risk_per_trade
         if config.trading.vol_regime_enabled:
             from src.signals.vol_regime import compute_vol_regime
+            # ATR と同じ足種でリサンプルして vol_regime を計算
+            vr_df = price_data.df
+            _vr_tf = config.trading.atr_timeframe
+            if _vr_tf and _vr_tf not in ("", "1h"):
+                vr_df = vr_df.resample(_vr_tf).agg({
+                    "Open": "first", "High": "max", "Low": "min",
+                    "Close": "last", "Volume": "sum",
+                }).dropna()
             vr = compute_vol_regime(
-                price_data.df,
+                vr_df,
                 ewma_span=config.trading.vol_regime_ewma_span,
                 high_threshold=config.trading.vol_regime_high_threshold,
                 low_threshold=config.trading.vol_regime_low_threshold,
@@ -391,7 +401,10 @@ async def _review_hold_decisions(
     for hold in unreviewed:
         try:
             current_price = _get_price(hold.pair, price_provider)
-            hold_atr = _fetch_and_compute_atr(hold.pair, config, price_store)
+            hold_atr = _fetch_and_compute_atr(
+                hold.pair, config, price_store,
+                atr_timeframe=config.trading.atr_timeframe,
+            )
 
             review_text, lesson, worth_storing = build_hold_review(
                 pair=hold.pair,

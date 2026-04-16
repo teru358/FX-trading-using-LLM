@@ -17,8 +17,8 @@ import pytest
 from src.data.price_fetcher import PriceData
 
 
-def _make_price_data(symbol: str = "USDJPY=X", bars: int = 20) -> PriceData:
-    """pandas_ta.atr(14) が計算できる最低限の OHLCV を返す。"""
+def _make_price_data(symbol: str = "USDJPY=X", bars: int = 100) -> PriceData:
+    """pandas_ta.atr(14) が計算できる OHLCV を返す。4h リサンプル対応で 100 本。"""
     idx = pd.date_range("2026-04-01", periods=bars, freq="1h")
     df = pd.DataFrame(
         {

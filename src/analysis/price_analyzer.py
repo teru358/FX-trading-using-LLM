@@ -43,6 +43,8 @@ class PriceAnalysis:
     analyzed_at: datetime
     key_support: float | None = None
     key_resistance: float | None = None
+    market_regime: str = "unknown"       # "trending" | "ranging" | "breakout_pending" | "unknown"
+    confidence_modifier: float = 0.0     # LLM による tech_score confidence の補正 (-0.1〜+0.1)
     # 後方互換: 旧LLM出力・snapshot aggが stop_loss/take_profit を含む場合に受容
     stop_loss: float = 0.0
     take_profit: float = 0.0
@@ -186,16 +188,21 @@ async def analyze_price_action(
                 continue
             raise
 
-        direction = data.get("direction_bias", "neutral")
-        bias_score = _to_float(data.get("bias_score"), 0.0)
-        confidence = _to_float(data.get("confidence"), 0.5)
+        # 新フォーマット (5フィールド) を優先、旧フォーマット (10フィールド) も後方互換で受容
         entry_zone_raw = data.get("entry_zone", [summary.current_price, summary.current_price])
         if not isinstance(entry_zone_raw, (list, tuple)) or len(entry_zone_raw) < 2:
             entry_zone_raw = [summary.current_price, summary.current_price]
         key_support = _to_float(data.get("key_support"), 0.0) or None
         key_resistance = _to_float(data.get("key_resistance"), 0.0) or None
+        market_regime = data.get("market_regime", "unknown")
+        if market_regime not in ("trending", "ranging", "breakout_pending"):
+            market_regime = "unknown"
+        confidence_modifier = max(-0.1, min(0.1, _to_float(data.get("confidence_modifier"), 0.0)))
 
-        # 後方互換: LLM が旧フォーマットで SL/TP を返した場合は受容するが使わない
+        # 後方互換: 旧フォーマットのフィールドも受容
+        direction = data.get("direction_bias", "neutral")
+        bias_score = _to_float(data.get("bias_score"), 0.0)
+        confidence = _to_float(data.get("confidence"), 0.5)
         stop_loss = _to_float(data.get("stop_loss"), 0.0)
         take_profit = _to_float(data.get("take_profit"), 0.0)
         rr = _to_float(data.get("risk_reward_ratio"), 0.0)
@@ -213,24 +220,33 @@ async def analyze_price_action(
             analyzed_at=db_now(),
             key_support=key_support,
             key_resistance=key_resistance,
+            market_regime=market_regime,
+            confidence_modifier=confidence_modifier,
             stop_loss=stop_loss,
             take_profit=take_profit,
             risk_reward_ratio=rr,
         )
 
-        logger.info(
-            f"[PRICE] {pair_cfg.display_name}: {direction} bias={bias_score:+.2f} "
-            f"conf={confidence:.2f}"
-        )
-
+        # tech_score override (direction/bias/confidence はルールベースが決定)
         if tech_score is not None:
-            llm_bias = analysis.bias_score
             analysis.bias_score = tech_score.total_score
-            analysis.confidence = tech_score.confidence
             analysis.direction_bias = tech_score.direction
+            # confidence_modifier を tech_score.confidence に加算
+            base_conf = tech_score.confidence
+            analysis.confidence = max(0.0, min(1.0, base_conf + confidence_modifier))
+            if confidence_modifier != 0.0:
+                logger.info(
+                    f"[PRICE] {pair_cfg.display_name}: conf={base_conf:.2f}{confidence_modifier:+.2f}"
+                    f"={analysis.confidence:.2f} regime={market_regime}"
+                )
+            else:
+                logger.info(
+                    f"[PRICE] {pair_cfg.display_name}: conf={base_conf:.2f} regime={market_regime}"
+                )
+        else:
             logger.info(
-                f"[PRICE] {pair_cfg.display_name}: bias overridden "
-                f"LLM={llm_bias:+.2f} → Rule={tech_score.total_score:+.2f}"
+                f"[PRICE] {pair_cfg.display_name}: {direction} bias={bias_score:+.2f} "
+                f"conf={confidence:.2f} regime={market_regime}"
             )
 
         return analysis

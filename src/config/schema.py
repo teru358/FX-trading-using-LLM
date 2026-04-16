@@ -112,12 +112,13 @@ class TradingConfig:
     rag_adjustment_forecast_multiplier: float = 0.5
     rag_adjustment_hold_multiplier: float = 0.3
     # ATRベースSL/TP
-    sl_atr_mult_default: float = 1.5
-    tp_atr_mult_default: float = 3.0
-    sl_atr_mult_min: float = 0.5
-    sl_atr_mult_max: float = 3.0
-    tp_atr_mult_min: float = 1.0
-    tp_atr_mult_max: float = 6.0
+    atr_timeframe: str = "4h"            # ATR 計算用の足種 ("1h" / "4h" / "1d")。テクニカル分析の ohlcv_interval とは独立
+    sl_atr_mult_default: float = 3.0
+    tp_atr_mult_default: float = 6.0
+    sl_atr_mult_min: float = 1.0
+    sl_atr_mult_max: float = 5.0
+    tp_atr_mult_min: float = 2.0
+    tp_atr_mult_max: float = 10.0
     # TradingView テクニカルサマリー (矛盾検出)
     tv_summary_enabled: bool = False
     tv_conflict_dampen: float = 0.7    # TV判定と方向が矛盾時のconfidence倍率

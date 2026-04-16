@@ -69,7 +69,10 @@ async def forecast_cycle(
                     continue
 
                 review_ts = db_now()
-                pair_atr = _fetch_and_compute_atr(pair_cfg.symbol, config, price_store)
+                pair_atr = _fetch_and_compute_atr(
+                    pair_cfg.symbol, config, price_store,
+                    atr_timeframe=config.trading.atr_timeframe,
+                )
 
                 # 各予測の delta を更新
                 for fc in recent_forecasts:

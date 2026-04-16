@@ -90,19 +90,29 @@ def combine_signals(
                 f"conf×{tv_conflict_dampen}"
             )
 
-    # Deadband: ±signal_deadband to avoid over-trading on weak signals
+    # Deadband: confidence 連動型
+    # 高確信 (≥0.80) → deadband 緩和 (0.10): indicator の一致度が高い = ノイズが少ない
+    # 中確信 (≥0.60) → 通常 deadband
+    # 低確信 (<0.60) → deadband 拡大 (0.20): 不確かな時は厳しくフィルタ
+    if combined_confidence >= 0.80:
+        effective_deadband = signal_deadband * 0.67  # 0.15 → 0.10
+    elif combined_confidence < 0.60:
+        effective_deadband = signal_deadband * 1.33  # 0.15 → 0.20
+    else:
+        effective_deadband = signal_deadband
+
     if combined_confidence < confidence_threshold:
         action = "hold"
         reason = f"confidence too low ({combined_confidence:.2f} < {confidence_threshold})"
-    elif combined_score > signal_deadband:
+    elif combined_score > effective_deadband:
         action = "buy"
         reason = f"score={combined_score:+.3f} conf={combined_confidence:.2f}"
-    elif combined_score < -signal_deadband:
+    elif combined_score < -effective_deadband:
         action = "sell"
         reason = f"score={combined_score:+.3f} conf={combined_confidence:.2f}"
     else:
         action = "hold"
-        reason = f"score in deadband ({combined_score:+.3f})"
+        reason = f"score in deadband ({combined_score:+.3f}, db={effective_deadband:.3f})"
 
     # R:R チェックは ATR SL/TP 算出後に実施 (_apply_atr_sltp_to_signal 内)
     # LLM の SL/TP は信頼性が低いため、combine_signals 段階では判定しない

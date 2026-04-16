@@ -1,5 +1,5 @@
 {%- if tech_score_context is defined and tech_score_context %}
-=== Rule-Based Technical Score (OVERRIDE — use these values for bias_score/confidence/direction) ===
+=== Rule-Based Technical Score (direction & confidence are determined by this) ===
 {{ tech_score_context }}
 {%- endif %}
 {%- if mtf_score_context is defined and mtf_score_context %}
@@ -30,30 +30,21 @@
 {{ user_context }}
 {%- endif %}
 
-Based on ALL of the above, provide your swing trading analysis for {{ pair }}.
+Based on ALL of the above, provide your analysis for {{ pair }}.
 
-Consider in order of priority:
-1. Rule-based Technical Score (if provided) — this defines direction & confidence
-2. Multi-TF alignment (if provided) — higher TF regime should constrain entry timing
-3. Entry precision from short-TF indicators — SMA/RSI/MACD/BB/Ichimoku/Patterns
-   - Ichimoku: price vs Kumo = bias; TK cross = timing; Kumo edges are dynamic S/R
-   - Bullish patterns: hammer, morning_star, bullish_engulfing, bullish_pin_bar
-   - Bearish patterns: shooting_star, evening_star, bearish_engulfing, bearish_pin_bar
-   - Neutral patterns (doji, inside_bar, bb_squeeze): wait for confirmation
-4. News sentiment + macro correlation shifts (Δ≥0.2 = regime change signal)
-5. Continuity — compare with previous analysis and past trade reflections
+Focus on:
+1. Entry precision — identify optimal entry_zone from support/resistance, Ichimoku Kumo edges, BB bands
+2. Key levels — nearest support and resistance prices for SL/TP anchoring
+3. Market regime — is the market trending, ranging, or about to break out?
+4. Confidence modifier — does news, macro, or pattern context suggest the rule-based score is too aggressive or too conservative? (range: -0.1 to +0.1, 0.0 if no adjustment needed)
+5. Reasoning — concise Japanese summary of your analysis
 
 Output ONLY valid JSON. NO markdown fences, NO comments.
-direction_bias must be exactly one of: "long", "short", "neutral".
 {
-  "direction_bias": "long|short|neutral",
-  "bias_score": <float -1.0 to 1.0>,
-  "confidence": <float 0.0 to 1.0>,
   "entry_zone": [<low_price>, <high_price>],
-  "stop_loss": <price>,
-  "take_profit": <price>,
-  "risk_reward_ratio": <float>,
   "key_support": <nearest_support_price>,
   "key_resistance": <nearest_resistance_price>,
-  "reasoning_summary": "ニュースやテクニカル指標を踏まえた分析根拠を日本語1文で記述"
+  "market_regime": "trending|ranging|breakout_pending",
+  "confidence_modifier": <float -0.1 to 0.1>,
+  "reasoning_summary": "テクニカル・ニュースを踏まえた分析根拠を日本語1文で記述"
 }

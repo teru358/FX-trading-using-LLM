@@ -53,15 +53,26 @@ def _get_ohlcv(
     return fetch_ohlcv(symbol, period, interval, price_store)
 
 
-def _compute_atr_from_price_data(price_data) -> float | None:
-    """price_data から ATR(14) を計算する。データ不足や例外時は None。"""
+def _compute_atr_from_price_data(price_data, resample_tf: str = "") -> float | None:
+    """price_data から ATR(14) を計算する。データ不足や例外時は None。
+
+    Args:
+        price_data: OHLCV データ (price_data.df)
+        resample_tf: リサンプル足種 ("4h", "1d" 等)。空なら元の足種のまま。
+    """
     if not price_data or len(price_data.df) < 14:
         return None
     try:
         import pandas_ta as pta
-        atr_s = pta.atr(
-            price_data.df["High"], price_data.df["Low"], price_data.df["Close"], length=14,
-        )
+        df = price_data.df
+        if resample_tf and resample_tf not in ("", "1h"):
+            df = df.resample(resample_tf).agg({
+                "Open": "first", "High": "max", "Low": "min",
+                "Close": "last", "Volume": "sum",
+            }).dropna()
+            if len(df) < 14:
+                return None
+        atr_s = pta.atr(df["High"], df["Low"], df["Close"], length=14)
         if atr_s is None or atr_s.empty:
             return None
         return float(atr_s.iloc[-1])
@@ -69,8 +80,14 @@ def _compute_atr_from_price_data(price_data) -> float | None:
         return None
 
 
-def _fetch_and_compute_atr(symbol: str, config: AppConfig, price_store) -> float | None:
-    """price_store から OHLCV を取得し ATR(14) を返す。失敗時は None。"""
+def _fetch_and_compute_atr(
+    symbol: str, config: AppConfig, price_store, atr_timeframe: str = "",
+) -> float | None:
+    """price_store から OHLCV を取得し ATR(14) を返す。失敗時は None。
+
+    Args:
+        atr_timeframe: ATR 計算用の足種 ("4h", "1d" 等)。空なら config.trading.ohlcv_interval。
+    """
     if price_store is None:
         return None
     try:
@@ -81,7 +98,7 @@ def _fetch_and_compute_atr(symbol: str, config: AppConfig, price_store) -> float
             config.trading.ohlcv_interval,
             price_store=price_store,
         )
-        return _compute_atr_from_price_data(price_data)
+        return _compute_atr_from_price_data(price_data, resample_tf=atr_timeframe)
     except Exception:
         return None
 

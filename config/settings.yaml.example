@@ -106,12 +106,13 @@ trading:
   rag_adjustment_forecast_multiplier: 0.5
   rag_adjustment_hold_multiplier: 0.3
   # ATRベースSL/TP
-  sl_atr_mult_default: 1.5            # SL距離 = ATR(14) × この倍率
-  tp_atr_mult_default: 3.0            # TP距離 = ATR(14) × この倍率
-  sl_atr_mult_min: 0.5                # LLM動的更新の下限
-  sl_atr_mult_max: 3.0                # LLM動的更新の上限
-  tp_atr_mult_min: 1.0
-  tp_atr_mult_max: 6.0
+  atr_timeframe: "4h"                 # ATR計算用の足種 ("1h"/"4h"/"1d")。テクニカル分析の ohlcv_interval とは独立
+  sl_atr_mult_default: 3.0            # SL距離 = ATR(14, atr_timeframe) × この倍率
+  tp_atr_mult_default: 6.0            # TP距離 = ATR(14, atr_timeframe) × この倍率
+  sl_atr_mult_min: 1.0                # LLM動的更新の下限
+  sl_atr_mult_max: 5.0                # LLM動的更新の上限
+  tp_atr_mult_min: 2.0
+  tp_atr_mult_max: 10.0
   # TradingView テクニカルサマリー (矛盾検出)
   tv_summary_enabled: false      # TV判定と方向矛盾時にconfidence減衰
   tv_conflict_dampen: 0.7        # 矛盾時のconfidence倍率
