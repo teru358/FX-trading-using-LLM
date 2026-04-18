@@ -1,0 +1,25 @@
+# 名前付きホストプロファイル (client.py 用)
+#
+# このファイルを config/hosts.yaml にコピーして編集してください (gitignored)。
+# 未配置時は FINANCE_HOST 環境変数と settings.yaml のポートから組み立てる従来動作。
+#
+# 使い方:
+#   uv run client.py --host main         # 対話モードで main ホストに接続
+#   uv run client.py --host stickpc      # 対話モードで stickpc に接続
+#   uv run client.py --host stickpc status   # 非対話モードで1コマンド
+#   uv run client.py --url http://x:8811 status   # 直接 URL 指定
+#
+# 実行中は以下でも切替可能:
+#   > hosts          # プロファイル一覧
+#   > use stickpc    # 接続先切替
+
+hosts:
+  main:
+    url: "http://localhost:8811"
+    # api_key_env: "API_SECRET_KEY"   # (省略可) 環境変数名を切替
+
+  stickpc:
+    url: "http://stream-svr.local:8811"
+    # api_key_env: "API_SECRET_KEY_STICKPC"
+
+default: main
