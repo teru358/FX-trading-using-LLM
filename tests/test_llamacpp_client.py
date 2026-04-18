@@ -1,0 +1,186 @@
+"""LlamaCppClient と make_embed_fn の単体テスト。
+
+httpx.AsyncClient をモックし、OpenAI 互換リクエスト/レスポンスの組み立てを検証する。
+"""
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx
+import pytest
+
+from src.llm.factory import create_llm_client
+from src.llm.llamacpp_client import LlamaCppClient
+from src.rag.embedder import embed_text, make_embed_fn
+
+
+@pytest.fixture
+def fake_httpx_response():
+    """OpenAI 互換レスポンスを返す httpx.Response モック。"""
+
+    def _build(json_payload):
+        resp = MagicMock(spec=httpx.Response)
+        resp.json = MagicMock(return_value=json_payload)
+        resp.raise_for_status = MagicMock()
+        return resp
+
+    return _build
+
+
+def _mock_async_client(response):
+    """AsyncClient の async context manager を生成する helper。"""
+    client = MagicMock()
+    client.post = AsyncMock(return_value=response)
+
+    async_ctx = MagicMock()
+    async_ctx.__aenter__ = AsyncMock(return_value=client)
+    async_ctx.__aexit__ = AsyncMock(return_value=None)
+    return async_ctx, client
+
+
+@pytest.mark.asyncio
+async def test_llamacpp_client_chat_completion(fake_httpx_response):
+    """chat() が OpenAI 互換ペイロードで POST し、content を抽出する。"""
+    resp = fake_httpx_response({
+        "choices": [{"message": {"content": "  Hello world  "}}],
+    })
+    async_ctx, mock_client = _mock_async_client(resp)
+
+    with patch("httpx.AsyncClient", return_value=async_ctx):
+        cli = LlamaCppClient(
+            base_url="http://localhost:8080/v1",
+            model="llama3.1-8b",
+        )
+        out = await cli.chat(
+            [{"role": "user", "content": "hi"}], temperature=0.2,
+        )
+
+    assert out == "Hello world"  # trim 済み
+    # POST URL は /chat/completions に解決される
+    called_url = mock_client.post.call_args[0][0]
+    assert called_url == "http://localhost:8080/v1/chat/completions"
+    body = mock_client.post.call_args.kwargs["json"]
+    assert body["model"] == "llama3.1-8b"
+    assert body["temperature"] == 0.2
+    assert body["messages"] == [{"role": "user", "content": "hi"}]
+
+
+@pytest.mark.asyncio
+async def test_llamacpp_client_strips_end_tokens(fake_httpx_response):
+    """モデルが <|eot_id|> などを返したら切り捨てる。"""
+    resp = fake_httpx_response({
+        "choices": [{"message": {"content": "hello<|eot_id|>extra"}}],
+    })
+    async_ctx, _ = _mock_async_client(resp)
+    with patch("httpx.AsyncClient", return_value=async_ctx):
+        cli = LlamaCppClient(base_url="http://x/v1", model="m")
+        out = await cli.chat([{"role": "user", "content": "hi"}])
+    assert out == "hello"
+
+
+def test_factory_rejects_llamacpp_without_model():
+    """provider=llamacpp で model 未指定は ValueError。"""
+    config = SimpleNamespace(
+        llm=SimpleNamespace(
+            news_analysis=SimpleNamespace(provider="llamacpp", model=""),
+            llamacpp=SimpleNamespace(
+                base_url="http://x/v1", timeout_seconds=300, max_retries=2,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="llamacpp"):
+        create_llm_client(config, "news_analysis")
+
+
+def test_factory_creates_llamacpp_client():
+    """provider=llamacpp + model 指定で LlamaCppClient を返す。"""
+    config = SimpleNamespace(
+        llm=SimpleNamespace(
+            news_analysis=SimpleNamespace(provider="llamacpp", model="llama3.1-8b"),
+            llamacpp=SimpleNamespace(
+                base_url="http://localhost:8080/v1",
+                timeout_seconds=300,
+                max_retries=2,
+            ),
+        ),
+    )
+    client = create_llm_client(config, "news_analysis")
+    assert isinstance(client, LlamaCppClient)
+    assert client.model_name == "llama3.1-8b"
+    assert client.provider_name == "llamacpp"
+
+
+@pytest.mark.asyncio
+async def test_embed_text_llamacpp_uses_openai_format(fake_httpx_response):
+    """provider=llamacpp で /v1/embeddings を OpenAI 形式で叩く。"""
+    resp = fake_httpx_response({"data": [{"embedding": [0.1, 0.2, 0.3]}]})
+    async_ctx, mock_client = _mock_async_client(resp)
+
+    with patch("httpx.AsyncClient", return_value=async_ctx):
+        vec = await embed_text(
+            text="hello",
+            provider="llamacpp",
+            base_url="http://localhost:8080/v1",
+            model="nomic-embed-text",
+        )
+
+    assert vec == [0.1, 0.2, 0.3]
+    called_url = mock_client.post.call_args[0][0]
+    assert called_url == "http://localhost:8080/v1/embeddings"
+    body = mock_client.post.call_args.kwargs["json"]
+    assert body["input"] == "hello"
+    assert body["model"] == "nomic-embed-text"
+    # Ollama 形式の "prompt" キーを使っていないことを確認
+    assert "prompt" not in body
+
+
+@pytest.mark.asyncio
+async def test_embed_text_ollama_uses_legacy_format(fake_httpx_response):
+    """デフォルト provider=ollama では /api/embeddings を使う。"""
+    resp = fake_httpx_response({"embedding": [0.5, 0.6]})
+    async_ctx, mock_client = _mock_async_client(resp)
+
+    with patch("httpx.AsyncClient", return_value=async_ctx):
+        vec = await embed_text(
+            text="hi",
+            ollama_base_url="http://localhost:11434",
+            model="nomic-embed-text",
+        )
+
+    assert vec == [0.5, 0.6]
+    called_url = mock_client.post.call_args[0][0]
+    assert called_url == "http://localhost:11434/api/embeddings"
+    body = mock_client.post.call_args.kwargs["json"]
+    assert body["prompt"] == "hi"
+
+
+def test_make_embed_fn_ollama_default():
+    """config.rag.embedding_provider 未指定時は ollama にフォールバック。"""
+    config = SimpleNamespace(
+        llm=SimpleNamespace(
+            ollama=SimpleNamespace(base_url="http://localhost:11434"),
+        ),
+        rag=SimpleNamespace(embedding_model="nomic-embed-text"),
+    )
+    fn = make_embed_fn(config)
+    # functools.partial 経由で keyword args を検証
+    assert fn.keywords["provider"] == "ollama"
+    assert fn.keywords["ollama_base_url"] == "http://localhost:11434"
+
+
+def test_make_embed_fn_llamacpp():
+    """embedding_provider=llamacpp で base_url が llama-swap に切替わる。"""
+    config = SimpleNamespace(
+        llm=SimpleNamespace(
+            ollama=SimpleNamespace(base_url="http://localhost:11434"),
+            llamacpp=SimpleNamespace(base_url="http://localhost:8080/v1"),
+        ),
+        rag=SimpleNamespace(
+            embedding_model="nomic-embed-text",
+            embedding_provider="llamacpp",
+        ),
+    )
+    fn = make_embed_fn(config)
+    assert fn.keywords["provider"] == "llamacpp"
+    assert fn.keywords["base_url"] == "http://localhost:8080/v1"

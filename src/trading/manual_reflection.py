@@ -8,14 +8,13 @@ complete フェーズとして登録する。
 from __future__ import annotations
 
 import logging
-from functools import partial
 
 from src.analysis.price_analyzer import load_user_notes
 from src.analysis.reflector import generate_close_reflection
 from src.config import AppConfig
 from src.llm.factory import create_llm_client
 from src.rag.directional_writer import record_trade_complete
-from src.rag.embedder import embed_text
+from src.rag.embedder import make_embed_fn
 from src.rag.vector_store import VectorStore
 from src.trading.position_manager import Order
 
@@ -46,11 +45,7 @@ async def run_manual_reflection(
         logger.warning(f"[MANUAL/REFLECT] LLM client unavailable: {e}")
         return
 
-    embed_fn = partial(
-        embed_text,
-        ollama_base_url=config.llm.ollama.base_url,
-        model=config.rag.embedding_model,
-    )
+    embed_fn = make_embed_fn(config)
 
     try:
         reflection = await generate_close_reflection(

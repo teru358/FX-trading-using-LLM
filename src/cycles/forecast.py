@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from functools import partial
-
 from src.config import AppConfig
 from src.cycles._helpers import (
     _build_macro_context,
@@ -23,7 +21,7 @@ from src.data.analysis_store import AnalysisStore
 from src.data.price_provider import PriceProvider
 from src.persistence.state_store import StateStore
 from src.rag.directional_writer import record_forecast_entry, record_forecast_review
-from src.rag.embedder import embed_text
+from src.rag.embedder import make_embed_fn
 from src.rag.vector_store import VectorStore
 from src.trading.market_hours import is_market_open
 from src.trading.position_manager import PositionManager
@@ -51,11 +49,7 @@ async def forecast_cycle(
 
     logger.info(f"=== Forecast cycle: {now.strftime('%H:%M %Z')} ===")
 
-    embed_fn = partial(
-        embed_text,
-        ollama_base_url=config.llm.ollama.base_url,
-        model=config.rag.embedding_model,
-    )
+    embed_fn = make_embed_fn(config)
 
     for pair_cfg in config.tradeable_instruments:
         try:
