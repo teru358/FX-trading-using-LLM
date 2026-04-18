@@ -149,41 +149,106 @@ _profiles: dict[str, HostProfile] = {}
 
 # ── HTTP ヘルパー ────────────────────────────────────────────────
 
-def _get(path: str, params: dict | None = None) -> dict[str, Any] | None:
-    try:
-        r = httpx.get(
-            f"{_conn.profile.url}{path}", headers=_conn.headers, params=params, timeout=60,
+def _parse_host_port(url: str) -> tuple[str, int]:
+    """URL からホスト名とポートを抽出 (診断用)。"""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    host = parsed.hostname or "?"
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return host, port
+
+
+def _describe_error(url: str, e: Exception) -> str:
+    """HTTP エラーを人間可読な診断メッセージに変換する。
+
+    ポート開放・DNS 解決・デーモン起動状態など、原因の切り分けを助ける。
+    """
+    host, port = _parse_host_port(url)
+    err_type = type(e).__name__
+    msg = str(e).lower()
+
+    # 1. タイムアウト系
+    if isinstance(e, httpx.ConnectTimeout):
+        return (
+            f"[red]接続タイムアウト[/red] ([cyan]{host}:{port}[/cyan] に TCP 接続できず)\n"
+            f"  [dim]可能性:[/dim] ファイアウォール/ポート未開放 / ホスト down / ネットワーク経路断\n"
+            f"  [dim]確認:[/dim] [cyan]ping {host}[/cyan] / "
+            f"[cyan]nc -vz {host} {port}[/cyan] / "
+            f"stick PC 側で [cyan]ss -tlnp | grep {port}[/cyan]"
         )
+    if isinstance(e, httpx.ReadTimeout):
+        return (
+            f"[yellow]読み取りタイムアウト[/yellow] ([cyan]{host}:{port}[/cyan] は接続したが応答遅延)\n"
+            f"  [dim]可能性:[/dim] LLM 呼び出しが長引いている / サーバ側高負荷"
+        )
+    if isinstance(e, httpx.TimeoutException):
+        return (
+            f"[red]タイムアウト[/red] ([cyan]{host}:{port}[/cyan]): {e}\n"
+            f"  [dim]確認:[/dim] [cyan]nc -vz {host} {port}[/cyan] でポート到達性"
+        )
+
+    # 2. 接続エラー系
+    if isinstance(e, httpx.ConnectError):
+        if "name or service not known" in msg or "nodename nor servname" in msg or "[errno -2]" in msg:
+            return (
+                f"[red]DNS 解決失敗[/red] (ホスト名 [cyan]{host}[/cyan] が見つからない)\n"
+                f"  [dim]確認:[/dim] [cyan]getent hosts {host}[/cyan] / mDNS (.local) なら avahi-daemon が動いているか"
+            )
+        if "connection refused" in msg:
+            return (
+                f"[red]接続拒否[/red] ([cyan]{host}:{port}[/cyan] はポートを閉じている)\n"
+                f"  [dim]可能性:[/dim] finance デーモン未起動 / 別ポートで稼働中\n"
+                f"  [dim]確認:[/dim] stick PC 側で "
+                f"[cyan]systemctl --user status finance.service[/cyan]"
+            )
+        if "no route to host" in msg:
+            return (
+                f"[red]経路なし[/red] ([cyan]{host}[/cyan] にルーティング不可)\n"
+                f"  [dim]確認:[/dim] 同一 LAN か / VPN 状態 / [cyan]ip route[/cyan]"
+            )
+        if "network is unreachable" in msg:
+            return (
+                f"[red]ネットワーク到達不可[/red]\n"
+                f"  [dim]確認:[/dim] [cyan]ip addr[/cyan] でインターフェース状態"
+            )
+        return f"[red]接続失敗[/red] ({err_type}): {e}"
+
+    # 3. HTTP ステータスエラー
+    if isinstance(e, httpx.HTTPStatusError):
+        code = e.response.status_code
+        body = e.response.text[:200]
+        if code == 401 or code == 403:
+            return (
+                f"[red]認証エラー[/red] (HTTP {code}): {body}\n"
+                f"  [dim]確認:[/dim] [cyan]API_SECRET_KEY[/cyan] が両側で一致しているか"
+            )
+        if code == 404:
+            return f"[yellow]エンドポイント未実装[/yellow] (HTTP 404): {url}"
+        return f"[red]HTTP {code}[/red]: {body}"
+
+    # 4. その他
+    return f"[red]エラー[/red] ({err_type}): {e}"
+
+
+def _get(path: str, params: dict | None = None) -> dict[str, Any] | None:
+    url = f"{_conn.profile.url}{path}"
+    try:
+        r = httpx.get(url, headers=_conn.headers, params=params, timeout=60)
         r.raise_for_status()
         return r.json()
-    except httpx.ConnectError:
-        _console.print(
-            f"[red]接続失敗: {_conn.profile.url} に接続できません。[/red]"
-        )
-        return None
-    except httpx.HTTPStatusError as e:
-        _console.print(f"[red]HTTPエラー {e.response.status_code}: {e.response.text}[/red]")
-        return None
     except Exception as e:
-        _console.print(f"[red]エラー: {e}[/red]")
+        _console.print(_describe_error(url, e))
         return None
 
 
 def _post(path: str, json: dict | None = None) -> dict[str, Any] | None:
+    url = f"{_conn.profile.url}{path}"
     try:
-        r = httpx.post(
-            f"{_conn.profile.url}{path}", headers=_conn.headers, json=json, timeout=300,
-        )
+        r = httpx.post(url, headers=_conn.headers, json=json, timeout=300)
         r.raise_for_status()
         return r.json()
-    except httpx.ConnectError:
-        _console.print(f"[red]接続失敗: {_conn.profile.url} に接続できません。[/red]")
-        return None
-    except httpx.HTTPStatusError as e:
-        _console.print(f"[red]HTTPエラー {e.response.status_code}: {e.response.text}[/red]")
-        return None
     except Exception as e:
-        _console.print(f"[red]エラー: {e}[/red]")
+        _console.print(_describe_error(url, e))
         return None
 
 
@@ -552,9 +617,9 @@ def _start_log_poller(stop_event: threading.Event, interval: float = 3.0) -> Non
                 err = str(e)
                 if _conn.online or err != _conn.last_poll_error:
                     _console.print(
-                        f"[yellow][OFFLINE] {_conn.profile.name} への接続が切れました: "
-                        f"{err[:80]}[/yellow]"
+                        f"[yellow][OFFLINE] {_conn.profile.name} への接続が切れました[/yellow]"
                     )
+                    _console.print(_describe_error(f"{_conn.profile.url}/logs", e))
                     with _conn.lock:
                         _conn.online = False
                         _conn.last_poll_error = err
