@@ -6,7 +6,7 @@ REST API 経由でデーモンプロセス (ローカル or リモート) を操
 
 使い方:
     uv run python client.py                       # 対話 (default ホスト)
-    uv run python client.py --host stickpc        # 対話 (stickpc プロファイル)
+    uv run python client.py --host remote         # 対話 (remote プロファイル)
     uv run python client.py --url http://x:8811   # 対話 (URL 直接指定)
     uv run python client.py status                # 1 コマンド実行
     uv run python client.py --host main logs 50   # 指定ホストで logs
@@ -579,7 +579,7 @@ _HELP = """\
   [cyan]feeds[/cyan]                — RSSフィード疎通確認
   [cyan]health[/cyan]               — プロセス死活確認
   [cyan]hosts[/cyan]                — ホストプロファイル一覧
-  [cyan]use[/cyan] <name>           — 接続先ホスト切替  例: use stickpc
+  [cyan]use[/cyan] <name>           — 接続先ホスト切替  例: use remote
   [cyan]help[/cyan]   (h)           — このヘルプを表示
   [cyan]quit[/cyan]   (q)           — クライアントを終了（デーモンは継続稼働）"""
 
@@ -658,7 +658,7 @@ def _parse_args() -> tuple[argparse.Namespace, list[str]]:
         "--host", help="名前付きホストプロファイル (config/hosts.yaml)",
     )
     parser.add_argument(
-        "--url", help="直接 URL 指定 (例: http://stream-svr.local:8811)",
+        "--url", help="直接 URL 指定 (例: http://192.168.1.100:8811)",
     )
     # 残りの引数は非対話モードのコマンドとして扱う
     args, rest = parser.parse_known_args()
