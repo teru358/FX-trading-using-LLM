@@ -28,43 +28,102 @@ def _check_one_symbol(inst: InstrumentConfig) -> tuple[bool, str]:
 _console = Console()
 
 
+def _ollama_required_models(config: AppConfig) -> dict[str, str]:
+    """Ollama に要求されるモデル {model_name: display_label}。"""
+    models: dict[str, str] = {}
+    roles = ("news_analysis", "price_analysis", "reflection")
+
+    # デフォルトモデルは Ollama ロールでモデル未指定のものがある場合のみチェック
+    needs_default = any(
+        getattr(config.llm, role).provider == "ollama" and not getattr(config.llm, role).model
+        for role in roles
+    )
+    if needs_default:
+        models[_DEFAULT_OLLAMA_MODEL] = f"Ollama: {_DEFAULT_OLLAMA_MODEL}"
+
+    for role in roles:
+        role_cfg = getattr(config.llm, role)
+        if role_cfg.provider == "ollama" and role_cfg.model:
+            models[role_cfg.model] = f"Ollama: {role_cfg.model}"
+
+    if getattr(config.rag, "embedding_provider", "ollama") == "ollama":
+        models[config.rag.embedding_model] = f"Ollama: {config.rag.embedding_model}"
+    return models
+
+
+def _llamacpp_required_models(config: AppConfig) -> dict[str, str]:
+    """llama-swap に要求されるモデル {model_name: display_label}。"""
+    models: dict[str, str] = {}
+    for role in ("news_analysis", "price_analysis", "reflection"):
+        role_cfg = getattr(config.llm, role)
+        if role_cfg.provider == "llamacpp" and role_cfg.model:
+            models[role_cfg.model] = f"llamacpp: {role_cfg.model}"
+    if getattr(config.rag, "embedding_provider", "ollama") == "llamacpp":
+        models[config.rag.embedding_model] = f"llamacpp: {config.rag.embedding_model}"
+    return models
+
+
+def _check_ollama(config: AppConfig, models_to_check: dict[str, str]) -> list[tuple[str, str, bool]]:
+    """Ollama の疎通と必要モデル存在をチェック。"""
+    import httpx
+
+    results: list[tuple[str, str, bool]] = []
+    try:
+        resp = httpx.get(f"{config.llm.ollama.base_url}/api/tags", timeout=5)
+        resp.raise_for_status()
+        available = [m["name"] for m in resp.json().get("models", [])]
+    except Exception:
+        results.append((f"Ollama ({config.llm.ollama.base_url})", "[red]UNREACHABLE[/red]", False))
+        return results
+
+    for model_name, label in models_to_check.items():
+        found = any(model_name in n for n in available)
+        status = "[green]OK[/green]" if found else "[red]NOT FOUND[/red]"
+        results.append((label, status, found))
+    return results
+
+
+def _check_llamacpp(config: AppConfig, models_to_check: dict[str, str]) -> list[tuple[str, str, bool]]:
+    """llama-swap (llama.cpp) の疎通と必要モデル登録をチェック。"""
+    import httpx
+
+    results: list[tuple[str, str, bool]] = []
+    base_url = config.llm.llamacpp.base_url.rstrip("/")
+    try:
+        resp = httpx.get(f"{base_url}/models", timeout=5)
+        resp.raise_for_status()
+        available = {m["id"] for m in resp.json().get("data", [])}
+    except Exception:
+        results.append((f"llamacpp ({base_url})", "[red]UNREACHABLE[/red]", False))
+        return results
+
+    for model_name, label in models_to_check.items():
+        found = model_name in available
+        status = "[green]OK[/green]" if found else "[red]NOT FOUND[/red]"
+        results.append((label, status, found))
+    return results
+
+
 def startup_checks(config: AppConfig) -> bool:
-    """起動時チェック（Ollamaモデル・シンボル疎通・ディレクトリ）を実行して結果を表示する。"""
+    """起動時チェック（LLMプロバイダー・シンボル疎通・ディレクトリ）を実行して結果を表示する。"""
     checks: list[tuple[str, str, bool]] = []
     ok = True
 
-    # Ollama チェック
-    try:
-        import httpx
-
-        base_url = config.llm.ollama.base_url
-        resp = httpx.get(f"{base_url}/api/tags", timeout=5)
-        resp.raise_for_status()
-        model_names = [m["name"] for m in resp.json().get("models", [])]
-
-        # チェック対象: ロール別モデル（明示指定分）+ embeddingモデル
-        # デフォルトモデルは Ollama ロールでモデル未指定のものがある場合のみチェック
-        models_to_check: dict[str, str] = {}
-        needs_default = any(
-            getattr(config.llm, role).provider == "ollama" and not getattr(config.llm, role).model
-            for role in ("news_analysis", "price_analysis", "reflection")
-        )
-        if needs_default:
-            models_to_check[_DEFAULT_OLLAMA_MODEL] = f"Ollama: {_DEFAULT_OLLAMA_MODEL}"
-        for role in ("news_analysis", "price_analysis", "reflection"):
-            role_cfg = getattr(config.llm, role)
-            if role_cfg.provider == "ollama" and role_cfg.model:
-                models_to_check[role_cfg.model] = f"Ollama: {role_cfg.model}"
-        models_to_check[config.rag.embedding_model] = f"Ollama: {config.rag.embedding_model}"
-
-        for model_name, model_key in models_to_check.items():
-            found = any(model_name in n for n in model_names)
-            checks.append((model_key, "[green]OK[/green]" if found else "[red]NOT FOUND[/red]", found))
-            if not found:
+    # Ollama チェック (ollama を利用するロールがある場合のみ)
+    ollama_models = _ollama_required_models(config)
+    if ollama_models:
+        for item, status, passed in _check_ollama(config, ollama_models):
+            checks.append((item, status, passed))
+            if not passed:
                 ok = False
-    except Exception:
-        checks.append((f"Ollama ({config.llm.ollama.base_url})", "[red]UNREACHABLE[/red]", False))
-        ok = False
+
+    # llama.cpp (llama-swap) チェック (llamacpp を利用するロールがある場合のみ)
+    llamacpp_models = _llamacpp_required_models(config)
+    if llamacpp_models:
+        for item, status, passed in _check_llamacpp(config, llamacpp_models):
+            checks.append((item, status, passed))
+            if not passed:
+                ok = False
 
     # シンボル疎通チェック（並列フェッチ）
     instruments = config.enabled_instruments
