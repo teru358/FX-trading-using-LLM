@@ -15,7 +15,7 @@ from rich.table import Table
 from src.cli import run_commands
 from src.concurrency.job_guard import JobGuard
 from src.concurrency.priority_job_slot import PriorityJobSlot
-from src.config import BASE_DIR, _DEFAULT_OLLAMA_MODEL, load_config
+from src.config import BASE_DIR, load_config
 from src.data.analysis_store import AnalysisStore
 from src.data.price_store import PriceStore
 from src.jobs.news_collector import run_news_collection
@@ -94,29 +94,17 @@ def main() -> None:
     config = load_config()
     setup_logging(config.logging, BASE_DIR)
 
-    # 構成サマリを 1 行で出す (起動時の構成を事後解析から辿れるように)
-    def _llm_label(role_cfg) -> str:
-        # ollama の場合のみ default を補う。他の provider はモデル未指定なら "default" と表示。
-        if role_cfg.model:
-            return f"{role_cfg.provider}({role_cfg.model})"
-        if role_cfg.provider == "ollama":
-            return f"ollama({_DEFAULT_OLLAMA_MODEL})"
-        return f"{role_cfg.provider}(default)"
-
+    # 構成サマリ (LLM 詳細は Startup Checks パネル側で表示)
     _trade_n = len(config.tradeable_instruments)
     _watch_n = len(config.watch_only_instruments)
-    _llm_price = _llm_label(config.llm.price_analysis)
-    _llm_news = _llm_label(config.llm.news_analysis)
-    _llm_reflect = _llm_label(config.llm.reflection)
     _tv = "on" if config.tradingview.enabled else "off"
     _api = "on" if config.api.enabled else "off"
     _pp = config.price_provider.realtime_provider
     _logger.info(
         "[SYSTEM] Startup — mode=%s daemon=%s instruments=%dtrade/%dwatch "
-        "LLM price=%s news=%s reflect=%s TV=%s API=%s provider=%s",
+        "TV=%s API=%s provider=%s",
         config.trading.trading_mode, args.daemon,
         _trade_n, _watch_n,
-        _llm_price, _llm_news, _llm_reflect,
         _tv, _api, _pp,
     )
 
@@ -224,13 +212,7 @@ def main() -> None:
         if deleted > 0:
             _console.print(f"[dim][RAG] cleanup: {deleted} entries deleted[/dim]")
 
-    def _model(role_cfg) -> str:
-        return role_cfg.model or _DEFAULT_OLLAMA_MODEL
     sched_table.add_row("Price provider", price_provider.status_line())
-    sched_table.add_row("LLM (news)",      _model(config.llm.news_analysis))
-    sched_table.add_row("LLM (price)",     _model(config.llm.price_analysis))
-    sched_table.add_row("LLM (reflect)",   _model(config.llm.reflection))
-    sched_table.add_row("Embed model",     config.rag.embedding_model)
     _console.print(Panel(sched_table, title="[bold cyan]Schedule[/bold cyan]", border_style="cyan", padding=(0, 1)))
 
     # ジョブ登録（実行優先順: 軽量ジョブを先に登録 → 同時刻では先に実行される）
