@@ -142,6 +142,7 @@ async def analyze_category_sentiment(
 
     MAX_RETRIES = 2
     last_error: str | None = None
+    response_text: str = ""  # LLM 呼び出し自体が失敗した場合に備えて初期化
 
     for attempt in range(MAX_RETRIES):
         try:
@@ -162,10 +163,13 @@ async def analyze_category_sentiment(
             )
             if attempt < MAX_RETRIES - 1:
                 # リトライ: JSON出力を明示的に要求
-                messages.append({"role": "assistant", "content": response_text})
-                messages.append({"role": "user", "content":
-                    "Your response was not valid JSON. Please return ONLY a valid JSON object with no extra text."
-                })
+                # ただし LLM 呼び出し自体が失敗したケース (response_text="") では
+                # assistant turn を挿入しない (モデル対話として不整合になるため)
+                if response_text:
+                    messages.append({"role": "assistant", "content": response_text})
+                    messages.append({"role": "user", "content":
+                        "Your response was not valid JSON. Please return ONLY a valid JSON object with no extra text."
+                    })
                 continue
 
     logger.warning(f"[NEWS] {label}: All {MAX_RETRIES} attempts failed. Returning neutral sentiment.")

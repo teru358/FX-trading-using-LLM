@@ -35,6 +35,7 @@ API キー不要。ローカル LLM GPU 不要 (embed は別途 ollama 等で処
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 
 from tenacity import Retrying, retry_if_not_exception_type, stop_after_attempt, wait_fixed
@@ -42,6 +43,15 @@ from tenacity import Retrying, retry_if_not_exception_type, stop_after_attempt, 
 from src.llm.client import LLMClient
 
 logger = logging.getLogger(__name__)
+
+# Claude CLI がサブスク認証を使う際に、外部 API キー系 env が存在すると
+# 誤ってそちらを使い "Invalid API key" を返すため subprocess から除外する。
+_STRIP_ENV_VARS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "CLAUDE_API_KEY",
+)
 
 
 class ClaudeCliError(RuntimeError):
@@ -135,6 +145,14 @@ class ClaudeCliClient(LLMClient):
         argv.append(prompt)
         return argv
 
+    def _child_env(self) -> dict[str, str]:
+        """subprocess 用の環境変数。CLI がサブスク認証を使うよう
+        外部 API キー系の env をクリアする。"""
+        env = os.environ.copy()
+        for key in _STRIP_ENV_VARS:
+            env.pop(key, None)
+        return env
+
     async def _spawn(self, argv: list[str]) -> tuple[int, str, str]:
         """subprocess を spawn し (returncode, stdout, stderr) を返す。"""
         proc = await asyncio.create_subprocess_exec(
@@ -142,6 +160,7 @@ class ClaudeCliClient(LLMClient):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=self._isolated_cwd,
+            env=self._child_env(),
         )
         try:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(

@@ -231,3 +231,29 @@ def test_build_argv_includes_model_output_format_and_extra_args():
     assert "--dangerously-skip-permissions" in argv
     # プロンプトは最後
     assert argv[-1] == "test prompt"
+
+
+# ── subprocess env clean-up ────────────────────────────────────────────────────
+
+
+def test_child_env_strips_anthropic_api_keys(monkeypatch):
+    """外部 API キー系の env が subprocess から除外される。
+
+    Claude CLI は ANTHROPIC_API_KEY 等が存在するとサブスク認証を使わず
+    "Invalid API key" エラーになるため、明示的にクリアする必要がある。
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-xxx")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok-yyy")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://evil.example.com")
+    monkeypatch.setenv("CLAUDE_API_KEY", "key-zzz")
+    monkeypatch.setenv("OTHER_VAR", "keep-me")
+
+    client = ClaudeCliClient(model="claude-haiku-4-5")
+    env = client._child_env()
+
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+    assert "ANTHROPIC_BASE_URL" not in env
+    assert "CLAUDE_API_KEY" not in env
+    # 他の変数は保持される (PATH など)
+    assert env.get("OTHER_VAR") == "keep-me"
