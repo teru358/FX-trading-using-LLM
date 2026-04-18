@@ -6,7 +6,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from src.startup import _llamacpp_required_models, _ollama_required_models
+from src.startup import (
+    _collect_llm_role_entries,
+    _llamacpp_required_models,
+    _ollama_required_models,
+)
 
 
 def _make_config(
@@ -48,11 +52,7 @@ def test_ollama_required_models_all_ollama_explicit_overrides():
         reflection=("ollama", "deepseek-r1:8b"),
     )
     models = _ollama_required_models(config)
-    assert "gemma3:4b" in models
-    assert "plutus" in models
-    assert "deepseek-r1:8b" in models
-    assert "nomic-embed-text" in models
-    assert "llama3.1:8b" not in models  # デフォルト不要
+    assert models == {"gemma3:4b", "plutus", "deepseek-r1:8b", "nomic-embed-text"}
 
 
 def test_ollama_required_models_all_llamacpp():
@@ -63,7 +63,7 @@ def test_ollama_required_models_all_llamacpp():
         price=("llamacpp", "plutus"),
         reflection=("llamacpp", "deepseek-r1-8b"),
     )
-    assert _ollama_required_models(config) == {}
+    assert _ollama_required_models(config) == set()
 
 
 def test_llamacpp_required_models_all_llamacpp():
@@ -74,19 +74,15 @@ def test_llamacpp_required_models_all_llamacpp():
         price=("llamacpp", "plutus"),
         reflection=("llamacpp", "deepseek-r1-8b"),
     )
-    models = _llamacpp_required_models(config)
-    assert models == {
-        "llama3.1-8b": "llamacpp: llama3.1-8b",
-        "plutus": "llamacpp: plutus",
-        "deepseek-r1-8b": "llamacpp: deepseek-r1-8b",
-        "nomic-embed-text": "llamacpp: nomic-embed-text",
+    assert _llamacpp_required_models(config) == {
+        "llama3.1-8b", "plutus", "deepseek-r1-8b", "nomic-embed-text",
     }
 
 
 def test_llamacpp_required_models_all_ollama():
     """全ロール ollama → llamacpp 必要モデルは空。"""
     config = _make_config()
-    assert _llamacpp_required_models(config) == {}
+    assert _llamacpp_required_models(config) == set()
 
 
 def test_mixed_providers():
@@ -97,14 +93,8 @@ def test_mixed_providers():
         price=("ollama", "plutus:latest"),
         reflection=("claude", "claude-haiku"),  # 別プロバイダー
     )
-    ollama_models = _ollama_required_models(config)
-    assert ollama_models == {"plutus:latest": "Ollama: plutus:latest"}
-
-    llamacpp_models = _llamacpp_required_models(config)
-    assert llamacpp_models == {
-        "llama3.1-8b": "llamacpp: llama3.1-8b",
-        "nomic-embed-text": "llamacpp: nomic-embed-text",
-    }
+    assert _ollama_required_models(config) == {"plutus:latest"}
+    assert _llamacpp_required_models(config) == {"llama3.1-8b", "nomic-embed-text"}
 
 
 def test_api_providers_are_skipped_from_both():
@@ -115,8 +105,30 @@ def test_api_providers_are_skipped_from_both():
         price=("openai", "gpt-4o-mini"),
         reflection=("claude", "claude-haiku"),
     )
-    assert _ollama_required_models(config) == {}
+    assert _ollama_required_models(config) == set()
     # embedding のみ llamacpp
-    assert _llamacpp_required_models(config) == {
-        "nomic-embed-text": "llamacpp: nomic-embed-text",
-    }
+    assert _llamacpp_required_models(config) == {"nomic-embed-text"}
+
+
+def test_collect_llm_role_entries_order_and_labels():
+    """表示用エントリは news → price → reflect → embed の順で短縮ラベル化される。"""
+    config = _make_config(
+        embedding_provider="llamacpp",
+        news=("llamacpp", "llama3.1-8b"),
+        price=("llamacpp", "plutus"),
+        reflection=("ollama", "deepseek-r1:8b"),
+    )
+    entries = _collect_llm_role_entries(config)
+    assert [e[0] for e in entries] == ["news", "price", "reflect", "embed"]
+    assert entries[0] == ("news", "llamacpp", "llama3.1-8b")
+    assert entries[1] == ("price", "llamacpp", "plutus")
+    assert entries[2] == ("reflect", "ollama", "deepseek-r1:8b")
+    assert entries[3] == ("embed", "llamacpp", "nomic-embed-text")
+
+
+def test_collect_llm_role_entries_ollama_default_model():
+    """Ollama で model 未指定 → _DEFAULT_OLLAMA_MODEL がフォールバックとして表示される。"""
+    config = _make_config(news=("ollama", ""))
+    entries = _collect_llm_role_entries(config)
+    news_entry = next(e for e in entries if e[0] == "news")
+    assert news_entry == ("news", "ollama", "llama3.1:8b")
