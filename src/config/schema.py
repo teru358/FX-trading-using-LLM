@@ -80,6 +80,32 @@ class OllamaBaseConfig:
 
 
 @dataclass
+class LlamaCppBaseConfig:
+    """llama.cpp (llama-swap) 接続設定。OpenAI 互換 /v1 エンドポイントを前提。
+
+    timeout_seconds はモデル初回ロード時間も含めるため長めに設定 (既定 300 秒)。
+    llama-swap がリクエスト時に対象モデルをロードするため、初回は数十秒かかる。
+    """
+    base_url: str = "http://localhost:8080/v1"
+    timeout_seconds: int = 300
+    max_retries: int = 2
+
+
+@dataclass
+class ClaudeCliBaseConfig:
+    """Claude Code CLI (`claude -p`) 接続設定。サブスクプラン利用時の subprocess 呼び出し。
+
+    前提: `claude` CLI が PATH に存在し、`claude login` で認証済み。
+    isolated_cwd: CLAUDE.md / skills 汚染を避けるための隔離ディレクトリ (空ディレクトリ推奨)。
+    """
+    command: str = "claude"
+    isolated_cwd: str = ""
+    timeout_seconds: int = 120
+    max_retries: int = 2
+    extra_args: list[str] = field(default_factory=list)
+
+
+@dataclass
 class TradingConfig:
     initial_balance: float = 10000.0
     risk_per_trade: float = 0.02
@@ -231,6 +257,10 @@ class NewsSourcesConfig:
 class RagConfig:
     db_path: str = "data/rag"
     embedding_model: str = "nomic-embed-text"
+    # embedding プロバイダー: "ollama" | "llamacpp"
+    # "ollama"   — Ollama の /api/embeddings を使用 (従来互換)
+    # "llamacpp" — llama-swap の /v1/embeddings (OpenAI 互換) を使用
+    embedding_provider: str = "ollama"
     news_lookback_hours: int = 24
     retrieval_top_k: int = 5
     reflection_lookback_count: int = 3
@@ -398,6 +428,8 @@ class LLMRoleConfig:
 class LLMConfig:
     """3種類の分析ロールごとに LLM プロバイダーを個別設定する。"""
     ollama: OllamaBaseConfig = field(default_factory=OllamaBaseConfig)
+    llamacpp: LlamaCppBaseConfig = field(default_factory=LlamaCppBaseConfig)
+    claude_cli: ClaudeCliBaseConfig = field(default_factory=ClaudeCliBaseConfig)
     news_analysis: LLMRoleConfig = field(
         default_factory=lambda: LLMRoleConfig(temperature=0.3)
     )

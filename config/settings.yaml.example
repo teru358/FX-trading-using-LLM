@@ -16,13 +16,14 @@ api:
 # LLM設定 — ニュース分析 / 価格分析 / 振り返り生成を個別に設定
 #
 # provider:
-#   "ollama"  — ローカル Ollama（デフォルト、API KEY不要）
-#   "gemini"  — Google Gemini API  （GEMINI_API_KEY 必須）
-#   "openai"  — OpenAI API         （OPENAI_API_KEY 必須）
-#   "claude"  — Anthropic Claude   （ANTHROPIC_API_KEY 必須）
+#   "ollama"   — ローカル Ollama（デフォルト、API KEY不要）
+#   "llamacpp" — ローカル llama.cpp (llama-swap 経由、API KEY不要)
+#   "gemini"   — Google Gemini API  （GEMINI_API_KEY 必須）
+#   "openai"   — OpenAI API         （OPENAI_API_KEY 必須）
+#   "claude"   — Anthropic Claude   （ANTHROPIC_API_KEY 必須）
 #
 # model: 空文字 "" = 各プロバイダーセクションのデフォルトモデルを使用
-#        明示的に指定する場合は例: model: "gemini-2.5-pro-preview"
+#        llamacpp の場合は model 必須（llama-swap config.yaml の models.<name> と一致）
 # ============================================================
 llm:
   # Ollama 接続設定（model 指定は各ロールで行う）
@@ -31,6 +32,22 @@ llm:
     timeout_seconds: 120
     max_retries: 2
     max_concurrent: 2              # 同時分析数上限（VRAM保護）
+
+  # llama.cpp (llama-swap) 接続設定（provider: "llamacpp" のときに参照）
+  llamacpp:
+    base_url: "http://localhost:8080/v1"
+    timeout_seconds: 300           # モデル初回ロード時間を含むため長めに
+    max_retries: 2
+
+  # Claude Code CLI 接続設定（provider: "claude-cli" のときに参照）
+  # Claude Max 等のサブスクプラン経由で subprocess として `claude -p` を呼び出す。
+  # 前提: `claude` CLI が PATH にあり、`claude login` 済み。
+  claude_cli:
+    command: "claude"              # 実行パス or コマンド名
+    isolated_cwd: ""               # CLAUDE.md 汚染回避用ディレクトリ (例 "/opt/finance-cli")
+    timeout_seconds: 120
+    max_retries: 2
+    extra_args: []                 # 追加フラグ (例: ["--dangerously-skip-permissions"])
 
   # model 未指定時は config.py の _DEFAULT_OLLAMA_MODEL（llama3.1:8b）を使用
   news_analysis:
@@ -235,6 +252,8 @@ news_collection:
 rag:
   db_path: "data/rag"
   embedding_model: "nomic-embed-text"
+  # embedding プロバイダー: "ollama" (従来) | "llamacpp" (llama-swap 経由)
+  embedding_provider: "ollama"
   news_lookback_hours: 24
   retrieval_top_k: 5
   reflection_lookback_count: 3

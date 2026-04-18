@@ -135,12 +135,9 @@ class AskContextBuilder:
         all_instruments = config.watch_only_instruments + config.tradeable_instruments
         pairs = extract_pairs(user_message, all_instruments)
 
-        from src.rag.embedder import embed_text
-        query_embedding = await embed_text(
-            text=user_message,
-            ollama_base_url=config.llm.ollama.base_url,
-            model=config.rag.embedding_model,
-        )
+        from src.rag.embedder import make_embed_fn
+        embed_fn = make_embed_fn(config)
+        query_embedding = await embed_fn(text=user_message)
 
         semantic_results = await self._semantic_search(query_embedding, pairs)
         technical = self._build_technical_snapshots(pairs)

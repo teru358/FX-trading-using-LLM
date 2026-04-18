@@ -409,8 +409,6 @@ async def collect_all_technical(
     # Phase 3: 経済指標影響分析 (オプション)
     if config.economic_calendar.enabled:
         try:
-            from functools import partial
-
             from src.utils.clock import db_now
 
             from src.data.econ_event_store import EconEventStore
@@ -419,7 +417,7 @@ async def collect_all_technical(
                 analyze_event_impact, PairReaction, SnapshotBrief
             )
             from src.analysis.economic_calendar import classify_surprise
-            from src.rag.embedder import embed_text
+            from src.rag.embedder import make_embed_fn
 
             econ_store = EconEventStore(config.econ_db_path)
 
@@ -514,11 +512,7 @@ async def collect_all_technical(
                         )
 
                         # RAG保存
-                        embed_fn = partial(
-                            embed_text,
-                            ollama_base_url=config.llm.ollama.base_url,
-                            model=config.rag.embedding_model,
-                        )
+                        embed_fn = make_embed_fn(config)
                         embedding = await embed_fn(report)
                         store.upsert_econ_analysis(
                             event_id=ev.event_id,

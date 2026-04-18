@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from functools import partial
 
 from src.analysis.price_analyzer import analyze_price_action, load_user_notes
 from src.analysis.reflector import generate_close_reflection
@@ -45,7 +44,7 @@ from src.rag.directional_writer import (
     record_trade_complete,
     record_trade_entry,
 )
-from src.rag.embedder import embed_text
+from src.rag.embedder import make_embed_fn
 from src.rag.vector_store import VectorStore
 from src.reporting.reporter import print_run_summary
 from src.signals.rag_adjustment import RagAdjustmentConfig, compute_rag_adjustment
@@ -392,11 +391,7 @@ async def _review_hold_decisions(
         return
 
     logger.info(f"[HOLD REVIEW] Reviewing {len(unreviewed)} hold decision(s)")
-    embed_fn = partial(
-        embed_text,
-        ollama_base_url=config.llm.ollama.base_url,
-        model=config.rag.embedding_model,
-    )
+    embed_fn = make_embed_fn(config)
 
     for hold in unreviewed:
         try:
@@ -939,11 +934,7 @@ async def trading_cycle(
     # internal 用 notifier: signal モードでは NullNotifier (通知なし)
     internal_notifier = NullNotifier() if is_signal_mode else notifier
 
-    embed_fn = partial(
-        embed_text,
-        ollama_base_url=config.llm.ollama.base_url,
-        model=config.rag.embedding_model,
-    )
+    embed_fn = make_embed_fn(config)
 
     # Phase 1: SL/TP クローズ (internal)
     closed_this_run = await _phase_close_sl_tp(config, position_mgr, broker, internal_notifier, price_provider)

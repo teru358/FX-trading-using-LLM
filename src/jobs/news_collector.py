@@ -17,7 +17,7 @@ from src.analysis.price_analyzer import load_user_notes
 from src.analysis.rss_fetcher import fetch_category_news
 from src.config import AppConfig
 from src.llm.factory import create_llm_client
-from src.rag.embedder import embed_text
+from src.rag.embedder import make_embed_fn
 from src.rag.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -107,13 +107,10 @@ async def collect_category(
 
     # 方向別RAGから類似テーマの取引振り返りを検索
     trade_lessons = ""
+    embed_fn = make_embed_fn(config)
     try:
         news_text_for_search = fetch_result.format_for_llm()[:500]
-        query_embedding = await embed_text(
-            text=news_text_for_search,
-            ollama_base_url=config.llm.ollama.base_url,
-            model=config.rag.embedding_model,
-        )
+        query_embedding = await embed_fn(text=news_text_for_search)
         bullish_hits = store.directional.query(query_embedding, "bullish", top_k=3)
         bearish_hits = store.directional.query(query_embedding, "bearish", top_k=3)
         all_hits = bullish_hits + bearish_hits
@@ -153,11 +150,7 @@ async def collect_category(
     # 次サイクルで同じ記事セットに対する再分析は起こるが、LLM 分析結果自体はログに残る。
     text = _format_for_embedding(category, news)
     try:
-        embedding = await embed_text(
-            text=text,
-            ollama_base_url=config.llm.ollama.base_url,
-            model=config.rag.embedding_model,
-        )
+        embedding = await embed_fn(text=text)
         entry_id = f"{category}_{db_now().strftime('%Y%m%d%H%M')}"
         store.upsert_category_news(
             entry_id=entry_id,

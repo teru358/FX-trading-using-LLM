@@ -24,7 +24,7 @@ from src.data.session_store import SessionStore
 from src.llm.factory import create_llm_client
 from src.persistence.state_store import StateStore
 from src.rag.ask_context_builder import AskContextBuilder, extract_pairs
-from src.rag.embedder import embed_text
+from src.rag.embedder import make_embed_fn
 from src.rag.vector_store import VectorStore
 from src.reporting.reporter import print_news_summary, print_run_summary, print_tech_summary
 from src.trading.position_manager import PositionManager
@@ -247,10 +247,9 @@ async def _run_ask(
         # 回答の要約（長すぎる場合は先頭500文字）
         insight_text = response[:500] if len(response) > 500 else response
 
-        insight_embedding = await embed_text(
+        embed_fn = make_embed_fn(config)
+        insight_embedding = await embed_fn(
             text=f"Q: {user_message}\nA: {insight_text}",
-            ollama_base_url=config.llm.ollama.base_url,
-            model=config.rag.embedding_model,
         )
 
         now = db_now()

@@ -32,3 +32,4 @@ compare/
 
 clear_data.py
 .pid
+scripts/bench_ollama_vs_llamacpp.py
