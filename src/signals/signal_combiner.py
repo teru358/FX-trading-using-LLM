@@ -90,16 +90,22 @@ def combine_signals(
                 f"conf×{tv_conflict_dampen}"
             )
 
-    # Deadband: confidence 連動型
-    # 高確信 (≥0.80) → deadband 緩和 (0.10): indicator の一致度が高い = ノイズが少ない
-    # 中確信 (≥0.60) → 通常 deadband
-    # 低確信 (<0.60) → deadband 拡大 (0.20): 不確かな時は厳しくフィルタ
+    # Deadband: confidence 連動 + market_regime 連動
+    # Step 1: confidence による基本調整
     if combined_confidence >= 0.80:
         effective_deadband = signal_deadband * 0.67  # 0.15 → 0.10
     elif combined_confidence < 0.60:
         effective_deadband = signal_deadband * 1.33  # 0.15 → 0.20
     else:
         effective_deadband = signal_deadband
+
+    # Step 2: market_regime による追加調整
+    # trending → トレンドに乗りやすく (×0.8)、ranging → レンジノイズ回避 (×1.2)
+    regime = getattr(price, "market_regime", "unknown")
+    if regime == "trending":
+        effective_deadband *= 0.8
+    elif regime == "ranging":
+        effective_deadband *= 1.2
 
     if combined_confidence < confidence_threshold:
         action = "hold"
@@ -128,12 +134,10 @@ def combine_signals(
     else:
         predicted_direction = "neutral"
 
-    # Entry price: midpoint of Ollama's entry zone, or current price if neutral
+    # Entry price: 成行約定前提のため current_price を使用
+    # LLM の entry_zone は理想的なエントリーゾーンだが、ペーパートレードでは
+    # 指値注文ができないため current_price で約定する。entry_zone は reasoning 参考用。
     entry_price = current_price
-    if action == "buy":
-        entry_price = price.entry_zone[0]  # buy near the bottom of the zone
-    elif action == "sell":
-        entry_price = price.entry_zone[1]  # sell near the top of the zone
 
     # SL/TP と position_size は ATR ベースで後から算出される (_apply_atr_sltp_to_signal)
     # ここではプレースホルダーを設定し、ATR 未通過時のフォールバックとする
