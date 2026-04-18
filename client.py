@@ -174,7 +174,7 @@ def _describe_error(url: str, e: Exception) -> str:
             f"  [dim]可能性:[/dim] ファイアウォール/ポート未開放 / ホスト down / ネットワーク経路断\n"
             f"  [dim]確認:[/dim] [cyan]ping {host}[/cyan] / "
             f"[cyan]nc -vz {host} {port}[/cyan] / "
-            f"stick PC 側で [cyan]ss -tlnp | grep {port}[/cyan]"
+            f"サーバ側で [cyan]ss -tlnp | grep {port}[/cyan]"
         )
     if isinstance(e, httpx.ReadTimeout):
         return (
@@ -198,7 +198,7 @@ def _describe_error(url: str, e: Exception) -> str:
             return (
                 f"[red]接続拒否[/red] ([cyan]{host}:{port}[/cyan] はポートを閉じている)\n"
                 f"  [dim]可能性:[/dim] finance デーモン未起動 / 別ポートで稼働中\n"
-                f"  [dim]確認:[/dim] stick PC 側で "
+                f"  [dim]確認:[/dim] サーバ側で "
                 f"[cyan]systemctl --user status finance.service[/cyan]"
             )
         if "no route to host" in msg:
