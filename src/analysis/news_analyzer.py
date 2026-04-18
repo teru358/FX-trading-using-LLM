@@ -161,6 +161,11 @@ async def analyze_category_sentiment(
             logger.warning(
                 f"[NEWS] {label}: Analysis failed (attempt {attempt + 1}/{MAX_RETRIES}): {e}"
             )
+            if response_text:
+                logger.warning(
+                    f"[NEWS] {label}: raw response ({len(response_text)} chars, first 1000): "
+                    f"{response_text[:1000]!r}"
+                )
             if attempt < MAX_RETRIES - 1:
                 # リトライ: JSON出力を明示的に要求
                 # ただし LLM 呼び出し自体が失敗したケース (response_text="") では
