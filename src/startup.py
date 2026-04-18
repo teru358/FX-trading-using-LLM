@@ -102,6 +102,44 @@ def _fetch_llamacpp_models(config: AppConfig) -> set[str] | None:
         return None
 
 
+def _claude_cli_used(config: AppConfig) -> bool:
+    """claude-cli を使うロールが 1 つでもあるか。"""
+    return any(
+        getattr(config.llm, role).provider == "claude-cli"
+        for role in ("news_analysis", "price_analysis", "reflection")
+    )
+
+
+def _check_claude_cli(config: AppConfig) -> tuple[bool, str]:
+    """`claude` CLI の存在と呼び出し可能性を確認。
+
+    Returns: (ok, detail_text)。
+    """
+    import shutil
+    import subprocess
+
+    cfg = getattr(config.llm, "claude_cli", None)
+    command = getattr(cfg, "command", "claude") if cfg else "claude"
+
+    exe = shutil.which(command)
+    if not exe:
+        return False, f"{command!r} not found in PATH"
+
+    try:
+        proc = subprocess.run(
+            [exe, "--version"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception as e:
+        return False, f"{command} --version failed: {e}"
+
+    if proc.returncode != 0:
+        return False, f"{command} --version exit={proc.returncode}"
+
+    version = (proc.stdout or proc.stderr).strip().splitlines()[0] if (proc.stdout or proc.stderr) else "?"
+    return True, version
+
+
 def _ollama_model_available(name: str, available: set[str]) -> bool:
     """Ollama はタグ付き (e.g. "llama3.1:8b") で登録されるため substring 一致。"""
     return any(name in a for a in available)
@@ -111,6 +149,7 @@ def _build_llm_table(
     config: AppConfig,
     ollama_available: set[str] | None,
     llamacpp_available: set[str] | None,
+    claude_cli_ok: bool | None,
 ) -> tuple[Table, bool]:
     """LLM / Embedding の状態テーブルを組み立てる。(table, all_ok)。"""
     table = Table(box=None, show_header=False, padding=(0, 1), pad_edge=False, expand=True)
@@ -134,8 +173,17 @@ def _build_llm_table(
                 status_text, passed = "[green]✓[/green]", True
             else:
                 status_text, passed = "[red]✗ NOT FOUND[/red]", False
+        elif provider == "claude-cli":
+            # モデル存在確認は CLI が認証済みならサブスク側の責務なので省略、
+            # CLI バイナリの存在のみを確認
+            if claude_cli_ok is None:
+                status_text, passed = "[yellow]◦ skipped[/yellow]", True
+            elif claude_cli_ok:
+                status_text, passed = "[green]✓[/green]", True
+            else:
+                status_text, passed = "[red]✗ CLI not found[/red]", False
         else:
-            # gemini / openai / claude は HTTP チェック省略 (API キーは別途)
+            # gemini / openai / claude (API) は HTTP チェック省略 (API キーは別途)
             status_text, passed = f"[yellow]◦ api[/yellow]", True
 
         table.add_row(role_label, f"{provider} / {model}", status_text)
@@ -191,7 +239,11 @@ def startup_checks(config: AppConfig) -> bool:
     # LLM / Embedding チェック (provider ごとに一括で /models を取りにいく)
     ollama_avail = _fetch_ollama_models(config) if _ollama_required_models(config) else set()
     llamacpp_avail = _fetch_llamacpp_models(config) if _llamacpp_required_models(config) else set()
-    llm_table, llm_ok = _build_llm_table(config, ollama_avail, llamacpp_avail)
+    if _claude_cli_used(config):
+        claude_cli_ok, _claude_cli_detail = _check_claude_cli(config)
+    else:
+        claude_cli_ok = None  # 未使用なら不問
+    llm_table, llm_ok = _build_llm_table(config, ollama_avail, llamacpp_avail, claude_cli_ok)
 
     # Symbols チェック
     instruments = config.enabled_instruments

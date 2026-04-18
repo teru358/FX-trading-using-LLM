@@ -39,6 +39,16 @@ llm:
     timeout_seconds: 300           # モデル初回ロード時間を含むため長めに
     max_retries: 2
 
+  # Claude Code CLI 接続設定（provider: "claude-cli" のときに参照）
+  # Claude Max 等のサブスクプラン経由で subprocess として `claude -p` を呼び出す。
+  # 前提: `claude` CLI が PATH にあり、`claude login` 済み。
+  claude_cli:
+    command: "claude"              # 実行パス or コマンド名
+    isolated_cwd: ""               # CLAUDE.md 汚染回避用ディレクトリ (例 "/opt/finance-cli")
+    timeout_seconds: 120
+    max_retries: 2
+    extra_args: []                 # 追加フラグ (例: ["--dangerously-skip-permissions"])
+
   # model 未指定時は config.py の _DEFAULT_OLLAMA_MODEL（llama3.1:8b）を使用
   news_analysis:
     provider: "ollama"

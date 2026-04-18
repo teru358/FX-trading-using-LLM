@@ -92,6 +92,20 @@ class LlamaCppBaseConfig:
 
 
 @dataclass
+class ClaudeCliBaseConfig:
+    """Claude Code CLI (`claude -p`) 接続設定。サブスクプラン利用時の subprocess 呼び出し。
+
+    前提: `claude` CLI が PATH に存在し、`claude login` で認証済み。
+    isolated_cwd: CLAUDE.md / skills 汚染を避けるための隔離ディレクトリ (空ディレクトリ推奨)。
+    """
+    command: str = "claude"
+    isolated_cwd: str = ""
+    timeout_seconds: int = 120
+    max_retries: int = 2
+    extra_args: list[str] = field(default_factory=list)
+
+
+@dataclass
 class TradingConfig:
     initial_balance: float = 10000.0
     risk_per_trade: float = 0.02
@@ -415,6 +429,7 @@ class LLMConfig:
     """3種類の分析ロールごとに LLM プロバイダーを個別設定する。"""
     ollama: OllamaBaseConfig = field(default_factory=OllamaBaseConfig)
     llamacpp: LlamaCppBaseConfig = field(default_factory=LlamaCppBaseConfig)
+    claude_cli: ClaudeCliBaseConfig = field(default_factory=ClaudeCliBaseConfig)
     news_analysis: LLMRoleConfig = field(
         default_factory=lambda: LLMRoleConfig(temperature=0.3)
     )
