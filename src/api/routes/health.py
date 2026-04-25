@@ -186,6 +186,41 @@ def logs(lines: int = 100) -> dict[str, Any]:
     }
 
 
+@router.get("/usage", dependencies=[Depends(verify_api_key)])
+def usage() -> dict[str, Any]:
+    """LLM プロバイダ別の使用量 / サーキットブレーカー詳細。
+
+    /health でも一部返すが、こちらはエラー履歴や usage_limit ヒット数など
+    より詳しい情報を返す。クライアント (`usage` コマンド) から参照する。
+
+    claude_in_use=False のときは Claude 系プロバイダが設定されておらず
+    usage_limit 追跡対象がないことを示す。クライアント側で非表示・警告切替。
+    """
+    # Claude 系プロバイダが設定されているか判定 (claude-cli / claude)
+    claude_providers = {"claude-cli", "claude"}
+    claude_roles: list[str] = []
+    if state.config is not None:
+        for role in ("news_analysis", "price_analysis", "reflection"):
+            rc = getattr(state.config.llm, role, None)
+            if rc is not None and rc.provider in claude_providers:
+                claude_roles.append(role)
+
+    providers: dict[str, Any] = {}
+    try:
+        from src.llm.client import _circuit_breakers
+        for provider, cb in _circuit_breakers.items():
+            providers[provider] = cb.snapshot()
+    except Exception as e:
+        return {"error": str(e), "providers": {}}
+
+    return {
+        "now":           db_now().isoformat(),
+        "claude_in_use": bool(claude_roles),
+        "claude_roles":  claude_roles,
+        "providers":     providers,
+    }
+
+
 @router.get("/schedule", dependencies=[Depends(verify_api_key)])
 def schedule_info() -> dict[str, Any]:
     """スケジュール情報を返す。

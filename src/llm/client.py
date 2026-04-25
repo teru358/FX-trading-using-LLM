@@ -68,8 +68,20 @@ class LLMClient(ABC):
             return result
         except CircuitOpenError:
             raise
-        except Exception:
-            cb.record_failure()
+        except Exception as e:
+            # usage limit 系エラーは別カウンタで集計 (endpoint で可視化するため)
+            # claude_cli_client を遅延 import (循環依存回避)
+            is_usage_limit = False
+            try:
+                from src.llm.claude_cli_client import ClaudeCliUsageLimitError
+                is_usage_limit = isinstance(e, ClaudeCliUsageLimitError)
+            except ImportError:
+                pass
+            cb.record_failure(
+                error_type=type(e).__name__,
+                message=str(e),
+                is_usage_limit=is_usage_limit,
+            )
             raise
 
 
