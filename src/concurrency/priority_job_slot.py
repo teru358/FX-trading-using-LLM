@@ -92,15 +92,21 @@ class PriorityJobSlot:
         fn: Callable[..., Any],
         *args: Any,
         soft_timeout: float,
+        on_promoted_complete: Callable[[Any, Exception | None], None] | None = None,
         **kwargs: Any,
     ) -> tuple[UserSyncStatus, Any]:
         """ユーザージョブを同期実行試行。
+
+        Args:
+            on_promoted_complete: promoted 経路で worker が完了した時に呼ばれる
+                コールバック (result, error)。HTTP レスポンスを先に返した後、
+                Discord 通知等で最終結果を届けるために使う。
 
         戻り値:
             ("completed", result)            → soft_timeout 内に正常完了
             ("completed_with_error", exc)    → soft_timeout 内に例外完了
             ("promoted", None)               → soft_timeout 超過 → ジョブはバックグラウンドで継続中
-                                               呼び出し側は完了 webhook のためのポーリングを仕掛けるだけでよい
+                                               on_promoted_complete 指定時は完了時にそれが呼ばれる
             ("slot_busy", None)              → 他ジョブが占有中で worker 未起動
                                                呼び出し側は spawn_user_background で再投入する必要あり
         """
@@ -151,6 +157,16 @@ class PriorityJobSlot:
                 logger.info(f"[SLOT] {self._name}: promoted background done in {elapsed2:.1f}s")
                 self._mark_finished()
                 self._slot_lock.release()
+                if on_promoted_complete is not None:
+                    try:
+                        on_promoted_complete(
+                            result_holder.get("value"),
+                            result_holder.get("error"),
+                        )
+                    except Exception as cb_err:
+                        logger.warning(
+                            f"[SLOT] {self._name}: on_promoted_complete raised: {cb_err}"
+                        )
 
             threading.Thread(target=_cleanup_after_worker, daemon=True).start()
             return ("promoted", None)

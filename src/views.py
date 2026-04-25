@@ -238,6 +238,11 @@ async def _run_ask(
     response = await llm.chat(messages, temperature=config.llm.reflection.temperature)
     response = _re.sub(r"<think>.*?</think>", "", response, flags=_re.DOTALL).strip()
 
+    # promoted 分岐で HTTP レスポンスが先に返った場合でも activity.log から辿れるよう
+    # 回答プレビューを残す。長文はトリム (過度なログ肥大化を避ける)。
+    _preview = response if len(response) <= 800 else response[:800] + "…(truncated)"
+    logger.info(f"[ASK] 回答 ({len(response)} chars): {_preview}")
+
     # === Ask回答を洞察としてRAGに保存 ===
     try:
         all_instruments = config.watch_only_instruments + config.tradeable_instruments

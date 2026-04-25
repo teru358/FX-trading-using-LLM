@@ -38,3 +38,47 @@ class DiscordNotifier(NotifierAdapter):
             logger.debug(f"[NOTIFY] Discord sent ({len(message)} chars)")
         except Exception as e:
             logger.warning(f"[NOTIFY] Discord failed: {e}")
+
+    async def send_embed(
+        self,
+        title: str,
+        description: str,
+        color: int = 0x2ecc71,
+        footer: str = "",
+        fields: list[dict] | None = None,
+    ) -> None:
+        """Discord webhook 経由で embed を送信する。
+
+        制約 (Discord の仕様):
+          - title     ≤ 256 chars (超えた分は切詰め)
+          - description ≤ 4096 chars (超えた分は切詰め)
+          - footer.text ≤ 2048 chars
+          - fields      ≤ 25 個
+          - 1 embed の合計 ≤ 6000 chars
+        """
+        embed: dict = {
+            "title":       title[:256],
+            "description": description[:4096],
+            "color":       color,
+        }
+        if footer:
+            embed["footer"] = {"text": footer[:2048]}
+        if fields:
+            embed["fields"] = [
+                {
+                    "name":   str(f.get("name", ""))[:256],
+                    "value":  str(f.get("value", ""))[:1024],
+                    "inline": bool(f.get("inline", False)),
+                }
+                for f in fields[:25]
+            ]
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(self._url, json={"embeds": [embed]})
+                resp.raise_for_status()
+            logger.debug(
+                f"[NOTIFY] Discord embed sent "
+                f"(title={len(embed['title'])} desc={len(embed['description'])} chars)"
+            )
+        except Exception as e:
+            logger.warning(f"[NOTIFY] Discord embed failed: {e}")

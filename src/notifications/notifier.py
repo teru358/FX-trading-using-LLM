@@ -130,6 +130,34 @@ class NotifierAdapter(ABC):
         """テキストメッセージを送信する。失敗してもシステムを止めない。"""
         ...
 
+    async def send_embed(
+        self,
+        title: str,
+        description: str,
+        color: int = 0x2ecc71,
+        footer: str = "",
+        fields: list[dict] | None = None,
+    ) -> None:
+        """構造化された埋め込み (embed) を送信する。
+
+        Discord webhook 等 embed をサポートする実装はリッチな表示を行い、
+        それ以外はデフォルト実装でテキスト化して ``send()`` にフォールバックする。
+
+        Args:
+            title: 見出し (≤256 chars 推奨)
+            description: 本文 (≤4096 chars 推奨、長文 OK)
+            color: 16進カラーコード (例: 0x2ecc71)
+            footer: フッター文字列
+            fields: [{"name": "...", "value": "...", "inline": False}, ...]
+        """
+        # フォールバック: 連結して send()
+        parts: list[str] = [f"**{title}**", description]
+        if fields:
+            parts.extend(f"**{f.get('name','')}**: {f.get('value','')}" for f in fields)
+        if footer:
+            parts.append(f"_{footer}_")
+        await self.send("\n".join(p for p in parts if p))
+
     async def notify_order_opened(self, event: OrderOpenedEvent) -> None:
         direction_emoji = "📈" if event.direction == "buy" else "📉"
         sl_pips = abs(event.entry_price - event.stop_loss)
