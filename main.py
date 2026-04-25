@@ -305,7 +305,7 @@ def main() -> None:
         _wd_weekday = _wd_cfg.weekday.lower().strip()
         _wd_picker = getattr(schedule.every(), _wd_weekday, None)
         if _wd_picker is None:
-            logger.warning(
+            _logger.warning(
                 f"[WEEKLY] invalid weekday {_wd_cfg.weekday!r}, skipping schedule registration"
             )
         else:
@@ -315,7 +315,7 @@ def main() -> None:
             _wd_picker.at(_wd_cfg.at_time, news_tz).do(
                 _run_with_guard, _guards["weekly_diagnosis"], _weekly_diagnosis_run,
             )
-            logger.info(
+            _logger.info(
                 f"[WEEKLY] Scheduled: {_wd_weekday} {_wd_cfg.at_time} ({news_tz})"
             )
 
@@ -331,7 +331,7 @@ def main() -> None:
         schedule.every().day.at(_bk_cfg.at_time, news_tz).do(
             _run_with_guard, _guards["data_backup"], _data_backup_run,
         )
-        logger.info(
+        _logger.info(
             f"[BACKUP] Scheduled: daily {_bk_cfg.at_time} ({news_tz}), "
             f"keep {_bk_cfg.retention_count} archives in {_bk_cfg.output_dir}"
         )
