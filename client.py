@@ -680,6 +680,34 @@ def _cmd_usage() -> None:
             )
 
 
+def _cmd_schedule() -> None:
+    """次回実行予定 + 各カテゴリのスケジュール時刻を表示。"""
+    data = _get("/schedule")
+    if data is None:
+        return
+    if not isinstance(data, dict) or not data:
+        _console.print("[dim]スケジュール情報なし[/dim]")
+        return
+
+    tbl = Table(
+        box=box.SIMPLE,
+        show_header=True,
+        padding=(0, 1),
+        title="Schedule",
+    )
+    tbl.add_column("category")
+    tbl.add_column("next_run")
+    tbl.add_column("schedule (時刻)", overflow="fold")
+
+    for cat, info in data.items():
+        info = info or {}
+        nr = (info.get("next_run") or "")[:16].replace("T", " ") or "—"
+        times = info.get("schedule") or []
+        times_str = ", ".join(times) if times else "—"
+        tbl.add_row(cat, nr, times_str)
+    _console.print(tbl)
+
+
 def _cmd_use(name: str) -> None:
     """接続先を切替。"""
     if name not in _profiles:
@@ -786,6 +814,7 @@ _HELP = """\
   [cyan]feeds[/cyan]                — RSSフィード疎通確認
   [cyan]health[/cyan]               — プロセス死活確認
   [cyan]usage[/cyan]                — LLM使用量 / CB状態 / usage_limit集計
+  [cyan]schedule[/cyan]             — スケジュール (取引/予測/ニュース/技術/exit_check)
   [cyan]hosts[/cyan]                — ホストプロファイル一覧
   [cyan]use[/cyan] <name>           — 接続先ホスト切替  例: use remote
   [cyan]help[/cyan]   (h)           — このヘルプを表示
@@ -812,6 +841,8 @@ def _dispatch(raw: str) -> bool:
         _cmd_health()
     elif cmd == "usage":
         _cmd_usage()
+    elif cmd == "schedule":
+        _cmd_schedule()
     elif cmd == "run":
         if not args:
             _console.print("[red]使い方: run news | tech | analyze | forecast [pair] | trade[/red]")

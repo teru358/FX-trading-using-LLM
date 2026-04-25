@@ -242,12 +242,32 @@ def schedule_info() -> dict[str, Any]:
     }
     _HIDDEN = {"run_price_monitor", "_run_rag_cleanup"}
 
+    def _resolve_job_name(job_func: Any) -> str:
+        """schedule の job_func から本来の対象関数名を解決する。
+
+        main.py で ``_run_with_guard`` / ``_run_with_slot`` ラッパーを噛ませて
+        登録しているため ``job_func`` は ``functools.partial`` となり、その
+        ``__name__`` は schedule ライブラリがラッパー名 (例: "_run_with_slot")
+        を付けてしまう。partial の場合は ``args`` 内から最初の
+        "callable かつ __name__ を持つもの" を対象関数とみなす
+        (ラッパー設計上 guard インスタンスは __name__ なしで除外される)。
+        """
+        # partial 経由のラッパー登録: args から target fn を探す
+        for a in getattr(job_func, "args", ()):
+            if callable(a) and hasattr(a, "__name__"):
+                return a.__name__
+        # 直接登録: __name__ をそのまま使う
+        if hasattr(job_func, "__name__"):
+            return job_func.__name__
+        wrapped = getattr(job_func, "func", None)
+        return getattr(wrapped, "__name__", str(job_func))
+
     jobs = sched_mod.get_jobs()
 
     # カテゴリ別に分類
     categorized: dict[str, list[dict]] = {}
     for j in jobs:
-        name = getattr(j.job_func, "__name__", str(j.job_func))
+        name = _resolve_job_name(j.job_func)
         if name in _HIDDEN:
             continue
         cat = _CATEGORY.get(name, "other")
