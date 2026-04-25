@@ -296,3 +296,15 @@ economic_calendar:
   post_event_window_min: 30
   post_event_impact_min: 1
   refresh_lookback_min: 60
+
+# 週次自己診断レポート (FX 休場の週末に走らせる、cron 不要 / schedule ライブラリ使用)
+# 過去 N 日のパフォーマンス・予測精度・LLM 使用量・現状設定を集約して
+# Claude (claude-cli) に診断させ、Markdown + Discord embed で配信する。
+weekly_diagnosis:
+  enabled: false                   # true で週次レポートを有効化
+  weekday: "saturday"              # monday / tuesday / ... / sunday
+  at_time: "09:00"                 # HH:MM (news_collection の timezone を使用)
+  lookback_days: 7
+  llm_role: "reflection"           # llm.<role> から client を取得 (claude-cli 推奨)
+  output_dir: "reports"            # プロジェクトルート相対、自動 mkdir
+  notify_discord: true             # 完了時に Discord embed でサマリ通知

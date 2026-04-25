@@ -44,6 +44,7 @@ _guards: dict[str, JobGuard] = {
     "exit_check": JobGuard("exit_check", skip_predicate=market_skip_check),
     "forecast": JobGuard("forecast", skip_predicate=market_skip_check),
     "econ": JobGuard("econ_calendar"),
+    "weekly_diagnosis": JobGuard("weekly_diagnosis"),
 }
 
 
@@ -294,6 +295,28 @@ def main() -> None:
             config.economic_calendar.fetch_time,
             config.economic_calendar.fetch_timezone,
         ).do(_run_with_guard, _guards["econ"], _econ_daily)
+
+    # 週次自己診断レポート (FX 休場の週末に実行、cron 不使用)
+    if config.weekly_diagnosis.enabled:
+        from src.jobs.weekly_diagnosis import run_weekly_diagnosis as _run_weekly
+
+        _wd_cfg = config.weekly_diagnosis
+        _wd_weekday = _wd_cfg.weekday.lower().strip()
+        _wd_picker = getattr(schedule.every(), _wd_weekday, None)
+        if _wd_picker is None:
+            logger.warning(
+                f"[WEEKLY] invalid weekday {_wd_cfg.weekday!r}, skipping schedule registration"
+            )
+        else:
+            def _weekly_diagnosis_run():
+                _run_weekly(config, forecast_store)
+
+            _wd_picker.at(_wd_cfg.at_time, news_tz).do(
+                _run_with_guard, _guards["weekly_diagnosis"], _weekly_diagnosis_run,
+            )
+            logger.info(
+                f"[WEEKLY] Scheduled: {_wd_weekday} {_wd_cfg.at_time} ({news_tz})"
+            )
 
     # REST API サーバー（有効時のみ — Initial collection 前に起動）
     if config.api.enabled:

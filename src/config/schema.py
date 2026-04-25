@@ -490,6 +490,25 @@ class TradingViewConfig:
 
 
 @dataclass
+class WeeklyDiagnosisConfig:
+    """週次自己診断レポート設定。
+
+    FX 市場の休場 (土日) に合わせ、過去 N 日のパフォーマンス・予測精度・
+    LLM 使用量・現状設定を集約して Claude に診断させ、
+    Markdown レポート + Discord embed で配信する。
+    """
+    enabled: bool = False
+    # schedule (UTC ではなく news_timezone を使う = 設定の他箇所と統一)
+    weekday: str = "saturday"             # monday / ... / sunday
+    at_time: str = "09:00"                # HH:MM (news_timezone)
+    lookback_days: int = 7                # 集計対象期間
+    # role: 既存 LLM client ロールから流用 (claude-cli を選んでおけば自動で claude)
+    llm_role: str = "reflection"
+    output_dir: str = "reports"           # プロジェクトルート相対 / 自動 mkdir
+    notify_discord: bool = True           # 完了時に Discord embed 通知
+
+
+@dataclass
 class AppConfig:
     trading: TradingConfig
     instruments: list[InstrumentConfig]
@@ -510,6 +529,9 @@ class AppConfig:
     keywords: KeywordsConfig = field(default_factory=KeywordsConfig)
     economic_calendar: EconomicCalendarConfig = field(default_factory=EconomicCalendarConfig)
     tradingview: TradingViewConfig = field(default_factory=TradingViewConfig)
+    weekly_diagnosis: "WeeklyDiagnosisConfig" = field(
+        default_factory=lambda: WeeklyDiagnosisConfig()
+    )
 
     @property
     def state_dir(self) -> Path:

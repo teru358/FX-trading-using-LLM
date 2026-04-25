@@ -1,0 +1,20 @@
+=== 週次診断レポート用データ ===
+期間: {{ period_start }} 〜 {{ period_end }} ({{ lookback_days }} 日)
+レポート生成日時: {{ generated_at }}
+
+=== 取引パフォーマンス ===
+{{ performance_section }}
+
+=== ペア別 Forecast Accuracy ({{ lookback_days }}日) ===
+{{ accuracy_section }}
+
+=== LLM プロバイダ稼働状況 ===
+{{ llm_status_section }}
+
+=== 既存機能サマリ (重複提案を避けるため参考) ===
+{{ existing_features_section }}
+
+=== 現在の主要設定値 ===
+{{ settings_section }}
+
+=== 観測データに基づき診断レポートを Markdown で作成してください ===
