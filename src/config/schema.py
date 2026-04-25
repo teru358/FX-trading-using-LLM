@@ -509,6 +509,19 @@ class WeeklyDiagnosisConfig:
 
 
 @dataclass
+class DataBackupConfig:
+    """data/ ディレクトリの定期バックアップ設定。
+
+    sync 失敗・破損から復旧できるよう zip 化して世代保存する。
+    保存先はプロジェクトルート相対のディレクトリ。
+    """
+    enabled: bool = True
+    at_time: str = "03:10"                # HH:MM (news_timezone)
+    output_dir: str = "backup/data"       # プロジェクトルート相対 / 自動 mkdir
+    retention_count: int = 30             # 保持世代数 (古いものから削除)
+
+
+@dataclass
 class AppConfig:
     trading: TradingConfig
     instruments: list[InstrumentConfig]
@@ -531,6 +544,9 @@ class AppConfig:
     tradingview: TradingViewConfig = field(default_factory=TradingViewConfig)
     weekly_diagnosis: "WeeklyDiagnosisConfig" = field(
         default_factory=lambda: WeeklyDiagnosisConfig()
+    )
+    data_backup: "DataBackupConfig" = field(
+        default_factory=lambda: DataBackupConfig()
     )
 
     @property

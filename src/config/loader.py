@@ -49,6 +49,7 @@ from src.config.schema import (
     TradingViewConfig,
     TwelveDataConfig,
     WeeklyDiagnosisConfig,
+    DataBackupConfig,
 )
 
 
@@ -118,6 +119,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     tradingview_cfg = _from_dict(TradingViewConfig, raw.get("tradingview", {}))
     economic_calendar_cfg = _from_dict(EconomicCalendarConfig, raw.get("economic_calendar", {}))
     weekly_diagnosis_cfg = _from_dict(WeeklyDiagnosisConfig, raw.get("weekly_diagnosis", {}))
+    data_backup_cfg = _from_dict(DataBackupConfig, raw.get("data_backup", {}))
 
     # ── 特殊ケース: YAML キー ≠ フィールド名 ─────────────────────
 
@@ -273,4 +275,5 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         economic_calendar=economic_calendar_cfg,
         tradingview=tradingview_cfg,
         weekly_diagnosis=weekly_diagnosis_cfg,
+        data_backup=data_backup_cfg,
     )

@@ -308,3 +308,11 @@ weekly_diagnosis:
   llm_role: "reflection"           # llm.<role> から client を取得 (claude-cli 推奨)
   output_dir: "reports"            # プロジェクトルート相対、自動 mkdir
   notify_discord: true             # 完了時に Discord embed でサマリ通知
+
+# data/ ディレクトリの定期バックアップ (sync 失敗・破損対策)
+# data/ を zip 化して output_dir 配下に世代保存し、retention_count を超えた古いものは削除
+data_backup:
+  enabled: true                    # false で無効化
+  at_time: "03:10"                 # HH:MM (news_collection の timezone)。tech 処理 (毎時) と被らない時刻
+  output_dir: "backup/data"        # プロジェクトルート相対、自動 mkdir
+  retention_count: 30              # 保持世代数 (古いものから自動削除)

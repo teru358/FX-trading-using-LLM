@@ -45,6 +45,7 @@ _guards: dict[str, JobGuard] = {
     "forecast": JobGuard("forecast", skip_predicate=market_skip_check),
     "econ": JobGuard("econ_calendar"),
     "weekly_diagnosis": JobGuard("weekly_diagnosis"),
+    "data_backup": JobGuard("data_backup"),
 }
 
 
@@ -317,6 +318,23 @@ def main() -> None:
             logger.info(
                 f"[WEEKLY] Scheduled: {_wd_weekday} {_wd_cfg.at_time} ({news_tz})"
             )
+
+    # data/ 定期バックアップ (sync 失敗・破損対策、cron 不使用)
+    if config.data_backup.enabled:
+        from src.jobs.data_backup import run_data_backup as _run_backup
+
+        _bk_cfg = config.data_backup
+
+        def _data_backup_run():
+            _run_backup(config)
+
+        schedule.every().day.at(_bk_cfg.at_time, news_tz).do(
+            _run_with_guard, _guards["data_backup"], _data_backup_run,
+        )
+        logger.info(
+            f"[BACKUP] Scheduled: daily {_bk_cfg.at_time} ({news_tz}), "
+            f"keep {_bk_cfg.retention_count} archives in {_bk_cfg.output_dir}"
+        )
 
     # REST API サーバー（有効時のみ — Initial collection 前に起動）
     if config.api.enabled:

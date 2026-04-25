@@ -29,6 +29,7 @@ compare/
 # Backups
 *.bak
 *.tmp
+backup/
 
 clear_data.py
 .pid
