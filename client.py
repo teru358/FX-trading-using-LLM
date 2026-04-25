@@ -241,10 +241,14 @@ def _get(path: str, params: dict | None = None) -> dict[str, Any] | None:
         return None
 
 
-def _post(path: str, json: dict | None = None) -> dict[str, Any] | None:
+def _post(
+    path: str,
+    json: dict | None = None,
+    timeout: float = 300.0,
+) -> dict[str, Any] | None:
     url = f"{_conn.profile.url}{path}"
     try:
-        r = httpx.post(url, headers=_conn.headers, json=json, timeout=300)
+        r = httpx.post(url, headers=_conn.headers, json=json, timeout=timeout)
         r.raise_for_status()
         return r.json()
     except Exception as e:
@@ -446,11 +450,32 @@ def _cmd_run_trade() -> None:
 
 
 def _cmd_ask(message: str) -> None:
-    _console.print("[cyan]LLMに問い合わせ中...[/cyan]")
-    data = _post("/ask", json={"message": message})
+    """CLI 版: 回答は必ず Client に返させ (notify=False)、Discord 通知は発生させない。
+
+    サーバ側が blocking で待つ間、HTTP タイムアウトは最大 ask_soft_timeout_sec×5
+    (= 通常 300s) を想定するため余裕を持って 600s に。
+    """
+    _console.print("[cyan]LLMに問い合わせ中...[/cyan]  [dim](最長 5 分まで待機)[/dim]")
+    data = _post(
+        "/ask",
+        json={"message": message, "notify": False},
+        timeout=600.0,
+    )
     if data is None:
         return
-    _console.print(f"\n[bold]LLM回答:[/bold]\n{data.get('response', '')}\n")
+    status = data.get("status", "")
+    response = (data.get("response") or "").strip()
+    if status == "completed" and response:
+        elapsed = data.get("elapsed_seconds")
+        el = f"  [dim]({elapsed:.0f}s)[/dim]" if isinstance(elapsed, (int, float)) else ""
+        _console.print(f"\n[bold]LLM回答:[/bold]{el}\n{response}\n")
+    elif status == "accepted":
+        # notify=False を指定しているので通常ここには来ない (サーバが古い場合のみ)
+        _console.print(
+            f"[yellow]{data.get('notice') or '受理されましたが応答待ち'}[/yellow]"
+        )
+    else:
+        _console.print(f"[red]ask 失敗: status={status!r}[/red]\n{data!r}")
 
 
 def _cmd_close(pair: str) -> None:
@@ -536,6 +561,123 @@ def _cmd_hosts() -> None:
         tbl.add_row(marker, name, p.url, auth)
     _console.print(tbl)
     _console.print(f"[dim]切替: [cyan]use <name>[/cyan][/dim]")
+
+
+def _fmt_ago(epoch: float | None) -> str:
+    """UNIX 秒を「X分前」形式に。None は '—'。"""
+    if not epoch:
+        return "—"
+    delta = time.time() - epoch
+    if delta < 60:
+        return f"{int(delta)}s ago"
+    if delta < 3600:
+        return f"{int(delta/60)}m ago"
+    if delta < 86400:
+        return f"{int(delta/3600)}h ago"
+    return f"{int(delta/86400)}d ago"
+
+
+def _cmd_usage() -> None:
+    """LLM プロバイダ別の CB 状態・エラー履歴・usage_limit ヒット数を表示。
+
+    Claude 系プロバイダ (claude-cli / claude) を使っていない場合は
+    usage_limit 追跡対象外のため、その旨を明示する。
+    """
+    data = _get("/usage")
+    if data is None:
+        return
+
+    # Claude 未使用ならバナーを出して詳細は簡略化
+    if not data.get("claude_in_use", False):
+        _console.print(
+            "[yellow]Claude 系プロバイダ (claude-cli / claude) が設定されていないため、"
+            "usage_limit 追跡対象はありません。[/yellow]"
+        )
+        _console.print(
+            "[dim]  config/settings.yaml の llm.{news,price,reflection}_analysis.provider "
+            "を確認してください。[/dim]"
+        )
+        # 参考情報として他プロバイダの CB 状態は表示する (health の簡易版)
+        providers = data.get("providers", {}) or {}
+        if not providers:
+            return
+        _console.print("[dim]  参考: 現在稼働中プロバイダの CB 状態:[/dim]")
+        for name, info in providers.items():
+            st = info.get("state", "?")
+            fail = info.get("total_failure", 0)
+            succ = info.get("total_success", 0)
+            _console.print(
+                f"    [cyan]{name}[/cyan] state={st} succ={succ} fail={fail}"
+            )
+        return
+
+    providers = data.get("providers", {}) or {}
+    if not providers:
+        _console.print("[dim]プロバイダ記録なし (まだ LLM 呼び出しが発生していない)[/dim]")
+        return
+
+    tbl = Table(
+        box=box.SIMPLE,
+        show_header=True,
+        padding=(0, 1),
+        title="LLM Usage / Circuit Breaker",
+    )
+    tbl.add_column("provider")
+    tbl.add_column("state", justify="center")
+    tbl.add_column("cooldown", justify="right")
+    tbl.add_column("success", justify="right")
+    tbl.add_column("fail", justify="right")
+    tbl.add_column("usage_limit", justify="right")
+    tbl.add_column("last error", overflow="fold")
+
+    for name, info in providers.items():
+        state = info.get("state", "?")
+        cd = info.get("cooldown_remaining_s", 0) or 0
+        state_color = {
+            "CLOSED":    "green",
+            "HALF_OPEN": "yellow",
+            "OPEN":      "red",
+        }.get(state, "white")
+        cd_str = f"{cd:.0f}s" if state == "OPEN" else "—"
+        succ = info.get("total_success", 0)
+        fail = info.get("total_failure", 0)
+        ulh = info.get("usage_limit_hits", 0)
+        ulh_color = "red" if ulh > 0 else "dim"
+        last = info.get("last_error") or {}
+        last_str = (
+            f"[dim]{_fmt_ago(last.get('at'))}[/dim] {last.get('type','')}"
+            f" — {(last.get('message') or '')[:50]}"
+            if last else "—"
+        )
+        tbl.add_row(
+            name,
+            f"[{state_color}]{state}[/{state_color}]",
+            cd_str,
+            str(succ),
+            f"[{'red' if fail else 'white'}]{fail}[/]",
+            f"[{ulh_color}]{ulh}[/{ulh_color}]",
+            last_str,
+        )
+    _console.print(tbl)
+
+    # OPEN のプロバイダがあれば詳細 (直近エラー 3 件) を下に補足
+    for name, info in providers.items():
+        if info.get("state") != "OPEN":
+            continue
+        recent = (info.get("recent_errors") or [])[-3:]
+        if not recent:
+            continue
+        _console.print(
+            f"[red]● {name} OPEN[/red]"
+            f" (残 {info.get('cooldown_remaining_s', 0):.0f}s) "
+            f"直近エラー:"
+        )
+        for ev in reversed(recent):
+            _console.print(
+                f"  [dim]{_fmt_ago(ev.get('at'))}[/dim]"
+                f" [yellow]{ev.get('type', '?')}[/yellow]"
+                f"  {(ev.get('message') or '')[:80]}"
+            )
 
 
 def _cmd_use(name: str) -> None:
@@ -643,6 +785,7 @@ _HELP = """\
   [cyan]logs[/cyan] (N)             — activity.log の末尾N行（デフォルト50）
   [cyan]feeds[/cyan]                — RSSフィード疎通確認
   [cyan]health[/cyan]               — プロセス死活確認
+  [cyan]usage[/cyan]                — LLM使用量 / CB状態 / usage_limit集計
   [cyan]hosts[/cyan]                — ホストプロファイル一覧
   [cyan]use[/cyan] <name>           — 接続先ホスト切替  例: use remote
   [cyan]help[/cyan]   (h)           — このヘルプを表示
@@ -667,6 +810,8 @@ def _dispatch(raw: str) -> bool:
         _cmd_status()
     elif cmd == "health":
         _cmd_health()
+    elif cmd == "usage":
+        _cmd_usage()
     elif cmd == "run":
         if not args:
             _console.print("[red]使い方: run news | tech | analyze | forecast [pair] | trade[/red]")
