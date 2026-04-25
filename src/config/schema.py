@@ -164,6 +164,28 @@ class TradingConfig:
     vol_regime_high_risk_scale: float = 0.5  # high vol 時の risk_per_trade 倍率
     vol_regime_low_risk_scale: float = 1.0   # low vol 時 (デフォルト = 等倍、拡大はリスク増なので慎重に)
 
+    # Forecast accuracy auto-feedback (直近サイクルの予測精度を signal に反映)
+    forecast_accuracy_feedback: "ForecastAccuracyFeedbackConfig" = field(
+        default_factory=lambda: ForecastAccuracyFeedbackConfig()
+    )
+
+
+@dataclass
+class ForecastAccuracyFeedbackConfig:
+    """ForecastStore の直近予測精度を signal の confidence/action に反映する設定。
+
+    予測 hit 率 (predicted_direction × latest_price_delta の符号一致率) が
+    soft_threshold 未満なら confidence × confidence_penalty、
+    hard_threshold 未満なら action="hold" を強制する。
+    サンプル数が min_samples 未満の場合は適用しない (false positive 防止)。
+    """
+    enabled: bool = False
+    lookback_hours: int = 24
+    min_samples: int = 4              # 適用に必要な reviewed forecast 数の下限
+    soft_threshold: float = 0.50      # この値未満で confidence ペナルティ
+    hard_threshold: float = 0.33      # この値未満で action=hold 強制
+    confidence_penalty: float = 0.7   # soft 適用時の confidence 乗数
+
 
 @dataclass
 class NewsCollectionConfig:

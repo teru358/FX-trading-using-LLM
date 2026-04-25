@@ -150,6 +150,19 @@ trading:
   vol_regime_high_risk_scale: 0.5       # high vol 時の risk_per_trade 倍率
   vol_regime_low_risk_scale: 1.0        # low vol 時 (= 通常と同じ。拡大はリスク増なので慎重に)
 
+  # Forecast accuracy auto-feedback (直近サイクルの予測精度を signal に反映)
+  # 直近 lookback_hours 内の reviewed forecast の hit 率 (predicted_direction が当たった率) が:
+  #   - soft_threshold 未満 → confidence × confidence_penalty (signal は弱化、action は不変)
+  #   - hard_threshold 未満 → action="hold" を強制 (誤った方向への新規 entry を抑止)
+  # min_samples 未満のサンプル数では適用しない (false positive 防止)。
+  forecast_accuracy_feedback:
+    enabled: false
+    lookback_hours: 24
+    min_samples: 4
+    soft_threshold: 0.50
+    hard_threshold: 0.33
+    confidence_penalty: 0.7
+
 price_monitor:
   enabled: true
   interval_minutes: 10             # Layer 4: 監視間隔（分）

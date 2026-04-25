@@ -39,6 +39,7 @@ from src.config.schema import (
     NotifierConfig,
     OllamaBaseConfig,
     OpenAIConfig,
+    ForecastAccuracyFeedbackConfig,
     PriceMonitorConfig,
     PriceProviderConfig,
     RagConfig,
@@ -96,7 +97,14 @@ def load_config(config_path: Path | None = None) -> AppConfig:
 
     # ── フラット configs (_from_dict で自動構築) ──────────────────
 
-    trading = _from_dict(TradingConfig, raw.get("trading", {}))
+    trading_raw = raw.get("trading", {}) or {}
+    # ネスト dataclass: forecast_accuracy_feedback (TradingConfig 配下)
+    fa_raw = trading_raw.pop("forecast_accuracy_feedback", None)
+    trading = _from_dict(TradingConfig, trading_raw)
+    if isinstance(fa_raw, dict):
+        trading.forecast_accuracy_feedback = _from_dict(
+            ForecastAccuracyFeedbackConfig, fa_raw
+        )
     schedule = _from_dict(ScheduleConfig, raw.get("schedule", {}))
     news_collection = _from_dict(NewsCollectionConfig, raw.get("news_collection", {}))
     rag = _from_dict(RagConfig, raw.get("rag", {}))

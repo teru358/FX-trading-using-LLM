@@ -72,6 +72,7 @@ async def _process_pair(
     analysis_store: AnalysisStore,
     llm: LLMClient,
     price_provider: PriceProvider | None = None,
+    forecast_store=None,
 ):
     """1ペアの分析→シグナル生成。
 
@@ -141,6 +142,19 @@ async def _process_pair(
                 )
 
         account = position_mgr.get_account_state()
+
+        # Forecast accuracy auto-feedback の provider を構築
+        # forecast_store 未提供なら provider=None で従来動作
+        accuracy_provider = None
+        if forecast_store is not None and config.trading.forecast_accuracy_feedback.enabled:
+            from functools import partial
+            from src.signals.accuracy_tracker import compute_recent_accuracy
+            accuracy_provider = partial(
+                compute_recent_accuracy,
+                forecast_store,
+                hours=config.trading.forecast_accuracy_feedback.lookback_hours,
+            )
+
         signal = combine_signals(
             news=news,
             price=price,
@@ -157,6 +171,8 @@ async def _process_pair(
             tv_summary=tv_summary,
             tv_conflict_dampen=config.trading.tv_conflict_dampen,
             min_rr_ratio=config.trading.min_rr_ratio,
+            accuracy_provider=accuracy_provider,
+            accuracy_config=config.trading.forecast_accuracy_feedback,
         )
         return signal, macro_ctx
     except Exception as e:
@@ -471,6 +487,7 @@ async def _phase_analyze_pairs(
     analysis_store: AnalysisStore,
     llm_price: LLMClient,
     price_provider: PriceProvider | None,
+    forecast_store=None,
 ) -> tuple[list, dict[str, str]]:
     """Phase 3: 全ペアを並列分析してシグナル + macro_ctx を生成する。"""
     semaphore = asyncio.Semaphore(config.llm.ollama.max_concurrent)
@@ -480,6 +497,7 @@ async def _phase_analyze_pairs(
             return await _process_pair(
                 pair_cfg, config, position_mgr, store, price_store, analysis_store, llm_price,
                 price_provider=price_provider,
+                forecast_store=forecast_store,
             )
 
     results = await asyncio.gather(
@@ -912,6 +930,7 @@ async def trading_cycle(
     hold_store: HoldDecisionStore,
     price_provider: PriceProvider | None = None,
     session_store=None,
+    forecast_store=None,
 ) -> None:
     """取引サイクル全体のオーケストレーター。"""
     run_start = local_now(config)
@@ -966,6 +985,7 @@ async def trading_cycle(
     # Phase 3: 並列ペア分析
     signals, macro_ctxs = await _phase_analyze_pairs(
         config, position_mgr, store, price_store, analysis_store, llm_price, price_provider,
+        forecast_store=forecast_store,
     )
 
     # Phase 4a: position_review (Layer 1-3) → 決済 → 振り返り (internal)
@@ -1020,13 +1040,16 @@ def run_trading_cycle(
     price_provider: PriceProvider | None = None,
 ) -> None:
     """schedule ライブラリから呼び出す同期ラッパー。"""
+    from src.data.analysis_store import ForecastStore
     from src.data.session_store import SessionStore
     state_store = StateStore(config.state_dir)
     position_mgr = PositionManager(
         state_store, config.trading.initial_balance, context="TradingCycle",
     )
     session_store = SessionStore(config.prices_db_path)
+    forecast_store = ForecastStore(config.prices_db_path)
     asyncio.run(trading_cycle(
         config, position_mgr, store, price_store, analysis_store, hold_store,
         price_provider=price_provider, session_store=session_store,
+        forecast_store=forecast_store,
     ))
