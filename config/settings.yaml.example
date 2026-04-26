@@ -105,16 +105,8 @@ trading:
   #   "live"       — OANDA REST 実発注 (Phase 3 未実装、NotImplementedError)
   #   "mt5_bridge" — mt5_bridge 経由で MT5 へ発注 (DRY_RUN は bridge .env で制御)
   #   "shadow"     — paper を canonical で動かしつつ mt5_bridge にも発注して比較ログ取得
+  # ※ mt5_bridge / shadow モードの詳細設定は下部の `mt5_bridge:` セクションに集約
   trading_mode: "paper"
-
-  # MT5 ブリッジブローカー設定 (trading_mode = "mt5_bridge" or "shadow" 時)
-  mt5_bridge_url: ""             # 空なら mt5_bridge.bridge_url を自動流用
-  mt5_lot_size_units: 100000     # 1 lot = 100,000 通貨 (FX 標準)。ブローカーで違う場合に調整
-  mt5_magic_number: 12345        # MT5 発注時の bot 識別 ID (手動 / 他 EA との区別用)
-
-  # シャドートレード (trading_mode = "shadow" 時のみ使用)
-  shadow_log_path: "data/state/shadow_trades.jsonl"     # paper vs MT5 比較ログ
-  shadow_observer_state_dir: "data/shadow_state"        # observer 専用 state_store
   # ポジション再評価（Phase 4a: Layer 1〜3）
   position_review_enabled: false        # true で有効化
   reversal_confidence_min: 0.70         # Layer 1: 反転シグナルの最低信頼度
@@ -329,12 +321,23 @@ data_backup:
   retention_count: 30              # 保持世代数 (古いものから自動削除)
 
 # MT5 ブリッジ (Windows 側 FastAPI) との接続設定
-# Phase 1 では heartbeat のみ。bridge_url を設定して enabled=true にすると
-# 定期的に /health を叩き、応答結果を log_path に JSONL で追記する。
-# 稼働率データを 1 週間ほど蓄積した上で発注機能の組込み是非を判断する。
+# heartbeat (Phase 1+2) と発注 (Phase 3a) で同じ bridge_url を共有する。
+# trading_mode = "mt5_bridge" or "shadow" を有効化する場合は bridge_url を必ず設定。
 mt5_bridge:
-  enabled: false                              # true で heartbeat 起動
-  bridge_url: ""                              # 例: "http://192.168.1.10:8812" (main PC IP)
-  heartbeat_interval_minutes: 60              # 1時間おきに /health を叩く
-  request_timeout_seconds: 5.0
-  log_path: "data/state/mt5_heartbeat.jsonl"  # JSONL 追記、稼働率分析用
+  # ── 共通 ──
+  enabled: false                                       # true で heartbeat 起動 (発注は trading_mode で制御)
+  bridge_url: ""                                       # 例: "http://192.168.1.10:8812" (main PC IP)
+
+  # ── heartbeat (Phase 1+2) ──
+  heartbeat_interval_minutes: 60                       # 1時間おきに /health を叩く
+  request_timeout_seconds: 5.0                         # heartbeat /health のタイムアウト
+  log_path: "data/state/mt5_heartbeat.jsonl"           # JSONL 追記、稼働率分析用
+
+  # ── 発注 (trading_mode = "mt5_bridge" or "shadow" 時) ──
+  order_request_timeout_seconds: 10.0                  # /order POST のタイムアウト
+  lot_size_units: 100000                               # 1 lot = 100,000 通貨 (FX 標準)
+  magic_number: 12345                                  # MT5 発注時の bot 識別 ID
+
+  # ── シャドートレード (trading_mode = "shadow" 時のみ) ──
+  shadow_log_path: "data/state/shadow_trades.jsonl"    # paper vs MT5 比較ログ
+  shadow_observer_state_dir: "data/shadow_state"       # observer 専用 state_store

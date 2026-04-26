@@ -148,6 +148,7 @@ def create_broker(
     mt5_bridge_url: str = "",
     mt5_lot_size_units: int = 100_000,
     mt5_magic_number: int = 12345,
+    mt5_order_timeout_seconds: float = 10.0,
     shadow_log_path: str = "data/state/shadow_trades.jsonl",
     shadow_observer_state_dir: str = "data/shadow_state",
     initial_balance: float = 100_000.0,
@@ -200,10 +201,11 @@ def create_broker(
         from src.trading.mt5_bridge_broker import Mt5BridgeBrokerAdapter
         if not mt5_bridge_url:
             raise ValueError(
-                "trading_mode='mt5_bridge' requires mt5_bridge_url"
+                "trading_mode='mt5_bridge' requires mt5_bridge.bridge_url"
             )
         return Mt5BridgeBrokerAdapter(
             bridge_url=mt5_bridge_url,
+            request_timeout_seconds=mt5_order_timeout_seconds,
             lot_size_units=mt5_lot_size_units,
             magic_number=mt5_magic_number,
             max_total_positions=max_total_positions,
@@ -221,7 +223,7 @@ def create_broker(
 
         if not mt5_bridge_url:
             raise ValueError(
-                "trading_mode='shadow' requires mt5_bridge_url"
+                "trading_mode='shadow' requires mt5_bridge.bridge_url"
             )
 
         primary = PaperBrokerAdapter(
@@ -234,6 +236,7 @@ def create_broker(
         )
         observer = Mt5BridgeBrokerAdapter(
             bridge_url=mt5_bridge_url,
+            request_timeout_seconds=mt5_order_timeout_seconds,
             lot_size_units=mt5_lot_size_units,
             magic_number=mt5_magic_number,
             max_total_positions=max_total_positions,
