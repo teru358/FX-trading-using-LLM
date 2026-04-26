@@ -169,6 +169,14 @@ class TradingConfig:
         default_factory=lambda: ForecastAccuracyFeedbackConfig()
     )
 
+    # MT5 ブリッジブローカー設定 (trading_mode == "mt5_bridge" or "shadow" 時に使用)
+    mt5_bridge_url: str = ""               # 空なら mt5_bridge.bridge_url を流用
+    mt5_lot_size_units: int = 100_000      # 1 lot = 100,000 通貨 (FX 標準)
+    mt5_magic_number: int = 12345          # MT5 発注時の bot 識別 ID
+    # シャドートレード設定 (trading_mode == "shadow" 時のみ)
+    shadow_log_path: str = "data/state/shadow_trades.jsonl"
+    shadow_observer_state_dir: str = "data/shadow_state"   # observer 専用 state_store
+
 
 @dataclass
 class ForecastAccuracyFeedbackConfig:

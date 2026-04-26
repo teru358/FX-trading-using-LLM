@@ -54,7 +54,17 @@ async def exit_check_cycle(
         f"({len(account.open_positions)} open positions) ==="
     )
 
-    broker = create_broker(config.trading.trading_mode)
+    broker = create_broker(
+        config.trading.trading_mode,
+        mt5_bridge_url=(
+            config.trading.mt5_bridge_url or config.mt5_bridge.bridge_url
+        ),
+        mt5_lot_size_units=config.trading.mt5_lot_size_units,
+        mt5_magic_number=config.trading.mt5_magic_number,
+        shadow_log_path=config.trading.shadow_log_path,
+        shadow_observer_state_dir=config.trading.shadow_observer_state_dir,
+        initial_balance=config.trading.initial_balance,
+    )
     notifier = create_notifier(config.notifier.enabled)
 
     # Phase 1: SL/TP 確認

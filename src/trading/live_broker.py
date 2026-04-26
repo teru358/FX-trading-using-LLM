@@ -144,14 +144,24 @@ def create_broker(
     drawdown_kill_switch_enabled: bool = False,
     drawdown_kill_switch_max_pct: float = 0.10,
     drawdown_kill_switch_lookback_days: int = 0,
+    # ── mt5_bridge / shadow 用 (Phase 3a) ──
+    mt5_bridge_url: str = "",
+    mt5_lot_size_units: int = 100_000,
+    mt5_magic_number: int = 12345,
+    shadow_log_path: str = "data/state/shadow_trades.jsonl",
+    shadow_observer_state_dir: str = "data/shadow_state",
+    initial_balance: float = 100_000.0,
 ) -> BrokerAdapter:
     """trading_mode に応じた BrokerAdapter を返すファクトリ関数。
 
     Args:
-        trading_mode: "paper" | "live" | "signal"
+        trading_mode: "paper" | "live" | "signal" | "mt5_bridge" | "shadow"
         manual_position_mgr: "signal" モード時に必須。manual ポジション管理用。
         notifier: "signal" モード時に必須。通知アダプター。
         drawdown_kill_switch_*: 新規エントリーの DD kill switch 設定。
+        mt5_bridge_url: "mt5_bridge" or "shadow" 時に必須。
+        shadow_*: "shadow" 時に observer 専用 state_store と比較ログの場所を指定。
+        initial_balance: shadow モードで observer 専用 PositionManager の初期残高。
     """
     from src.trading.paper_broker import PaperBrokerAdapter
 
@@ -186,5 +196,65 @@ def create_broker(
             drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
             drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
         )
+    elif trading_mode == "mt5_bridge":
+        from src.trading.mt5_bridge_broker import Mt5BridgeBrokerAdapter
+        if not mt5_bridge_url:
+            raise ValueError(
+                "trading_mode='mt5_bridge' requires mt5_bridge_url"
+            )
+        return Mt5BridgeBrokerAdapter(
+            bridge_url=mt5_bridge_url,
+            lot_size_units=mt5_lot_size_units,
+            magic_number=mt5_magic_number,
+            max_total_positions=max_total_positions,
+            max_positions_per_group=max_positions_per_group,
+            max_same_direction_per_group=max_same_direction_per_group,
+            drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
+            drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
+            drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
+        )
+    elif trading_mode == "shadow":
+        from pathlib import Path
+        from src.persistence.state_store import StateStore
+        from src.trading.mt5_bridge_broker import Mt5BridgeBrokerAdapter
+        from src.trading.shadow_broker import ShadowBrokerAdapter
+
+        if not mt5_bridge_url:
+            raise ValueError(
+                "trading_mode='shadow' requires mt5_bridge_url"
+            )
+
+        primary = PaperBrokerAdapter(
+            max_total_positions=max_total_positions,
+            max_positions_per_group=max_positions_per_group,
+            max_same_direction_per_group=max_same_direction_per_group,
+            drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
+            drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
+            drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
+        )
+        observer = Mt5BridgeBrokerAdapter(
+            bridge_url=mt5_bridge_url,
+            lot_size_units=mt5_lot_size_units,
+            magic_number=mt5_magic_number,
+            max_total_positions=max_total_positions,
+            max_positions_per_group=max_positions_per_group,
+            max_same_direction_per_group=max_same_direction_per_group,
+            drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
+            drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
+            drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
+        )
+        # observer 専用 state_store + position_mgr (paper の state を汚染しない)
+        obs_store = StateStore(Path(shadow_observer_state_dir))
+        obs_pm = PositionManager(
+            obs_store, initial_balance, context="ShadowObserver",
+        )
+        return ShadowBrokerAdapter(
+            primary=primary, observer=observer,
+            observer_position_mgr=obs_pm,
+            comparison_log_path=Path(shadow_log_path),
+        )
     else:
-        raise ValueError(f"Unknown trading_mode: {trading_mode!r}. Use 'paper', 'live', or 'signal'.")
+        raise ValueError(
+            f"Unknown trading_mode: {trading_mode!r}. "
+            "Use 'paper', 'live', 'signal', 'mt5_bridge', or 'shadow'."
+        )
