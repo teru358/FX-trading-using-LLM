@@ -48,7 +48,7 @@ notepad .env   # MT5_LOGIN / MT5_PASSWORD / MT5_SERVER を埋める
 uv sync
 
 # 6. 起動 (フォアグラウンド)
-uv run python -m mt5_bridge.server
+uv run python server.py
 ```
 
 成功すると以下のようなログ:
@@ -97,7 +97,7 @@ Windows でブリッジを常駐させる方法:
 
 ```powershell
 # NSSM をダウンロード後
-nssm install Mt5Bridge "C:\path\to\uv.exe" "run python -m mt5_bridge.server"
+nssm install Mt5Bridge "C:\path\to\uv.exe" "run python server.py"
 nssm set Mt5Bridge AppDirectory "C:\path\to\finance\mt5_bridge"
 nssm start Mt5Bridge
 ```

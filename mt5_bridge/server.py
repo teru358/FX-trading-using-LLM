@@ -1,10 +1,10 @@
 """MT5 ブリッジ FastAPI サーバー (Phase 1+2: read-only)。
 
-起動方法 (Windows main PC):
+起動方法 (Windows main PC または WSL でテスト):
     cd mt5_bridge
     cp .env.example .env  # 値を埋める
     uv sync
-    uv run python -m mt5_bridge.server
+    uv run python server.py
 """
 from __future__ import annotations
 
@@ -15,8 +15,8 @@ from dataclasses import asdict
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel
 
-from mt5_bridge.config import BridgeSettings, load_settings
-from mt5_bridge.mt5_client import Mt5Client
+from config import BridgeSettings, load_settings
+from mt5_client import Mt5Client
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -133,15 +133,11 @@ def symbols():
 
 
 def main() -> None:
-    """`python -m mt5_bridge.server` で uvicorn を直接起動する。"""
+    """`python server.py` で uvicorn を直接起動する。"""
     import uvicorn
     cfg = load_settings()
-    uvicorn.run(
-        "mt5_bridge.server:app",
-        host=cfg.host,
-        port=cfg.port,
-        log_level="info",
-    )
+    # app オブジェクト直渡し (reload 不要、import 文字列のパス問題を回避)
+    uvicorn.run(app, host=cfg.host, port=cfg.port, log_level="info")
 
 
 if __name__ == "__main__":
