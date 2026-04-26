@@ -177,6 +177,31 @@ class Mt5Client:
             "dry_run": True, "magic": magic,
         }
 
+    def close_position_dry_run(
+        self, ticket: int, symbol: str | None = None,
+    ) -> dict:
+        """ポジション close をシミュレート。
+
+        DRY_RUN ではポジション ticket は擬似値なので MT5 の positions_get には存在しない。
+        symbol が指定されていれば対向 tick の中値を close_price として返す。
+        symbol 未指定なら 0.0 を返す (シャドウ用途では adapter 側で symbol を保持)。
+        """
+        from datetime import datetime, timezone
+
+        close_price = 0.0
+        if symbol:
+            tick = self._mt5.symbol_info_tick(symbol)
+            if tick is not None:
+                close_price = float((tick.bid + tick.ask) / 2)
+        ts = datetime.now(tz=timezone.utc).isoformat()
+        logger.info(
+            f"[DRY_RUN] close: ticket={ticket} symbol={symbol} @ {close_price}"
+        )
+        return {
+            "ticket": ticket, "close_price": close_price, "time": ts,
+            "dry_run": True, "note": "DRY_RUN: ticket not validated",
+        }
+
     def get_positions(self) -> list[Position]:
         positions = self._mt5.positions_get()
         if positions is None:

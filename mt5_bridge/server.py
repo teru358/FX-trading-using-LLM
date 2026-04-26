@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from config import BridgeSettings, load_settings
 from mt5_client import Mt5Client
-from order_models import OrderRequest, OrderResponse
+from order_models import ClosePositionResponse, OrderRequest, OrderResponse
 
 # ── ログ設定: stdout + ローテーション付きファイル ───────────────────
 _LOG_DIR = Path(__file__).parent / "logs"
@@ -166,6 +166,22 @@ def place_order(req: OrderRequest):
         return OrderResponse(**result)
     except RuntimeError as e:
         raise HTTPException(404, str(e))
+
+
+@app.post("/positions/{ticket}/close", response_model=ClosePositionResponse,
+          dependencies=[Depends(require_api_key)])
+def close_position(ticket: int, symbol: str | None = None):
+    if _client is None or not _client.is_connected:
+        raise HTTPException(503, "MT5 not connected")
+    if not _settings.dry_run:
+        raise HTTPException(
+            501, "live close not implemented in Phase 3a — set DRY_RUN=true",
+        )
+    try:
+        result = _client.close_position_dry_run(ticket, symbol=symbol)
+        return ClosePositionResponse(**result)
+    except RuntimeError as e:
+        raise HTTPException(500, str(e))
 
 
 def main() -> None:

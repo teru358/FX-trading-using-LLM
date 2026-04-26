@@ -27,3 +27,11 @@ class OrderResponse(BaseModel):
     time: str                               # ISO 8601
     dry_run: bool
     magic: int
+
+
+class ClosePositionResponse(BaseModel):
+    ticket: int
+    close_price: float                      # symbol 指定時は (bid+ask)/2、未指定なら 0.0
+    time: str                               # ISO 8601
+    dry_run: bool
+    note: str = ""                          # DRY_RUN モード時の補足説明
