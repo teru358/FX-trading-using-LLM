@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from config import BridgeSettings, load_settings
 from mt5_client import Mt5Client
+from order_models import OrderRequest, OrderResponse
 
 # ── ログ設定: stdout + ローテーション付きファイル ───────────────────
 _LOG_DIR = Path(__file__).parent / "logs"
@@ -144,8 +145,27 @@ def symbols():
     return _client.get_symbols()
 
 
-# 注意: 発注 endpoint (/order, /modify, /close) は Phase 1+2 では実装しない。
-# 資金 0 の本番口座保護のため、Phase 3 で BrokerAdapter 抽象とセットで導入予定。
+# ── 発注系 endpoint (Phase 3a: DRY_RUN のみ) ────────────────────────
+# 実発注 (DRY_RUN=false) は Phase 3b で資金チェック・slippage 制御等とセットで実装。
+
+@app.post("/order", response_model=OrderResponse,
+          dependencies=[Depends(require_api_key)])
+def place_order(req: OrderRequest):
+    if _client is None or not _client.is_connected:
+        raise HTTPException(503, "MT5 not connected")
+    if not _settings.dry_run:
+        raise HTTPException(
+            501,
+            "live order placement not implemented in Phase 3a — set DRY_RUN=true",
+        )
+    try:
+        result = _client.place_order_dry_run(
+            symbol=req.symbol, side=req.side, volume_lots=req.volume_lots,
+            sl=req.sl, tp=req.tp, magic=req.magic, comment=req.comment,
+        )
+        return OrderResponse(**result)
+    except RuntimeError as e:
+        raise HTTPException(404, str(e))
 
 
 def main() -> None:

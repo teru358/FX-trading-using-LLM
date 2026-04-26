@@ -143,6 +143,40 @@ class Mt5Client:
             spread_points=spread, time=ts,
         )
 
+    def place_order_dry_run(
+        self, symbol: str, side: str, volume_lots: float,
+        sl: float | None = None, tp: float | None = None,
+        magic: int = 0, comment: str = "",
+    ) -> dict:
+        """発注をシミュレート (MT5 には送らない)。
+        現在の bid/ask を fill_price として使い、time_ns で擬似 ticket を生成する。
+        """
+        import time as _time
+        from datetime import datetime, timezone
+
+        if not self._mt5.symbol_select(symbol, True):
+            raise RuntimeError(
+                f"symbol_select({symbol}) failed: {self._mt5.last_error()}"
+            )
+        tick = self._mt5.symbol_info_tick(symbol)
+        if tick is None:
+            raise RuntimeError(
+                f"symbol_info_tick({symbol}) failed: {self._mt5.last_error()}"
+            )
+        fill_price = float(tick.ask if side == "buy" else tick.bid)
+        ticket = _time.time_ns() // 1_000  # μs 解像度の擬似 ticket
+        ts = datetime.now(tz=timezone.utc).isoformat()
+        logger.info(
+            f"[DRY_RUN] order: {side} {symbol} lot={volume_lots} "
+            f"@ {fill_price} sl={sl} tp={tp} magic={magic} ticket={ticket}"
+        )
+        return {
+            "ticket": ticket, "symbol": symbol, "side": side,
+            "volume_lots": volume_lots, "fill_price": fill_price,
+            "sl": sl, "tp": tp, "time": ts,
+            "dry_run": True, "magic": magic,
+        }
+
     def get_positions(self) -> list[Position]:
         positions = self._mt5.positions_get()
         if positions is None:
