@@ -316,3 +316,14 @@ data_backup:
   at_time: "03:10"                 # HH:MM (news_collection の timezone)。tech 処理 (毎時) と被らない時刻
   output_dir: "backup/data"        # プロジェクトルート相対、自動 mkdir
   retention_count: 30              # 保持世代数 (古いものから自動削除)
+
+# MT5 ブリッジ (Windows 側 FastAPI) との接続設定
+# Phase 1 では heartbeat のみ。bridge_url を設定して enabled=true にすると
+# 定期的に /health を叩き、応答結果を log_path に JSONL で追記する。
+# 稼働率データを 1 週間ほど蓄積した上で発注機能の組込み是非を判断する。
+mt5_bridge:
+  enabled: false                              # true で heartbeat 起動
+  bridge_url: ""                              # 例: "http://192.168.1.10:8812" (main PC IP)
+  heartbeat_interval_minutes: 60              # 1時間おきに /health を叩く
+  request_timeout_seconds: 5.0
+  log_path: "data/state/mt5_heartbeat.jsonl"  # JSONL 追記、稼働率分析用

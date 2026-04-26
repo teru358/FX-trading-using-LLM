@@ -522,6 +522,21 @@ class DataBackupConfig:
 
 
 @dataclass
+class Mt5BridgeConfig:
+    """MT5 ブリッジサービス (Windows 側 FastAPI) との接続設定。
+
+    main PC で MetaTrader5 + Python ブリッジを動かし、stick PC の finance
+    から HTTP で発注・照会する構成。Phase 1 ではブリッジ可達性を測るため
+    heartbeat だけ動かして稼働率データを蓄積する。
+    """
+    enabled: bool = False                 # true で heartbeat ジョブ起動
+    bridge_url: str = ""                  # 例: "http://192.168.1.10:8812" (main PC)
+    heartbeat_interval_minutes: int = 60  # 何分おきに /health を叩くか
+    request_timeout_seconds: float = 5.0
+    log_path: str = "data/state/mt5_heartbeat.jsonl"  # JSONL 追記ログ (project root 相対)
+
+
+@dataclass
 class AppConfig:
     trading: TradingConfig
     instruments: list[InstrumentConfig]
@@ -547,6 +562,9 @@ class AppConfig:
     )
     data_backup: "DataBackupConfig" = field(
         default_factory=lambda: DataBackupConfig()
+    )
+    mt5_bridge: "Mt5BridgeConfig" = field(
+        default_factory=lambda: Mt5BridgeConfig()
     )
 
     @property
