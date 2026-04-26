@@ -99,11 +99,22 @@ trading:
   signal_deadband: 0.15            # BUY/SELL判定のスコア閾値（±）
   min_lot_size: 1000.0             # 最小ロットサイズ
   lot_unit: 1000.0                 # ロット切り捨て単位
-  # trading_mode: "paper" | "signal" | "live"
-  # - paper: ペーパートレード（シミュレーション）
-  # - signal: シグナル通知 + 内部自動RAG学習 + 手動ポジション管理
-  # - live: OANDA自動発注（未実装）
+  # trading_mode:
+  #   "paper"      — ローカルシミュレーション (state_store のみ更新)
+  #   "signal"     — シグナル通知のみ (発注しない、manual ポジション SL/TP のみ通知)
+  #   "live"       — OANDA REST 実発注 (Phase 3 未実装、NotImplementedError)
+  #   "mt5_bridge" — mt5_bridge 経由で MT5 へ発注 (DRY_RUN は bridge .env で制御)
+  #   "shadow"     — paper を canonical で動かしつつ mt5_bridge にも発注して比較ログ取得
   trading_mode: "paper"
+
+  # MT5 ブリッジブローカー設定 (trading_mode = "mt5_bridge" or "shadow" 時)
+  mt5_bridge_url: ""             # 空なら mt5_bridge.bridge_url を自動流用
+  mt5_lot_size_units: 100000     # 1 lot = 100,000 通貨 (FX 標準)。ブローカーで違う場合に調整
+  mt5_magic_number: 12345        # MT5 発注時の bot 識別 ID (手動 / 他 EA との区別用)
+
+  # シャドートレード (trading_mode = "shadow" 時のみ使用)
+  shadow_log_path: "data/state/shadow_trades.jsonl"     # paper vs MT5 比較ログ
+  shadow_observer_state_dir: "data/shadow_state"        # observer 専用 state_store
   # ポジション再評価（Phase 4a: Layer 1〜3）
   position_review_enabled: false        # true で有効化
   reversal_confidence_min: 0.70         # Layer 1: 反転シグナルの最低信頼度
