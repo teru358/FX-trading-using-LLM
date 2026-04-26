@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel
@@ -18,8 +20,22 @@ from pydantic import BaseModel
 from config import BridgeSettings, load_settings
 from mt5_client import Mt5Client
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+# ── ログ設定: stdout + ローテーション付きファイル ───────────────────
+_LOG_DIR = Path(__file__).parent / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+_LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+_file_handler = RotatingFileHandler(
+    _LOG_DIR / "bridge.log",
+    maxBytes=5_000_000,    # 5MB ごとに rotate
+    backupCount=5,         # bridge.log + bridge.log.1 .. .5 を保持
+    encoding="utf-8",
+)
+_file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+logging.basicConfig(
+    level=logging.INFO,
+    format=_LOG_FORMAT,
+    handlers=[logging.StreamHandler(), _file_handler],
+)
 logger = logging.getLogger(__name__)
 
 

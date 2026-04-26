@@ -104,6 +104,24 @@ nssm start Mt5Bridge
 
 ---
 
+## ログ
+
+`mt5_bridge/logs/bridge.log` にローテーション付きで出力されます (5MB × 6 世代)。
+
+```powershell
+# 直近のログ確認
+Get-Content C:\Users\<user>\mt5-bridge\logs\bridge.log -Tail 50
+
+# リアルタイム追跡 (tail -f 相当)
+Get-Content C:\Users\<user>\mt5-bridge\logs\bridge.log -Tail 20 -Wait
+```
+
+ファイルログには **mt5_client / server の自前ログ**だけが入ります (MT5 connect / disconnect / 起動メッセージ等)。Uvicorn の HTTP アクセスログは stdout (PowerShell コンソール) のみ。アクセスログも永続化したい場合は起動時に PowerShell でリダイレクト:
+
+```powershell
+uv run python server.py 2>&1 | Tee-Object -FilePath logs\full-stdout.log -Append
+```
+
 ## トラブルシュート
 
 | 症状 | 原因 / 対処 |
