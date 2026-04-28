@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import timedelta
+from typing import TYPE_CHECKING
 
 from src.analysis.price_analyzer import analyze_price_action
 from src.config import AppConfig, InstrumentConfig
@@ -31,6 +32,9 @@ from src.rag.prompt_formatter import (
 )
 from src.rag.vector_store import VectorStore
 from src.trading.market_hours import is_market_open
+
+if TYPE_CHECKING:
+    from src.data.price_fetcher import PriceData
 
 logger = logging.getLogger(__name__)
 
@@ -253,10 +257,15 @@ async def _collect_one(
     macro_context: str = "",
     correlation_context: str = "",
     price_provider: "PriceProvider | None" = None,
+    price_data: "PriceData | None" = None,
 ) -> None:
-    """1銘柄のOHLCVを取得してテクニカル分析を実行し、スナップショットを保存する。"""
-    # Phase 1: OHLCV 取得
-    price_data = _fetch_instrument_ohlcv(inst, config, price_store, price_provider)
+    """1銘柄のOHLCVを取得してテクニカル分析を実行し、スナップショットを保存する。
+
+    price_data が渡された場合は内部フェッチをスキップする (prefetch キャッシュ経由)。
+    """
+    # Phase 1: OHLCV 取得 (prefetch されていなければここで取得)
+    if price_data is None:
+        price_data = _fetch_instrument_ohlcv(inst, config, price_store, price_provider)
 
     # Phase 2: 鮮度チェック (古ければスキップ)
     staleness = _is_price_data_stale(price_data, max_staleness=_max_staleness_for(inst))
@@ -321,13 +330,39 @@ async def collect_all_technical(
         f"llm={type(llm_price).__name__}({llm_price.model_name}) ==="
     )
 
+    # Step 0: 全銘柄 OHLCV を 1 サイクル 1 回ずつ prefetch してキャッシュ
+    # 各 phase からは prices[symbol] を参照して重複フェッチを避ける。
+    all_instruments = list(watch_only) + list(tradeable)
+    prices: dict[str, "PriceData"] = {}
+    for inst in all_instruments:
+        try:
+            prices[inst.symbol] = _fetch_instrument_ohlcv(
+                inst, config, price_store, price_provider,
+            )
+        except Exception as e:
+            logger.warning(
+                f"[PREFETCH] {inst.display_name}: OHLCV fetch failed: {e}"
+            )
+    logger.info(
+        f"[PREFETCH] cached {len(prices)}/{len(all_instruments)} symbols"
+    )
+
     # Phase 1: 監視専用銘柄（指数・参照FX）を先に収集
     if watch_only:
         logger.info(f"[COLLECT] Phase 1: {len(watch_only)} watch-only instruments")
     for i, inst in enumerate(watch_only):
+        pd_cached = prices.get(inst.symbol)
+        if pd_cached is None:
+            logger.warning(f"[COLLECT] {inst.display_name}: skipped (no cached price)")
+            if i < len(watch_only) - 1:
+                await asyncio.sleep(delay)
+            continue
         try:
-            logger.debug(f"[COLLECT] {inst.display_name}: starting OHLCV + technical analysis...")
-            await _collect_one(inst, config, store, price_store, analysis_store, llm_price, price_provider=price_provider)
+            logger.debug(f"[COLLECT] {inst.display_name}: starting technical analysis...")
+            await _collect_one(
+                inst, config, store, price_store, analysis_store, llm_price,
+                price_provider=price_provider, price_data=pd_cached,
+            )
         except Exception as e:
             logger.error(f"[COLLECT] {inst.display_name}: technical analysis failed: {e}", exc_info=True)
         if i < len(watch_only) - 1:
@@ -344,32 +379,16 @@ async def collect_all_technical(
         realtime_provider=config.price_provider.realtime_provider,
     )
 
-    # Phase 1.5: trade×watch の価格相関を計算（LLMなし）
+    # Phase 1.5: trade×watch の価格相関を計算（LLMなし、キャッシュ参照のみ）
     correlations: list[PairCorrelation] = []
     if watch_only and tradeable:
         try:
-            from src.data.price_fetcher import fetch_ohlcv as _fetch_ohlcv
-            _period = f"{config.trading.lookback_days}d"
-            _interval = config.trading.ohlcv_interval
-
-            trade_prices = {}
-            for inst in tradeable:
-                try:
-                    pd_ = (price_provider.get_ohlcv(inst.symbol, period=_period, interval=_interval, price_store=price_store)
-                           if price_provider else _fetch_ohlcv(inst.symbol, period=_period, interval=_interval, price_store=price_store))
-                    trade_prices[inst.symbol] = pd_
-                except Exception as e:
-                    logger.warning(f"[CORR] {inst.display_name}: OHLCV fetch failed: {e}")
-
-            watch_prices = {}
-            for inst in watch_only:
-                try:
-                    pd_ = (price_provider.get_ohlcv(inst.symbol, period=_period, interval=_interval, price_store=price_store)
-                           if price_provider else _fetch_ohlcv(inst.symbol, period=_period, interval=_interval, price_store=price_store))
-                    watch_prices[inst.symbol] = pd_
-                except Exception as e:
-                    logger.warning(f"[CORR] {inst.display_name}: OHLCV fetch failed: {e}")
-
+            trade_prices = {
+                i.symbol: prices[i.symbol] for i in tradeable if i.symbol in prices
+            }
+            watch_prices = {
+                i.symbol: prices[i.symbol] for i in watch_only if i.symbol in prices
+            }
             watch_names = {inst.symbol: inst.display_name for inst in watch_only}
             correlations = compute_correlations(trade_prices, watch_prices, watch_names)
             logger.info(f"[CORR] Computed {len(correlations)} correlation pairs")
@@ -382,11 +401,20 @@ async def collect_all_technical(
             await asyncio.sleep(delay)
         logger.info(f"[COLLECT] Phase 2: {len(tradeable)} tradeable instruments")
     for i, inst in enumerate(tradeable):
+        pd_cached = prices.get(inst.symbol)
+        if pd_cached is None:
+            logger.warning(f"[COLLECT] {inst.display_name}: skipped (no cached price)")
+            if i < len(tradeable) - 1:
+                await asyncio.sleep(delay)
+            continue
         try:
             corr_ctx = format_correlation_context(correlations, inst.symbol)
-            logger.debug(f"[COLLECT] {inst.display_name}: starting OHLCV + technical analysis...")
-            await _collect_one(inst, config, store, price_store, analysis_store, llm_price,
-                               macro_context=macro_ctx, correlation_context=corr_ctx, price_provider=price_provider)
+            logger.debug(f"[COLLECT] {inst.display_name}: starting technical analysis...")
+            await _collect_one(
+                inst, config, store, price_store, analysis_store, llm_price,
+                macro_context=macro_ctx, correlation_context=corr_ctx,
+                price_provider=price_provider, price_data=pd_cached,
+            )
         except Exception as e:
             logger.error(f"[COLLECT] {inst.display_name}: technical analysis failed: {e}", exc_info=True)
         if i < len(tradeable) - 1:
