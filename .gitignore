@@ -12,6 +12,7 @@ wheels/
 # Secrets / personal docs
 .env
 CLAUDE.md
+.claude/
 docs/
 
 # 個人設定 — *.yaml はすべて非公開、*.yaml.example のみ公開
