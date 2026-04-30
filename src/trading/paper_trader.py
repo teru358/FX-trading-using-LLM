@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import logging
 
+from src.signals.scale_in import evaluate_pre_execution_checks
 from src.signals.signal_combiner import TradeSignal
-from src.trading.portfolio_guard import check_drawdown_kill_switch, check_portfolio_limits
 from src.trading.position_manager import Order, PositionManager
 
 logger = logging.getLogger(__name__)
@@ -13,9 +13,11 @@ def execute_signal(
     signal: TradeSignal,
     position_mgr: PositionManager,
     macro_context: str = "",
-    max_total_positions: int = 4,
-    max_positions_per_group: int = 2,
-    max_same_direction_per_group: int = 2,
+    *,
+    max_positions_per_pair: int = 2,
+    scale_in_enabled: bool = False,
+    scale_in_conf_margin: float = 0.05,
+    scale_in_score_margin: float = 0.05,
     drawdown_kill_switch_enabled: bool = False,
     drawdown_kill_switch_max_pct: float = 0.10,
     drawdown_kill_switch_lookback_days: int = 0,
@@ -23,59 +25,46 @@ def execute_signal(
     if signal.action == "hold":
         return None
 
-    # One position per pair
-    existing = position_mgr.get_open_position(signal.pair)
-    if existing is not None:
-        logger.info(
-            f"[SKIP] {signal.pair} already has open position {existing.order_id}. "
-            f"Skipping new {signal.action} signal."
-        )
+    status, reason = evaluate_pre_execution_checks(
+        signal, position_mgr,
+        max_positions_per_pair=max_positions_per_pair,
+        scale_in_enabled=scale_in_enabled,
+        scale_in_conf_margin=scale_in_conf_margin,
+        scale_in_score_margin=scale_in_score_margin,
+        drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
+        drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
+        drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
+    )
+    if status == "skip":
+        logger.info(f"[SKIP] {signal.pair}: {reason}")
         return None
 
+    is_scale_in = (status == "scale_in")
     direction = "buy" if signal.action == "buy" else "sell"
 
-    # Portfolio-level risk check
-    account = position_mgr.get_account_state()
-    rejection = check_portfolio_limits(
-        pair=signal.pair,
-        direction=direction,
-        position_size=signal.position_size,
-        open_positions=account.open_positions,
-        max_total_positions=max_total_positions,
-        max_positions_per_group=max_positions_per_group,
-        max_same_direction_per_group=max_same_direction_per_group,
-    )
-    if rejection:
-        logger.info(f"[SKIP] {signal.pair}: portfolio guard — {rejection}")
-        return None
-
-    # Drawdown kill switch (新規エントリーのみ停止)
-    dd_rejection = check_drawdown_kill_switch(
-        initial_balance=account.initial_balance,
-        closed_trades=account.closed_trades,
-        enabled=drawdown_kill_switch_enabled,
-        max_drawdown_pct=drawdown_kill_switch_max_pct,
-        lookback_days=drawdown_kill_switch_lookback_days,
-    )
-    if dd_rejection:
-        logger.warning(f"[SKIP] {signal.pair}: {dd_rejection}")
-        return None
-
     order = Order.new(
-        pair=signal.pair,
-        direction=direction,
-        entry_price=signal.entry_price,
-        stop_loss=signal.stop_loss,
-        take_profit=signal.take_profit,
-        position_size=signal.position_size,
+        pair=signal.pair, direction=direction,
+        entry_price=signal.entry_price, stop_loss=signal.stop_loss,
+        take_profit=signal.take_profit, position_size=signal.position_size,
         signal_reason=signal.signal_reason,
         macro_context_at_entry=macro_context,
+        open_confidence=signal.confidence,
+        open_score=signal.combined_score,
     )
     position_mgr.open_position(order)
-    logger.info(
-        f"[ORDER] {signal.pair} {direction.upper()} executed | "
-        f"reason: {signal.signal_reason}"
-    )
+
+    prefix = "[SCALE]" if is_scale_in else "[ORDER]"
+    if is_scale_in:
+        logger.info(
+            f"{prefix} {signal.pair} {direction.upper()} executed | "
+            f"new conf={signal.confidence:.3f} score={signal.combined_score:+.3f} | "
+            f"{reason} | reason: {signal.signal_reason}"
+        )
+    else:
+        logger.info(
+            f"{prefix} {signal.pair} {direction.upper()} executed | "
+            f"reason: {signal.signal_reason}"
+        )
     return order
 
 

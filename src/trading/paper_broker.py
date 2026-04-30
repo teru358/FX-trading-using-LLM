@@ -11,16 +11,18 @@ class PaperBrokerAdapter(BrokerAdapter):
 
     def __init__(
         self,
-        max_total_positions: int = 4,
-        max_positions_per_group: int = 2,
-        max_same_direction_per_group: int = 2,
+        max_positions_per_pair: int = 2,
+        scale_in_enabled: bool = False,
+        scale_in_conf_margin: float = 0.05,
+        scale_in_score_margin: float = 0.05,
         drawdown_kill_switch_enabled: bool = False,
         drawdown_kill_switch_max_pct: float = 0.10,
         drawdown_kill_switch_lookback_days: int = 0,
     ) -> None:
-        self._max_total = max_total_positions
-        self._max_per_group = max_positions_per_group
-        self._max_same_dir = max_same_direction_per_group
+        self._max_per_pair = max_positions_per_pair
+        self._scale_in_enabled = scale_in_enabled
+        self._scale_in_conf_margin = scale_in_conf_margin
+        self._scale_in_score_margin = scale_in_score_margin
         self._dd_enabled = drawdown_kill_switch_enabled
         self._dd_max_pct = drawdown_kill_switch_max_pct
         self._dd_lookback = drawdown_kill_switch_lookback_days
@@ -33,9 +35,10 @@ class PaperBrokerAdapter(BrokerAdapter):
     ) -> Order | None:
         return execute_signal(
             signal, position_mgr, macro_context=macro_context,
-            max_total_positions=self._max_total,
-            max_positions_per_group=self._max_per_group,
-            max_same_direction_per_group=self._max_same_dir,
+            max_positions_per_pair=self._max_per_pair,
+            scale_in_enabled=self._scale_in_enabled,
+            scale_in_conf_margin=self._scale_in_conf_margin,
+            scale_in_score_margin=self._scale_in_score_margin,
             drawdown_kill_switch_enabled=self._dd_enabled,
             drawdown_kill_switch_max_pct=self._dd_max_pct,
             drawdown_kill_switch_lookback_days=self._dd_lookback,
