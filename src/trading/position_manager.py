@@ -31,8 +31,8 @@ class Order:
     realized_pnl: Optional[float] = None
     signal_reason: str = ""  # エントリー理由（決済時の振り返りに使用）
     macro_context_at_entry: str = ""  # エントリー時の監視銘柄スナップショット（振り返りに使用）
-    open_confidence: Optional[float] = None    # 追加
-    open_score: Optional[float] = None         # 追加
+    open_confidence: Optional[float] = None  # エントリー時の signal.confidence (scale-in 判定用)
+    open_score: Optional[float] = None       # エントリー時の signal.combined_score (scale-in 判定用)
 
     @staticmethod
     def new(
