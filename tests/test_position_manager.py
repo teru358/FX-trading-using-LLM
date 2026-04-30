@@ -276,3 +276,63 @@ def test_close_by_stale_instance_does_not_resurrect_other_positions(tmp_state_st
     fresh = PositionManager(tmp_state_store, initial_balance=100_000.0, context="fresh")
     assert len(fresh.get_account_state().open_positions) == 0
     assert len(fresh.get_account_state().closed_trades) == 2
+
+
+# ── open_confidence / open_score (scale-in feature) ───────────
+
+
+def test_order_new_records_open_confidence_and_score():
+    order = Order.new(
+        pair="USDJPY=X", direction="buy", entry_price=160.0,
+        stop_loss=159.5, take_profit=161.0, position_size=1000.0,
+        signal_reason="test",
+        open_confidence=0.65, open_score=0.40,
+    )
+    assert order.open_confidence == 0.65
+    assert order.open_score == 0.40
+
+
+def test_order_new_defaults_open_confidence_score_to_none():
+    order = Order.new(
+        pair="USDJPY=X", direction="buy", entry_price=160.0,
+        stop_loss=159.5, take_profit=161.0, position_size=1000.0,
+    )
+    assert order.open_confidence is None
+    assert order.open_score is None
+
+
+def test_order_from_dict_handles_missing_open_confidence_score():
+    """legacy positions.json に open_conf/score が無い場合の fallback。"""
+    legacy_dict = {
+        "order_id": "abc-123",
+        "pair": "USDJPY=X",
+        "direction": "buy",
+        "entry_price": 160.0,
+        "stop_loss": 159.5,
+        "take_profit": 161.0,
+        "position_size": 1000.0,
+        "initial_stop_loss": 159.5,
+        "status": "open",
+        "opened_at": "2026-04-29T12:00:00",
+        "closed_at": None,
+        "close_price": None,
+        "close_reason": None,
+        "realized_pnl": None,
+        "signal_reason": "",
+        "macro_context_at_entry": "",
+        # open_confidence / open_score 不在
+    }
+    order = Order.from_dict(legacy_dict)
+    assert order.open_confidence is None
+    assert order.open_score is None
+
+
+def test_order_to_dict_roundtrip_preserves_open_confidence_score():
+    original = Order.new(
+        pair="USDJPY=X", direction="buy", entry_price=160.0,
+        stop_loss=159.5, take_profit=161.0, position_size=1000.0,
+        open_confidence=0.72, open_score=0.55,
+    )
+    restored = Order.from_dict(original.to_dict())
+    assert restored.open_confidence == 0.72
+    assert restored.open_score == 0.55

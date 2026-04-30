@@ -31,6 +31,8 @@ class Order:
     realized_pnl: Optional[float] = None
     signal_reason: str = ""  # エントリー理由（決済時の振り返りに使用）
     macro_context_at_entry: str = ""  # エントリー時の監視銘柄スナップショット（振り返りに使用）
+    open_confidence: Optional[float] = None    # 追加
+    open_score: Optional[float] = None         # 追加
 
     @staticmethod
     def new(
@@ -42,6 +44,8 @@ class Order:
         position_size: float,
         signal_reason: str = "",
         macro_context_at_entry: str = "",
+        open_confidence: Optional[float] = None,
+        open_score: Optional[float] = None,
     ) -> "Order":
         return Order(
             order_id=str(uuid.uuid4()),
@@ -54,6 +58,8 @@ class Order:
             initial_stop_loss=stop_loss,
             signal_reason=signal_reason,
             macro_context_at_entry=macro_context_at_entry,
+            open_confidence=open_confidence,
+            open_score=open_score,
         )
 
     def to_dict(self) -> dict:
@@ -74,6 +80,8 @@ class Order:
         # 現在のSLを記録することしかできない (follow ステージでの元SL距離が
         # 実際より小さくなる可能性がある)。新規Orderは Order.new で正しく設定される。
         d.setdefault("initial_stop_loss", d["stop_loss"])
+        d.setdefault("open_confidence", None)
+        d.setdefault("open_score", None)
         return Order(**d)
 
 
