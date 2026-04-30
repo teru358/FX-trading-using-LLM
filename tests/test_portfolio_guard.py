@@ -1,11 +1,11 @@
-"""portfolio_guard.check_portfolio_limits() / check_drawdown_kill_switch() のテスト。"""
+"""portfolio_guard.check_max_positions_per_pair() / check_drawdown_kill_switch() のテスト。"""
 from __future__ import annotations
 
 from datetime import datetime, timedelta
 
 from src.trading.portfolio_guard import (
     check_drawdown_kill_switch,
-    check_portfolio_limits,
+    check_max_positions_per_pair,
 )
 from src.trading.position_manager import Order
 
@@ -36,68 +36,37 @@ def _closed(pnl: float, closed_at: datetime) -> Order:
     return order
 
 
-def test_allows_when_no_positions():
-    result = check_portfolio_limits(
-        pair="USDJPY=X", direction="buy", position_size=10000,
-        open_positions=[],
+def _make_pair_order(pair: str, direction: str = "buy"):
+    return Order.new(
+        pair=pair, direction=direction, entry_price=160.0,
+        stop_loss=159.5, take_profit=161.0, position_size=1000.0,
     )
-    assert result is None
 
 
-def test_blocks_when_max_total_reached():
-    positions = [_pos("USDJPY=X"), _pos("EURUSD=X"), _pos("GBPUSD=X"), _pos("AUDUSD=X")]
-    result = check_portfolio_limits(
-        pair="USDCHF=X", direction="buy", position_size=10000,
-        open_positions=positions, max_total_positions=4,
+def test_check_max_positions_per_pair_blocks_when_at_limit():
+    open_pos = [_make_pair_order("USDJPY=X"), _make_pair_order("USDJPY=X")]
+    rejection = check_max_positions_per_pair(
+        "USDJPY=X", open_pos, max_positions_per_pair=2,
     )
-    assert result is not None
-    assert "Max total positions" in result
+    assert rejection is not None
+    assert "USDJPY=X" in rejection
+    assert "2" in rejection
 
 
-def test_blocks_when_currency_group_full():
-    positions = [_pos("USDJPY=X"), _pos("EURJPY=X")]
-    result = check_portfolio_limits(
-        pair="GBPJPY=X", direction="buy", position_size=10000,
-        open_positions=positions, max_positions_per_group=2,
+def test_check_max_positions_per_pair_allows_when_below_limit():
+    open_pos = [_make_pair_order("USDJPY=X")]
+    rejection = check_max_positions_per_pair(
+        "USDJPY=X", open_pos, max_positions_per_pair=2,
     )
-    assert result is not None
-    assert "JPY group" in result
+    assert rejection is None
 
 
-def test_allows_different_group():
-    """JPYグループが埋まっていても、別グループのペアは開ける。"""
-    positions = [_pos("USDJPY=X"), _pos("EURJPY=X")]
-    result = check_portfolio_limits(
-        pair="AUDUSD=X", direction="buy", position_size=10000,
-        open_positions=positions, max_positions_per_group=2,
+def test_check_max_positions_per_pair_counts_only_target_pair():
+    open_pos = [_make_pair_order("EURUSD=X"), _make_pair_order("EURUSD=X")]
+    rejection = check_max_positions_per_pair(
+        "USDJPY=X", open_pos, max_positions_per_pair=2,
     )
-    # AUDUSD is in USD group, not JPY-only
-    # USD group has USDJPY (1 position) → still under limit
-    assert result is None
-
-
-def test_blocks_same_direction_in_group():
-    positions = [_pos("USDJPY=X", "buy"), _pos("EURJPY=X", "buy")]
-    result = check_portfolio_limits(
-        pair="GBPJPY=X", direction="buy", position_size=10000,
-        open_positions=positions,
-        max_positions_per_group=3,  # enough room by count
-        max_same_direction_per_group=2,
-    )
-    assert result is not None
-    assert "buy positions" in result
-
-
-def test_allows_opposite_direction_in_group():
-    """グループ内に2つbuyがあっても、sellなら同方向制限に引っかからない。"""
-    positions = [_pos("USDJPY=X", "buy"), _pos("EURJPY=X", "buy")]
-    result = check_portfolio_limits(
-        pair="GBPJPY=X", direction="sell", position_size=10000,
-        open_positions=positions,
-        max_positions_per_group=3,
-        max_same_direction_per_group=2,
-    )
-    assert result is None
+    assert rejection is None
 
 
 # ---------------------------------------------------------------------------
