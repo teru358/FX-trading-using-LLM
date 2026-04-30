@@ -1,6 +1,8 @@
 """position_manager.PositionManager のテスト。"""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from src.trading.position_manager import Order, PositionManager
@@ -336,3 +338,49 @@ def test_order_to_dict_roundtrip_preserves_open_confidence_score():
     restored = Order.from_dict(original.to_dict())
     assert restored.open_confidence == 0.72
     assert restored.open_score == 0.55
+
+
+# ── get_open_positions_by_pair ────────────────────────────────
+
+
+def _setup_position_manager(tmp_path: Path) -> PositionManager:
+    from src.persistence.state_store import StateStore
+    return PositionManager(
+        StateStore(tmp_path),
+        initial_balance=10000.0,
+        context="Test",
+    )
+
+
+def test_get_open_positions_by_pair_returns_all_matching(tmp_path):
+    mgr = _setup_position_manager(tmp_path)
+    o1 = Order.new("USDJPY=X", "buy", 160.0, 159.5, 161.0, 1000.0)
+    o2 = Order.new("USDJPY=X", "buy", 160.5, 160.0, 162.0, 1000.0,
+                   open_confidence=0.70, open_score=0.50)
+    o3 = Order.new("EURUSD=X", "sell", 1.10, 1.11, 1.09, 1000.0)
+    mgr.open_position(o1)
+    mgr.open_position(o2)
+    mgr.open_position(o3)
+
+    result = mgr.get_open_positions_by_pair("USDJPY=X")
+    assert len(result) == 2
+    assert {p.order_id for p in result} == {o1.order_id, o2.order_id}
+
+
+def test_get_open_positions_by_pair_returns_empty_when_no_match(tmp_path):
+    mgr = _setup_position_manager(tmp_path)
+    o1 = Order.new("USDJPY=X", "buy", 160.0, 159.5, 161.0, 1000.0)
+    mgr.open_position(o1)
+
+    result = mgr.get_open_positions_by_pair("EURUSD=X")
+    assert result == []
+
+
+def test_get_open_positions_by_pair_excludes_closed(tmp_path):
+    mgr = _setup_position_manager(tmp_path)
+    o1 = Order.new("USDJPY=X", "buy", 160.0, 159.5, 161.0, 1000.0)
+    mgr.open_position(o1)
+    mgr.close_position(o1.order_id, 161.0, "take_profit")
+
+    result = mgr.get_open_positions_by_pair("USDJPY=X")
+    assert result == []

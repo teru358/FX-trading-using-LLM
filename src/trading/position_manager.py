@@ -170,11 +170,17 @@ class PositionManager:
             closed_trades=list(self._closed),
         )
 
+    def get_open_positions_by_pair(self, pair: str) -> list[Order]:
+        """指定ペアの open ポジを全て返す (順序: opened_at 昇順)。"""
+        return sorted(
+            [p for p in self._open if p.pair == pair],
+            key=lambda p: p.opened_at,
+        )
+
     def get_open_position(self, pair: str) -> Optional[Order]:
-        for pos in self._open:
-            if pos.pair == pair:
-                return pos
-        return None
+        """指定ペアの最初の open ポジを返す (互換性維持)。"""
+        positions = self.get_open_positions_by_pair(pair)
+        return positions[0] if positions else None
 
     def open_position(self, order: Order) -> None:
         with self._store.transaction():
