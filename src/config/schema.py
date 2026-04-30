@@ -148,10 +148,12 @@ class TradingConfig:
     # TradingView テクニカルサマリー (矛盾検出)
     tv_summary_enabled: bool = False
     tv_conflict_dampen: float = 0.7    # TV判定と方向が矛盾時のconfidence倍率
-    # ポートフォリオリスク管理
-    max_total_positions: int = 4                 # 全体の最大同時ポジション数
-    max_positions_per_currency_group: int = 2    # 通貨グループ別の最大ポジション数
-    max_same_direction_per_group: int = 2        # グループ内同方向の最大ポジション数
+    # Scale-in (順張り増し玉): 既存ポジと同方向で強い signal が来た時に追加発注
+    scale_in_enabled: bool = False
+    scale_in_conf_margin: float = 0.05    # confidence 上回り幅
+    scale_in_score_margin: float = 0.05   # |combined_score| 上回り幅
+    # ペアごとのポジション数上限 (旧 max_total_positions / per_currency_group / same_direction を統合)
+    max_positions_per_pair: int = 2
     # Drawdown kill switch (新規エントリーのみ停止、既存ポジションは保持)
     drawdown_kill_switch_enabled: bool = False
     drawdown_kill_switch_max_pct: float = 0.10   # peak からこの割合以上落ちたら新規停止 (例: 0.10 = 10%)

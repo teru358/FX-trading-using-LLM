@@ -10,12 +10,15 @@ YAML キー ≠ フィールド名のケース (KeywordsConfig 等) やネスト
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import fields
 from pathlib import Path
 
 import yaml
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 from src.config.schema import (
     AnalysisConfig,
@@ -85,6 +88,32 @@ def _merge_split_configs(base: dict, config_dir: Path) -> dict:
     return base
 
 
+_DEPRECATED_TRADING_KEYS = {
+    "max_total_positions",
+    "max_positions_per_currency_group",
+    "max_same_direction_per_group",
+}
+
+
+def _strip_deprecated_keys(trading_dict: dict) -> dict:
+    """deprecated trading キーを除去 (Phase 4 で本関数自体を削除予定)。
+
+    Phase 3b で max_total_positions / max_positions_per_currency_group /
+    max_same_direction_per_group を廃止し max_positions_per_pair に統合した。
+    旧 settings.yaml に残っていれば WARNING ログ + 無視。
+    """
+    result = dict(trading_dict)
+    for key in list(result.keys()):
+        if key in _DEPRECATED_TRADING_KEYS:
+            logger.warning(
+                f"[CONFIG] '{key}' is deprecated and ignored. "
+                f"Remove it from settings.yaml. "
+                f"This warning will be removed in Phase 4."
+            )
+            result.pop(key)
+    return result
+
+
 # ── load_config ──────────────────────────────────────────────────
 
 def load_config(config_path: Path | None = None) -> AppConfig:
@@ -100,7 +129,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
 
     # ── フラット configs (_from_dict で自動構築) ──────────────────
 
-    trading_raw = raw.get("trading", {}) or {}
+    trading_raw = _strip_deprecated_keys(raw.get("trading", {}) or {})
     # ネスト dataclass: forecast_accuracy_feedback (TradingConfig 配下)
     fa_raw = trading_raw.pop("forecast_accuracy_feedback", None)
     trading = _from_dict(TradingConfig, trading_raw)
