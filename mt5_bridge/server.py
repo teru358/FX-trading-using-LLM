@@ -21,21 +21,112 @@ from config import BridgeSettings, load_settings
 from mt5_client import Mt5Client
 from order_models import ClosePositionResponse, OrderRequest, OrderResponse
 
-# ── ログ設定: stdout + ローテーション付きファイル ───────────────────
+# ── ログ設定: stdout (色付き) + ローテーション付きファイル (色なし) ──
+import sys
+
 _LOG_DIR = Path(__file__).parent / "logs"
 _LOG_DIR.mkdir(exist_ok=True)
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+# levelname 専用 ANSI 色 (cmd.exe / Windows Terminal / Linux 共通)
+_LEVEL_COLORS = {
+    logging.DEBUG:    "\033[36m",     # cyan
+    logging.INFO:     "\033[32m",     # green
+    logging.WARNING:  "\033[33m",     # yellow
+    logging.ERROR:    "\033[31m",     # red
+    logging.CRITICAL: "\033[1;31m",   # bold red
+}
+_ANSI_RESET = "\033[0m"
+
+
+def _colorize_levelname(record: logging.LogRecord, use_colors: bool) -> str | None:
+    """record.levelname を色付き文字列に書換え、元の値を返す (None=色なし)。
+
+    呼出側で finally に元値を戻すこと (record の汚染回避)。
+    """
+    if not use_colors:
+        return None
+    color = _LEVEL_COLORS.get(record.levelno)
+    if not color:
+        return None
+    original = record.levelname
+    record.levelname = f"{color}{original}{_ANSI_RESET}"
+    return original
+
+
+class _ColoredLevelFormatter(logging.Formatter):
+    """ターミナル用フォーマッタ。`%(levelname)s` を ANSI で色付けする。
+
+    アプリ標準ログ + uvicorn 起動メッセージ用。
+    """
+
+    def __init__(
+        self,
+        fmt: str | None = None,
+        datefmt: str | None = None,
+        *,
+        use_colors: bool | None = None,
+    ) -> None:
+        super().__init__(fmt=fmt, datefmt=datefmt)
+        if use_colors is None:
+            use_colors = sys.stderr.isatty()
+        self._use_colors = bool(use_colors)
+
+    def format(self, record: logging.LogRecord) -> str:
+        original = _colorize_levelname(record, self._use_colors)
+        try:
+            return super().format(record)
+        finally:
+            if original is not None:
+                record.levelname = original
+
+
+def _make_colored_access_formatter(*args, **kwargs):
+    """uvicorn.AccessFormatter を継承して levelname も色付けするクラスを返す。
+
+    AccessFormatter は client_addr/request_line/status_code を scope から
+    展開する特殊機能を持つため、置換ではなく継承する必要がある。
+    関数で動的生成しているのは uvicorn のインポートをモジュールロード時に
+    遅延させるため (mt5_bridge ローカル実行で uvicorn 未インストール環境を許容)。
+    """
+    from uvicorn.logging import AccessFormatter
+
+    class _ColoredAccessFormatter(AccessFormatter):
+        def __init__(self, *a, **kw) -> None:
+            super().__init__(*a, **kw)
+            if self.use_colors is None:
+                self.use_colors = sys.stderr.isatty()
+
+        def formatMessage(self, record: logging.LogRecord) -> str:
+            original = _colorize_levelname(record, self.use_colors)
+            try:
+                return super().formatMessage(record)
+            finally:
+                if original is not None:
+                    record.levelname = original
+
+    return _ColoredAccessFormatter(*args, **kwargs)
+
+
+# ファイル出力 (色なし、ANSI 制御文字を埋め込まない)
 _file_handler = RotatingFileHandler(
     _LOG_DIR / "bridge.log",
     maxBytes=5_000_000,    # 5MB ごとに rotate
     backupCount=5,         # bridge.log + bridge.log.1 .. .5 を保持
     encoding="utf-8",
 )
-_file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
+_file_handler.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=_DATE_FORMAT))
+
+# ターミナル出力 (色付き、tty 検出で自動切替)
+_stream_handler = logging.StreamHandler()
+_stream_handler.setFormatter(
+    _ColoredLevelFormatter(_LOG_FORMAT, datefmt=_DATE_FORMAT),
+)
+
 logging.basicConfig(
     level=logging.INFO,
-    format=_LOG_FORMAT,
-    handlers=[logging.StreamHandler(), _file_handler],
+    handlers=[_stream_handler, _file_handler],
 )
 logger = logging.getLogger(__name__)
 
@@ -184,12 +275,72 @@ def close_position(ticket: int, symbol: str | None = None):
         raise HTTPException(500, str(e))
 
 
+class _UvicornNameRewriter(logging.Filter):
+    """uvicorn.error logger name を 'uvicorn' に書き換えて表示する。
+
+    uvicorn は起動・停止・通常 INFO ログをすべて `uvicorn.error` logger に流す
+    仕様 (logger 名に "error" が入っていても誤りではない) のため、ログ表示が
+    `[INFO] uvicorn.error:` となって誤解を招く。本フィルタで表示名のみ書換える。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name == "uvicorn.error":
+            record.name = "uvicorn"
+        return True
+
+
 def main() -> None:
     """`python server.py` で uvicorn を直接起動する。"""
     import uvicorn
+
     cfg = load_settings()
+
+    # uvicorn のデフォルトログは `INFO: ...` でタイムスタンプ無し
+    # → アプリと同じフォーマット (時刻付き) に統一、`uvicorn.error` 表記も整理
+    log_config = {
+        "version": 1,
+        "disable_existing_loggers": False,
+        "filters": {
+            "uvicorn_name_fix": {
+                "()": _UvicornNameRewriter,
+            },
+        },
+        "formatters": {
+            "default": {
+                "()": _ColoredLevelFormatter,    # levelname に色
+                "format": _LOG_FORMAT,
+                "datefmt": _DATE_FORMAT,
+            },
+            "access": {
+                # AccessFormatter を継承して levelname も色付け
+                # status_code/request_line の色付けは AccessFormatter 標準のまま
+                "()": _make_colored_access_formatter,
+                "format": "%(asctime)s [%(levelname)s] uvicorn.access: %(client_addr)s - \"%(request_line)s\" %(status_code)s",
+                "datefmt": _DATE_FORMAT,
+            },
+        },
+        "handlers": {
+            "default": {
+                "formatter": "default",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stderr",
+                "filters": ["uvicorn_name_fix"],
+            },
+            "access": {
+                "formatter": "access",
+                "class": "logging.StreamHandler",
+                "stream": "ext://sys.stdout",
+            },
+        },
+        "loggers": {
+            "uvicorn":        {"handlers": ["default"], "level": "INFO", "propagate": False},
+            "uvicorn.error":  {"handlers": ["default"], "level": "INFO", "propagate": False},
+            "uvicorn.access": {"handlers": ["access"],  "level": "INFO", "propagate": False},
+        },
+    }
+
     # app オブジェクト直渡し (reload 不要、import 文字列のパス問題を回避)
-    uvicorn.run(app, host=cfg.host, port=cfg.port, log_level="info")
+    uvicorn.run(app, host=cfg.host, port=cfg.port, log_level="info", log_config=log_config)
 
 
 if __name__ == "__main__":
