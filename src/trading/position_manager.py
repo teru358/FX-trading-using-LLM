@@ -187,6 +187,10 @@ class PositionManager:
         return positions[0] if positions else None
 
     def open_position(self, order: Order) -> None:
+        # Note: max_positions_per_pair / scale-in eligibility is validated upstream
+        # in evaluate_pre_execution_checks (outside this transaction). Multi-writer
+        # processes sharing state_dir could theoretically race; current design
+        # assumes single-cycle scheduling.
         with self._store.transaction():
             self._reload_from_disk()
             self._open.append(order)

@@ -62,7 +62,7 @@ class SignalBrokerAdapter(BrokerAdapter):
     def execute_signal(
         self,
         signal: TradeSignal,
-        position_mgr: PositionManager,
+        _position_mgr: PositionManager,   # ignored: SignalBroker uses self._manual_mgr
         macro_context: str = "",
     ) -> Order | None:
         """シグナルを推奨通知として発火する。注文は発注しない。"""

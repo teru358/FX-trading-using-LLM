@@ -1024,6 +1024,9 @@ async def trading_cycle(
     if is_signal_mode and signal_broker is not None:
         for sig in signals:
             if sig.action != "hold":
+                # Note: signal mode invokes BOTH internal paper broker AND signal_broker for
+                # each signal — they evaluate scale-in against different position pools (paper
+                # bot positions vs user manual positions) and may emit divergent [SCALE] logs.
                 signal_broker.execute_signal(sig, position_mgr, macro_context=macro_ctxs.get(sig.pair, ""))
 
     # TradingView チャート反映

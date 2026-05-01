@@ -340,6 +340,17 @@ def test_order_to_dict_roundtrip_preserves_open_confidence_score():
     assert restored.open_score == 0.55
 
 
+def test_order_to_dict_roundtrip_preserves_is_scale_in():
+    original = Order.new(
+        pair="USDJPY=X", direction="buy", entry_price=160.0,
+        stop_loss=159.5, take_profit=161.0, position_size=1000.0,
+        open_confidence=0.78, open_score=0.55,
+        is_scale_in=True,
+    )
+    restored = Order.from_dict(original.to_dict())
+    assert restored.is_scale_in is True
+
+
 # ── get_open_positions_by_pair ────────────────────────────────
 
 
