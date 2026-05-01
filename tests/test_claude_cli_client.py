@@ -182,28 +182,28 @@ async def test_chat_timeout_kills_process():
 # ── factory 統合 ────────────────────────────────────────────────────────────────
 
 
-def test_factory_rejects_claude_cli_without_model():
-    config = SimpleNamespace(
-        llm=SimpleNamespace(
-            news_analysis=SimpleNamespace(provider="claude-cli", model=""),
-            claude_cli=SimpleNamespace(
-                command="claude", isolated_cwd="", timeout_seconds=120,
-                max_retries=2, extra_args=[],
-            ),
-        ),
-    )
-    with pytest.raises(ValueError, match="claude-cli"):
-        create_llm_client(config, "news_analysis")
-
-
 def test_factory_creates_claude_cli_client():
+    """新スキーマ: provider=claude-cli + provider_config + 役割 model で生成。
+
+    旧 'model 未指定で factory が ValueError' は loader 側のバリデーションに
+    移管されたため、本ファイルからは削除 (test_loader_llm_config.py で検証)。
+    """
     config = SimpleNamespace(
         llm=SimpleNamespace(
-            news_analysis=SimpleNamespace(provider="claude-cli", model="claude-haiku-4-5"),
-            claude_cli=SimpleNamespace(
-                command="claude", isolated_cwd="/opt/finance-cli",
-                timeout_seconds=90, max_retries=2, extra_args=["--flag-a"],
+            provider="claude-cli",
+            provider_config=SimpleNamespace(
+                base_url="",
+                command="claude",
+                isolated_cwd="/opt/finance-cli",
+                extra_args=["--flag-a"],
+                max_tokens=0,
+                timeout_seconds=90,
+                max_retries=2,
+                max_concurrent=2,
             ),
+            news_analysis=SimpleNamespace(model="claude-haiku-4-5", temperature=0.3),
+            price_analysis=SimpleNamespace(model="claude-sonnet-4-6", temperature=0.1),
+            reflection=SimpleNamespace(model="claude-haiku-4-5", temperature=0.3),
         ),
     )
     client = create_llm_client(config, "news_analysis")

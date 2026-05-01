@@ -10,8 +10,11 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).parent.parent.parent
 
-# Ollama のデフォルトモデル（llm.<role>.model が空の場合に使用）
-_DEFAULT_OLLAMA_MODEL = "llama3.1:8b"
+# 利用可能な LLM プロバイダー名 (loader バリデーションで使用)
+LLM_PROVIDERS = ("ollama", "llamacpp", "claude-cli", "gemini", "openai", "claude")
+
+# base_url が必須な provider (空欄なら起動時 ConfigError)
+LLM_PROVIDERS_REQUIRING_BASE_URL = ("ollama", "llamacpp")
 
 
 @dataclass
@@ -71,38 +74,27 @@ PairConfig = InstrumentConfig
 
 
 @dataclass
-class OllamaBaseConfig:
-    """Ollama 接続設定（モデル指定は llm.<role>.model で行う）。"""
-    base_url: str = "http://localhost:11434"
+class ProviderConfig:
+    """全プロバイダー共通の接続設定。
+
+    意味のあるフィールドは provider に依存する (使われない値は無視):
+      base_url        — ollama / llamacpp で必須 (空欄は ConfigError)
+      command         — claude-cli の実行コマンド (空欄なら "claude" を補完)
+      isolated_cwd    — claude-cli の隔離 cwd (CLAUDE.md/skills 汚染回避用、空欄なら警告)
+      extra_args      — claude-cli の追加引数
+      max_tokens      — claude (API) の応答最大トークン (0 なら 4096 補完)
+      timeout_seconds — 共通: HTTP/プロセスタイムアウト
+      max_retries     — 共通: リトライ回数
+      max_concurrent  — ollama 等の同時呼び出し上限 (Semaphore に渡す)
+    """
+    base_url: str = ""
+    command: str = ""
+    isolated_cwd: str = ""
+    extra_args: list[str] = field(default_factory=list)
+    max_tokens: int = 0
     timeout_seconds: int = 120
     max_retries: int = 2
     max_concurrent: int = 2
-
-
-@dataclass
-class LlamaCppBaseConfig:
-    """llama.cpp (llama-swap) 接続設定。OpenAI 互換 /v1 エンドポイントを前提。
-
-    timeout_seconds はモデル初回ロード時間も含めるため長めに設定 (既定 300 秒)。
-    llama-swap がリクエスト時に対象モデルをロードするため、初回は数十秒かかる。
-    """
-    base_url: str = "http://localhost:8080/v1"
-    timeout_seconds: int = 300
-    max_retries: int = 2
-
-
-@dataclass
-class ClaudeCliBaseConfig:
-    """Claude Code CLI (`claude -p`) 接続設定。サブスクプラン利用時の subprocess 呼び出し。
-
-    前提: `claude` CLI が PATH に存在し、`claude login` で認証済み。
-    isolated_cwd: CLAUDE.md / skills 汚染を避けるための隔離ディレクトリ (空ディレクトリ推奨)。
-    """
-    command: str = "claude"
-    isolated_cwd: str = ""
-    timeout_seconds: int = 120
-    max_retries: int = 2
-    extra_args: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -170,9 +162,6 @@ class TradingConfig:
     forecast_accuracy_feedback: "ForecastAccuracyFeedbackConfig" = field(
         default_factory=lambda: ForecastAccuracyFeedbackConfig()
     )
-
-    # MT5 ブリッジブローカー設定はすべて Mt5BridgeConfig (mt5_bridge: セクション) に集約。
-    # trading_mode = "mt5_bridge" or "shadow" 選択時に config.mt5_bridge.* を参照する。
 
 
 @dataclass
@@ -288,6 +277,9 @@ class RagConfig:
     # "ollama"   — Ollama の /api/embeddings を使用 (従来互換)
     # "llamacpp" — llama-swap の /v1/embeddings (OpenAI 互換) を使用
     embedding_provider: str = "ollama"
+    # embedding プロバイダーの接続先。空欄なら起動時 ConfigError。
+    # LLM 用 provider_config.base_url とは独立 (LLM が claude-cli でも embedding は ollama を使えるため)。
+    embedding_base_url: str = ""
     news_lookback_hours: int = 24
     retrieval_top_k: int = 5
     reflection_lookback_count: int = 3
@@ -422,41 +414,26 @@ class AnalysisConfig:
 
 
 @dataclass
-class GeminiConfig:
-    model: str = "gemini-2.0-flash"
-    timeout_seconds: int = 60
-    max_retries: int = 2
-
-
-@dataclass
-class OpenAIConfig:
-    model: str = "gpt-4o-mini"
-    timeout_seconds: int = 60
-    max_retries: int = 2
-
-
-@dataclass
-class ClaudeConfig:
-    model: str = "claude-haiku-4-5-20251001"
-    timeout_seconds: int = 60
-    max_retries: int = 2
-    max_tokens: int = 4096
-
-
-@dataclass
 class LLMRoleConfig:
-    """1つの分析ロールが使用するプロバイダー・モデル・温度の設定。"""
-    provider: str = "ollama"
-    model: str = ""           # 空 = _DEFAULT_OLLAMA_MODEL を使用（ollama 時）
-    temperature: float = 0.2  # ロール別温度
+    """1 つの分析ロールが使用するモデル名と温度。
+
+    provider は LLMConfig.provider に統一される (役割ごとの provider 切替は廃止)。
+    model 空欄は loader でバリデートされ、provider と整合しないモデル名は実行時に検出される。
+    """
+    model: str = ""
+    temperature: float = 0.2
 
 
 @dataclass
 class LLMConfig:
-    """3種類の分析ロールごとに LLM プロバイダーを個別設定する。"""
-    ollama: OllamaBaseConfig = field(default_factory=OllamaBaseConfig)
-    llamacpp: LlamaCppBaseConfig = field(default_factory=LlamaCppBaseConfig)
-    claude_cli: ClaudeCliBaseConfig = field(default_factory=ClaudeCliBaseConfig)
+    """LLM 設定の単一エントリポイント。
+
+    provider と provider_config を 1 つだけ持ち、3 役割すべてが同じ provider を使う。
+    各役割は model と temperature だけを個別指定する。
+    role_overrides 等の特殊機構は意図的に持たない (シンプル化方針)。
+    """
+    provider: str = "claude-cli"
+    provider_config: ProviderConfig = field(default_factory=ProviderConfig)
     news_analysis: LLMRoleConfig = field(
         default_factory=lambda: LLMRoleConfig(temperature=0.3)
     )
@@ -574,9 +551,6 @@ class AppConfig:
     api: ApiConfig = field(default_factory=ApiConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
-    gemini: GeminiConfig = field(default_factory=GeminiConfig)
-    openai: OpenAIConfig = field(default_factory=OpenAIConfig)
-    claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     keywords: KeywordsConfig = field(default_factory=KeywordsConfig)
     economic_calendar: EconomicCalendarConfig = field(default_factory=EconomicCalendarConfig)
     tradingview: TradingViewConfig = field(default_factory=TradingViewConfig)

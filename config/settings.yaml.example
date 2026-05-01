@@ -13,74 +13,58 @@ api:
   # 認証: .env の API_SECRET_KEY を設定（X-API-Key ヘッダーで送信）
 
 # ============================================================
-# LLM設定 — ニュース分析 / 価格分析 / 振り返り生成を個別に設定
+# LLM 設定 — provider を 1 つ選び、3 役割すべて同じ provider で動かす
 #
-# provider:
-#   "ollama"   — ローカル Ollama（デフォルト、API KEY不要）
-#   "llamacpp" — ローカル llama.cpp (llama-swap 経由、API KEY不要)
-#   "gemini"   — Google Gemini API  （GEMINI_API_KEY 必須）
-#   "openai"   — OpenAI API         （OPENAI_API_KEY 必須）
-#   "claude"   — Anthropic Claude   （ANTHROPIC_API_KEY 必須）
+# provider に応じて意味のあるフィールドが provider_config 側で異なる:
+#   ollama / llamacpp — base_url 必須（空欄なら起動時 ConfigError）
+#   claude-cli        — command (空欄なら "claude" 補完) / isolated_cwd / extra_args
+#   claude (API)      — max_tokens (0 なら 4096 補完) / API キーは ANTHROPIC_API_KEY
+#   gemini / openai   — API キーは GEMINI_API_KEY / OPENAI_API_KEY
 #
-# model: 空文字 "" = 各プロバイダーセクションのデフォルトモデルを使用
-#        llamacpp の場合は model 必須（llama-swap config.yaml の models.<name> と一致）
+# 各役割は model のみを provider に合わせて差し替える:
+#   ollama:     "llama3.1:8b" など
+#   llamacpp:   llama-swap config.yaml の models.<name> と一致
+#   claude-cli: "claude-haiku-4-5" / "claude-sonnet-4-6"
+#   claude:     "claude-haiku-4-5-20251001" など
+#   gemini:     "gemini-2.0-flash" など
+#   openai:     "gpt-4o-mini" など
 # ============================================================
 llm:
-  # Ollama 接続設定（model 指定は各ロールで行う）
-  ollama:
-    base_url: "http://localhost:11434"
+  # 使用する LLM プロバイダー (1 つだけ選ぶ)
+  # 候補: ollama / llamacpp / claude-cli / claude / gemini / openai
+  provider: "claude-cli"
+
+  # provider 共通の接続設定 (該当 provider で意味のあるフィールドのみ使われる)
+  provider_config:
+    # ollama / llamacpp で必須。空欄なら起動時 ConfigError。
+    # 例: ollama   → "http://localhost:11434"
+    #     llamacpp → "http://localhost:8080/v1"
+    base_url: ""
+    # claude-cli の実行コマンド (空欄なら "claude" を PATH 解決)
+    command: ""
+    # claude-cli の隔離 cwd (CLAUDE.md/skills 汚染回避。例 "/opt/finance-cli")
+    isolated_cwd: ""
+    # claude-cli の追加引数 (例: ["--dangerously-skip-permissions"])
+    extra_args: []
+    # claude (API) の応答最大トークン (0 のままなら 4096 補完)
+    max_tokens: 0
+    # 共通: HTTP / プロセスタイムアウト秒
     timeout_seconds: 120
+    # 共通: リトライ回数
     max_retries: 2
-    max_concurrent: 2              # 同時分析数上限（VRAM保護）
+    # 共通: 同時呼び出し上限 (Semaphore に渡る)
+    max_concurrent: 2
 
-  # llama.cpp (llama-swap) 接続設定（provider: "llamacpp" のときに参照）
-  llamacpp:
-    base_url: "http://localhost:8080/v1"
-    timeout_seconds: 300           # モデル初回ロード時間を含むため長めに
-    max_retries: 2
-
-  # Claude Code CLI 接続設定（provider: "claude-cli" のときに参照）
-  # Claude Max 等のサブスクプラン経由で subprocess として `claude -p` を呼び出す。
-  # 前提: `claude` CLI が PATH にあり、`claude login` 済み。
-  claude_cli:
-    command: "claude"              # 実行パス or コマンド名
-    isolated_cwd: ""               # CLAUDE.md 汚染回避用ディレクトリ (例 "/opt/finance-cli")
-    timeout_seconds: 120
-    max_retries: 2
-    extra_args: []                 # 追加フラグ (例: ["--dangerously-skip-permissions"])
-
-  # model 未指定時は config.py の _DEFAULT_OLLAMA_MODEL（llama3.1:8b）を使用
+  # 各役割で使うモデルと温度
   news_analysis:
-    provider: "ollama"
+    model: "claude-haiku-4-5"
     temperature: 0.3
-    model: ""
   price_analysis:
-    provider: "ollama"
+    model: "claude-sonnet-4-6"
     temperature: 0.1
-    model: ""
   reflection:
-    provider: "ollama"
+    model: "claude-haiku-4-5"
     temperature: 0.3
-    model: ""
-
-# Gemini API 設定（provider: "gemini" のときに参照）
-gemini:
-  model: "gemini-2.0-flash"        # gemini-2.5-pro-preview / gemini-1.5-flash なども可
-  timeout_seconds: 60
-  max_retries: 2
-
-# OpenAI API 設定（provider: "openai" のときに参照）
-openai:
-  model: "gpt-4o-mini"             # gpt-4o / o3-mini なども可
-  timeout_seconds: 60
-  max_retries: 2
-
-# Anthropic Claude 設定（provider: "claude" のときに参照）
-claude:
-  model: "claude-haiku-4-5-20251001"  # claude-sonnet-4-6 / claude-opus-4-6 なども可
-  timeout_seconds: 60
-  max_retries: 2
-  max_tokens: 4096
 
 # instruments → config/instruments.yaml に分離
 # price_provider → config/instruments.yaml に分離
@@ -272,6 +256,11 @@ rag:
   embedding_model: "nomic-embed-text"
   # embedding プロバイダー: "ollama" (従来) | "llamacpp" (llama-swap 経由)
   embedding_provider: "ollama"
+  # embedding プロバイダーの接続先 URL。空欄なら起動時 ConfigError。
+  # LLM 用 provider_config.base_url とは独立 (LLM が claude-cli でも embedding は ollama を使えるため)。
+  # 例: ollama   → "http://localhost:11434"
+  #     llamacpp → "http://localhost:8080/v1"
+  embedding_base_url: "http://localhost:11434"
   news_lookback_hours: 24
   retrieval_top_k: 5
   reflection_lookback_count: 3

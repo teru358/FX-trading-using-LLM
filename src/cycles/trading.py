@@ -490,7 +490,7 @@ async def _phase_analyze_pairs(
     forecast_store=None,
 ) -> tuple[list, dict[str, str]]:
     """Phase 3: 全ペアを並列分析してシグナル + macro_ctx を生成する。"""
-    semaphore = asyncio.Semaphore(config.llm.ollama.max_concurrent)
+    semaphore = asyncio.Semaphore(config.llm.provider_config.max_concurrent)
 
     async def bounded(pair_cfg):
         async with semaphore:
