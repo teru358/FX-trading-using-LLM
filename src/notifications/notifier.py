@@ -22,6 +22,7 @@ class OrderOpenedEvent:
     signal_reason: str
     detail_reason: str = ""   # ニュース/テクニカル内訳
     source: str = ""          # "trading" | "forecast" | "monitor" など
+    is_scale_in: bool = False # スケールイン注文フラグ
 
 
 @dataclass
@@ -163,8 +164,9 @@ class NotifierAdapter(ABC):
         sl_pips = abs(event.entry_price - event.stop_loss)
         tp_pips = abs(event.take_profit - event.entry_price)
         tag = _source_tag(event.source)
+        order_label = "【スケールイン】" if event.is_scale_in else "【注文発注】"
         msg = (
-            f"{direction_emoji} 【注文発注】{tag}{event.pair}\n"
+            f"{direction_emoji} {order_label}{tag}{event.pair}\n"
             f"方向: {event.direction.upper()}\n"
             f"エントリー: {event.entry_price:.5f}\n"
             f"SL: {event.stop_loss:.5f}  ({sl_pips:.5f})\n"

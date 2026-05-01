@@ -33,6 +33,7 @@ class Order:
     macro_context_at_entry: str = ""  # エントリー時の監視銘柄スナップショット（振り返りに使用）
     open_confidence: Optional[float] = None  # エントリー時の signal.confidence (scale-in 判定用)
     open_score: Optional[float] = None       # エントリー時の signal.combined_score (scale-in 判定用)
+    is_scale_in: bool = False                # スケールイン注文フラグ
 
     @staticmethod
     def new(
@@ -46,6 +47,7 @@ class Order:
         macro_context_at_entry: str = "",
         open_confidence: Optional[float] = None,
         open_score: Optional[float] = None,
+        is_scale_in: bool = False,
     ) -> "Order":
         return Order(
             order_id=str(uuid.uuid4()),
@@ -60,6 +62,7 @@ class Order:
             macro_context_at_entry=macro_context_at_entry,
             open_confidence=open_confidence,
             open_score=open_score,
+            is_scale_in=is_scale_in,
         )
 
     def to_dict(self) -> dict:
@@ -82,6 +85,7 @@ class Order:
         d.setdefault("initial_stop_loss", d["stop_loss"])
         d.setdefault("open_confidence", None)
         d.setdefault("open_score", None)
+        d.setdefault("is_scale_in", False)
         return Order(**d)
 
 

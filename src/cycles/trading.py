@@ -734,6 +734,7 @@ async def _execute_one_signal(
             signal_reason=sig.signal_reason,
             detail_reason=sig.detail_reason,
             source="trading",
+            is_scale_in=order.is_scale_in,
         ))
 
     if session_store:

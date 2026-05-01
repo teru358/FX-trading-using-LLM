@@ -127,6 +127,7 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             macro_context_at_entry=macro_context,
             open_confidence=signal.confidence,
             open_score=signal.combined_score,
+            is_scale_in=is_scale_in,
         )
         order.order_id = f"mt5:{data['ticket']}"
         position_mgr.open_position(order)

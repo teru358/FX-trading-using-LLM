@@ -50,6 +50,7 @@ def execute_signal(
         macro_context_at_entry=macro_context,
         open_confidence=signal.confidence,
         open_score=signal.combined_score,
+        is_scale_in=is_scale_in,
     )
     position_mgr.open_position(order)
 
