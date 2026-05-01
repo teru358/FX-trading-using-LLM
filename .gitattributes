@@ -1,0 +1,28 @@
+# 改行コード方針: テキストは LF、バイナリは保持
+# Windows 経由の編集 (UNC path 等) で CRLF が混入しても commit 時に LF に正規化する。
+* text=auto eol=lf
+
+# 明示: 主要なテキスト形式
+*.py        text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.md        text eol=lf
+*.toml      text eol=lf
+*.json      text eol=lf
+*.sh        text eol=lf
+*.cfg       text eol=lf
+*.ini       text eol=lf
+
+# バイナリ (改行変換しない)
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.zip       binary
+*.gz        binary
+*.tar       binary
+*.pdf       binary
+*.so        binary
+*.dll       binary
+*.exe       binary
