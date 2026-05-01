@@ -9,13 +9,10 @@ import logging
 
 import httpx
 
+from src.signals.scale_in import evaluate_pre_execution_checks
 from src.signals.signal_combiner import TradeSignal
 from src.trading.broker_adapter import BrokerAdapter
 from src.trading.paper_trader import check_and_close_positions as _paper_close_check
-from src.trading.portfolio_guard import (
-    check_drawdown_kill_switch,
-    check_portfolio_limits,
-)
 from src.trading.position_manager import Order, PositionManager
 from src.trading.symbol_mapping import to_mt5_symbol
 
@@ -38,9 +35,10 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         request_timeout_seconds: float = 10.0,
         lot_size_units: int = 100_000,
         magic_number: int = 12345,
-        max_total_positions: int = 4,
-        max_positions_per_group: int = 2,
-        max_same_direction_per_group: int = 2,
+        max_positions_per_pair: int = 2,
+        scale_in_enabled: bool = False,
+        scale_in_conf_margin: float = 0.05,
+        scale_in_score_margin: float = 0.05,
         drawdown_kill_switch_enabled: bool = False,
         drawdown_kill_switch_max_pct: float = 0.10,
         drawdown_kill_switch_lookback_days: int = 0,
@@ -52,9 +50,10 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         self._timeout = request_timeout_seconds
         self._lot_units = lot_size_units
         self._magic = magic_number
-        self._max_total = max_total_positions
-        self._max_per_group = max_positions_per_group
-        self._max_same_dir = max_same_direction_per_group
+        self._max_per_pair = max_positions_per_pair
+        self._scale_in_enabled = scale_in_enabled
+        self._scale_in_conf_margin = scale_in_conf_margin
+        self._scale_in_score_margin = scale_in_score_margin
         self._dd_enabled = drawdown_kill_switch_enabled
         self._dd_max_pct = drawdown_kill_switch_max_pct
         self._dd_lookback = drawdown_kill_switch_lookback_days
@@ -72,40 +71,26 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         if signal.action == "hold":
             return None
 
-        # 同一ペア重複防止
-        if position_mgr.get_open_position(signal.pair) is not None:
-            logger.info(
-                f"[MT5_BRIDGE] {signal.pair} already has open position, skip"
-            )
-            return None
-
         direction = "buy" if signal.action == "buy" else "sell"
 
-        # ポートフォリオ制約 (paper と同等のゲート)
-        account = position_mgr.get_account_state()
-        rejection = check_portfolio_limits(
-            pair=signal.pair, direction=direction,
-            position_size=signal.position_size,
-            open_positions=account.open_positions,
-            max_total_positions=self._max_total,
-            max_positions_per_group=self._max_per_group,
-            max_same_direction_per_group=self._max_same_dir,
+        # 発注前チェック (ペア上限 / scale-in / drawdown kill switch)
+        status, reason = evaluate_pre_execution_checks(
+            signal=signal,
+            position_mgr=position_mgr,
+            max_positions_per_pair=self._max_per_pair,
+            scale_in_enabled=self._scale_in_enabled,
+            scale_in_conf_margin=self._scale_in_conf_margin,
+            scale_in_score_margin=self._scale_in_score_margin,
+            drawdown_kill_switch_enabled=self._dd_enabled,
+            drawdown_kill_switch_max_pct=self._dd_max_pct,
+            drawdown_kill_switch_lookback_days=self._dd_lookback,
         )
-        if rejection:
-            logger.info(f"[MT5_BRIDGE] {signal.pair} portfolio gate — {rejection}")
+        if status == "skip":
+            logger.info(f"[MT5_BRIDGE] {signal.pair} スキップ: {reason}")
             return None
 
-        # Drawdown kill switch
-        dd_rejection = check_drawdown_kill_switch(
-            initial_balance=account.initial_balance,
-            closed_trades=account.closed_trades,
-            enabled=self._dd_enabled,
-            max_drawdown_pct=self._dd_max_pct,
-            lookback_days=self._dd_lookback,
-        )
-        if dd_rejection:
-            logger.warning(f"[MT5_BRIDGE] {signal.pair} — {dd_rejection}")
-            return None
+        is_scale_in = status == "scale_in"
+        log_prefix = "[MT5_BRIDGE] [SCALE]" if is_scale_in else "[MT5_BRIDGE] [ORDER]"
 
         # 発注 payload (送信時は MT5 形式に変換)
         payload = {
@@ -140,11 +125,13 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             position_size=signal.position_size,
             signal_reason=signal.signal_reason,
             macro_context_at_entry=macro_context,
+            open_confidence=signal.confidence,
+            open_score=signal.combined_score,
         )
         order.order_id = f"mt5:{data['ticket']}"
         position_mgr.open_position(order)
         logger.info(
-            f"[MT5_BRIDGE] {signal.pair} {direction.upper()} executed | "
+            f"{log_prefix} {signal.pair} {direction.upper()} executed | "
             f"ticket={data['ticket']} fill={data['fill_price']} "
             f"dry_run={data.get('dry_run')}"
         )

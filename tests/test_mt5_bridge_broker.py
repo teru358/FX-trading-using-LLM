@@ -31,6 +31,7 @@ def _make_pm(open_positions=None, closed_trades=None,
              initial_balance: float = 100_000.0) -> MagicMock:
     pm = MagicMock(spec=PositionManager)
     pm.get_open_position.return_value = None
+    pm.get_open_positions_by_pair.return_value = []
     account = MagicMock()
     account.open_positions = open_positions or []
     account.closed_trades = closed_trades or []
@@ -137,10 +138,11 @@ def test_execute_signal_handles_bridge_error_gracefully(monkeypatch, caplog):
 
 
 def test_existing_position_returns_none():
+    """scale-in disabled (default) で既存ポジがある場合はスキップする。"""
     adapter = Mt5BridgeBrokerAdapter(bridge_url="http://example:8812")
     pm = _make_pm()
     existing = Order.new("USDJPY=X", "buy", 159, 158, 160, 1000)
-    pm.get_open_position.return_value = existing
+    pm.get_open_positions_by_pair.return_value = [existing]
     sig = _make_signal()
     assert adapter.execute_signal(sig, pm) is None
 

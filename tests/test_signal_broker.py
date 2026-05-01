@@ -107,15 +107,3 @@ def test_check_and_close_no_alert_when_in_range(broker, manual_mgr):
     broker._notifier.notify_sltp_alert.assert_not_called()
 
 
-def test_portfolio_warning_in_notification(broker, manual_mgr, internal_mgr):
-    """manual に既存ポジがあるとき portfolio_warning が設定される。"""
-    for i in range(4):
-        manual_mgr.open_position(Order.new(
-            pair=f"PAIR{i}=X", direction="buy", entry_price=150.0,
-            stop_loss=149.0, take_profit=152.0, position_size=5000,
-        ))
-    signal = _make_signal()
-    broker.execute_signal(signal, internal_mgr)
-    call_args = broker._notifier.notify_signal_recommendation.call_args
-    event = call_args[0][0]
-    assert event.portfolio_warning != ""

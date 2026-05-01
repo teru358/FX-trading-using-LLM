@@ -47,18 +47,22 @@ def test_manual_close_triggers_balance_update(dual_mgrs):
 
 
 def test_signal_broker_uses_manual_for_guard(dual_mgrs):
-    """SignalBrokerAdapter が manual ポジションを参照してガード判定する。"""
+    """SignalBrokerAdapter が manual ポジションを参照してガード判定する。
+
+    max_positions_per_pair=1 のとき、manual に同ペアのポジションが 1 件あれば
+    execute_signal はスキップし、notify_signal_recommendation を呼ばない。
+    """
     internal, manual = dual_mgrs
     from src.trading.signal_broker import SignalBrokerAdapter
 
     notifier = AsyncMock(spec=NullNotifier)
     broker = SignalBrokerAdapter(
         manual_position_mgr=manual, notifier=notifier,
-        max_total_positions=1,
+        max_positions_per_pair=1,
     )
     manual.open_position(Order.new(
-        pair="USDJPY=X", direction="buy", entry_price=150.0,
-        stop_loss=149.0, take_profit=152.0, position_size=5000,
+        pair="EURUSD=X", direction="buy", entry_price=1.08,
+        stop_loss=1.07, take_profit=1.11, position_size=5000,
     ))
 
     # _make_signal ヘルパーを直接定義（外部テストに依存しない）
@@ -79,7 +83,7 @@ def test_signal_broker_uses_manual_for_guard(dual_mgrs):
         news=news, price=price, generated_at=datetime.now(),
     )
 
-    broker.execute_signal(signal, internal)
-    call_args = notifier.notify_signal_recommendation.call_args
-    event = call_args[0][0]
-    assert "Max total positions" in event.portfolio_warning
+    result = broker.execute_signal(signal, internal)
+    # ペア上限に達しているので通知されずスキップされる
+    assert result is None
+    notifier.notify_signal_recommendation.assert_not_called()
