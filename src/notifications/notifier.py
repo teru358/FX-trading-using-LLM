@@ -114,6 +114,8 @@ _SOURCE_LABELS = {
     "monitor": "価格監視",
     "exit_check": "決済判定",
     "manual": "手動",
+    "signal": "シグナル推奨",
+    "signal_scale_in": "シグナル推奨(スケールイン)",
 }
 
 

@@ -13,6 +13,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from src.signals.signal_combiner import TradeSignal
+from src.trading.portfolio_guard import (
+    check_drawdown_kill_switch,
+    check_max_positions_per_pair,
+)
 from src.trading.position_manager import Order
 
 if TYPE_CHECKING:
@@ -122,11 +126,6 @@ def evaluate_pre_execution_checks(
         ("scale_in", reason): scale-in 発注可 (reason に判定詳細)
         ("skip", reason): 発注スキップ (reason に理由)
     """
-    from src.trading.portfolio_guard import (
-        check_drawdown_kill_switch,
-        check_max_positions_per_pair,
-    )
-
     # 1. ペアごと上限チェック
     same_pair_positions = position_mgr.get_open_positions_by_pair(signal.pair)
     account = position_mgr.get_account_state()
