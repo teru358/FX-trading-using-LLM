@@ -204,48 +204,48 @@ def _common_kwargs(scale_in_enabled: bool = False) -> dict:
 
 def test_pre_exec_returns_allowed_when_no_existing_position(position_mgr):
     signal = _make_signal("buy", conf=0.75, combined_score=0.50)
-    status, reason = evaluate_pre_execution_checks(
+    result = evaluate_pre_execution_checks(
         signal, position_mgr, **_common_kwargs(),
     )
-    assert status == "allowed"
+    assert result.status == "allowed"
 
 
 def test_pre_exec_returns_skip_when_max_per_pair_reached(position_mgr):
     position_mgr.open_position(_make_order("buy", open_conf=0.65, open_score=0.40))
     position_mgr.open_position(_make_order("buy", open_conf=0.70, open_score=0.50))
     signal = _make_signal("buy", conf=0.85, combined_score=0.60)
-    status, reason = evaluate_pre_execution_checks(
+    result = evaluate_pre_execution_checks(
         signal, position_mgr, **_common_kwargs(scale_in_enabled=True),
     )
-    assert status == "skip"
-    assert "max" in reason.lower() or "positions" in reason.lower()
+    assert result.status == "skip"
+    assert "max" in result.reason.lower() or "positions" in result.reason.lower()
 
 
 def test_pre_exec_returns_skip_when_existing_pos_and_scale_in_disabled(position_mgr):
     position_mgr.open_position(_make_order("buy", open_conf=0.65, open_score=0.40))
     signal = _make_signal("buy", conf=0.85, combined_score=0.60)
-    status, reason = evaluate_pre_execution_checks(
+    result = evaluate_pre_execution_checks(
         signal, position_mgr, **_common_kwargs(scale_in_enabled=False),
     )
-    assert status == "skip"
-    assert "scale-in disabled" in reason
+    assert result.status == "skip"
+    assert "scale-in disabled" in result.reason
 
 
 def test_pre_exec_returns_scale_in_when_judgment_allowed(position_mgr):
     position_mgr.open_position(_make_order("buy", open_conf=0.65, open_score=0.40))
     signal = _make_signal("buy", conf=0.78, combined_score=0.60)
-    status, reason = evaluate_pre_execution_checks(
+    result = evaluate_pre_execution_checks(
         signal, position_mgr, **_common_kwargs(scale_in_enabled=True),
     )
-    assert status == "scale_in"
+    assert result.status == "scale_in"
 
 
 def test_pre_exec_returns_skip_when_scale_in_judgment_rejects(position_mgr):
     position_mgr.open_position(_make_order("buy", open_conf=0.65, open_score=0.40))
     # margin 不足
     signal = _make_signal("buy", conf=0.68, combined_score=0.42)
-    status, reason = evaluate_pre_execution_checks(
+    result = evaluate_pre_execution_checks(
         signal, position_mgr, **_common_kwargs(scale_in_enabled=True),
     )
-    assert status == "skip"
-    assert "scale-in rejected" in reason
+    assert result.status == "skip"
+    assert "scale-in rejected" in result.reason

@@ -107,6 +107,14 @@ def should_scale_in(
 PreExecStatus = Literal["allowed", "scale_in", "skip"]
 
 
+@dataclass(frozen=True)
+class PreExecResult:
+    """Pre-execution check result. Enables uniform broker logging."""
+    status: PreExecStatus  # "allowed" | "scale_in" | "skip"
+    reason: str
+    decision: "ScaleInDecision | None" = None  # populated when status == "scale_in"
+
+
 def evaluate_pre_execution_checks(
     signal: TradeSignal,
     position_mgr: "PositionManager",
@@ -118,14 +126,8 @@ def evaluate_pre_execution_checks(
     drawdown_kill_switch_enabled: bool,
     drawdown_kill_switch_max_pct: float,
     drawdown_kill_switch_lookback_days: int,
-) -> tuple[PreExecStatus, str]:
-    """発注前の共通チェックを実施。
-
-    Returns:
-        ("allowed", reason): 通常発注可
-        ("scale_in", reason): scale-in 発注可 (reason に判定詳細)
-        ("skip", reason): 発注スキップ (reason に理由)
-    """
+) -> PreExecResult:
+    """発注前の共通チェックを実施。"""
     # 1. ペアごと上限チェック
     same_pair_positions = position_mgr.get_open_positions_by_pair(signal.pair)
     account = position_mgr.get_account_state()
@@ -135,14 +137,18 @@ def evaluate_pre_execution_checks(
         max_positions_per_pair=max_positions_per_pair,
     )
     if pair_limit_rejection:
-        return "skip", pair_limit_rejection
+        return PreExecResult(status="skip", reason=pair_limit_rejection)
 
     # 2. 既存ポジあり → scale-in 判定
-    decision_reason = "no existing position, normal entry"
+    decision: ScaleInDecision | None = None
     is_scale_in = False
+    decision_reason = "no existing position, normal entry"
     if same_pair_positions:
         if not scale_in_enabled:
-            return "skip", f"{signal.pair} already has open position (scale-in disabled)"
+            return PreExecResult(
+                status="skip",
+                reason=f"{signal.pair} already has open position (scale-in disabled)",
+            )
         decision = should_scale_in(
             signal,
             same_pair_positions,
@@ -150,7 +156,11 @@ def evaluate_pre_execution_checks(
             score_margin=scale_in_score_margin,
         )
         if not decision.allowed:
-            return "skip", f"scale-in rejected: {decision.reason}"
+            return PreExecResult(
+                status="skip",
+                reason=f"scale-in rejected: {decision.reason}",
+                decision=decision,
+            )
         is_scale_in = True
         decision_reason = decision.reason
 
@@ -163,9 +173,9 @@ def evaluate_pre_execution_checks(
         lookback_days=drawdown_kill_switch_lookback_days,
     )
     if dd_rejection:
-        return "skip", dd_rejection
+        return PreExecResult(status="skip", reason=dd_rejection, decision=decision)
 
     # 4. 結果決定
     if is_scale_in:
-        return "scale_in", decision_reason
-    return "allowed", decision_reason
+        return PreExecResult(status="scale_in", reason=decision_reason, decision=decision)
+    return PreExecResult(status="allowed", reason=decision_reason)

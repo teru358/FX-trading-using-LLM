@@ -9,7 +9,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from src.notifications.notifier import SignalRecommendationEvent, SLTPAlertEvent
-from src.signals.scale_in import evaluate_pre_execution_checks
+from src.signals.scale_in import PreExecResult, evaluate_pre_execution_checks
 from src.signals.signal_combiner import TradeSignal
 from src.trading.broker_adapter import BrokerAdapter
 from src.trading.position_manager import Order, PositionManager
@@ -71,7 +71,7 @@ class SignalBrokerAdapter(BrokerAdapter):
             return None
 
         # manual ポジションを対象にポートフォリオガード判定
-        status, reason = evaluate_pre_execution_checks(
+        result = evaluate_pre_execution_checks(
             signal=signal,
             position_mgr=self._manual_mgr,
             max_positions_per_pair=self._max_per_pair,
@@ -82,11 +82,18 @@ class SignalBrokerAdapter(BrokerAdapter):
             drawdown_kill_switch_max_pct=self._dd_max_pct,
             drawdown_kill_switch_lookback_days=self._dd_lookback,
         )
-        if status == "skip":
-            logger.info("%s %s スキップ: %s", _LOG, signal.pair, reason)
+        if result.status == "skip":
+            logger.info(f"{_LOG} [SKIP] {signal.pair}: {result.reason}")
             return None
 
-        is_scale_in = status == "scale_in"
+        is_scale_in = result.status == "scale_in"
+        if is_scale_in and result.decision is not None:
+            logger.info(
+                f"{_LOG} [SCALE] {signal.pair} {signal.action.upper()} | "
+                f"new conf={signal.confidence:.3f} score={signal.combined_score:+.3f} | "
+                f"prev_max conf={result.decision.prev_max_conf:.3f} "
+                f"score={result.decision.prev_max_abs_score:.3f}"
+            )
 
         # 同一ペアの既存 manual ポジション数
         manual_account = self._manual_mgr.get_account_state()

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from src.signals.scale_in import evaluate_pre_execution_checks
+from src.signals.scale_in import PreExecResult, evaluate_pre_execution_checks
 from src.signals.signal_combiner import TradeSignal
 from src.trading.position_manager import Order, PositionManager
 
@@ -25,7 +25,7 @@ def execute_signal(
     if signal.action == "hold":
         return None
 
-    status, reason = evaluate_pre_execution_checks(
+    result = evaluate_pre_execution_checks(
         signal, position_mgr,
         max_positions_per_pair=max_positions_per_pair,
         scale_in_enabled=scale_in_enabled,
@@ -35,11 +35,11 @@ def execute_signal(
         drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
         drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
     )
-    if status == "skip":
-        logger.info(f"[SKIP] {signal.pair}: {reason}")
+    if result.status == "skip":
+        logger.info(f"[SKIP] {signal.pair}: {result.reason}")
         return None
 
-    is_scale_in = (status == "scale_in")
+    is_scale_in = (result.status == "scale_in")
     direction = "buy" if signal.action == "buy" else "sell"
 
     order = Order.new(
@@ -54,16 +54,17 @@ def execute_signal(
     )
     position_mgr.open_position(order)
 
-    prefix = "[SCALE]" if is_scale_in else "[ORDER]"
-    if is_scale_in:
+    if is_scale_in and result.decision is not None:
         logger.info(
-            f"{prefix} {signal.pair} {direction.upper()} executed | "
+            f"[SCALE] {signal.pair} {direction.upper()} executed | "
             f"new conf={signal.confidence:.3f} score={signal.combined_score:+.3f} | "
-            f"{reason} | reason: {signal.signal_reason}"
+            f"prev_max conf={result.decision.prev_max_conf:.3f} "
+            f"score={result.decision.prev_max_abs_score:.3f} | "
+            f"reason: {signal.signal_reason}"
         )
     else:
         logger.info(
-            f"{prefix} {signal.pair} {direction.upper()} executed | "
+            f"[ORDER] {signal.pair} {direction.upper()} executed | "
             f"reason: {signal.signal_reason}"
         )
     return order

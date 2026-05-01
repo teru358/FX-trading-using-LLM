@@ -9,7 +9,7 @@ import logging
 
 import httpx
 
-from src.signals.scale_in import evaluate_pre_execution_checks
+from src.signals.scale_in import PreExecResult, evaluate_pre_execution_checks
 from src.signals.signal_combiner import TradeSignal
 from src.trading.broker_adapter import BrokerAdapter
 from src.trading.paper_trader import check_and_close_positions as _paper_close_check
@@ -74,7 +74,7 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         direction = "buy" if signal.action == "buy" else "sell"
 
         # 発注前チェック (ペア上限 / scale-in / drawdown kill switch)
-        status, reason = evaluate_pre_execution_checks(
+        result = evaluate_pre_execution_checks(
             signal=signal,
             position_mgr=position_mgr,
             max_positions_per_pair=self._max_per_pair,
@@ -85,12 +85,11 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             drawdown_kill_switch_max_pct=self._dd_max_pct,
             drawdown_kill_switch_lookback_days=self._dd_lookback,
         )
-        if status == "skip":
-            logger.info(f"[MT5_BRIDGE] {signal.pair} スキップ: {reason}")
+        if result.status == "skip":
+            logger.info(f"[MT5_BRIDGE] [SKIP] {signal.pair}: {result.reason}")
             return None
 
-        is_scale_in = status == "scale_in"
-        log_prefix = "[MT5_BRIDGE] [SCALE]" if is_scale_in else "[MT5_BRIDGE] [ORDER]"
+        is_scale_in = result.status == "scale_in"
 
         # 発注 payload (送信時は MT5 形式に変換)
         payload = {
@@ -131,11 +130,19 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         )
         order.order_id = f"mt5:{data['ticket']}"
         position_mgr.open_position(order)
-        logger.info(
-            f"{log_prefix} {signal.pair} {direction.upper()} executed | "
-            f"ticket={data['ticket']} fill={data['fill_price']} "
-            f"dry_run={data.get('dry_run')}"
-        )
+        ticket = data["ticket"]
+        if is_scale_in and result.decision is not None:
+            logger.info(
+                f"[SCALE] [mt5_bridge] {signal.pair} {direction.upper()} ticket={ticket} | "
+                f"new conf={signal.confidence:.3f} score={signal.combined_score:+.3f} | "
+                f"prev_max conf={result.decision.prev_max_conf:.3f} "
+                f"score={result.decision.prev_max_abs_score:.3f}"
+            )
+        else:
+            logger.info(
+                f"[ORDER] [mt5_bridge] {signal.pair} {direction.upper()} ticket={ticket} | "
+                f"fill={data['fill_price']} dry_run={data.get('dry_run')}"
+            )
         return order
 
     def check_and_close_positions(
