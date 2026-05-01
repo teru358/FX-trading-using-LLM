@@ -27,8 +27,22 @@ def audit_config(tmp_path: Path):
     cfg.tradeable_instruments = [inst]
     cfg.watch_only_instruments = []
 
+    # 新スキーマ: llm.provider が単一、provider_config 共通、各役割は model/temperature のみ
     cfg.llm = MagicMock()
-    cfg.llm.reflection = MagicMock(provider="ollama", model="test", temperature=0.1)
+    cfg.llm.provider = "ollama"
+    cfg.llm.provider_config = MagicMock(
+        base_url="http://localhost:11434",
+        command="",
+        isolated_cwd="",
+        extra_args=[],
+        max_tokens=0,
+        timeout_seconds=120,
+        max_retries=2,
+        max_concurrent=2,
+    )
+    cfg.llm.reflection = MagicMock(model="test", temperature=0.1)
+    cfg.llm.news_analysis = MagicMock(model="test", temperature=0.3)
+    cfg.llm.price_analysis = MagicMock(model="test", temperature=0.1)
 
     # trading 設定 — risk_budget (= initial_balance × risk_per_trade) の計算に使う
     cfg.trading = MagicMock()

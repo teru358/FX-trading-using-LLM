@@ -51,11 +51,16 @@ async def main() -> None:
     for i, text in enumerate(TEST_TEXTS, 1):
         print(f"[{i}/{len(TEST_TEXTS)}] {text[:60]}...")
 
+        # 両プロバイダーで比較するため、本スクリプトは両 URL を直接指定する
+        # (config 側は単一 embedding_provider しか持たない設計のため)
+        ollama_url = "http://localhost:11434"
+        llamacpp_url = "http://localhost:8080/v1"
+
         # Ollama 側で embed
         vec_ollama = await embed_text(
             text=text,
             provider="ollama",
-            ollama_base_url=config.llm.ollama.base_url,
+            ollama_base_url=ollama_url,
             model="nomic-embed-text",  # Ollama 側のモデル名
         )
         print(f"    Ollama:    dim={len(vec_ollama)} sample={vec_ollama[:3]}")
@@ -64,7 +69,7 @@ async def main() -> None:
         vec_llamacpp = await embed_text(
             text=text,
             provider="llamacpp",
-            base_url=config.llm.llamacpp.base_url,
+            base_url=llamacpp_url,
             model=config.rag.embedding_model,  # llama-swap 側のモデル名
         )
         print(f"    llamacpp:  dim={len(vec_llamacpp)} sample={vec_llamacpp[:3]}")

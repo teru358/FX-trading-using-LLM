@@ -197,13 +197,11 @@ def usage() -> dict[str, Any]:
     usage_limit 追跡対象がないことを示す。クライアント側で非表示・警告切替。
     """
     # Claude 系プロバイダが設定されているか判定 (claude-cli / claude)
+    # 新スキーマでは llm.provider が単一 → 全 role が同じ provider を共有
     claude_providers = {"claude-cli", "claude"}
     claude_roles: list[str] = []
-    if state.config is not None:
-        for role in ("news_analysis", "price_analysis", "reflection"):
-            rc = getattr(state.config.llm, role, None)
-            if rc is not None and rc.provider in claude_providers:
-                claude_roles.append(role)
+    if state.config is not None and state.config.llm.provider in claude_providers:
+        claude_roles = list(("news_analysis", "price_analysis", "reflection"))
 
     providers: dict[str, Any] = {}
     try:

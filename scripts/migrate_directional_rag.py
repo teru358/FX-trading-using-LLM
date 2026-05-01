@@ -47,7 +47,7 @@ async def main():
 
     embed_fn = partial(
         embed_text,
-        ollama_base_url=config.llm.ollama.base_url,
+        ollama_base_url=config.rag.embedding_base_url,
         model=config.rag.embedding_model,
     )
 

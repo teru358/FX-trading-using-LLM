@@ -79,31 +79,36 @@ async def test_llamacpp_client_strips_end_tokens(fake_httpx_response):
     assert out == "hello"
 
 
-def test_factory_rejects_llamacpp_without_model():
-    """provider=llamacpp で model 未指定は ValueError。"""
-    config = SimpleNamespace(
+def _make_llm_config(provider: str, *, model: str, base_url: str = "", **pc_overrides):
+    """新スキーマ準拠のテスト用 config を組み立てる。"""
+    pc_kwargs = dict(
+        base_url=base_url,
+        command="",
+        isolated_cwd="",
+        extra_args=[],
+        max_tokens=0,
+        timeout_seconds=300,
+        max_retries=2,
+        max_concurrent=2,
+    )
+    pc_kwargs.update(pc_overrides)
+    return SimpleNamespace(
         llm=SimpleNamespace(
-            news_analysis=SimpleNamespace(provider="llamacpp", model=""),
-            llamacpp=SimpleNamespace(
-                base_url="http://x/v1", timeout_seconds=300, max_retries=2,
-            ),
+            provider=provider,
+            provider_config=SimpleNamespace(**pc_kwargs),
+            news_analysis=SimpleNamespace(model=model, temperature=0.3),
+            price_analysis=SimpleNamespace(model=model, temperature=0.1),
+            reflection=SimpleNamespace(model=model, temperature=0.3),
         ),
     )
-    with pytest.raises(ValueError, match="llamacpp"):
-        create_llm_client(config, "news_analysis")
 
 
 def test_factory_creates_llamacpp_client():
     """provider=llamacpp + model 指定で LlamaCppClient を返す。"""
-    config = SimpleNamespace(
-        llm=SimpleNamespace(
-            news_analysis=SimpleNamespace(provider="llamacpp", model="llama3.1-8b"),
-            llamacpp=SimpleNamespace(
-                base_url="http://localhost:8080/v1",
-                timeout_seconds=300,
-                max_retries=2,
-            ),
-        ),
+    config = _make_llm_config(
+        "llamacpp",
+        model="llama3.1-8b",
+        base_url="http://localhost:8080/v1",
     )
     client = create_llm_client(config, "news_analysis")
     assert isinstance(client, LlamaCppClient)
@@ -156,12 +161,16 @@ async def test_embed_text_ollama_uses_legacy_format(fake_httpx_response):
 
 
 def test_make_embed_fn_ollama_default():
-    """config.rag.embedding_provider 未指定時は ollama にフォールバック。"""
+    """config.rag.embedding_provider 未指定時は ollama にフォールバック。
+
+    新スキーマでは embedding は config.rag に独立した base_url を持つ
+    (LLM 用 provider_config.base_url とは分離)。
+    """
     config = SimpleNamespace(
-        llm=SimpleNamespace(
-            ollama=SimpleNamespace(base_url="http://localhost:11434"),
+        rag=SimpleNamespace(
+            embedding_model="nomic-embed-text",
+            embedding_base_url="http://localhost:11434",
         ),
-        rag=SimpleNamespace(embedding_model="nomic-embed-text"),
     )
     fn = make_embed_fn(config)
     # functools.partial 経由で keyword args を検証
@@ -172,13 +181,10 @@ def test_make_embed_fn_ollama_default():
 def test_make_embed_fn_llamacpp():
     """embedding_provider=llamacpp で base_url が llama-swap に切替わる。"""
     config = SimpleNamespace(
-        llm=SimpleNamespace(
-            ollama=SimpleNamespace(base_url="http://localhost:11434"),
-            llamacpp=SimpleNamespace(base_url="http://localhost:8080/v1"),
-        ),
         rag=SimpleNamespace(
             embedding_model="nomic-embed-text",
             embedding_provider="llamacpp",
+            embedding_base_url="http://localhost:8080/v1",
         ),
     )
     fn = make_embed_fn(config)

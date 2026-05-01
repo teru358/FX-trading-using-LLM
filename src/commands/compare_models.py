@@ -149,10 +149,19 @@ async def _probe_claude(api_key: str, timeout: int = 5) -> list[ModelOption]:
 
 
 async def discover_models(config: AppConfig) -> list[ModelOption]:
-    """利用可能なモデルを全プロバイダーで並行探索する。"""
+    """利用可能なモデルを全プロバイダーで並行探索する。
+
+    compare_models は単一 active provider に縛られず、API キー/ローカル疎通が
+    成立する provider を全部並べる比較ツール。Ollama base_url は active provider が
+    ollama の時は config から、それ以外はデフォルト値を使う。
+    """
     _console.print("[dim]利用可能なモデルを確認中...[/dim]")
+    if config.llm.provider == "ollama":
+        ollama_base_url = config.llm.provider_config.base_url
+    else:
+        ollama_base_url = "http://localhost:11434"
     results = await asyncio.gather(
-        _probe_ollama(config.llm.ollama.base_url),
+        _probe_ollama(ollama_base_url),
         _probe_gemini(os.environ.get("GEMINI_API_KEY", "")),
         _probe_openai(os.environ.get("OPENAI_API_KEY", "")),
         _probe_claude(os.environ.get("ANTHROPIC_API_KEY", "")),
@@ -168,31 +177,44 @@ async def discover_models(config: AppConfig) -> list[ModelOption]:
 # ── LLMクライアント生成 ────────────────────────────────────────────────────
 
 def _make_llm(option: ModelOption, config: AppConfig) -> LLMClient:
+    """compare 用 LLMClient を生成。
+
+    比較ツールの性質上 provider 横断で生成するため、active provider の
+    provider_config に縛られず固定デフォルト値を使う。
+    """
     if option.provider == "gemini":
         return GeminiClient(
             model=option.model,
-            timeout_seconds=config.gemini.timeout_seconds,
-            max_retries=config.gemini.max_retries,
+            timeout_seconds=60,
+            max_retries=2,
         )
     if option.provider == "openai":
         return OpenAIClient(
             model=option.model,
-            timeout_seconds=config.openai.timeout_seconds,
-            max_retries=config.openai.max_retries,
+            timeout_seconds=60,
+            max_retries=2,
         )
     if option.provider == "claude":
         return ClaudeClient(
             model=option.model,
-            timeout_seconds=config.claude.timeout_seconds,
-            max_retries=config.claude.max_retries,
-            max_tokens=config.claude.max_tokens,
+            timeout_seconds=60,
+            max_retries=2,
+            max_tokens=4096,
         )
     # default: ollama
+    if config.llm.provider == "ollama":
+        ollama_base_url = config.llm.provider_config.base_url
+        ollama_timeout = config.llm.provider_config.timeout_seconds
+        ollama_retries = config.llm.provider_config.max_retries
+    else:
+        ollama_base_url = "http://localhost:11434"
+        ollama_timeout = 120
+        ollama_retries = 2
     return OllamaClient(
-        base_url=config.llm.ollama.base_url,
+        base_url=ollama_base_url,
         model=option.model,
-        timeout_seconds=config.llm.ollama.timeout_seconds,
-        max_retries=config.llm.ollama.max_retries,
+        timeout_seconds=ollama_timeout,
+        max_retries=ollama_retries,
     )
 
 

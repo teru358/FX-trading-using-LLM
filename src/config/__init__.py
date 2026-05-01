@@ -4,24 +4,22 @@
   - schema.py  : dataclass 定義 (InstrumentConfig / AppConfig / ...)
   - loader.py  : YAML ロード + _merge_split_configs + load_config
 
-このファイルは旧パスとの互換のため、すべての dataclass と
-load_config / BASE_DIR / _DEFAULT_OLLAMA_MODEL を再エクスポートする。
+このファイルは旧パスとの互換のため、dataclass と load_config / BASE_DIR を再エクスポートする。
 既存の `from src.config import AppConfig, load_config` などはそのまま動く。
 """
 from __future__ import annotations
 
-from src.config.loader import load_config
+from src.config.loader import ConfigError, load_config
 from src.config.schema import (
     BASE_DIR,
-    _DEFAULT_OLLAMA_MODEL,
+    LLM_PROVIDERS,
+    LLM_PROVIDERS_REQUIRING_BASE_URL,
     AnalysisConfig,
     ApiConfig,
     AppConfig,
     ChartPatternConfig,
-    ClaudeConfig,
     EconomicCalendarConfig,
     FeedlyConfig,
-    GeminiConfig,
     IndicatorToggleConfig,
     InstrumentConfig,
     KeywordsConfig,
@@ -32,11 +30,10 @@ from src.config.schema import (
     NewsCollectionConfig,
     NewsSourcesConfig,
     NotifierConfig,
-    OllamaBaseConfig,
-    OpenAIConfig,
     PairConfig,  # 後方互換エイリアス
     PriceMonitorConfig,
     PriceProviderConfig,
+    ProviderConfig,
     RagConfig,
     ScheduleConfig,
     TimeframeConfig,
@@ -47,16 +44,16 @@ from src.config.schema import (
 
 __all__ = [
     "BASE_DIR",
-    "_DEFAULT_OLLAMA_MODEL",
+    "LLM_PROVIDERS",
+    "LLM_PROVIDERS_REQUIRING_BASE_URL",
+    "ConfigError",
     "load_config",
     "AnalysisConfig",
     "ApiConfig",
     "AppConfig",
     "ChartPatternConfig",
-    "ClaudeConfig",
     "EconomicCalendarConfig",
     "FeedlyConfig",
-    "GeminiConfig",
     "IndicatorToggleConfig",
     "InstrumentConfig",
     "KeywordsConfig",
@@ -67,11 +64,10 @@ __all__ = [
     "NewsCollectionConfig",
     "NewsSourcesConfig",
     "NotifierConfig",
-    "OllamaBaseConfig",
-    "OpenAIConfig",
     "PairConfig",
     "PriceMonitorConfig",
     "PriceProviderConfig",
+    "ProviderConfig",
     "RagConfig",
     "ScheduleConfig",
     "TimeframeConfig",

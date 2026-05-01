@@ -9,7 +9,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from src.config import AppConfig, InstrumentConfig, _DEFAULT_OLLAMA_MODEL
+from src.config import AppConfig, InstrumentConfig
 
 _SYMBOL_CHECK_TIMEOUT = 10  # 全シンボルの並列フェッチ最大待機秒数
 
@@ -20,6 +20,8 @@ _ROLE_LABEL = {
     "reflection": "reflect",
     "embedding": "embed",
 }
+
+_LLM_ROLES = ("news_analysis", "price_analysis", "reflection")
 
 
 def _check_one_symbol(inst: InstrumentConfig) -> tuple[bool, str]:
@@ -40,13 +42,14 @@ _console = Console()
 def _collect_llm_role_entries(config: AppConfig) -> list[tuple[str, str, str]]:
     """表示用に (role_label, provider, model_name) のリストを組み立てる。
 
-    ロール順: news → price → reflect → embed
+    新スキーマでは provider は config.llm.provider で 1 つだけ。
+    embedding は config.rag.embedding_provider で別管理。
     """
     entries: list[tuple[str, str, str]] = []
-    for role in ("news_analysis", "price_analysis", "reflection"):
+    provider = config.llm.provider
+    for role in _LLM_ROLES:
         rc = getattr(config.llm, role)
-        model = rc.model or _DEFAULT_OLLAMA_MODEL if rc.provider == "ollama" else rc.model
-        entries.append((_ROLE_LABEL[role], rc.provider, model or "(unset)"))
+        entries.append((_ROLE_LABEL[role], provider, rc.model or "(unset)"))
 
     emb_provider = getattr(config.rag, "embedding_provider", "ollama")
     entries.append((_ROLE_LABEL["embedding"], emb_provider, config.rag.embedding_model))
@@ -54,12 +57,13 @@ def _collect_llm_role_entries(config: AppConfig) -> list[tuple[str, str, str]]:
 
 
 def _ollama_required_models(config: AppConfig) -> set[str]:
-    """Ollama に要求されるモデル名の集合。"""
+    """Ollama に要求されるモデル名の集合 (LLM provider と embedding 両方を考慮)。"""
     models: set[str] = set()
-    for role in ("news_analysis", "price_analysis", "reflection"):
-        rc = getattr(config.llm, role)
-        if rc.provider == "ollama":
-            models.add(rc.model or _DEFAULT_OLLAMA_MODEL)
+    if config.llm.provider == "ollama":
+        for role in _LLM_ROLES:
+            rc = getattr(config.llm, role)
+            if rc.model:
+                models.add(rc.model)
     if getattr(config.rag, "embedding_provider", "ollama") == "ollama":
         models.add(config.rag.embedding_model)
     return models
@@ -68,21 +72,32 @@ def _ollama_required_models(config: AppConfig) -> set[str]:
 def _llamacpp_required_models(config: AppConfig) -> set[str]:
     """llama-swap に要求されるモデル名の集合。"""
     models: set[str] = set()
-    for role in ("news_analysis", "price_analysis", "reflection"):
-        rc = getattr(config.llm, role)
-        if rc.provider == "llamacpp" and rc.model:
-            models.add(rc.model)
+    if config.llm.provider == "llamacpp":
+        for role in _LLM_ROLES:
+            rc = getattr(config.llm, role)
+            if rc.model:
+                models.add(rc.model)
     if getattr(config.rag, "embedding_provider", "ollama") == "llamacpp":
         models.add(config.rag.embedding_model)
     return models
 
 
 def _fetch_ollama_models(config: AppConfig) -> set[str] | None:
-    """Ollama の /api/tags から登録モデル一覧を取得。疎通失敗時は None。"""
+    """Ollama の /api/tags から登録モデル一覧を取得。疎通失敗時は None。
+
+    base_url は LLM provider が ollama のときは provider_config から、
+    それ以外で embedding が ollama のときは rag.embedding_base_url から取得。
+    """
     import httpx
 
+    if config.llm.provider == "ollama":
+        base_url = config.llm.provider_config.base_url
+    else:
+        base_url = getattr(config.rag, "embedding_base_url", "")
+    if not base_url:
+        return None
     try:
-        resp = httpx.get(f"{config.llm.ollama.base_url}/api/tags", timeout=5)
+        resp = httpx.get(f"{base_url}/api/tags", timeout=5)
         resp.raise_for_status()
         return {m["name"] for m in resp.json().get("models", [])}
     except Exception:
@@ -93,7 +108,13 @@ def _fetch_llamacpp_models(config: AppConfig) -> set[str] | None:
     """llama-swap の /v1/models から登録モデル一覧を取得。疎通失敗時は None。"""
     import httpx
 
-    base_url = config.llm.llamacpp.base_url.rstrip("/")
+    if config.llm.provider == "llamacpp":
+        base_url = config.llm.provider_config.base_url
+    else:
+        base_url = getattr(config.rag, "embedding_base_url", "")
+    if not base_url:
+        return None
+    base_url = base_url.rstrip("/")
     try:
         resp = httpx.get(f"{base_url}/models", timeout=5)
         resp.raise_for_status()
@@ -103,11 +124,8 @@ def _fetch_llamacpp_models(config: AppConfig) -> set[str] | None:
 
 
 def _claude_cli_used(config: AppConfig) -> bool:
-    """claude-cli を使うロールが 1 つでもあるか。"""
-    return any(
-        getattr(config.llm, role).provider == "claude-cli"
-        for role in ("news_analysis", "price_analysis", "reflection")
-    )
+    """claude-cli が選択されているか。"""
+    return config.llm.provider == "claude-cli"
 
 
 def _check_claude_cli(config: AppConfig) -> tuple[bool, str]:
@@ -118,8 +136,7 @@ def _check_claude_cli(config: AppConfig) -> tuple[bool, str]:
     import shutil
     import subprocess
 
-    cfg = getattr(config.llm, "claude_cli", None)
-    command = getattr(cfg, "command", "claude") if cfg else "claude"
+    command = config.llm.provider_config.command or "claude"
 
     exe = shutil.which(command)
     if not exe:
@@ -184,7 +201,7 @@ def _build_llm_table(
                 status_text, passed = "[red]✗ CLI not found[/red]", False
         else:
             # gemini / openai / claude (API) は HTTP チェック省略 (API キーは別途)
-            status_text, passed = f"[yellow]◦ api[/yellow]", True
+            status_text, passed = "[yellow]◦ api[/yellow]", True
 
         table.add_row(role_label, f"{provider} / {model}", status_text)
         if not passed:

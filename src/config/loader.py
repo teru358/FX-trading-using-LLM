@@ -23,13 +23,13 @@ from src.config.schema import (
     AppConfig,
     BASE_DIR,
     ChartPatternConfig,
-    ClaudeConfig,
     EconomicCalendarConfig,
     FeedlyConfig,
-    GeminiConfig,
     IndicatorToggleConfig,
     InstrumentConfig,
     KeywordsConfig,
+    LLM_PROVIDERS,
+    LLM_PROVIDERS_REQUIRING_BASE_URL,
     LLMConfig,
     LLMRoleConfig,
     LoggingConfig,
@@ -37,8 +37,7 @@ from src.config.schema import (
     NewsCollectionConfig,
     NewsSourcesConfig,
     NotifierConfig,
-    OllamaBaseConfig,
-    OpenAIConfig,
+    ProviderConfig,
     ForecastAccuracyFeedbackConfig,
     PriceMonitorConfig,
     PriceProviderConfig,
@@ -51,6 +50,23 @@ from src.config.schema import (
     WeeklyDiagnosisConfig,
     DataBackupConfig,
 )
+
+
+# embedding provider 別の default base_url (rag.embedding_base_url が空欄かつ未バリデート時のヒント表示用)
+_EMBEDDING_BASE_URL_HINTS = {
+    "ollama":   "http://localhost:11434",
+    "llamacpp": "http://localhost:8080/v1",
+}
+
+# LLM provider 別の default base_url (provider_config.base_url が空欄時のヒント表示用)
+_LLM_BASE_URL_HINTS = {
+    "ollama":   "http://localhost:11434",
+    "llamacpp": "http://localhost:8080/v1",
+}
+
+
+class ConfigError(ValueError):
+    """設定の起動時バリデーションで検出された致命的エラー。"""
 
 
 # ── 汎用ヘルパー ────────────────────────────────────────────────
@@ -84,6 +100,96 @@ def _merge_split_configs(base: dict, config_dir: Path) -> dict:
     return base
 
 
+# ── LLM 設定の構築とバリデーション ──────────────────────────────
+
+def _build_provider_config(provider: str, raw: dict) -> ProviderConfig:
+    """provider_config セクションを ProviderConfig に組み立て、provider 別の補完/検証を行う。
+
+    - ollama / llamacpp の base_url が空欄なら ConfigError (起動阻止)
+    - claude-cli の command が空欄なら "claude" 自動補完 (PATH 解決前提)
+    - claude (API) の max_tokens が 0 なら 4096 補完
+    - timeout_seconds / max_retries / max_concurrent は dataclass デフォルトに任せる
+    """
+    pc = _from_dict(ProviderConfig, raw)
+
+    if provider in LLM_PROVIDERS_REQUIRING_BASE_URL and not pc.base_url:
+        hint = _LLM_BASE_URL_HINTS.get(provider, "")
+        raise ConfigError(
+            f"llm.provider_config.base_url is required when provider='{provider}'. "
+            f"Edit config/settings.yaml and set base_url (e.g. \"{hint}\")."
+        )
+
+    if provider == "claude-cli" and not pc.command:
+        pc.command = "claude"
+
+    if provider == "claude" and pc.max_tokens <= 0:
+        pc.max_tokens = 4096
+
+    return pc
+
+
+def _build_role_config(raw: dict, default_temp: float, *, provider: str, role: str) -> LLMRoleConfig:
+    model = (raw or {}).get("model", "") or ""
+    temperature = (raw or {}).get("temperature", default_temp)
+    if not model:
+        raise ConfigError(
+            f"llm.{role}.model is required (provider='{provider}'). "
+            f"Edit config/settings.yaml and set a model name appropriate for the provider."
+        )
+    return LLMRoleConfig(model=model, temperature=temperature)
+
+
+def _build_llm_config(lc: dict) -> LLMConfig:
+    """yaml の llm: セクションから LLMConfig を構築する。
+
+    旧形式 (llm.ollama / llm.llamacpp / llm.claude_cli, llm.<role>.provider) は
+    Phase 3c でサポートを廃止。検出時は ConfigError を投げ、移行を促す。
+    """
+    # 旧形式の検出: llm.ollama / llm.llamacpp / llm.claude_cli が yaml に残っている
+    legacy_keys = [k for k in ("ollama", "llamacpp", "claude_cli") if k in lc]
+    if legacy_keys:
+        raise ConfigError(
+            f"Legacy LLM config detected (keys: {legacy_keys}). "
+            "The schema was consolidated to a single 'provider' + 'provider_config'. "
+            "See config/settings.yaml.example for the new layout."
+        )
+    # 旧形式の検出: llm.<role>.provider が指定されている
+    for role in ("news_analysis", "price_analysis", "reflection"):
+        if isinstance(lc.get(role), dict) and "provider" in lc[role]:
+            raise ConfigError(
+                f"Legacy per-role 'provider' detected at llm.{role}.provider. "
+                "Use a single top-level 'llm.provider' instead. "
+                "See config/settings.yaml.example for the new layout."
+            )
+
+    provider = lc.get("provider", "")
+    if not provider:
+        raise ConfigError(
+            "llm.provider is required. "
+            f"Choose one of {LLM_PROVIDERS} in config/settings.yaml."
+        )
+    if provider not in LLM_PROVIDERS:
+        raise ConfigError(
+            f"Unknown llm.provider '{provider}'. Must be one of {LLM_PROVIDERS}."
+        )
+
+    provider_config = _build_provider_config(provider, lc.get("provider_config", {}) or {})
+
+    return LLMConfig(
+        provider=provider,
+        provider_config=provider_config,
+        news_analysis=_build_role_config(
+            lc.get("news_analysis", {}), 0.3, provider=provider, role="news_analysis",
+        ),
+        price_analysis=_build_role_config(
+            lc.get("price_analysis", {}), 0.1, provider=provider, role="price_analysis",
+        ),
+        reflection=_build_role_config(
+            lc.get("reflection", {}), 0.3, provider=provider, role="reflection",
+        ),
+    )
+
+
 # ── load_config ──────────────────────────────────────────────────
 
 def load_config(config_path: Path | None = None) -> AppConfig:
@@ -113,9 +219,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     notifier = _from_dict(NotifierConfig, raw.get("notification", {}))
     api_cfg = _from_dict(ApiConfig, raw.get("api", {}))
     price_monitor = _from_dict(PriceMonitorConfig, raw.get("price_monitor", {}))
-    gemini = _from_dict(GeminiConfig, raw.get("gemini", {}))
-    openai_cfg = _from_dict(OpenAIConfig, raw.get("openai", {}))
-    claude_cfg = _from_dict(ClaudeConfig, raw.get("claude", {}))
     tradingview_cfg = _from_dict(TradingViewConfig, raw.get("tradingview", {}))
     economic_calendar_cfg = _from_dict(EconomicCalendarConfig, raw.get("economic_calendar", {}))
     weekly_diagnosis_cfg = _from_dict(WeeklyDiagnosisConfig, raw.get("weekly_diagnosis", {}))
@@ -158,23 +261,9 @@ def load_config(config_path: Path | None = None) -> AppConfig:
 
     # ── ネスト configs ────────────────────────────────────────────
 
-    # LLM (ollama + 3 roles)
-    lc = raw.get("llm", {})
-    ollama_base = _from_dict(OllamaBaseConfig, lc.get("ollama", {}))
-
-    def _role(raw_role: dict, default_temp: float) -> LLMRoleConfig:
-        return LLMRoleConfig(
-            provider=raw_role.get("provider", "ollama"),
-            model=raw_role.get("model", ""),
-            temperature=raw_role.get("temperature", default_temp),
-        )
-
-    llm_cfg = LLMConfig(
-        ollama=ollama_base,
-        news_analysis=_role(lc.get("news_analysis", {}), 0.3),
-        price_analysis=_role(lc.get("price_analysis", {}), 0.1),
-        reflection=_role(lc.get("reflection", {}), 0.3),
-    )
+    # LLM: provider + provider_config + 3 roles の単一エントリ
+    lc = raw.get("llm", {}) or {}
+    llm_cfg = _build_llm_config(lc)
 
     # NewsSourcesConfig (feeds + feedly with env token)
     ns = raw.get("news_sources", {})
@@ -252,6 +341,14 @@ def load_config(config_path: Path | None = None) -> AppConfig:
                 f"activation={price_monitor.trailing_stop_activation_pct})"
             )
 
+    # rag.embedding_base_url: 空欄なら起動阻止 (provider 別 default を提示)
+    if rag.embedding_provider in LLM_PROVIDERS_REQUIRING_BASE_URL and not rag.embedding_base_url:
+        hint = _EMBEDDING_BASE_URL_HINTS.get(rag.embedding_provider, "")
+        raise ConfigError(
+            f"rag.embedding_base_url is required when embedding_provider='{rag.embedding_provider}'. "
+            f"Edit config/settings.yaml and set embedding_base_url (e.g. \"{hint}\")."
+        )
+
     # ── AppConfig 組み立て ────────────────────────────────────────
 
     return AppConfig(
@@ -267,9 +364,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         price_provider=price_provider,
         api=api_cfg,
         llm=llm_cfg,
-        gemini=gemini,
-        openai=openai_cfg,
-        claude=claude_cfg,
         analysis=analysis_cfg,
         keywords=keywords_cfg,
         economic_calendar=economic_calendar_cfg,

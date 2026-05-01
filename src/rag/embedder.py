@@ -95,11 +95,11 @@ def make_embed_fn(config) -> "callable":
         embed_fn = make_embed_fn(config)
     """
     from functools import partial
+    # embedding は config.rag に独立した base_url を持つ (LLM provider と分離)。
     # 後方互換: テストで SimpleNamespace を渡す場合などに備えて getattr で取得
     provider = getattr(config.rag, "embedding_provider", "ollama")
+    base_url = getattr(config.rag, "embedding_base_url", "")
     if provider == "llamacpp":
-        llamacpp_cfg = getattr(config.llm, "llamacpp", None)
-        base_url = getattr(llamacpp_cfg, "base_url", "http://localhost:8080/v1")
         return partial(
             embed_text,
             provider="llamacpp",
@@ -109,6 +109,6 @@ def make_embed_fn(config) -> "callable":
     return partial(
         embed_text,
         provider="ollama",
-        ollama_base_url=config.llm.ollama.base_url,
+        ollama_base_url=base_url,
         model=config.rag.embedding_model,
     )
