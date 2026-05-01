@@ -136,9 +136,10 @@ def create_broker(
     trading_mode: str,
     position_mgr: PositionManager | None = None,
     *,
-    max_total_positions: int = 4,
-    max_positions_per_group: int = 2,
-    max_same_direction_per_group: int = 2,
+    max_positions_per_pair: int = 2,
+    scale_in_enabled: bool = False,
+    scale_in_conf_margin: float = 0.05,
+    scale_in_score_margin: float = 0.05,
     manual_position_mgr: "PositionManager | None" = None,
     notifier: "NotifierAdapter | None" = None,
     drawdown_kill_switch_enabled: bool = False,
@@ -157,6 +158,10 @@ def create_broker(
 
     Args:
         trading_mode: "paper" | "live" | "signal" | "mt5_bridge" | "shadow"
+        max_positions_per_pair: 1ペアあたりの最大ポジション数 (scale-in上限)。
+        scale_in_enabled: スケールインを許可するか。
+        scale_in_conf_margin: スケールイン時に要求する追加信頼度マージン。
+        scale_in_score_margin: スケールイン時に要求する追加スコアマージン。
         manual_position_mgr: "signal" モード時に必須。manual ポジション管理用。
         notifier: "signal" モード時に必須。通知アダプター。
         drawdown_kill_switch_*: 新規エントリーの DD kill switch 設定。
@@ -168,9 +173,10 @@ def create_broker(
 
     if trading_mode == "paper":
         return PaperBrokerAdapter(
-            max_total_positions=max_total_positions,
-            max_positions_per_group=max_positions_per_group,
-            max_same_direction_per_group=max_same_direction_per_group,
+            max_positions_per_pair=max_positions_per_pair,
+            scale_in_enabled=scale_in_enabled,
+            scale_in_conf_margin=scale_in_conf_margin,
+            scale_in_score_margin=scale_in_score_margin,
             drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
             drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
             drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
@@ -190,9 +196,10 @@ def create_broker(
         return SignalBrokerAdapter(
             manual_position_mgr=manual_position_mgr,
             notifier=notifier,
-            max_total_positions=max_total_positions,
-            max_positions_per_group=max_positions_per_group,
-            max_same_direction_per_group=max_same_direction_per_group,
+            max_positions_per_pair=max_positions_per_pair,
+            scale_in_enabled=scale_in_enabled,
+            scale_in_conf_margin=scale_in_conf_margin,
+            scale_in_score_margin=scale_in_score_margin,
             drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
             drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
             drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
@@ -208,9 +215,10 @@ def create_broker(
             request_timeout_seconds=mt5_order_timeout_seconds,
             lot_size_units=mt5_lot_size_units,
             magic_number=mt5_magic_number,
-            max_total_positions=max_total_positions,
-            max_positions_per_group=max_positions_per_group,
-            max_same_direction_per_group=max_same_direction_per_group,
+            max_positions_per_pair=max_positions_per_pair,
+            scale_in_enabled=scale_in_enabled,
+            scale_in_conf_margin=scale_in_conf_margin,
+            scale_in_score_margin=scale_in_score_margin,
             drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
             drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
             drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
@@ -227,9 +235,10 @@ def create_broker(
             )
 
         primary = PaperBrokerAdapter(
-            max_total_positions=max_total_positions,
-            max_positions_per_group=max_positions_per_group,
-            max_same_direction_per_group=max_same_direction_per_group,
+            max_positions_per_pair=max_positions_per_pair,
+            scale_in_enabled=scale_in_enabled,
+            scale_in_conf_margin=scale_in_conf_margin,
+            scale_in_score_margin=scale_in_score_margin,
             drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
             drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
             drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
@@ -239,9 +248,10 @@ def create_broker(
             request_timeout_seconds=mt5_order_timeout_seconds,
             lot_size_units=mt5_lot_size_units,
             magic_number=mt5_magic_number,
-            max_total_positions=max_total_positions,
-            max_positions_per_group=max_positions_per_group,
-            max_same_direction_per_group=max_same_direction_per_group,
+            max_positions_per_pair=max_positions_per_pair,
+            scale_in_enabled=scale_in_enabled,
+            scale_in_conf_margin=scale_in_conf_margin,
+            scale_in_score_margin=scale_in_score_margin,
             drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
             drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
             drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,

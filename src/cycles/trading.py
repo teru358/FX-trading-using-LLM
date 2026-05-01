@@ -886,9 +886,10 @@ def _build_trading_runtime(config: AppConfig):
         # internal broker: PaperBrokerAdapter (通知なし、ログのみ)
         broker = create_broker(
             "paper",
-            max_total_positions=config.trading.max_total_positions,
-            max_positions_per_group=config.trading.max_positions_per_currency_group,
-            max_same_direction_per_group=config.trading.max_same_direction_per_group,
+            max_positions_per_pair=config.trading.max_positions_per_pair,
+            scale_in_enabled=config.trading.scale_in_enabled,
+            scale_in_conf_margin=config.trading.scale_in_conf_margin,
+            scale_in_score_margin=config.trading.scale_in_score_margin,
             **_dd_kwargs,
         )
         # manual PositionManager (ユーザーの実取引記録用)
@@ -903,17 +904,19 @@ def _build_trading_runtime(config: AppConfig):
             "signal",
             manual_position_mgr=manual_mgr,
             notifier=notifier,
-            max_total_positions=config.trading.max_total_positions,
-            max_positions_per_group=config.trading.max_positions_per_currency_group,
-            max_same_direction_per_group=config.trading.max_same_direction_per_group,
+            max_positions_per_pair=config.trading.max_positions_per_pair,
+            scale_in_enabled=config.trading.scale_in_enabled,
+            scale_in_conf_margin=config.trading.scale_in_conf_margin,
+            scale_in_score_margin=config.trading.scale_in_score_margin,
             **_dd_kwargs,
         )
     else:
         broker = create_broker(
             config.trading.trading_mode,
-            max_total_positions=config.trading.max_total_positions,
-            max_positions_per_group=config.trading.max_positions_per_currency_group,
-            max_same_direction_per_group=config.trading.max_same_direction_per_group,
+            max_positions_per_pair=config.trading.max_positions_per_pair,
+            scale_in_enabled=config.trading.scale_in_enabled,
+            scale_in_conf_margin=config.trading.scale_in_conf_margin,
+            scale_in_score_margin=config.trading.scale_in_score_margin,
             mt5_bridge_url=config.mt5_bridge.bridge_url,
             mt5_lot_size_units=config.mt5_bridge.lot_size_units,
             mt5_magic_number=config.mt5_bridge.magic_number,
