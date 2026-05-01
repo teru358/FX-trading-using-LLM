@@ -136,10 +136,12 @@ trading:
   # TradingView テクニカルサマリー (矛盾検出)
   tv_summary_enabled: false      # TV判定と方向矛盾時にconfidence減衰
   tv_conflict_dampen: 0.7        # 矛盾時のconfidence倍率
-  # ポートフォリオリスク管理
-  max_total_positions: 4                 # 全体の最大同時ポジション数
-  max_positions_per_currency_group: 2    # 通貨グループ (JPY/USD/EUR/GBP) 別の最大ポジション数
-  max_same_direction_per_group: 2        # グループ内の同方向ポジション数上限
+  # ペアごとのポジション数上限 (1 ペアでの最大累積 open ポジ数)
+  max_positions_per_pair: 2              # scale-in 含めて 1 ペアで最大 N ポジ
+  # Scale-in (順張り増し玉): 既存ポジと同方向で強い signal が来た時に追加発注
+  scale_in_enabled: false                # フラグ式段階導入: 初期 OFF
+  scale_in_conf_margin: 0.05             # confidence 上回り幅
+  scale_in_score_margin: 0.05            # |combined_score| 上回り幅
   # Drawdown kill switch — 新規エントリーのみ停止 (既存ポジションは維持)
   # 運用保険。新規運用時は false のままで OK、audit で DD 履歴を確認してから有効化を検討
   drawdown_kill_switch_enabled: false
