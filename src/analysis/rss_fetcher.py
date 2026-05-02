@@ -192,6 +192,7 @@ def _fetch_from_feeds(
                 all_items.append(NewsItem(
                     title=title, summary=body, source=source_name,
                     published=pub_dt, age_hours=age_hours,
+                    link=item.get("link", "") or "",
                 ))
                 seen.add(title)
                 feed_count += 1

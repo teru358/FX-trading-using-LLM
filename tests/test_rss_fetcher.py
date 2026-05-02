@@ -45,3 +45,40 @@ def test_title_hash_matches_fetch_result_title_hashes():
     item = NewsItem(title="abc", summary="", source="x", published=None, age_hours=None)
     result = FetchResult(items=[item])
     assert title_hash("abc") in result.title_hashes
+
+
+from unittest.mock import patch, MagicMock
+
+
+def _make_feedparser_entry(title: str, link: str, summary: str = "summary"):
+    """feedparser.parse() の entry を模した dict-like。"""
+    entry = MagicMock()
+    entry.title = title
+    entry.link = link
+    entry.summary = summary
+    entry.published_parsed = None
+    entry.updated_parsed = None
+    entry.published = ""
+    entry.updated = ""
+    entry.get = lambda key, default="": getattr(entry, key, default)
+    return entry
+
+
+def test_fetch_extracts_link_from_feedparser_entry():
+    """feedparser entry.link を NewsItem.link に格納する。"""
+    from src.analysis.rss_fetcher import _fetch_from_feeds
+
+    fake_feed = MagicMock()
+    fake_feed.entries = [
+        _make_feedparser_entry("Article A", "https://example.com/a"),
+        _make_feedparser_entry("Article B", "https://example.com/b"),
+    ]
+    fake_feed.bozo = False
+
+    with patch("src.analysis.rss_fetcher.feedparser.parse", return_value=fake_feed):
+        result = _fetch_from_feeds(
+            ["https://example.com/feed"], None, 24.0, 5, 30, 600,
+        )
+
+    links = sorted(item.link for item in result.items)
+    assert links == ["https://example.com/a", "https://example.com/b"]
