@@ -226,6 +226,55 @@ class Mt5Client:
             return []
         return [s.name for s in symbols]
 
+    def copy_rates_range(
+        self, symbol: str, interval: str,
+        date_from: Any, date_to: Any,
+    ) -> list[dict]:
+        """MT5 から OHLCV を取得し dict のリストで返す。
+
+        interval: "1m" | "5m" | "15m" | "30m" | "1h" | "4h" | "1d"
+        date_from / date_to: datetime (tz-aware UTC 推奨)
+        """
+        from datetime import datetime, timezone
+
+        tf_map = {
+            "1m":  self._mt5.TIMEFRAME_M1,
+            "5m":  self._mt5.TIMEFRAME_M5,
+            "15m": self._mt5.TIMEFRAME_M15,
+            "30m": self._mt5.TIMEFRAME_M30,
+            "1h":  self._mt5.TIMEFRAME_H1,
+            "4h":  self._mt5.TIMEFRAME_H4,
+            "1d":  self._mt5.TIMEFRAME_D1,
+        }
+        tf = tf_map.get(interval)
+        if tf is None:
+            raise ValueError(f"unsupported interval: {interval}")
+
+        if not self._mt5.symbol_select(symbol, True):
+            raise RuntimeError(
+                f"symbol_select({symbol}) failed: {self._mt5.last_error()}"
+            )
+
+        rates = self._mt5.copy_rates_range(symbol, tf, date_from, date_to)
+        if rates is None:
+            raise RuntimeError(
+                f"copy_rates_range failed: {self._mt5.last_error()}"
+            )
+
+        bars: list[dict] = []
+        for r in rates:
+            # rates fields: time, open, high, low, close, tick_volume, spread, real_volume
+            ts = datetime.fromtimestamp(int(r["time"]), tz=timezone.utc).isoformat()
+            bars.append({
+                "time": ts,
+                "open": float(r["open"]),
+                "high": float(r["high"]),
+                "low": float(r["low"]),
+                "close": float(r["close"]),
+                "volume": float(r["tick_volume"]),
+            })
+        return bars
+
     def calc_required_margin(
         self, symbol: str, side: str, volume_lots: float, price: float,
     ) -> float:

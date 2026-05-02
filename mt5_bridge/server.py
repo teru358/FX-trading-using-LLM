@@ -14,12 +14,13 @@ from dataclasses import asdict
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, status
 from pydantic import BaseModel
 
 from admin_models import AdminStatus, HaltRequest
 from config import BridgeSettings, load_settings
 from mt5_client import Mt5Client
+from ohlcv_models import OhlcvBar, OhlcvResponse
 from order_models import ClosePositionResponse, OrderRequest, OrderResponse
 from runtime_state import RuntimeState
 
@@ -248,6 +249,46 @@ def symbols():
     if _client is None or not _client.is_connected:
         raise HTTPException(503, "MT5 not connected")
     return _client.get_symbols()
+
+
+@app.get("/ohlcv/{symbol}", response_model=OhlcvResponse,
+         dependencies=[Depends(require_api_key)])
+def ohlcv(
+    symbol: str,
+    from_: str = Query(..., alias="from"),
+    to: str = Query(...),
+    interval: str = Query("1h"),
+):
+    """OHLCV を MT5 から取得 (copy_rates_range ベース)。
+
+    query: from=ISO8601&to=ISO8601&interval=1h
+    interval: 1m | 5m | 15m | 30m | 1h | 4h | 1d
+    """
+    from datetime import datetime as _dt
+
+    if _client is None or not _client.is_connected:
+        raise HTTPException(503, "MT5 not connected")
+    try:
+        date_from = _dt.fromisoformat(from_.replace("Z", "+00:00"))
+        date_to = _dt.fromisoformat(to.replace("Z", "+00:00"))
+    except ValueError as e:
+        raise HTTPException(400, f"invalid timestamp: {e}")
+
+    if date_to <= date_from:
+        raise HTTPException(400, "to must be after from")
+
+    try:
+        bars_raw = _client.copy_rates_range(symbol, interval, date_from, date_to)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(404, str(e))
+
+    return OhlcvResponse(
+        symbol=symbol,
+        interval=interval,  # type: ignore[arg-type]
+        bars=[OhlcvBar(**b) for b in bars_raw],
+    )
 
 
 # ── 発注系 endpoint (Phase 3a: DRY_RUN のみ) ────────────────────────
