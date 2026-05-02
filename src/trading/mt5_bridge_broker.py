@@ -110,13 +110,12 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             "magic": self._magic,
             "comment": signal.signal_reason[:32],
         }
+        requested_lots = payload["volume_lots"]
         try:
             resp = httpx.post(
                 f"{self._url}/order", json=payload,
                 timeout=self._timeout, headers=self._headers(),
             )
-            resp.raise_for_status()
-            data = resp.json()
         except httpx.HTTPError as e:
             logger.error(f"[MT5_BRIDGE] bridge order failed: {e}")
             return None
@@ -124,13 +123,48 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             logger.error(f"[MT5_BRIDGE] unexpected error: {e}", exc_info=True)
             return None
 
+        # ── HTTP status 分岐 ──
+        if resp.status_code == 422:
+            try:
+                err = resp.json()
+            except Exception:  # noqa: BLE001
+                err = {"detail": resp.text}
+            logger.warning(
+                f"[MT5_BRIDGE] {signal.pair} insufficient margin: {err}"
+            )
+            self._notify_margin_insufficient(signal, err)
+            return None
+        if resp.status_code == 423:
+            logger.info(f"[MT5_BRIDGE] {signal.pair} skipped — bridge soft-halted")
+            return None
+        if resp.status_code == 409:
+            logger.warning(f"[MT5_BRIDGE] {signal.pair} order rejected: {resp.text}")
+            return None
+        if resp.status_code in (503, 504):
+            logger.error(
+                f"[MT5_BRIDGE] {signal.pair} bridge unavailable: {resp.status_code}"
+            )
+            return None
+        if resp.status_code != 200:
+            logger.error(
+                f"[MT5_BRIDGE] unexpected response {resp.status_code}: {resp.text}"
+            )
+            return None
+
+        data = resp.json()
+        actual_lots = float(data["volume_lots"])
+        partial = actual_lots < requested_lots * 0.99    # 1% 以上少なければ部分約定
+
+        # 部分約定なら position_size を実約定量に修正
+        actual_size = signal.position_size * (actual_lots / requested_lots) if requested_lots > 0 else signal.position_size
+
         # bridge ticket を order_id に組み込む (paper UUID と区別)。
         # pair は内部正規形 (signal.pair = "USDJPY=X") のまま保持。
         order = Order.new(
             pair=signal.pair, direction=direction,
             entry_price=float(data["fill_price"]),
             stop_loss=signal.stop_loss, take_profit=signal.take_profit,
-            position_size=signal.position_size,
+            position_size=actual_size,
             signal_reason=signal.signal_reason,
             macro_context_at_entry=macro_context,
             open_confidence=signal.confidence,
@@ -140,7 +174,14 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         order.order_id = f"mt5:{data['ticket']}"
         position_mgr.open_position(order)
         ticket = data["ticket"]
-        if is_scale_in and result.decision is not None:
+
+        if partial:
+            logger.warning(
+                f"[MT5_BRIDGE] partial fill: {signal.pair} requested={requested_lots:.4f} "
+                f"actual={actual_lots:.4f} ({actual_lots/requested_lots*100:.0f}%)"
+            )
+            self._notify_partial_fill(order, requested_lots, actual_lots)
+        elif is_scale_in and result.decision is not None:
             logger.info(
                 f"[SCALE] [mt5_bridge] {signal.pair} {direction.upper()} ticket={ticket} | "
                 f"new conf={signal.confidence:.3f} score={signal.combined_score:+.3f} | "
@@ -153,6 +194,17 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
                 f"fill={data['fill_price']} dry_run={data.get('dry_run')}"
             )
         return order
+
+    def _notify_partial_fill(
+        self, order: Order, requested_lots: float, actual_lots: float,
+    ) -> None:
+        """部分約定の Discord 通知 (タスク 13 で notifier 統合)。"""
+        # Phase 3b 暫定: 警告ログのみ (タスク 13 で _notifier 経由に置換)
+        pass
+
+    def _notify_margin_insufficient(self, signal, error_data: dict) -> None:
+        """証拠金不足の Discord 通知 (タスク 13 で notifier 統合)。"""
+        pass
 
     def _fetch_mt5_positions(self) -> list[dict] | None:
         """bridge /positions から最新ポジ一覧を取得。失敗時は None。"""

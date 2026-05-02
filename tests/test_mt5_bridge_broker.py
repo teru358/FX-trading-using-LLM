@@ -53,6 +53,7 @@ def test_execute_signal_posts_order_and_records(monkeypatch):
 
     class _Resp:
         is_success = True
+        status_code = 200
 
         def json(self):
             return {
@@ -98,6 +99,7 @@ def test_execute_signal_with_api_key_sends_header(monkeypatch):
 
     class _Resp:
         is_success = True
+        status_code = 200
 
         def json(self):
             return {
@@ -110,9 +112,11 @@ def test_execute_signal_with_api_key_sends_header(monkeypatch):
         def raise_for_status(self):
             pass
 
-    monkeypatch.setattr(httpx, "post",
-                        lambda url, json=None, timeout=None, headers=None:
-                        captured.setdefault("headers", headers) or _Resp())
+    def _post(url, json=None, timeout=None, headers=None):
+        captured["headers"] = headers
+        return _Resp()
+
+    monkeypatch.setattr(httpx, "post", _post)
     pm = _make_pm()
     adapter = Mt5BridgeBrokerAdapter(
         bridge_url="http://example:8812", api_key="secret123",
@@ -145,6 +149,91 @@ def test_existing_position_returns_none():
     pm.get_open_positions_by_pair.return_value = [existing]
     sig = _make_signal()
     assert adapter.execute_signal(sig, pm) is None
+
+
+# ── Phase 3b: HTTP status routing ──
+
+def test_execute_signal_handles_422_margin_insufficient(monkeypatch, caplog):
+    """422: 証拠金不足 → 警告ログ、order=None。"""
+    class _Resp:
+        is_success = False
+        status_code = 422
+        text = '{"detail":"insufficient margin"}'
+        def json(self):
+            return {"detail": "insufficient margin: required=6695 free=5200"}
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **kw: _Resp())
+    pm = _make_pm()
+    adapter = Mt5BridgeBrokerAdapter(bridge_url="http://x:8812")
+    with caplog.at_level("WARNING"):
+        order = adapter.execute_signal(_make_signal(action="buy"), pm)
+
+    assert order is None
+    assert any("margin" in r.message.lower() for r in caplog.records)
+
+
+def test_execute_signal_handles_423_soft_halt(monkeypatch, caplog):
+    """423: soft halted → info ログ、order=None。"""
+    class _Resp:
+        is_success = False
+        status_code = 423
+        text = '{"detail":"soft halted"}'
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **kw: _Resp())
+    pm = _make_pm()
+    adapter = Mt5BridgeBrokerAdapter(bridge_url="http://x:8812")
+    with caplog.at_level("INFO"):
+        order = adapter.execute_signal(_make_signal(action="buy"), pm)
+
+    assert order is None
+    assert any("halted" in r.message.lower() for r in caplog.records)
+
+
+def test_execute_signal_handles_409_order_rejected(monkeypatch, caplog):
+    """409: bridge が retcode で reject した時の挙動。"""
+    class _Resp:
+        is_success = False
+        status_code = 409
+        text = "order rejected: retcode=10006"
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **kw: _Resp())
+    pm = _make_pm()
+    adapter = Mt5BridgeBrokerAdapter(bridge_url="http://x:8812")
+    with caplog.at_level("WARNING"):
+        order = adapter.execute_signal(_make_signal(action="buy"), pm)
+    assert order is None
+    assert any("reject" in r.message.lower() for r in caplog.records)
+
+
+def test_execute_signal_partial_fill_modifies_position_size(monkeypatch):
+    """部分約定: actual lots に応じて Order.position_size を修正。"""
+    class _Resp:
+        is_success = True
+        status_code = 200
+        def json(self):
+            return {
+                "ticket": 1234567890,
+                "symbol": "USDJPY", "side": "buy",
+                "volume_lots": 0.0075,    # 要求 0.01 → 約定 0.0075 (75%)
+                "fill_price": 159.469,
+                "sl": 158.80, "tp": 160.30,
+                "time": "x", "dry_run": False, "magic": 12345,
+            }
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **kw: _Resp())
+    pm = _make_pm()
+    adapter = Mt5BridgeBrokerAdapter(
+        bridge_url="http://x:8812", lot_size_units=100_000,
+    )
+    sig = _make_signal(action="buy")    # signal.position_size = 1000.0
+
+    order = adapter.execute_signal(sig, pm)
+
+    assert order is not None
+    # 1000 * (0.0075 / 0.01) = 750
+    assert order.position_size == pytest.approx(750.0, rel=0.01)
 
 
 def test_empty_bridge_url_raises():
