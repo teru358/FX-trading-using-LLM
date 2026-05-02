@@ -510,6 +510,14 @@ class DataBackupConfig:
 
 
 @dataclass
+class Mt5FallbackConfig:
+    """MT5 → TD → yfinance チェーンのフォールバック判定設定 (Phase 3b タスク 10)。"""
+    failure_window_sec: int = 300              # 5 分窓
+    failure_threshold: int = 2                 # 連続失敗回数で degraded 発動
+    heartbeat_interval_degraded_min: int = 15  # degraded 中の /health ポーリング間隔
+
+
+@dataclass
 class Mt5BridgeConfig:
     """MT5 ブリッジサービス (Windows 側 FastAPI) との接続設定。
 
@@ -522,6 +530,7 @@ class Mt5BridgeConfig:
     - 発注 (Phase 3a, trading_mode = mt5_bridge / shadow): order_request_timeout_seconds,
       lot_size_units, magic_number
     - シャドートレード (trading_mode = shadow): shadow_log_path, shadow_observer_state_dir
+    - フォールバック (Phase 3b): fallback (Mt5FallbackConfig)
     """
     # ── 共通 ──
     enabled: bool = False                                # true で heartbeat ジョブ起動
@@ -540,6 +549,9 @@ class Mt5BridgeConfig:
     # ── シャドートレード (trading_mode = shadow 時のみ) ──
     shadow_log_path: str = "data/state/shadow_trades.jsonl"
     shadow_observer_state_dir: str = "data/shadow_state"  # observer 専用 state_store
+
+    # ── フォールバック (Phase 3b: MT5 → TD → yfinance チェーン) ──
+    fallback: Mt5FallbackConfig = field(default_factory=Mt5FallbackConfig)
 
 
 @dataclass

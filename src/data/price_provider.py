@@ -1,17 +1,25 @@
 """価格データプロバイダー統合ファサード。
 
-設定に応じて yfinance / Twelve Data を切替え、フォールバックを管理する。
-Watch銘柄は常にyfinanceを使用する。
+trade ペアは MT5 → Twelve Data → yfinance を順に試行し、失敗時自動降格する
+(Phase 3b)。watch ペアは Twelve Data → yfinance のまま (MT5 でブローカー
+依存性あり、本タスクのスコープ外)。
+
+state 遷移時のみ通知発火。bridge unreachable と MT5 disconnected の区別は
+/health レスポンスの mt5_connected を見る。
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from datetime import date
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 
+import httpx
+
+from src.data.mt5_ohlcv_fetcher import Mt5OhlcvFetcher, Mt5UnreachableError
 from src.data.price_fetcher import CurrentPrice, PriceData, fetch_current_price, fetch_ohlcv
+from src.data.provider_health_tracker import ProviderHealthTracker
 
 if TYPE_CHECKING:
     from src.config import AppConfig
@@ -29,7 +37,11 @@ class PriceProvider:
       - price_monitor: use_for_monitor設定に従う
     """
 
-    def __init__(self, config: "AppConfig") -> None:
+    def __init__(
+        self, config: "AppConfig", *,
+        health_tracker: ProviderHealthTracker | None = None,
+        notifier=None,
+    ) -> None:
         self._config = config
         self._provider = config.price_provider.realtime_provider
         self._trade_symbols: set[str] = {
@@ -55,6 +67,24 @@ class PriceProvider:
                     "TWELVEDATA_API_KEY not set — falling back to yfinance"
                 )
                 self._provider = "yfinance"
+
+        # Phase 3b: MT5 chain
+        self._mt5_fetcher: Mt5OhlcvFetcher | None = None
+        if config.mt5_bridge.bridge_url:
+            self._mt5_fetcher = Mt5OhlcvFetcher(
+                bridge_url=config.mt5_bridge.bridge_url,
+                request_timeout=config.mt5_bridge.request_timeout_seconds,
+            )
+        self._health_tracker = health_tracker or ProviderHealthTracker(
+            failure_window_sec=config.mt5_bridge.fallback.failure_window_sec,
+            failure_threshold=config.mt5_bridge.fallback.failure_threshold,
+        )
+        self._notifier = notifier
+        self._active_provider: dict[str, str] = {}        # symbol → provider name
+        self._last_health_check_at: datetime | None = None
+        self._health_check_interval = timedelta(
+            minutes=config.mt5_bridge.fallback.heartbeat_interval_degraded_min,
+        )
 
     def _is_trade_pair(self, symbol: str) -> bool:
         return symbol in self._trade_symbols
@@ -101,15 +131,115 @@ class PriceProvider:
         interval: str = "1h",
         price_store: "PriceStore | None" = None,
     ) -> PriceData:
-        """OHLCV を取得する（同期）。"""
+        """OHLCV を取得する（同期）。
+
+        trade ペア: MT5 → TD → yfinance の順で試行。
+        watch ペア: TD → yfinance (既存動作維持)。
+        """
+        # degraded 中なら 15min 毎に /health で復帰確認
+        self._maybe_check_bridge_health()
+
+        prev = self._active_provider.get(symbol, "mt5")
+
+        # Phase 3b: trade ペアは MT5 を最優先
+        if self._is_trade_pair(symbol) and self._mt5_fetcher is not None:
+            try:
+                data = self._mt5_fetcher.fetch(
+                    symbol, period=period, interval=interval, price_store=price_store,
+                )
+                if self._health_tracker.record_success(datetime.now()):
+                    self._notify_recovery(prev, "mt5")
+                self._record_provider(symbol, prev, "mt5")
+                return data
+            except Mt5UnreachableError as e:
+                if self._health_tracker.record_failure(datetime.now()):
+                    self._notify_degraded(reason=str(e))
+                logger.warning(f"[PROVIDER] {symbol} MT5 fetch failed: {e}")
+            except Exception as e:
+                logger.error(f"[PROVIDER] {symbol} MT5 unexpected error: {e}")
+
+        # Twelve Data
         if self._use_twelvedata(symbol):
             try:
                 price_data = self._td_fetcher.fetch_ohlcv(symbol, period, interval, price_store)
                 self._increment_count()
+                self._record_provider(symbol, prev, "twelvedata")
                 return price_data
             except Exception as e:
-                logger.warning(f"[PROVIDER] Twelve Data OHLCV failed for {symbol}, fallback to yfinance: {e}")
-        return fetch_ohlcv(symbol, period, interval, price_store)
+                logger.warning(
+                    f"[PROVIDER] Twelve Data OHLCV failed for {symbol}, "
+                    f"fallback to yfinance: {e}"
+                )
+
+        # yfinance (最終)
+        data = fetch_ohlcv(symbol, period, interval, price_store)
+        self._record_provider(symbol, prev, "yfinance")
+        return data
+
+    def _record_provider(self, symbol: str, prev: str, current: str) -> None:
+        self._active_provider[symbol] = current
+        if prev != current:
+            logger.warning(f"[PROVIDER] {symbol}: {prev} → {current}")
+
+    def _maybe_check_bridge_health(self) -> None:
+        """degraded 中で 15 分以上経過していれば /health で復帰確認。
+
+        - 失敗時は failure 加算しない (degraded 中の確認失敗は当然なのでカウンタを汚さない)
+        - 取引時間外で get_ohlcv が呼ばれない期間は復帰検知が止まる (許容)
+        """
+        if not self._health_tracker.is_degraded:
+            return
+        if self._mt5_fetcher is None or not self._config.mt5_bridge.bridge_url:
+            return
+        now = datetime.now()
+        if self._last_health_check_at is not None:
+            if now - self._last_health_check_at < self._health_check_interval:
+                return
+        self._last_health_check_at = now
+
+        try:
+            resp = httpx.get(
+                f"{self._config.mt5_bridge.bridge_url.rstrip('/')}/health",
+                timeout=5.0,
+            )
+            resp.raise_for_status()
+            if resp.json().get("mt5_connected"):
+                if self._health_tracker.record_success(now):
+                    self._notify_recovery(prev="twelvedata", current="mt5")
+        except (httpx.HTTPError, ValueError):
+            # 復帰失敗 → 状態維持 (failure 加算はしない)
+            pass
+
+    def _notify_degraded(self, reason: str) -> None:
+        if self._notifier is None:
+            return
+        try:
+            self._notifier.send_embed(
+                title="⚠️ MT5 ブリッジ → フォールバック発動",
+                description=(
+                    f"原因: {reason}\n"
+                    f"代替: Twelve Data → yfinance の順で取得\n"
+                    f"自動復帰確認: 15 分毎に /health 確認中"
+                ),
+                color=0xF39C12,
+            )
+        except Exception as e:
+            logger.warning(f"[PROVIDER] degraded notification failed: {e}")
+
+    def _notify_recovery(self, prev: str, current: str) -> None:
+        if self._notifier is None or prev == current:
+            return
+        try:
+            self._notifier.send_embed(
+                title="✅ MT5 ブリッジ 復帰",
+                description=(
+                    f"自動復旧確認、現在は MT5 経由で取得中\n"
+                    f"前回プロバイダ: {prev}"
+                ),
+                color=0x2ECC71,
+            )
+        except Exception as e:
+            logger.warning(f"[PROVIDER] recovery notification failed: {e}")
 
     def estimate_daily_requests(self) -> int:
         """Twelve Data使用時の日次リクエスト見積もりを返す。yfinance時は0。"""

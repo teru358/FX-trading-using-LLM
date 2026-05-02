@@ -339,3 +339,9 @@ mt5_bridge:
   # ── シャドートレード (trading_mode = "shadow" 時のみ) ──
   shadow_log_path: "data/state/shadow_trades.jsonl"    # paper vs MT5 比較ログ
   shadow_observer_state_dir: "data/shadow_state"       # observer 専用 state_store
+
+  # ── フォールバック (Phase 3b: MT5 → TD → yfinance チェーン) ──
+  fallback:
+    failure_window_sec: 300                            # 5 分窓
+    failure_threshold: 2                               # 連続失敗回数で degraded 発動
+    heartbeat_interval_degraded_min: 15                # degraded 中の /health ポーリング間隔
