@@ -253,24 +253,105 @@ def symbols():
 # ── 発注系 endpoint (Phase 3a: DRY_RUN のみ) ────────────────────────
 # 実発注 (DRY_RUN=false) は Phase 3b で資金チェック・slippage 制御等とセットで実装。
 
+# MT5 retcode → 処理分岐 (Phase 3b タスク 5)
+_RETCODE_DONE = 10009         # TRADE_RETCODE_DONE
+_RETCODE_PARTIAL = 10010      # TRADE_RETCODE_DONE_PARTIAL
+_RETCODE_RETRYABLE = {10004, 10020}  # REQUOTE / PRICE_CHANGED → 1 回再試行
+_RETCODE_RATE_LIMIT = 10024   # TOO_MANY_REQUESTS → 100ms backoff + 1 回再試行
+
+
 @app.post("/order", response_model=OrderResponse,
           dependencies=[Depends(require_api_key)])
 def place_order(req: OrderRequest):
     if _client is None or not _client.is_connected:
         raise HTTPException(503, "MT5 not connected")
-    if not _runtime.dry_run:
+    if _runtime is None:
+        raise HTTPException(503, "runtime not initialized")
+
+    # 経路 1: hard halt or 通常 DRY_RUN モード → DRY_RUN パス
+    if _runtime.dry_run:
+        try:
+            result = _client.place_order_dry_run(
+                symbol=req.symbol, side=req.side, volume_lots=req.volume_lots,
+                sl=req.sl, tp=req.tp, magic=req.magic, comment=req.comment,
+            )
+            return OrderResponse(**result)
+        except RuntimeError as e:
+            raise HTTPException(404, str(e))
+
+    # 経路 2: soft halt 中 → 423 Locked
+    if _runtime.soft_halted:
         raise HTTPException(
-            501,
-            "live order placement not implemented in Phase 3a — set DRY_RUN=true",
+            423,
+            "bridge is soft-halted, new orders rejected. "
+            "POST /admin/resume to clear halt.",
         )
+
+    # 経路 3: live mode
+    # ── 事前証拠金チェック (5% バッファ) ──
     try:
-        result = _client.place_order_dry_run(
-            symbol=req.symbol, side=req.side, volume_lots=req.volume_lots,
-            sl=req.sl, tp=req.tp, magic=req.magic, comment=req.comment,
+        if not _client._mt5.symbol_select(req.symbol, True):
+            raise HTTPException(404, f"symbol {req.symbol} not available")
+        tick = _client._mt5.symbol_info_tick(req.symbol)
+        if tick is None:
+            raise HTTPException(404, f"no tick for {req.symbol}")
+        price = float(tick.ask if req.side == "buy" else tick.bid)
+        required = _client.calc_required_margin(
+            req.symbol, req.side, req.volume_lots, price,
         )
-        return OrderResponse(**result)
-    except RuntimeError as e:
-        raise HTTPException(404, str(e))
+        required_with_buffer = required * 1.05
+        account = _client.get_account()
+        if account.free_margin < required_with_buffer:
+            raise HTTPException(
+                422,
+                f"insufficient margin: required={required:.2f} "
+                f"(with 5% buffer={required_with_buffer:.2f}) "
+                f"free={account.free_margin:.2f}",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"pre-flight check failed: {e}")
+
+    # ── 発注 + retry (REQUOTE/PRICE_CHANGED 1 回、TOO_MANY_REQUESTS は 100ms backoff) ──
+    last_result: dict | None = None
+    for attempt in range(2):
+        try:
+            last_result = _client.place_order_live(
+                symbol=req.symbol, side=req.side, volume_lots=req.volume_lots,
+                sl=req.sl, tp=req.tp, magic=req.magic, comment=req.comment,
+                filling_mode=_settings.filling_mode,
+                deviation_points=_settings.deviation_points,
+            )
+        except RuntimeError as e:
+            raise HTTPException(500, str(e))
+
+        retcode = last_result["retcode"]
+        if retcode in (_RETCODE_DONE, _RETCODE_PARTIAL):
+            return OrderResponse(
+                ticket=last_result["ticket"],
+                symbol=last_result["symbol"],
+                side=last_result["side"],
+                volume_lots=last_result["volume_lots"],
+                fill_price=last_result["fill_price"],
+                sl=last_result["sl"], tp=last_result["tp"],
+                time=last_result["time"],
+                dry_run=False,
+                magic=last_result["magic"],
+            )
+        if retcode in _RETCODE_RETRYABLE and attempt == 0:
+            continue
+        if retcode == _RETCODE_RATE_LIMIT and attempt == 0:
+            import time as _t
+            _t.sleep(0.1)
+            continue
+        break
+
+    raise HTTPException(
+        409,
+        f"order rejected: retcode={last_result['retcode']} "
+        f"comment={last_result.get('comment_response', '')}",
+    )
 
 
 @app.post("/positions/{ticket}/close", response_model=ClosePositionResponse,

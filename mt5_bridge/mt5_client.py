@@ -239,3 +239,70 @@ class Mt5Client:
                 f"order_calc_margin failed: {self._mt5.last_error()}"
             )
         return float(margin)
+
+    def place_order_live(
+        self, symbol: str, side: str, volume_lots: float,
+        sl: float | None = None, tp: float | None = None,
+        magic: int = 0, comment: str = "",
+        filling_mode: str = "IOC",
+        deviation_points: int = 30,
+    ) -> dict:
+        """MT5 へ実発注。retcode 解釈は呼出側 (server.py) で行う。"""
+        from datetime import datetime, timezone
+
+        if not self._mt5.symbol_select(symbol, True):
+            raise RuntimeError(
+                f"symbol_select({symbol}) failed: {self._mt5.last_error()}"
+            )
+        tick = self._mt5.symbol_info_tick(symbol)
+        if tick is None:
+            raise RuntimeError(
+                f"symbol_info_tick({symbol}) failed: {self._mt5.last_error()}"
+            )
+        price = float(tick.ask if side == "buy" else tick.bid)
+
+        fm_map = {
+            "IOC": self._mt5.ORDER_FILLING_IOC,
+            "FOK": self._mt5.ORDER_FILLING_FOK,
+            "RETURN": self._mt5.ORDER_FILLING_RETURN,
+        }
+        type_filling = fm_map.get(filling_mode.upper(), self._mt5.ORDER_FILLING_IOC)
+        order_type = (
+            self._mt5.ORDER_TYPE_BUY if side == "buy" else self._mt5.ORDER_TYPE_SELL
+        )
+
+        request = {
+            "action": self._mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "volume": volume_lots,
+            "type": order_type,
+            "price": price,
+            "deviation": deviation_points,
+            "magic": magic,
+            "comment": comment,
+            "type_time": self._mt5.ORDER_TIME_GTC,
+            "type_filling": type_filling,
+        }
+        if sl is not None and sl > 0:
+            request["sl"] = sl
+        if tp is not None and tp > 0:
+            request["tp"] = tp
+
+        result = self._mt5.order_send(request)
+        if result is None:
+            raise RuntimeError(f"order_send returned None: {self._mt5.last_error()}")
+
+        ts = datetime.now(tz=timezone.utc).isoformat()
+        return {
+            "retcode": int(result.retcode),
+            "ticket": int(result.order),
+            "symbol": symbol,
+            "side": side,
+            "volume_lots": float(result.volume),
+            "fill_price": float(result.price) if result.price > 0 else price,
+            "sl": sl, "tp": tp,
+            "time": ts,
+            "dry_run": False,
+            "magic": magic,
+            "comment_response": str(result.comment),
+        }
