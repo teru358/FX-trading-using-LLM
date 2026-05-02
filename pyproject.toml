@@ -27,6 +27,7 @@ dependencies = [
     "websockets>=13.0",
     "tradingview-ta>=3.3.0",
     "json-repair>=0.30.0",
+    "trafilatura>=2.0.0",
 ]
 
 [dependency-groups]
