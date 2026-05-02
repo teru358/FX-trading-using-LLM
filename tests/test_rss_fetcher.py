@@ -82,3 +82,51 @@ def test_fetch_extracts_link_from_feedparser_entry():
 
     links = sorted(item.link for item in result.items)
     assert links == ["https://example.com/a", "https://example.com/b"]
+
+
+def test_format_for_llm_omits_body_when_none():
+    """body=None の記事は Body: 行を出さない (既存形式互換)。"""
+    item = NewsItem(
+        title="No body article", summary="summary text",
+        source="src", published=None, age_hours=2.5, link="", body=None,
+    )
+    result = FetchResult(items=[item])
+    out = result.format_for_llm()
+    assert "Body:" not in out
+    assert "No body article" in out
+    assert "summary text" in out
+
+
+def test_format_for_llm_includes_body_when_present():
+    """body 付き記事には Body: 行が出る。"""
+    item = NewsItem(
+        title="Body article", summary="summary",
+        source="src", published=None, age_hours=1.0,
+        link="https://example.com/a", body="The full body text.",
+    )
+    result = FetchResult(items=[item])
+    out = result.format_for_llm()
+    assert "Body:" in out
+    assert "The full body text." in out
+    assert "Body article" in out
+
+
+def test_format_for_llm_mixed_body_and_no_body():
+    """body 付きと body なしの記事が混在しても両方フォーマットされる。"""
+    items = [
+        NewsItem(title="A", summary="sa", source="src", published=None,
+                 age_hours=1.0, body="body of A"),
+        NewsItem(title="B", summary="sb", source="src", published=None,
+                 age_hours=2.0, body=None),
+    ]
+    out = FetchResult(items=items).format_for_llm()
+    # A は Body 行あり、B は Body 行なし
+    # "B:" で記事Bを識別（"Body:" と区別）
+    assert "body of A" in out
+    assert "- [1.0h ago] [src] A: sa" in out
+    assert "- [2.0h ago] [src] B: sb" in out
+    # "Body: body of A" が A の後、B の前に来ることを確認
+    a_line_idx = out.index("- [1.0h ago] [src] A: sa")
+    b_line_idx = out.index("- [2.0h ago] [src] B: sb")
+    body_idx = out.index("Body: body of A")
+    assert a_line_idx < body_idx < b_line_idx

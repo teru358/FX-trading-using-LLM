@@ -76,13 +76,18 @@ class FetchResult:
         return ",".join(sorted(self.title_hashes))
 
     def format_for_llm(self) -> str:
-        """LLMプロンプト用にフォーマットする（日時情報付き）。"""
+        """LLMプロンプト用にフォーマットする（日時情報付き、body あれば追加）。
+
+        body が None の記事は従来形式 (1 行)、body 付きは複数行 (Body: セクション付き)。
+        """
         if not self.items:
             return "No relevant news found in RSS feeds."
         lines = []
         for item in self.items:
             age_str = f"{item.age_hours:.1f}h ago" if item.age_hours is not None else "time unknown"
             lines.append(f"- [{age_str}] [{item.source}] {item.title}: {item.summary}")
+            if item.body:
+                lines.append(f"  Body: {item.body}")
         return "\n".join(lines)
 
     def format_titles_log(self) -> str:
