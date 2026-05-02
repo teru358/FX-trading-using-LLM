@@ -187,6 +187,12 @@ class NewsCollectionConfig:
     inter_pair_delay_seconds: int = 60
     news_freshness_hours: float = 24.0   # この時間以上古い記事は除外
     summary_max_chars: int = 600         # RSS summary の切り捨て文字数
+    # Deep fetch (新規記事のみ trafilatura で本文取得)
+    deep_fetch_enabled: bool = True
+    deep_fetch_timeout_seconds: float = 8.0     # 1 記事あたりの HTTP タイムアウト
+    deep_fetch_max_chars: int = 3000            # 本文の切詰上限
+    deep_fetch_max_concurrent: int = 3          # 同時 HTTP fetch 上限
+    deep_fetch_user_agent: str = "finance-news-collector/1.0"
 
 
 @dataclass
