@@ -37,6 +37,7 @@ from src.config.schema import (
     LLMRoleConfig,
     LoggingConfig,
     Mt5BridgeConfig,
+    Mt5FallbackConfig,
     MultiTimeframeConfig,
     NewsCollectionConfig,
     NewsSourcesConfig,
@@ -253,7 +254,11 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     economic_calendar_cfg = _from_dict(EconomicCalendarConfig, raw.get("economic_calendar", {}))
     weekly_diagnosis_cfg = _from_dict(WeeklyDiagnosisConfig, raw.get("weekly_diagnosis", {}))
     data_backup_cfg = _from_dict(DataBackupConfig, raw.get("data_backup", {}))
-    mt5_bridge_cfg = _from_dict(Mt5BridgeConfig, raw.get("mt5_bridge", {}))
+    # mt5_bridge は nested fallback dataclass を含むため、専用処理で組立
+    mt5_raw = dict(raw.get("mt5_bridge", {}))
+    if "fallback" in mt5_raw and isinstance(mt5_raw["fallback"], dict):
+        mt5_raw["fallback"] = _from_dict(Mt5FallbackConfig, mt5_raw["fallback"])
+    mt5_bridge_cfg = _from_dict(Mt5BridgeConfig, mt5_raw)
 
     # ── 特殊ケース: YAML キー ≠ フィールド名 ─────────────────────
 
