@@ -1,9 +1,12 @@
-"""ヘルスチェック / システム状態系のエンドポイント。
+"""ヘルスチェック / システム状態系のエンドポイント (Phase 3b 整理後)。
 
-GET /health     — プロセス死活確認 + スケジューラ状態
-GET /status     — 残高・ポジション一覧
+GET /health     — 軽量 liveness check (death + uptime + scheduler のみ)
+GET /status     — システム健全性 (LLM CB / TV / price_provider / snapshots / MT5 bridge)
 GET /logs       — activity.log の末尾 N 行
-GET /schedule   — スケジュール情報 (取引/予測/ニュース/技術/exit_check)
+GET /usage      — LLM 使用量
+GET /schedule   — スケジュール情報
+
+旧 /status (残高 + ポジション) は /account に移動 (src/api/routes/account.py)。
 """
 from __future__ import annotations
 
@@ -14,9 +17,6 @@ from fastapi import APIRouter, Depends
 
 from src.api._state import state, verify_api_key
 from src.config import BASE_DIR
-from src.data.price_fetcher import fetch_current_price
-from src.persistence.state_store import StateStore
-from src.trading.position_manager import PositionManager
 from src.utils.clock import db_now
 
 router = APIRouter()
@@ -24,9 +24,9 @@ router = APIRouter()
 
 @router.get("/health", dependencies=[Depends(verify_api_key)])
 def health() -> dict[str, Any]:
-    """プロセス死活確認 + サブシステム状態 (スケジューラ / LLM CB / TV / snapshot freshness)。
+    """軽量 liveness check。死活 + 取引モード + scheduler 概況のみ。
 
-    障害時のトリアージを一発で行えるよう、依存サブシステムの状態を集約する。
+    依存サブシステム状態は /status に分離 (Phase 3b 整理)。
     """
     import schedule as sched_mod
 
@@ -34,10 +34,33 @@ def health() -> dict[str, Any]:
     jobs = sched_mod.get_jobs()
     next_run = min((j.next_run for j in jobs), default=None) if jobs else None
 
-    # 経過時間
     uptime_seconds: float | None = None
     if state.started_at is not None:
         uptime_seconds = (now - state.started_at).total_seconds()
+
+    trading_mode = state.config.trading.trading_mode if state.config else None
+
+    return {
+        "status":         "ok",
+        "trading_mode":   trading_mode,
+        "started_at":     state.started_at.isoformat() if state.started_at else None,
+        "uptime_seconds": uptime_seconds,
+        "now":            now.isoformat(),
+        "scheduler": {
+            "jobs_count": len(jobs),
+            "next_run":   next_run.isoformat() if next_run else None,
+        },
+    }
+
+
+@router.get("/status", dependencies=[Depends(verify_api_key)])
+def status() -> dict[str, Any]:
+    """システム健全性レポート (LLM CB / TV / price_provider / snapshots / MT5 bridge)。
+
+    Phase 3b で残高・ポジション (旧 /status) を /account に分離、ここではサブシステム
+    の健全性のみを返すように再定義。
+    """
+    now = db_now()
 
     # LLM サーキットブレーカー状態
     cb_states: dict[str, dict[str, Any]] = {}
@@ -75,7 +98,7 @@ def health() -> dict[str, Any]:
     except Exception as e:
         price_provider_status = f"error: {e}"
 
-    # トレード銘柄の最新スナップショット時刻 (=テクニカル収集の生存確認)
+    # トレード銘柄の最新スナップショット時刻
     snapshots_status: list[dict[str, Any]] = []
     if state.config is not None and state.analysis_store is not None:
         for inst in getattr(state.config, "tradeable_instruments", []):
@@ -85,79 +108,67 @@ def health() -> dict[str, Any]:
                     latest_at = snaps[0].analyzed_at
                     age_minutes = (now - latest_at).total_seconds() / 60.0
                     snapshots_status.append({
-                        "symbol":       inst.symbol,
-                        "latest_at":    latest_at.isoformat(),
-                        "age_minutes":  round(age_minutes, 1),
+                        "symbol":      inst.symbol,
+                        "latest_at":   latest_at.isoformat(),
+                        "age_minutes": round(age_minutes, 1),
                     })
                 else:
                     snapshots_status.append({
-                        "symbol":       inst.symbol,
-                        "latest_at":    None,
-                        "age_minutes":  None,
+                        "symbol":      inst.symbol,
+                        "latest_at":   None,
+                        "age_minutes": None,
                     })
             except Exception as e:
                 snapshots_status.append({"symbol": inst.symbol, "error": str(e)})
 
-    # 取引モード
-    trading_mode = state.config.trading.trading_mode if state.config else None
-
     return {
-        "status": "ok",
-        "trading_mode":   trading_mode,
-        "started_at":     state.started_at.isoformat() if state.started_at else None,
-        "uptime_seconds": uptime_seconds,
-        "now":            now.isoformat(),
-        "scheduler": {
-            "jobs_count": len(jobs),
-            "next_run":   next_run.isoformat() if next_run else None,
-        },
         "llm_circuit_breakers": cb_states,
         "tradingview":          tv_status,
         "price_provider":       price_provider_status,
         "snapshots":            snapshots_status,
+        "mt5_bridge":           _get_mt5_bridge_status(),
     }
 
 
-@router.get("/status", dependencies=[Depends(verify_api_key)])
-def status() -> dict[str, Any]:
-    """残高・ポジション一覧。"""
-    assert state.config is not None
-    state_store = StateStore(state.config.state_dir)
-    pm = PositionManager(state_store, state.config.trading.initial_balance, context="API_Status")
-    account = pm.get_account_state()
+def _get_mt5_bridge_status() -> dict[str, Any]:
+    """bridge /health + /admin/status をプロキシして MT5 ブリッジ状態を返す (Phase 3b)。
 
-    positions = []
-    for pos in account.open_positions:
-        entry: dict[str, Any] = {
-            "pair": pos.pair,
-            "direction": pos.direction,
-            "entry_price": pos.entry_price,
-            "stop_loss": pos.stop_loss,
-            "take_profit": pos.take_profit,
-            "position_size": pos.position_size,
-            "opened_at": pos.opened_at.isoformat(),
+    タイムアウトは 2 秒、失敗時は reachable: false で error 内容を返す。
+    """
+    cfg = state.config.mt5_bridge if state.config else None
+    if cfg is None or not cfg.bridge_url:
+        return {"configured": False}
+
+    try:
+        import httpx
+        url = cfg.bridge_url.rstrip("/")
+        h = httpx.get(f"{url}/health", timeout=2.0)
+        admin_headers = (
+            {"X-Bridge-Api-Key": cfg.api_key}
+            if getattr(cfg, "api_key", "") else {}
+        )
+        admin = httpx.get(
+            f"{url}/admin/status", timeout=2.0, headers=admin_headers,
+        )
+    except Exception as e:  # noqa: BLE001
+        return {
+            "configured": True,
+            "reachable":  False,
+            "error":      f"{type(e).__name__}: {e}",
         }
-        try:
-            current = fetch_current_price(pos.pair).price
-            mult = 1 if pos.direction == "buy" else -1
-            entry["current_price"] = current
-            entry["unrealized_pnl"] = round(
-                (current - pos.entry_price) * pos.position_size * mult, 2
-            )
-        except Exception:
-            entry["current_price"] = None
-            entry["unrealized_pnl"] = None
-        positions.append(entry)
 
-    pnl = account.balance - account.initial_balance
+    health_ok = h.is_success
+    health_body = h.json() if health_ok else {}
+    admin_body = admin.json() if admin.is_success else {}
+
     return {
-        "balance": account.balance,
-        "initial_balance": account.initial_balance,
-        "pnl": round(pnl, 2),
-        "pnl_pct": round(pnl / account.initial_balance * 100, 2),
-        "total_trades": account.total_trades,
-        "win_rate": round(account.win_rate() * 100, 1),
-        "open_positions": positions,
+        "configured":         True,
+        "reachable":          health_ok,
+        "mt5_connected":      health_body.get("mt5_connected", False),
+        "dry_run":            admin_body.get("dry_run"),
+        "soft_halted":        admin_body.get("soft_halted"),
+        "is_hard_halted":     admin_body.get("is_hard_halted"),
+        "accepts_new_orders": admin_body.get("accepts_new_orders"),
     }
 
 
