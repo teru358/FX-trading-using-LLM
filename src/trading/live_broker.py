@@ -150,6 +150,9 @@ def create_broker(
     mt5_lot_size_units: int = 100_000,
     mt5_magic_number: int = 12345,
     mt5_order_timeout_seconds: float = 10.0,
+    # ── Phase 3b: 自動 soft halt 閾値 (mt5_bridge / shadow) ──
+    mt5_bridge_offline_threshold_minutes: int = 30,
+    mt5_consecutive_reject_threshold: int = 3,
     shadow_log_path: str = "data/state/shadow_trades.jsonl",
     shadow_observer_state_dir: str = "data/shadow_state",
     initial_balance: float = 100_000.0,
@@ -222,6 +225,9 @@ def create_broker(
             drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
             drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
             drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
+            notifier=notifier,
+            bridge_offline_threshold_minutes=mt5_bridge_offline_threshold_minutes,
+            consecutive_reject_threshold=mt5_consecutive_reject_threshold,
         )
     elif trading_mode == "shadow":
         from pathlib import Path
@@ -255,6 +261,9 @@ def create_broker(
             drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
             drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
             drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
+            notifier=notifier,
+            bridge_offline_threshold_minutes=mt5_bridge_offline_threshold_minutes,
+            consecutive_reject_threshold=mt5_consecutive_reject_threshold,
         )
         # observer 専用 state_store + position_mgr (paper の state を汚染しない)
         obs_store = StateStore(Path(shadow_observer_state_dir))

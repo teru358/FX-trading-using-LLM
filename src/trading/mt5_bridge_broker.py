@@ -2,12 +2,14 @@
 
 DRY_RUN は bridge 側のフラグで制御するので、このアダプターは常に同じ呼び出し方を行う。
 Phase 3a では `Mt5BridgeBrokerAdapter` 単独でも shadow モード経由でも使える。
-Phase 3b で MT5 真実 (/positions) との reconciliation を実装。
+Phase 3b で MT5 真実 (/positions) との reconciliation + 通知統合 + 自動 soft halt
+判定を実装。
 """
 from __future__ import annotations
 
 import logging
 import time as _time
+from datetime import datetime, timezone
 
 import httpx
 
@@ -48,6 +50,8 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         drawdown_kill_switch_max_pct: float = 0.10,
         drawdown_kill_switch_lookback_days: int = 0,
         notifier=None,
+        bridge_offline_threshold_minutes: int = 30,
+        consecutive_reject_threshold: int = 3,
     ) -> None:
         if not bridge_url:
             raise ValueError("bridge_url is required")
@@ -66,6 +70,12 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         # Phase 3b: reconciliation 用キャッシュ + 通知
         self._notifier = notifier
         self._cached_external_positions: list[dict] = []
+        # Phase 3b タスク 14: 発注経路の auto soft halt 判定 (タスク 9 の OHLCV
+        # ProviderHealthTracker とは別管理: 目的・閾値・発動アクションが異なる)
+        self._offline_threshold_min = bridge_offline_threshold_minutes
+        self._reject_threshold = consecutive_reject_threshold
+        self._consecutive_rejects = 0
+        self._last_bridge_success = datetime.now(tz=timezone.utc)
 
     def _headers(self) -> dict[str, str]:
         h = {"Content-Type": "application/json"}
@@ -118,6 +128,7 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             )
         except httpx.HTTPError as e:
             logger.error(f"[MT5_BRIDGE] bridge order failed: {e}")
+            self._record_bridge_unreachable()
             return None
         except Exception as e:  # noqa: BLE001
             logger.error(f"[MT5_BRIDGE] unexpected error: {e}", exc_info=True)
@@ -133,17 +144,19 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
                 f"[MT5_BRIDGE] {signal.pair} insufficient margin: {err}"
             )
             self._notify_margin_insufficient(signal, err)
-            return None
+            return None    # 証拠金不足は bridge 健全 → カウンタ非増加
         if resp.status_code == 423:
             logger.info(f"[MT5_BRIDGE] {signal.pair} skipped — bridge soft-halted")
-            return None
+            return None    # soft halt は意図的 → カウンタ非増加
         if resp.status_code == 409:
             logger.warning(f"[MT5_BRIDGE] {signal.pair} order rejected: {resp.text}")
+            self._record_bridge_reject()
             return None
         if resp.status_code in (503, 504):
             logger.error(
                 f"[MT5_BRIDGE] {signal.pair} bridge unavailable: {resp.status_code}"
             )
+            self._record_bridge_unreachable()
             return None
         if resp.status_code != 200:
             logger.error(
@@ -154,6 +167,7 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         data = resp.json()
         actual_lots = float(data["volume_lots"])
         partial = actual_lots < requested_lots * 0.99    # 1% 以上少なければ部分約定
+        self._record_bridge_success()
 
         # 部分約定なら position_size を実約定量に修正
         actual_size = signal.position_size * (actual_lots / requested_lots) if requested_lots > 0 else signal.position_size
@@ -198,13 +212,39 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
     def _notify_partial_fill(
         self, order: Order, requested_lots: float, actual_lots: float,
     ) -> None:
-        """部分約定の Discord 通知 (タスク 13 で notifier 統合)。"""
-        # Phase 3b 暫定: 警告ログのみ (タスク 13 で _notifier 経由に置換)
-        pass
+        """部分約定の Discord 通知 (タスク 13)。"""
+        if self._notifier is None:
+            return
+        try:
+            self._notifier.send_embed(
+                title="⚠️ MT5 部分約定",
+                description=(
+                    f"**{order.pair}** {order.direction.upper()}\n"
+                    f"要求: {requested_lots:.4f} lot\n"
+                    f"約定: {actual_lots:.4f} lot ({actual_lots/requested_lots*100:.0f}%)\n"
+                    f"fill: {order.entry_price:.5f}\n"
+                    f"ticket: `{order.order_id}`"
+                ),
+                color=0xF39C12,    # 橙
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[MT5_BRIDGE] notify partial fill failed: {e}")
 
     def _notify_margin_insufficient(self, signal, error_data: dict) -> None:
-        """証拠金不足の Discord 通知 (タスク 13 で notifier 統合)。"""
-        pass
+        """証拠金不足の Discord 通知 (タスク 13)。"""
+        if self._notifier is None:
+            return
+        try:
+            self._notifier.send_embed(
+                title="⛔ MT5 発注拒否 (証拠金不足)",
+                description=(
+                    f"**{signal.pair}** {signal.action.upper()} {signal.position_size:.0f} unit\n"
+                    f"detail: {error_data.get('detail', 'unknown')}"
+                ),
+                color=0xE74C3C,    # 赤
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[MT5_BRIDGE] notify margin failed: {e}")
 
     def _fetch_mt5_positions(self) -> list[dict] | None:
         """bridge /positions から最新ポジ一覧を取得。失敗時は None。"""
@@ -404,6 +444,66 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
     def _notify_partial_close(
         self, pos: Order, internal_lots: float, mt5_lots: float, new_size: float,
     ) -> None:
-        """部分 close 検知の Discord 通知 (内部 state 修正済み)。タスク 13 で本格実装。"""
-        # Phase 3b 暫定: 警告ログのみ (タスク 13 で _notifier 経由に置換)
-        pass
+        """部分 close 検知の Discord 通知 (タスク 13、内部 state 修正済み)。"""
+        if self._notifier is None:
+            return
+        try:
+            self._notifier.send_embed(
+                title="⚠️ MT5 部分 close 検知",
+                description=(
+                    f"**{pos.pair}** ticket {pos.order_id}\n"
+                    f"内部記録: {internal_lots:.4f} lot\n"
+                    f"MT5 残量: {mt5_lots:.4f} lot\n"
+                    f"差分: {internal_lots - mt5_lots:.4f} lot\n"
+                    f"※ 自動再 close は Phase 4 実装予定。手動確認推奨。"
+                ),
+                color=0xE67E22,    # 濃橙
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[MT5_BRIDGE] notify partial close failed: {e}")
+
+    # ── Task 14: 発注経路の auto soft halt 判定 ──
+
+    def _record_bridge_success(self) -> None:
+        """発注成功または bridge 健全応答時に呼ぶ。カウンタリセット。"""
+        self._consecutive_rejects = 0
+        self._last_bridge_success = datetime.now(tz=timezone.utc)
+
+    def _record_bridge_reject(self) -> None:
+        """MT5 retcode REJECT (HTTP 409) 受領時に呼ぶ。連続 N 回で auto soft halt。"""
+        self._consecutive_rejects += 1
+        if self._consecutive_rejects >= self._reject_threshold:
+            self._auto_soft_halt(
+                f"{self._reject_threshold} consecutive rejects"
+            )
+
+    def _record_bridge_unreachable(self) -> None:
+        """bridge 不通 (connection error / 5xx) 受領時に呼ぶ。N 分継続で auto soft halt。"""
+        offline_for = (
+            datetime.now(tz=timezone.utc) - self._last_bridge_success
+        ).total_seconds() / 60.0
+        if offline_for >= self._offline_threshold_min:
+            self._auto_soft_halt(
+                f"bridge offline for {offline_for:.0f} min"
+            )
+
+    def _auto_soft_halt(self, reason: str) -> None:
+        """bridge を soft halt 状態にする (auto)。再開は手動 (POST /admin/resume)。"""
+        try:
+            httpx.post(
+                f"{self._url}/admin/halt",
+                json={"mode": "soft", "reason": f"auto: {reason}"},
+                timeout=self._timeout, headers=self._headers(),
+            )
+            logger.error(f"[MT5_BRIDGE] AUTO SOFT HALT triggered: {reason}")
+            if self._notifier:
+                try:
+                    self._notifier.send_embed(
+                        title="🛑 MT5 ブリッジ 自動 SOFT HALT 発動",
+                        description=f"reason: {reason}\n\n手動再開: /resume",
+                        color=0xE74C3C,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"[MT5_BRIDGE] notify auto soft halt failed: {e}")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[MT5_BRIDGE] auto halt API failed: {e}")

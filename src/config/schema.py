@@ -546,6 +546,10 @@ class Mt5BridgeConfig:
     lot_size_units: int = 100_000                        # 1 lot = 100,000 通貨 (FX 標準)
     magic_number: int = 12345                            # MT5 発注時の bot 識別 ID
 
+    # ── 自動 soft halt 閾値 (Phase 3b タスク 14、発注経路専用) ──
+    bridge_offline_threshold_minutes: int = 30           # bridge 不通がこの分数継続したら auto soft halt
+    consecutive_reject_threshold: int = 3                # MT5 retcode REJECT 連発回数で auto soft halt
+
     # ── シャドートレード (trading_mode = shadow 時のみ) ──
     shadow_log_path: str = "data/state/shadow_trades.jsonl"
     shadow_observer_state_dir: str = "data/shadow_state"  # observer 専用 state_store

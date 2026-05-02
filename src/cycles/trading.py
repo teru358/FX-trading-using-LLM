@@ -912,22 +912,26 @@ def _build_trading_runtime(config: AppConfig):
             **_dd_kwargs,
         )
     else:
+        # Phase 3b: notifier を broker 構築前に生成 (mt5_bridge / shadow が利用)
+        notifier = create_notifier(config.notifier.enabled)
         broker = create_broker(
             config.trading.trading_mode,
             max_positions_per_pair=config.trading.max_positions_per_pair,
             scale_in_enabled=config.trading.scale_in_enabled,
             scale_in_conf_margin=config.trading.scale_in_conf_margin,
             scale_in_score_margin=config.trading.scale_in_score_margin,
+            notifier=notifier,
             mt5_bridge_url=config.mt5_bridge.bridge_url,
             mt5_lot_size_units=config.mt5_bridge.lot_size_units,
             mt5_magic_number=config.mt5_bridge.magic_number,
             mt5_order_timeout_seconds=config.mt5_bridge.order_request_timeout_seconds,
+            mt5_bridge_offline_threshold_minutes=config.mt5_bridge.bridge_offline_threshold_minutes,
+            mt5_consecutive_reject_threshold=config.mt5_bridge.consecutive_reject_threshold,
             shadow_log_path=config.mt5_bridge.shadow_log_path,
             shadow_observer_state_dir=config.mt5_bridge.shadow_observer_state_dir,
             initial_balance=config.trading.initial_balance,
             **_dd_kwargs,
         )
-        notifier = create_notifier(config.notifier.enabled)
 
     return broker, adaptive_store, notifier, llm_price, llm_reflect, signal_broker, manual_mgr
 
