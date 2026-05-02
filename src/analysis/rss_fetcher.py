@@ -28,6 +28,16 @@ class NewsItem:
     source: str          # フィードURL（短縮名）
     published: datetime | None  # 発行日時（UTC）、取得不能時は None
     age_hours: float | None     # 取得時点での経過時間
+    link: str = ""              # RSS の <link> URL (deep fetch の入口)
+    body: str | None = None     # deep fetch 成功時の本文 (max_chars 切詰済)
+
+
+def title_hash(title: str) -> str:
+    """1 タイトルから FetchResult.title_hashes と同じ規則でハッシュを生成する。
+
+    deep fetch / 新規記事判定で個別記事のハッシュが必要な箇所から呼ぶ。
+    """
+    return hashlib.md5(title.encode()).hexdigest()[:8]
 
 
 @dataclass
@@ -58,10 +68,7 @@ class FetchResult:
     @property
     def title_hashes(self) -> frozenset[str]:
         """各記事タイトルの短縮ハッシュセット（新規/既知判定用）。"""
-        return frozenset(
-            hashlib.md5(item.title.encode()).hexdigest()[:8]
-            for item in self.items
-        )
+        return frozenset(title_hash(item.title) for item in self.items)
 
     @property
     def title_hashes_csv(self) -> str:
@@ -69,13 +76,18 @@ class FetchResult:
         return ",".join(sorted(self.title_hashes))
 
     def format_for_llm(self) -> str:
-        """LLMプロンプト用にフォーマットする（日時情報付き）。"""
+        """LLMプロンプト用にフォーマットする（日時情報付き、body あれば追加）。
+
+        body が None の記事は従来形式 (1 行)、body 付きは複数行 (Body: セクション付き)。
+        """
         if not self.items:
             return "No relevant news found in RSS feeds."
         lines = []
         for item in self.items:
             age_str = f"{item.age_hours:.1f}h ago" if item.age_hours is not None else "time unknown"
             lines.append(f"- [{age_str}] [{item.source}] {item.title}: {item.summary}")
+            if item.body:
+                lines.append(f"  Body: {item.body}")
         return "\n".join(lines)
 
     def format_titles_log(self) -> str:
@@ -185,6 +197,7 @@ def _fetch_from_feeds(
                 all_items.append(NewsItem(
                     title=title, summary=body, source=source_name,
                     published=pub_dt, age_hours=age_hours,
+                    link=item.get("link", "") or "",
                 ))
                 seen.add(title)
                 feed_count += 1

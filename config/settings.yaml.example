@@ -247,6 +247,13 @@ news_collection:
   inter_pair_delay_seconds: 10     # ペア間の待機（Ollama VRAM保護）
   news_freshness_hours: 24         # この時間以上古い記事は除外
   summary_max_chars: 600           # RSS summary の切り捨て文字数（LLM context に合わせて調整）
+  # Deep fetch (新規記事のみ trafilatura で本文取得)
+  # 既知記事は title+summary だけ、新規記事のみ本文を含めて LLM プロンプトに投入
+  deep_fetch_enabled: true              # false で従来動作 (タイトル+サマリーのみ)
+  deep_fetch_timeout_seconds: 8.0       # 1 記事あたりの HTTP タイムアウト
+  deep_fetch_max_chars: 3000            # 本文の切詰上限 (LLM context 配慮)
+  deep_fetch_max_concurrent: 3          # 同時 HTTP fetch の上限 (同一 host 配慮)
+  deep_fetch_user_agent: "finance-news-collector/1.0"
 
 # keywords → config/news_sources.yaml に分離
 # news_sources → config/news_sources.yaml に分離

@@ -12,9 +12,10 @@ import logging
 from src.utils.clock import db_now
 
 from src.analysis.feedly_fetcher import fetch_feedly_category
+from src.analysis.article_fetcher import fetch_bodies_concurrent
 from src.analysis.news_analyzer import NewsSentiment, analyze_category_sentiment
 from src.analysis.price_analyzer import load_user_notes
-from src.analysis.rss_fetcher import fetch_category_news
+from src.analysis.rss_fetcher import fetch_category_news, title_hash
 from src.config import AppConfig
 from src.llm.factory import create_llm_client
 from src.rag.embedder import make_embed_fn
@@ -76,7 +77,8 @@ async def collect_category(
     _, last_fingerprint, prev_hashes = store.get_last_analysis_state(category)
     current_hashes = fetch_result.title_hashes
     current_fingerprint = fetch_result.articles_fingerprint
-    new_count = len(current_hashes - prev_hashes) if prev_hashes else len(current_hashes)
+    new_hashes = (current_hashes - prev_hashes) if prev_hashes else current_hashes
+    new_count = len(new_hashes)
     known_count = len(current_hashes & prev_hashes) if prev_hashes else 0
 
     if fetch_result.items:
@@ -104,6 +106,25 @@ async def collect_category(
     if last_fingerprint is not None and new_count == 0:
         logger.info(f"[NEWS] {label}: new=0 (no new articles), skipping LLM")
         return
+
+    # Deep fetch: 新規記事のみ trafilatura で本文取得 (既知記事は body=None のまま)
+    if config.news_collection.deep_fetch_enabled and new_hashes:
+        new_items = [item for item in fetch_result.items if title_hash(item.title) in new_hashes]
+        with_link = [it for it in new_items if it.link]
+        if with_link:
+            await fetch_bodies_concurrent(
+                with_link,
+                max_concurrent=config.news_collection.deep_fetch_max_concurrent,
+                timeout_seconds=config.news_collection.deep_fetch_timeout_seconds,
+                max_chars=config.news_collection.deep_fetch_max_chars,
+                user_agent=config.news_collection.deep_fetch_user_agent,
+            )
+            success = sum(1 for it in with_link if it.body)
+            skipped = len(new_items) - len(with_link)
+            msg = f"deep fetch {success}/{len(with_link)} succeeded"
+            if skipped:
+                msg += f" ({skipped} skipped: no link)"
+            logger.info(f"[NEWS] {label}: {msg}")
 
     # 方向別RAGから類似テーマの取引振り返りを検索
     trade_lessons = ""
