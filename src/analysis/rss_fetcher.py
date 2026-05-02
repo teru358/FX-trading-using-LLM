@@ -28,6 +28,16 @@ class NewsItem:
     source: str          # フィードURL（短縮名）
     published: datetime | None  # 発行日時（UTC）、取得不能時は None
     age_hours: float | None     # 取得時点での経過時間
+    link: str = ""              # RSS の <link> URL (deep fetch の入口)
+    body: str | None = None     # deep fetch 成功時の本文 (max_chars 切詰済)
+
+
+def title_hash(title: str) -> str:
+    """1 タイトルから FetchResult.title_hashes と同じ規則でハッシュを生成する。
+
+    deep fetch / 新規記事判定で個別記事のハッシュが必要な箇所から呼ぶ。
+    """
+    return hashlib.md5(title.encode()).hexdigest()[:8]
 
 
 @dataclass
@@ -58,10 +68,7 @@ class FetchResult:
     @property
     def title_hashes(self) -> frozenset[str]:
         """各記事タイトルの短縮ハッシュセット（新規/既知判定用）。"""
-        return frozenset(
-            hashlib.md5(item.title.encode()).hexdigest()[:8]
-            for item in self.items
-        )
+        return frozenset(title_hash(item.title) for item in self.items)
 
     @property
     def title_hashes_csv(self) -> str:
