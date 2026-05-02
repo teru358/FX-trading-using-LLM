@@ -61,8 +61,10 @@ async def fetch_bodies_concurrent(
 ) -> None:
     """items の各 NewsItem.link を並列に fetch、結果を item.body に in-place で書く。
 
-    link が空の item は skip。個別 fetch の失敗は body=None として続行 (gather の
-    例外伝播を return_exceptions=True で吸収)。
+    link が空の item は skip。fetch_article_body は契約上例外を投げない (内部で
+    全例外を吸収して None を返す) ため通常は inner try/except に入らないが、
+    将来 fetch_article_body の契約が変わって例外が漏れた場合の defense-in-depth
+    として残している。
     """
     sem = asyncio.Semaphore(max_concurrent)
 

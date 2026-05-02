@@ -85,12 +85,17 @@ def fetch_feedly_category(
 
                 source_name = (entry.get("origin") or {}).get("title") or stream_id.split("/")[-1]
 
+                # Feedly は記事本体の URL を `alternate` 配列の先頭に格納する
+                alternates = entry.get("alternate") or []
+                link = alternates[0].get("href", "") if alternates else ""
+
                 all_items.append(NewsItem(
                     title=title,
                     summary=body,
                     source=source_name,
                     published=pub_dt,
                     age_hours=age_hours,
+                    link=link,
                 ))
                 seen.add(title)
 

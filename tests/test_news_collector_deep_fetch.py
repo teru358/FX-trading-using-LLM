@@ -1,6 +1,12 @@
 """news_collector の deep fetch 統合テスト。"""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from src.analysis.rss_fetcher import FetchResult, NewsItem, title_hash
 from src.config.schema import NewsCollectionConfig
 
 
@@ -11,15 +17,6 @@ def test_news_collection_config_has_deep_fetch_defaults():
     assert cfg.deep_fetch_max_chars == 3000
     assert cfg.deep_fetch_max_concurrent == 3
     assert cfg.deep_fetch_user_agent == "finance-news-collector/1.0"
-
-
-from datetime import datetime, timezone
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
-
-from src.analysis.rss_fetcher import FetchResult, NewsItem, title_hash
 
 
 def _make_item(title: str, link: str = "https://example.com/x") -> NewsItem:
@@ -134,8 +131,8 @@ async def test_deep_fetch_skipped_when_disabled():
 
 
 @pytest.mark.asyncio
-async def test_deep_fetch_skipped_when_no_new_articles():
-    """new_count==0 の cycle ではそもそも LLM/deep fetch とも走らず早期 return。"""
+async def test_deep_fetch_skipped_when_fingerprint_unchanged():
+    """記事セット fingerprint が前回と同じなら LLM/deep fetch とも走らず早期 return。"""
     from src.jobs import news_collector
 
     item = _make_item("same title", "https://example.com/x")

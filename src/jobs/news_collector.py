@@ -77,7 +77,8 @@ async def collect_category(
     _, last_fingerprint, prev_hashes = store.get_last_analysis_state(category)
     current_hashes = fetch_result.title_hashes
     current_fingerprint = fetch_result.articles_fingerprint
-    new_count = len(current_hashes - prev_hashes) if prev_hashes else len(current_hashes)
+    new_hashes = (current_hashes - prev_hashes) if prev_hashes else current_hashes
+    new_count = len(new_hashes)
     known_count = len(current_hashes & prev_hashes) if prev_hashes else 0
 
     if fetch_result.items:
@@ -107,21 +108,23 @@ async def collect_category(
         return
 
     # Deep fetch: 新規記事のみ trafilatura で本文取得 (既知記事は body=None のまま)
-    if config.news_collection.deep_fetch_enabled:
-        new_hashes = current_hashes - prev_hashes if prev_hashes else current_hashes
+    if config.news_collection.deep_fetch_enabled and new_hashes:
         new_items = [item for item in fetch_result.items if title_hash(item.title) in new_hashes]
-        if new_items:
+        with_link = [it for it in new_items if it.link]
+        if with_link:
             await fetch_bodies_concurrent(
-                new_items,
+                with_link,
                 max_concurrent=config.news_collection.deep_fetch_max_concurrent,
                 timeout_seconds=config.news_collection.deep_fetch_timeout_seconds,
                 max_chars=config.news_collection.deep_fetch_max_chars,
                 user_agent=config.news_collection.deep_fetch_user_agent,
             )
-            success = sum(1 for it in new_items if it.body)
-            logger.info(
-                f"[NEWS] {label}: deep fetch {success}/{len(new_items)} succeeded"
-            )
+            success = sum(1 for it in with_link if it.body)
+            skipped = len(new_items) - len(with_link)
+            msg = f"deep fetch {success}/{len(with_link)} succeeded"
+            if skipped:
+                msg += f" ({skipped} skipped: no link)"
+            logger.info(f"[NEWS] {label}: {msg}")
 
     # 方向別RAGから類似テーマの取引振り返りを検索
     trade_lessons = ""

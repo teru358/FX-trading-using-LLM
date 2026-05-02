@@ -4,12 +4,13 @@ httpx と trafilatura を mock して、各エラーパスとハッピーパス�
 """
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
-from src.analysis.article_fetcher import fetch_article_body
+from src.analysis.article_fetcher import fetch_article_body, fetch_bodies_concurrent
 from src.analysis.rss_fetcher import NewsItem
 
 
@@ -143,10 +144,6 @@ async def test_fetch_article_body_passes_user_agent_header():
     # AsyncClient が User-Agent を含む headers で生成されたか
     call_kwargs = mock_client_class.call_args.kwargs
     assert call_kwargs["headers"]["User-Agent"] == "custom/2.0"
-
-
-import asyncio
-from src.analysis.article_fetcher import fetch_bodies_concurrent
 
 
 @pytest.mark.asyncio
