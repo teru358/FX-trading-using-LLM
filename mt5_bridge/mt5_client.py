@@ -240,6 +240,50 @@ class Mt5Client:
             )
         return float(margin)
 
+    def close_position_live(self, ticket: int) -> dict:
+        """MT5 のポジションをクローズ。symbol/volume/type は positions_get から取得。"""
+        from datetime import datetime, timezone
+
+        positions = self._mt5.positions_get(ticket=ticket)
+        if not positions:
+            raise RuntimeError(f"position {ticket} not found")
+        p = positions[0]
+        close_type = (
+            self._mt5.ORDER_TYPE_SELL if p.type == 0 else self._mt5.ORDER_TYPE_BUY
+        )
+        tick = self._mt5.symbol_info_tick(p.symbol)
+        if tick is None:
+            raise RuntimeError(f"no tick for {p.symbol}")
+        price = float(tick.bid if p.type == 0 else tick.ask)
+
+        request = {
+            "action": self._mt5.TRADE_ACTION_DEAL,
+            "position": ticket,
+            "symbol": p.symbol,
+            "volume": p.volume,
+            "type": close_type,
+            "price": price,
+            "deviation": 30,
+            "magic": p.magic,
+            "comment": "close by bridge",
+            "type_time": self._mt5.ORDER_TIME_GTC,
+            "type_filling": self._mt5.ORDER_FILLING_IOC,
+        }
+        result = self._mt5.order_send(request)
+        if result is None or result.retcode != self._mt5.TRADE_RETCODE_DONE:
+            raise RuntimeError(
+                f"close_position {ticket} failed: retcode="
+                f"{getattr(result, 'retcode', 'None')}"
+            )
+        ts = datetime.now(tz=timezone.utc).isoformat()
+        return {
+            "ticket": ticket,
+            "close_price": float(result.price),
+            "time": ts,
+            "dry_run": False,
+            "note": "",
+        }
+
     def place_order_live(
         self, symbol: str, side: str, volume_lots: float,
         sl: float | None = None, tp: float | None = None,

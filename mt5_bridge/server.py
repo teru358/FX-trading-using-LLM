@@ -359,15 +359,22 @@ def place_order(req: OrderRequest):
 def close_position(ticket: int, symbol: str | None = None):
     if _client is None or not _client.is_connected:
         raise HTTPException(503, "MT5 not connected")
-    if not _runtime.dry_run:
-        raise HTTPException(
-            501, "live close not implemented in Phase 3a — set DRY_RUN=true",
-        )
+    if _runtime is None:
+        raise HTTPException(503, "runtime not initialized")
+
+    if _runtime.dry_run:
+        try:
+            result = _client.close_position_dry_run(ticket, symbol=symbol)
+            return ClosePositionResponse(**result)
+        except RuntimeError as e:
+            raise HTTPException(500, str(e))
+
+    # close は soft halt 中も実行可能 (既存ポジ管理のため)
     try:
-        result = _client.close_position_dry_run(ticket, symbol=symbol)
+        result = _client.close_position_live(ticket)
         return ClosePositionResponse(**result)
     except RuntimeError as e:
-        raise HTTPException(500, str(e))
+        raise HTTPException(404, str(e))
 
 
 # ── 管理エンドポイント (Phase 3b: 2-tier halt) ────────────────────────
