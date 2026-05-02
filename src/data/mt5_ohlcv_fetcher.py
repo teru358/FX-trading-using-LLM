@@ -27,6 +27,18 @@ class Mt5UnreachableError(Exception):
     """bridge への到達不可を示す例外 (上位で chain フォールバック判断)。"""
 
 
+def _to_utc(dt: datetime) -> datetime:
+    """tz-naive (local) datetime を tz-aware UTC に変換する。
+
+    既に tz-aware な場合は astimezone(UTC) で正規化。tz-naive は astimezone()
+    がデフォルトでローカル TZ 起点とみなして UTC に変換するため、JST/UTC を
+    跨いで一貫した動作になる。
+    """
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc)
+    return dt.astimezone(timezone.utc)    # naive → astimezone() がローカル TZ から UTC に
+
+
 def _parse_period_days(period: str) -> int:
     if period.endswith("d"):
         return int(period[:-1])
@@ -128,9 +140,12 @@ class Mt5OhlcvFetcher:
         interval: str,
     ) -> pd.DataFrame:
         mt5_symbol = to_mt5_symbol(symbol)
+        # naive datetime (= local time, JST 環境では JST) を UTC に**変換**して送る。
+        # 旧実装は replace(tzinfo=utc) でラベル付け替えだけしており、JST で 9 時間
+        # 先の未来時刻を bridge に要求して 0 バーが返る不具合があった。
         params = {
-            "from": start.replace(tzinfo=timezone.utc).isoformat(),
-            "to":   end.replace(tzinfo=timezone.utc).isoformat(),
+            "from": _to_utc(start).isoformat(),
+            "to":   _to_utc(end).isoformat(),
             "interval": interval,
         }
         try:

@@ -166,7 +166,8 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
 
         data = resp.json()
         actual_lots = float(data["volume_lots"])
-        partial = actual_lots < requested_lots * 0.99    # 1% 以上少なければ部分約定
+        # 部分約定判定 (reconciliation の _PARTIAL_THRESHOLD_LOW と同じ閾値を共有)
+        partial = actual_lots < requested_lots * (1.0 - _PARTIAL_THRESHOLD_LOW)
         self._record_bridge_success()
 
         # 部分約定なら position_size を実約定量に修正
@@ -258,6 +259,40 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         except httpx.HTTPError as e:
             logger.warning(f"[MT5_BRIDGE] /positions fetch failed: {e}")
             return None
+
+    def close_position(
+        self,
+        order_id: str,
+        close_price: float,
+        reason: str,
+        position_mgr: PositionManager,
+    ) -> Order | None:
+        """review-based 早期決済 (exit_check 等) 経由で呼ばれる能動 close。
+
+        paper モードと違い、MT5 サーバーへ close 指令を送って確認した上で内部 state
+        を更新する必要がある。これを怠ると次サイクルの reconciliation で MT5 側に
+        残った同 ticket を orphan として検出し、hard halt が発動する。
+
+        - mt5: prefix のついた order_id (= MT5 ticket 由来) は safe_close で MT5 close
+        - paper UUID 由来の order_id (shadow モードで paper 側) はそのまま内部 close
+        - safe_close 失敗時は内部 state を変更せず None を返す (reconciliation
+          サイクルが MT5 真実を見て後続処理する)
+        """
+        if not order_id.startswith("mt5:"):
+            # paper / shadow primary 由来 → 内部 state 更新のみ
+            return position_mgr.close_position(order_id, close_price, reason)
+        try:
+            ticket = int(order_id.removeprefix("mt5:"))
+        except ValueError:
+            logger.warning(f"[MT5_BRIDGE] invalid mt5 order_id: {order_id}")
+            return None
+        if not self.safe_close(ticket):
+            logger.warning(
+                f"[MT5_BRIDGE] active close skipped — safe_close failed for "
+                f"ticket={ticket}, internal state preserved (reconcile will retry)"
+            )
+            return None
+        return position_mgr.close_position(order_id, close_price, reason)
 
     def safe_close(self, ticket: int, max_retries: int = 3) -> bool:
         """close 指令 → 1秒待機 → ポジション確認 → 残ってれば retry。

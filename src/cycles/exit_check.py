@@ -137,8 +137,11 @@ async def exit_check_cycle(
         price = current_prices.get(decision.pair)
         if price is None:
             continue
-        closed_order = position_mgr.close_position(
-            decision.order_id, price, decision.close_reason,
+        # broker 経由で close (mt5_bridge live モードでは MT5 close → 内部 close、
+        # paper モードでは内部 close のみ)。これにより MT5 側に残ポジが残って次
+        # サイクル reconciliation で hard halt するのを防ぐ。
+        closed_order = broker.close_position(
+            decision.order_id, price, decision.close_reason, position_mgr,
         )
         if closed_order:
             closed_any = True

@@ -200,3 +200,61 @@ def test_safe_close_triggers_halt_after_3_retries(monkeypatch):
     assert result is False
     assert len(halt_called) == 1
     assert "still open" in halt_called[0].lower()
+
+
+# ── 能動 close (BrokerAdapter.close_position 経由) ──
+
+def test_active_close_mt5_ticket_calls_safe_close(monkeypatch):
+    """mt5: prefix の order_id は safe_close 経由で MT5 へ close 指令を送る。"""
+    adapter = Mt5BridgeBrokerAdapter(
+        bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+    )
+    safe_close_called: list[int] = []
+    monkeypatch.setattr(
+        adapter, "safe_close",
+        lambda ticket, max_retries=3: safe_close_called.append(ticket) or True,
+    )
+    pm = MagicMock()
+    closed_order = _mt5_order(111)
+    pm.close_position.return_value = closed_order
+
+    result = adapter.close_position("mt5:111", 158.0, "exit_review", pm)
+
+    assert result is closed_order
+    assert safe_close_called == [111]
+    pm.close_position.assert_called_once_with("mt5:111", 158.0, "exit_review")
+
+
+def test_active_close_safe_close_failure_preserves_state(monkeypatch):
+    """safe_close 失敗時は内部 state を変更せず None を返す (reconcile に委譲)。"""
+    adapter = Mt5BridgeBrokerAdapter(
+        bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+    )
+    monkeypatch.setattr(adapter, "safe_close", lambda t, max_retries=3: False)
+    pm = MagicMock()
+
+    result = adapter.close_position("mt5:111", 158.0, "exit_review", pm)
+
+    assert result is None
+    pm.close_position.assert_not_called()
+
+
+def test_active_close_paper_order_skips_mt5(monkeypatch):
+    """非 mt5: order_id (paper UUID) は safe_close を呼ばず内部 close のみ。"""
+    adapter = Mt5BridgeBrokerAdapter(
+        bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+    )
+    safe_close_calls: list[int] = []
+    monkeypatch.setattr(
+        adapter, "safe_close",
+        lambda ticket, max_retries=3: safe_close_calls.append(ticket) or True,
+    )
+    pm = MagicMock()
+    paper_order = Order.new("USDJPY=X", "buy", 159, 158, 160, 1000)
+    pm.close_position.return_value = paper_order
+
+    result = adapter.close_position(paper_order.order_id, 158.5, "exit_review", pm)
+
+    assert result is paper_order
+    assert safe_close_calls == []    # MT5 へは触らない
+    pm.close_position.assert_called_once()

@@ -554,8 +554,9 @@ async def _phase_review_open_positions(
         price = review_prices.get(decision.pair)
         if price is None:
             continue
-        closed_order = position_mgr.close_position(
-            decision.order_id, price, decision.close_reason,
+        # broker 経由で close (mt5_bridge live モードでは MT5 close → 内部 close)
+        closed_order = broker.close_position(
+            decision.order_id, price, decision.close_reason, position_mgr,
         )
         if not closed_order:
             continue
