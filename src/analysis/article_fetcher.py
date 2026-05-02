@@ -2,14 +2,18 @@
 
 新規 RSS 記事のみ対象に並列で HTTP fetch + trafilatura で本文抽出する。
 失敗時は None を返し、例外は呼び出し側に伝播させない (graceful degradation)。
+
+Cloudflare 等の bot 対策で UA だけでなく TLS フィンガープリントを検査するサイト
+(investing.com 等) があるため、curl_cffi で Chrome を impersonate して TLS 層
+から偽装する。httpx では HTTP 403 が返り本文取得に失敗していた。
 """
 from __future__ import annotations
 
 import asyncio
 import logging
 
-import httpx
 import trafilatura
+from curl_cffi.requests import AsyncSession
 
 from src.analysis.rss_fetcher import NewsItem
 
@@ -31,12 +35,14 @@ async def fetch_article_body(
     if not url:
         return None
     try:
-        async with httpx.AsyncClient(
-            timeout=timeout_seconds,
-            headers={"User-Agent": user_agent},
-            follow_redirects=True,
-        ) as client:
-            resp = await client.get(url)
+        async with AsyncSession() as session:
+            resp = await session.get(
+                url,
+                impersonate="chrome",
+                headers={"User-Agent": user_agent},
+                timeout=timeout_seconds,
+                allow_redirects=True,
+            )
             resp.raise_for_status()
             html = resp.text
 
