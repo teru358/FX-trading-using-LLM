@@ -231,6 +231,52 @@ class PositionManager:
                     return True
         return False
 
+    def adjust_position_size(
+        self, order_id: str, new_size: float,
+        reason: str = "reconcile_partial_close",
+    ) -> Optional[Order]:
+        """ポジションサイズを変更する (reconciliation 整合化用)。
+
+        変更対象: position_size のみ。価格レベル (entry_price/stop_loss/take_profit)
+        は unit 数に依存しないので不変。
+
+        Args:
+            order_id: 対象ポジションの内部 ID
+            new_size: 新しい position_size (元の size 未満であること)
+            reason: 変更理由 (ログ用)
+
+        Returns:
+            変更後の Order、対象ポジションが存在しない場合は None
+
+        Raises:
+            ValueError: new_size <= 0 (close_position を使うべき)
+            ValueError: new_size > 元の position_size (reconciliation で増やすことは想定外)
+        """
+        if new_size <= 0:
+            raise ValueError(
+                f"adjust to {new_size} <= 0; use close_position instead"
+            )
+
+        with self._store.transaction():
+            self._reload_from_disk()
+            for pos in self._open:
+                if pos.order_id == order_id:
+                    if new_size > pos.position_size:
+                        raise ValueError(
+                            f"adjust larger ({new_size:.2f} > {pos.position_size:.2f}) "
+                            f"is unexpected; reconciliation should never increase size"
+                        )
+                    old_size = pos.position_size
+                    pos.position_size = new_size
+                    self._save()
+                    logger.warning(
+                        f"[ADJUST] {order_id} {pos.pair} {pos.direction}: "
+                        f"position_size {old_size:.2f} → {new_size:.2f} "
+                        f"({(new_size/old_size)*100:.0f}% remaining, reason={reason})"
+                    )
+                    return pos
+        return None
+
     def set_balance(self, new_balance: float) -> float:
         """残高を明示的に補正する (manual モードの手動残高調整用)。
 

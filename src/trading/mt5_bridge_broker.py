@@ -2,21 +2,26 @@
 
 DRY_RUN は bridge 側のフラグで制御するので、このアダプターは常に同じ呼び出し方を行う。
 Phase 3a では `Mt5BridgeBrokerAdapter` 単独でも shadow モード経由でも使える。
+Phase 3b で MT5 真実 (/positions) との reconciliation を実装。
 """
 from __future__ import annotations
 
 import logging
+import time as _time
 
 import httpx
 
 from src.signals.scale_in import PreExecResult, evaluate_pre_execution_checks
 from src.signals.signal_combiner import TradeSignal
 from src.trading.broker_adapter import BrokerAdapter
-from src.trading.paper_trader import check_and_close_positions as _paper_close_check
 from src.trading.position_manager import Order, PositionManager
 from src.trading.symbol_mapping import to_mt5_symbol
 
 logger = logging.getLogger(__name__)
+
+# Phase 3b reconciliation: volume 差の閾値
+_PARTIAL_THRESHOLD_LOW = 0.01      # 1%: 端数 / 通常 partial の境界
+_PARTIAL_THRESHOLD_HIGH = 0.30     # 30%: 通常 / 異常 の境界
 
 
 class Mt5BridgeBrokerAdapter(BrokerAdapter):
@@ -42,6 +47,7 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         drawdown_kill_switch_enabled: bool = False,
         drawdown_kill_switch_max_pct: float = 0.10,
         drawdown_kill_switch_lookback_days: int = 0,
+        notifier=None,
     ) -> None:
         if not bridge_url:
             raise ValueError("bridge_url is required")
@@ -57,6 +63,9 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         self._dd_enabled = drawdown_kill_switch_enabled
         self._dd_max_pct = drawdown_kill_switch_max_pct
         self._dd_lookback = drawdown_kill_switch_lookback_days
+        # Phase 3b: reconciliation 用キャッシュ + 通知
+        self._notifier = notifier
+        self._cached_external_positions: list[dict] = []
 
     def _headers(self) -> dict[str, str]:
         h = {"Content-Type": "application/json"}
@@ -145,11 +154,204 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             )
         return order
 
+    def _fetch_mt5_positions(self) -> list[dict] | None:
+        """bridge /positions から最新ポジ一覧を取得。失敗時は None。"""
+        try:
+            resp = httpx.get(
+                f"{self._url}/positions",
+                timeout=self._timeout, headers=self._headers(),
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError as e:
+            logger.warning(f"[MT5_BRIDGE] /positions fetch failed: {e}")
+            return None
+
+    def safe_close(self, ticket: int, max_retries: int = 3) -> bool:
+        """close 指令 → 1秒待機 → ポジション確認 → 残ってれば retry。
+
+        全 retry 失敗で hard halt を発動。bridge 不通時は retry を中断して
+        reconciliation に委譲 (戻り値 False)。
+        """
+        for attempt in range(max_retries):
+            try:
+                httpx.post(
+                    f"{self._url}/positions/{ticket}/close",
+                    timeout=self._timeout, headers=self._headers(),
+                )
+            except httpx.HTTPError as e:
+                logger.warning(f"[CLOSE] attempt {attempt+1} HTTP error: {e}")
+                if attempt == max_retries - 1:
+                    self._trigger_hard_halt(
+                        f"close failed (HTTP) ticket={ticket} after "
+                        f"{max_retries} retries: {e}"
+                    )
+                    return False
+                _time.sleep(2 ** attempt)
+                continue
+
+            _time.sleep(1.0)    # MT5 側の処理反映待ち
+
+            positions = self._fetch_mt5_positions()
+            if positions is None:
+                logger.warning(
+                    f"[CLOSE] verify: bridge unreachable, "
+                    f"defer to reconcile (ticket={ticket})"
+                )
+                return False
+
+            if ticket not in {int(p["ticket"]) for p in positions}:
+                logger.info(f"[CLOSE] verified: ticket={ticket} closed")
+                return True
+
+            logger.warning(
+                f"[CLOSE] ticket={ticket} still open, "
+                f"retry {attempt+1}/{max_retries}"
+            )
+            _time.sleep(2 ** attempt)
+
+        self._trigger_hard_halt(
+            f"close failed: ticket={ticket} still open after {max_retries} retries"
+        )
+        return False
+
+    def _trigger_hard_halt(self, reason: str) -> None:
+        """bridge /admin/halt mode=hard を叩く + Discord 通知。"""
+        try:
+            httpx.post(
+                f"{self._url}/admin/halt",
+                json={"mode": "hard", "reason": f"auto: {reason}"},
+                timeout=self._timeout, headers=self._headers(),
+            )
+            logger.error(f"[MT5_BRIDGE] AUTO HARD HALT: {reason}")
+            if self._notifier:
+                self._notifier.send_embed(
+                    title="🛑 MT5 自動 HARD HALT",
+                    description=(
+                        f"reason: {reason}\n\n"
+                        f"⚠️ 自動再開不可。main PC で手動操作必須:\n"
+                        f"1. mt5_bridge/.env で `DRY_RUN=true` を確認\n"
+                        f"2. logs/hard_halt.flag を削除\n"
+                        f"3. bridge 再起動"
+                    ),
+                    color=0xC0392B,
+                )
+        except Exception as e:
+            logger.error(f"[MT5_BRIDGE] auto hard halt API failed: {e}")
+
     def check_and_close_positions(
         self, open_positions: list[Order],
         current_prices: dict[str, float],
         position_mgr: PositionManager,
     ) -> list[Order]:
-        # Phase 3a 簡略化: paper と同じローカル SL/TP 判定を使う。
-        # Phase 3b で MT5 真実 (/positions) との reconciliation に置き換える。
-        return _paper_close_check(open_positions, current_prices, position_mgr)
+        """Phase 3b reconciliation: MT5 を真実として 4 種の不整合を分類処理。
+
+        - 完全 close (内部 open, MT5 不在): 内部 close (server_sl_tp)
+        - 部分 close (1% 未満): 端数 → 無視
+        - 部分 close (1-30%): adjust_position_size
+        - 部分 close (30% 以上): hard halt
+        - Orphan (bot magic, 内部 state 無し): hard halt
+        - External (他 magic): キャッシュに保持、干渉せず
+        - bridge 不通: ノーオペ
+        """
+        mt5_positions = self._fetch_mt5_positions()
+        if mt5_positions is None:
+            logger.warning("[MT5_BRIDGE] reconciliation skipped — bridge unreachable")
+            return []
+
+        # MT5 side: bot magic / 他 magic で分離
+        bot_mt5 = {
+            int(p["ticket"]): float(p["volume"])
+            for p in mt5_positions if int(p.get("magic", 0)) == self._magic
+        }
+        self._cached_external_positions = [
+            p for p in mt5_positions
+            if int(p.get("magic", 0)) != self._magic
+        ]
+        if self._cached_external_positions:
+            logger.info(
+                f"[RECONCILE] external positions detected: "
+                f"{len(self._cached_external_positions)} (display only, no interference)"
+            )
+
+        # Internal side: bot magic ポジ抽出 (mt5: prefix が目印)
+        internal_bot = {
+            pos.order_id: pos for pos in open_positions
+            if pos.order_id.startswith("mt5:")
+        }
+        internal_tickets: set[int] = set()
+        for pos in internal_bot.values():
+            try:
+                internal_tickets.add(int(pos.order_id.removeprefix("mt5:")))
+            except ValueError:
+                continue
+
+        # Orphan 検出 (MT5 にあるが内部に無い、bot magic)
+        orphans = set(bot_mt5.keys()) - internal_tickets
+        if orphans:
+            self._trigger_hard_halt(
+                f"orphan positions detected: tickets={sorted(orphans)} "
+                f"(bot magic but no internal record)"
+            )
+            return []
+
+        closed: list[Order] = []
+        for pos in list(internal_bot.values()):
+            try:
+                ticket = int(pos.order_id.removeprefix("mt5:"))
+            except ValueError:
+                continue
+            internal_lots = pos.position_size / self._lot_units
+
+            # ── パターン 1: 完全 close 検出 ──
+            if ticket not in bot_mt5:
+                close_price = current_prices.get(pos.pair, pos.entry_price)
+                logger.info(
+                    f"[RECONCILE] full close: {pos.pair} ticket={ticket} "
+                    f"@ {close_price} (server-side close detected)"
+                )
+                closed_order = position_mgr.close_position(
+                    pos.order_id, close_price, "server_sl_tp",
+                )
+                if closed_order:
+                    closed.append(closed_order)
+                continue
+
+            # ── パターン 2-4: volume 差で分岐 ──
+            mt5_lots = bot_mt5[ticket]
+            if mt5_lots >= internal_lots:
+                continue    # 内部 ≤ MT5 = 一致 (or 異常な増加だが auto-correct しない)
+
+            diff_pct = (internal_lots - mt5_lots) / internal_lots
+
+            if diff_pct < _PARTIAL_THRESHOLD_LOW:
+                continue    # 端数 / 浮動小数点ノイズ → 無視
+
+            if diff_pct >= _PARTIAL_THRESHOLD_HIGH:
+                # 異常な大量消失 → hard halt
+                self._trigger_hard_halt(
+                    f"volume mismatch {diff_pct*100:.0f}%: ticket={ticket} "
+                    f"internal={internal_lots:.4f} mt5={mt5_lots:.4f}"
+                )
+                return closed    # 以降の処理は中断
+
+            # 通常 partial close → 内部 state 修正
+            new_size = pos.position_size * (mt5_lots / internal_lots)
+            logger.warning(
+                f"[RECONCILE] partial close: {pos.pair} ticket={ticket} "
+                f"internal_lots={internal_lots:.4f} mt5_lots={mt5_lots:.4f} "
+                f"diff={diff_pct*100:.1f}% → adjust to {new_size:.2f} unit"
+            )
+            position_mgr.adjust_position_size(
+                pos.order_id, new_size, reason="reconcile_partial_close",
+            )
+            self._notify_partial_close(pos, internal_lots, mt5_lots, new_size)
+
+        return closed
+
+    def _notify_partial_close(
+        self, pos: Order, internal_lots: float, mt5_lots: float, new_size: float,
+    ) -> None:
+        """部分 close 検知の Discord 通知 (内部 state 修正済み)。タスク 13 で本格実装。"""
+        # Phase 3b 暫定: 警告ログのみ (タスク 13 で _notifier 経由に置換)
+        pass
