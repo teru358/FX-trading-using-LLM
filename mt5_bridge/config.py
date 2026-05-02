@@ -30,6 +30,7 @@ class BridgeSettings:
     port: int
     api_key: str
     dry_run: bool
+    halt_state_path: str
 
     @property
     def auth_required(self) -> bool:
@@ -66,4 +67,5 @@ def load_settings(env_file: Path | None = None) -> BridgeSettings:
         port=int(_env("BRIDGE_PORT", "8812")),
         api_key=_env("BRIDGE_API_KEY"),
         dry_run=_env_bool("DRY_RUN", True),
+        halt_state_path=_env("HALT_STATE_PATH", "logs/hard_halt.flag"),
     )

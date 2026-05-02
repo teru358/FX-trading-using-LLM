@@ -17,9 +17,11 @@ from pathlib import Path
 from fastapi import Depends, FastAPI, Header, HTTPException, status
 from pydantic import BaseModel
 
+from admin_models import AdminStatus, HaltRequest
 from config import BridgeSettings, load_settings
 from mt5_client import Mt5Client
 from order_models import ClosePositionResponse, OrderRequest, OrderResponse
+from runtime_state import RuntimeState
 
 # ── ログ設定: stdout (色付き) + ローテーション付きファイル (色なし) ──
 import sys
@@ -135,19 +137,31 @@ logger = logging.getLogger(__name__)
 
 _settings: BridgeSettings | None = None
 _client: Mt5Client | None = None
+_runtime: RuntimeState | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _settings, _client
+    global _settings, _client, _runtime
     _settings = load_settings()
+    flag_path = Path(__file__).parent / _settings.halt_state_path
+    _runtime = RuntimeState(
+        initial_dry_run=_settings.dry_run,
+        env_file=Path(__file__).parent / ".env",
+        hard_halt_flag=flag_path,
+    )
+    if _runtime.is_hard_halted:
+        logger.error(
+            "[ADMIN] starting in HARD HALT state (flag file present). "
+            f"Remove {flag_path} and set DRY_RUN=false to recover."
+        )
     _client = Mt5Client(
         login=_settings.mt5_login,
         password=_settings.mt5_password,
         server=_settings.mt5_server,
     )
     logger.warning(
-        f"DRY_RUN={_settings.dry_run} | api_key={'set' if _settings.auth_required else 'NOT SET (LAN trust mode)'}"
+        f"DRY_RUN={_runtime.dry_run} | api_key={'set' if _settings.auth_required else 'NOT SET (LAN trust mode)'}"
     )
     try:
         _client.connect()
@@ -199,7 +213,7 @@ def health():
     return HealthResponse(
         status="ok",
         mt5_connected=connected,
-        dry_run=_settings.dry_run if _settings else True,
+        dry_run=_runtime.dry_run if _runtime else True,
         server=_settings.mt5_server if _settings else None,
         login=_settings.mt5_login if _settings else None,
     )
@@ -244,7 +258,7 @@ def symbols():
 def place_order(req: OrderRequest):
     if _client is None or not _client.is_connected:
         raise HTTPException(503, "MT5 not connected")
-    if not _settings.dry_run:
+    if not _runtime.dry_run:
         raise HTTPException(
             501,
             "live order placement not implemented in Phase 3a — set DRY_RUN=true",
@@ -264,7 +278,7 @@ def place_order(req: OrderRequest):
 def close_position(ticket: int, symbol: str | None = None):
     if _client is None or not _client.is_connected:
         raise HTTPException(503, "MT5 not connected")
-    if not _settings.dry_run:
+    if not _runtime.dry_run:
         raise HTTPException(
             501, "live close not implemented in Phase 3a — set DRY_RUN=true",
         )
@@ -273,6 +287,49 @@ def close_position(ticket: int, symbol: str | None = None):
         return ClosePositionResponse(**result)
     except RuntimeError as e:
         raise HTTPException(500, str(e))
+
+
+# ── 管理エンドポイント (Phase 3b: 2-tier halt) ────────────────────────
+
+def _build_admin_status() -> AdminStatus:
+    return AdminStatus(
+        dry_run=_runtime.dry_run,
+        soft_halted=_runtime.soft_halted,
+        is_hard_halted=_runtime.is_hard_halted,
+        accepts_new_orders=_runtime.accepts_new_orders,
+        mt5_connected=_client is not None and _client.ping(),
+    )
+
+
+@app.post("/admin/halt", response_model=AdminStatus,
+          dependencies=[Depends(require_api_key)])
+def admin_halt(req: HaltRequest):
+    if _runtime is None:
+        raise HTTPException(503, "runtime not initialized")
+    if req.mode == "hard":
+        _runtime.hard_halt(reason=req.reason)
+    else:
+        _runtime.soft_halt(reason=req.reason)
+    return _build_admin_status()
+
+
+@app.post("/admin/resume", response_model=AdminStatus,
+          dependencies=[Depends(require_api_key)])
+def admin_resume():
+    if _runtime is None:
+        raise HTTPException(503, "runtime not initialized")
+    ok, msg = _runtime.resume()
+    if not ok:
+        raise HTTPException(403, msg)
+    return _build_admin_status()
+
+
+@app.get("/admin/status", response_model=AdminStatus,
+         dependencies=[Depends(require_api_key)])
+def admin_status():
+    if _runtime is None:
+        raise HTTPException(503, "runtime not initialized")
+    return _build_admin_status()
 
 
 class _UvicornNameRewriter(logging.Filter):
