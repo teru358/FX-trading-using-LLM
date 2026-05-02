@@ -143,3 +143,106 @@ async def test_fetch_article_body_passes_user_agent_header():
     # AsyncClient が User-Agent を含む headers で生成されたか
     call_kwargs = mock_client_class.call_args.kwargs
     assert call_kwargs["headers"]["User-Agent"] == "custom/2.0"
+
+
+import asyncio
+from src.analysis.article_fetcher import fetch_bodies_concurrent
+
+
+@pytest.mark.asyncio
+async def test_fetch_bodies_concurrent_writes_in_place():
+    """各 NewsItem の body が in-place で書き込まれる。"""
+    items = [
+        NewsItem(title=f"t{i}", summary="s", source="x", published=None,
+                 age_hours=None, link=f"https://example.com/{i}")
+        for i in range(3)
+    ]
+
+    async def _fake_fetch(url, **kwargs):
+        return f"body_for_{url.rsplit('/', 1)[1]}"
+
+    with patch("src.analysis.article_fetcher.fetch_article_body", side_effect=_fake_fetch):
+        await fetch_bodies_concurrent(
+            items,
+            max_concurrent=3, timeout_seconds=8.0, max_chars=3000, user_agent="test/1.0",
+        )
+
+    bodies = [item.body for item in items]
+    assert bodies == ["body_for_0", "body_for_1", "body_for_2"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_bodies_concurrent_skips_items_without_link():
+    """link が空の記事は fetch_article_body を呼ばない。"""
+    items = [
+        NewsItem(title="t1", summary="s", source="x", published=None, age_hours=None, link=""),
+        NewsItem(title="t2", summary="s", source="x", published=None, age_hours=None,
+                 link="https://example.com/2"),
+    ]
+
+    fetch_mock = AsyncMock(return_value="body")
+    with patch("src.analysis.article_fetcher.fetch_article_body", new=fetch_mock):
+        await fetch_bodies_concurrent(
+            items,
+            max_concurrent=3, timeout_seconds=8.0, max_chars=3000, user_agent="test/1.0",
+        )
+
+    assert items[0].body is None  # link 空 → fetch されず None のまま
+    assert items[1].body == "body"
+    # fetch_article_body は 1 回だけ呼ばれた (link 付き記事のみ)
+    assert fetch_mock.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_bodies_concurrent_respects_semaphore():
+    """max_concurrent を超える並列実行が起きない。"""
+    items = [
+        NewsItem(title=f"t{i}", summary="s", source="x", published=None,
+                 age_hours=None, link=f"https://example.com/{i}")
+        for i in range(5)
+    ]
+
+    in_flight = 0
+    peak = 0
+
+    async def _slow_fetch(url, **kwargs):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.05)
+        in_flight -= 1
+        return "body"
+
+    with patch("src.analysis.article_fetcher.fetch_article_body", side_effect=_slow_fetch):
+        await fetch_bodies_concurrent(
+            items,
+            max_concurrent=2, timeout_seconds=8.0, max_chars=3000, user_agent="test/1.0",
+        )
+
+    assert peak <= 2  # 同時に 2 を超えない
+
+
+@pytest.mark.asyncio
+async def test_fetch_bodies_concurrent_continues_on_individual_failure():
+    """1 記事の例外が他の記事の処理を止めない。"""
+    items = [
+        NewsItem(title=f"t{i}", summary="s", source="x", published=None,
+                 age_hours=None, link=f"https://example.com/{i}")
+        for i in range(3)
+    ]
+
+    async def _maybe_fail(url, **kwargs):
+        if url.endswith("/1"):
+            raise RuntimeError("boom")
+        return "body"
+
+    with patch("src.analysis.article_fetcher.fetch_article_body", side_effect=_maybe_fail):
+        await fetch_bodies_concurrent(
+            items,
+            max_concurrent=3, timeout_seconds=8.0, max_chars=3000, user_agent="test/1.0",
+        )
+
+    # 失敗した index 1 は body=None、他は body="body"
+    assert items[0].body == "body"
+    assert items[1].body is None
+    assert items[2].body == "body"

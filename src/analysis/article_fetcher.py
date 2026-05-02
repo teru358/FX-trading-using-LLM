@@ -49,3 +49,39 @@ async def fetch_article_body(
             f"[ARTICLE] fetch failed for {url}: {type(e).__name__}: {e}"
         )
         return None
+
+
+async def fetch_bodies_concurrent(
+    items: list[NewsItem],
+    *,
+    max_concurrent: int,
+    timeout_seconds: float,
+    max_chars: int,
+    user_agent: str,
+) -> None:
+    """items の各 NewsItem.link を並列に fetch、結果を item.body に in-place で書く。
+
+    link が空の item は skip。個別 fetch の失敗は body=None として続行 (gather の
+    例外伝播を return_exceptions=True で吸収)。
+    """
+    sem = asyncio.Semaphore(max_concurrent)
+
+    async def _one(item: NewsItem) -> None:
+        if not item.link:
+            return
+        async with sem:
+            try:
+                item.body = await fetch_article_body(
+                    item.link,
+                    timeout_seconds=timeout_seconds,
+                    max_chars=max_chars,
+                    user_agent=user_agent,
+                )
+            except Exception as e:
+                logger.debug(
+                    f"[ARTICLE] concurrent fetch failed for {item.link}: "
+                    f"{type(e).__name__}: {e}"
+                )
+                item.body = None
+
+    await asyncio.gather(*[_one(it) for it in items], return_exceptions=False)
