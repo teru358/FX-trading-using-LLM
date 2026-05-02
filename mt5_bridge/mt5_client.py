@@ -225,3 +225,17 @@ class Mt5Client:
         if symbols is None:
             return []
         return [s.name for s in symbols]
+
+    def calc_required_margin(
+        self, symbol: str, side: str, volume_lots: float, price: float,
+    ) -> float:
+        """MT5 内蔵関数で必要証拠金を計算 (口座通貨建て、通貨換算込み)。"""
+        action = (
+            self._mt5.ORDER_TYPE_BUY if side == "buy" else self._mt5.ORDER_TYPE_SELL
+        )
+        margin = self._mt5.order_calc_margin(action, symbol, volume_lots, price)
+        if margin is None:
+            raise RuntimeError(
+                f"order_calc_margin failed: {self._mt5.last_error()}"
+            )
+        return float(margin)
