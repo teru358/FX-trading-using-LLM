@@ -77,7 +77,6 @@ async def exit_check_cycle(
     closed_this_run = broker.check_and_close_positions(
         account.open_positions, current_prices, position_mgr,
     )
-    closed_any = bool(closed_this_run)
     if config.notifier.notify_on_order_close:
         account_after = position_mgr.get_account_state()
         for closed in closed_this_run:
@@ -94,16 +93,10 @@ async def exit_check_cycle(
 
     # Phase 4a: ポジション再評価 (キャッシュ集約のみ、LLM 不使用)
     if not config.trading.position_review_enabled:
-        if closed_any:
-            from src.tradingview.tv_payload import render_tv_chart
-            await render_tv_chart(config, analysis_store, position_mgr, reason="exit_check close", force=True)
         return
 
     account_for_review = position_mgr.get_account_state()
     if not account_for_review.open_positions:
-        if closed_any:
-            from src.tradingview.tv_payload import render_tv_chart
-            await render_tv_chart(config, analysis_store, position_mgr, reason="exit_check close", force=True)
         return
 
     open_pairs = {pos.pair for pos in account_for_review.open_positions}
@@ -144,7 +137,6 @@ async def exit_check_cycle(
             decision.order_id, price, decision.close_reason, position_mgr,
         )
         if closed_order:
-            closed_any = True
             layer = _LAYER_LABEL.get(decision.close_reason, decision.close_reason)
             logger.info(
                 f"[EXIT] {decision.pair}: closed {layer}({decision.close_reason}) — {decision.detail}"
@@ -161,10 +153,6 @@ async def exit_check_cycle(
                     balance=account_after.balance,
                     source="exit_check",
                 ))
-
-    if closed_any:
-        from src.tradingview.tv_payload import render_tv_chart
-        await render_tv_chart(config, analysis_store, position_mgr, reason="exit_check close", force=True)
 
 
 def run_exit_check_cycle(

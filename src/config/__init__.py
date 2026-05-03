@@ -38,7 +38,6 @@ from src.config.schema import (
     ScheduleConfig,
     TimeframeConfig,
     TradingConfig,
-    TradingViewConfig,
     TwelveDataConfig,
 )
 
@@ -72,6 +71,5 @@ __all__ = [
     "ScheduleConfig",
     "TimeframeConfig",
     "TradingConfig",
-    "TradingViewConfig",
     "TwelveDataConfig",
 ]

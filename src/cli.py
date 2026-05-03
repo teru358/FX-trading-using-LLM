@@ -38,7 +38,6 @@ _HELP = """\
   [cyan]audit[/cyan] (days)         — 過去トレードの統計診断レポート生成
   [cyan]audit review[/cyan] (days)  — audit + LLM 改善候補の対話選別 (教訓を audit_lessons.md に蓄積)
   [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
-  [cyan]tv[/cyan]                   — TradingViewチャートにシグナルを描画更新
   [cyan]feeds[/cyan]                — RSSフィード疎通確認
   [cyan]notify[/cyan]  (n)          — 通知テストメッセージを送信
   [cyan]edit[/cyan]   (e)           — user_notes.md を vim で編集
@@ -142,11 +141,6 @@ def _cmd_close(config: AppConfig, pair_arg: str) -> None:
                     balance=pm.get_account_state().balance,
                     source="manual",
                 ))
-            if config.tradingview.enabled:
-                from src.data.analysis_store import AnalysisStore
-                from src.tradingview.tv_payload import render_tv_chart
-                analysis_store = AnalysisStore(config.prices_db_path)
-                await render_tv_chart(config, analysis_store, pm, reason="manual close", force=True)
 
     asyncio.run(_do())
 
@@ -190,36 +184,6 @@ def _cmd_audit(config: AppConfig, args: list[str]) -> None:
     if result.flag_counts:
         tbl.add_row("Flags", ", ".join(f"{k}:{v}" for k, v in result.flag_counts.items()))
     _console.print(Panel(tbl, title="Audit Summary", border_style="cyan"))
-
-
-async def _update_tv_chart(config: AppConfig, analysis_store) -> None:
-    """シグナル + オープンポジションを TradingView チャートに反映する。
-
-    共通ヘルパー ``render_tv_chart`` を使って常に最新状態 (ポジション決済後の
-    空状態も含む) を再描画する。
-    """
-    from src.persistence.state_store import StateStore
-    from src.trading.position_manager import PositionManager
-    from src.tradingview.tv_payload import render_tv_chart
-
-    state_store = StateStore(config.state_dir)
-    position_mgr = PositionManager(
-        state_store,
-        config.trading.initial_balance,
-        context="CLI",
-    )
-
-    if not config.tradingview.enabled:
-        _console.print("[yellow]TradingView 連携が無効です (config.tradingview.enabled=false)[/yellow]")
-        return
-
-    # CLI tv コマンドはユーザーが明示的に更新したい時に叩くので debounce をバイパス
-    await render_tv_chart(config, analysis_store, position_mgr, reason="tv command", force=True)
-    account = position_mgr.get_account_state()
-    _console.print(
-        f"[green]チャート更新完了 "
-        f"(positions={len(account.open_positions)})[/green]"
-    )
 
 
 def _cmd_notify(config: AppConfig) -> None:
@@ -361,13 +325,6 @@ def run_commands(
                 _cmd_notify(config)
             elif cmd in ("e", "edit"):
                 _cmd_edit(config)
-            elif cmd == "tv":
-                if not config.tradingview.enabled:
-                    _console.print("[red]tradingview.enabled が false です[/red]")
-                    continue
-                _console.print("[cyan]TradingViewチャートを更新中...[/cyan]")
-                import asyncio as _aio
-                _aio.run(_update_tv_chart(config, analysis_store))
             elif cmd == "feeds":
                 _cmd_feeds(config)
             elif cmd == "close":

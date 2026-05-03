@@ -6,7 +6,7 @@ Phase 2.5: 前回 HOLD 判断のレビュー (LLM 不使用)
 Phase 3: 並列ペア分析 (LLM 使用) → シグナル + macro_ctx
 Phase 4a: position_review (Layer1-3) → 早期決済 → 振り返り
 Phase 4b: 新規シグナルの RAG 補正 + 発注 / HOLD 保存
-Phase 5: TradingView チャート反映 → ランサマリー
+Phase 5: ランサマリー
 """
 from __future__ import annotations
 
@@ -779,16 +779,6 @@ async def _phase_execute_signals(
     return executed_orders
 
 
-async def _phase_render_tradingview(
-    config: AppConfig,
-    analysis_store: AnalysisStore,
-    position_mgr: PositionManager,
-) -> None:
-    """TradingView チャートにシグナル + ポジションを反映する。"""
-    from src.tradingview.tv_payload import render_tv_chart
-    await render_tv_chart(config, analysis_store, position_mgr, reason="trading cycle")
-
-
 # ──────────────────────────────────────────────────────────────────────
 # ランタイム生成 / オーケストレーター / 同期ラッパー
 # ──────────────────────────────────────────────────────────────────────
@@ -910,9 +900,6 @@ async def trading_cycle(
         signals, macro_ctxs, config, position_mgr, broker, notifier, store, price_store,
         hold_store, session_store, adaptive_store, embed_fn, price_provider,
     )
-
-    # TradingView チャート反映
-    await _phase_render_tradingview(config, analysis_store, position_mgr)
 
     # Phase 5: レポート
     all_closed = closed_this_run + reviewed_closed

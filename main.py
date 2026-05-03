@@ -100,15 +100,14 @@ def main() -> None:
     # 構成サマリ (LLM 詳細は Startup Checks パネル側で表示)
     _trade_n = len(config.tradeable_instruments)
     _watch_n = len(config.watch_only_instruments)
-    _tv = "on" if config.tradingview.enabled else "off"
     _api = "on" if config.api.enabled else "off"
     _pp = config.price_provider.realtime_provider
     _logger.info(
         "[SYSTEM] Startup — mode=%s daemon=%s instruments=%dtrade/%dwatch "
-        "TV=%s API=%s provider=%s",
+        "API=%s provider=%s",
         config.trading.trading_mode, args.daemon,
         _trade_n, _watch_n,
-        _tv, _api, _pp,
+        _api, _pp,
     )
 
     if not startup_checks(config):
@@ -402,14 +401,6 @@ def main() -> None:
             run_commands(config, store, analysis_store, _stop, _llm_slot, forecast_store, price_store, hold_store, price_provider=price_provider)
     finally:
         _stop.set()
-        # 共有 CDP クライアントを閉じる (描画経路で接続している場合)
-        if config.tradingview.enabled:
-            try:
-                import asyncio as _asyncio
-                from src.tradingview.cdp_client import shutdown_shared_cdp_clients
-                _asyncio.run(shutdown_shared_cdp_clients())
-            except Exception as e:
-                _logger.debug(f"[SYSTEM] CDP shutdown error: {e}")
         _logger.info("[SYSTEM] Shutdown — FX Paper Trader stopped")
 
 

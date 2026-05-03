@@ -234,8 +234,7 @@ finance/
 │   ├── notifications/              # Discord通知
 │   ├── persistence/                # 状態管理・動的パラメータ
 │   ├── utils/                      # 時刻ヘルパー (clock.py)
-│   ├── reporting/                  # Rich CLIレポート
-│   └── tradingview/                # TradingView連携（Pine Script生成・CDP注入）
+│   └── reporting/                  # Rich CLIレポート
 ├── tests/                          # 298テスト (pytest)
 ├── docs/
 │   └── audit/                      # audit レポート出力先 (gitignore 可)

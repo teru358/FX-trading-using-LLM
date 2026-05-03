@@ -420,20 +420,6 @@ async def collect_all_technical(
         if i < len(tradeable) - 1:
             await asyncio.sleep(delay)
 
-    # TradingView チャート反映（シグナル + オープンポジション）
-    if config.tradingview.enabled:
-        from src.persistence.state_store import StateStore
-        from src.trading.position_manager import PositionManager
-        from src.tradingview.tv_payload import render_tv_chart
-
-        state_store = StateStore(config.state_dir)
-        position_mgr = PositionManager(
-            state_store,
-            config.trading.initial_balance,
-            context="TechnicalCollector",
-        )
-        await render_tv_chart(config, analysis_store, position_mgr, reason="technical snapshots")
-
     # Phase 3: 経済指標影響分析 (オプション)
     if config.economic_calendar.enabled:
         try:

@@ -1,7 +1,7 @@
 """ヘルスチェック / システム状態系のエンドポイント (Phase 3b 整理後)。
 
 GET /health     — 軽量 liveness check (death + uptime + scheduler のみ)
-GET /status     — システム健全性 (LLM CB / TV / price_provider / snapshots / MT5 bridge)
+GET /status     — システム健全性 (LLM CB / price_provider / snapshots / MT5 bridge)
 GET /logs       — activity.log の末尾 N 行
 GET /usage      — LLM 使用量
 GET /schedule   — スケジュール情報
@@ -55,7 +55,7 @@ def health() -> dict[str, Any]:
 
 @router.get("/status", dependencies=[Depends(verify_api_key)])
 def status() -> dict[str, Any]:
-    """システム健全性レポート (LLM CB / TV / price_provider / snapshots / MT5 bridge)。
+    """システム健全性レポート (LLM CB / price_provider / snapshots / MT5 bridge)。
 
     Phase 3b で残高・ポジション (旧 /status) を /account に分離、ここではサブシステム
     の健全性のみを返すように再定義。
@@ -73,20 +73,6 @@ def status() -> dict[str, Any]:
             }
     except Exception:
         pass
-
-    # TV CDP 接続状態
-    tv_status: dict[str, Any] = {"enabled": False}
-    if state.config is not None and getattr(state.config.tradingview, "enabled", False):
-        tv_status["enabled"] = True
-        try:
-            from src.tradingview.cdp_client import _SHARED_CLIENTS
-            clients = list(_SHARED_CLIENTS.values())
-            tv_status["clients"] = [
-                {"host": c._host, "port": c._port, "connected": c.is_connected}
-                for c in clients
-            ]
-        except Exception:
-            tv_status["clients"] = []
 
     # price_provider 状態
     price_provider_status: str | None = None
@@ -123,7 +109,6 @@ def status() -> dict[str, Any]:
 
     return {
         "llm_circuit_breakers": cb_states,
-        "tradingview":          tv_status,
         "price_provider":       price_provider_status,
         "snapshots":            snapshots_status,
         "mt5_bridge":           _get_mt5_bridge_status(),

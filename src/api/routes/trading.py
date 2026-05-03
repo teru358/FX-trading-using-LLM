@@ -168,14 +168,6 @@ async def close_position(pair: str) -> dict[str, Any]:
         except Exception as e:
             logger.warning(f"[API] Close notification failed: {e}")
 
-    # TradingView チャート再描画 (ポジション線をクリア)
-    if state.config.tradingview.enabled:
-        try:
-            from src.tradingview.tv_payload import render_tv_chart
-            await render_tv_chart(state.config, state.analysis_store, pm, reason="API close", force=True)
-        except Exception as e:
-            logger.warning(f"[API] TV chart update failed: {e}")
-
     return {
         "closed":       True,
         "pair":         closed.pair,

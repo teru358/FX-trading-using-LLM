@@ -22,7 +22,6 @@ from src.cycles.trading import (
     _phase_analyze_pairs,
     _phase_close_sl_tp,
     _phase_execute_signals,
-    _phase_render_tradingview,
     _phase_review_open_positions,
     _process_pair,
     _review_hold_decisions,
@@ -68,6 +67,5 @@ __all__ = [
     "_adjust_signal_with_rag",
     "_execute_one_signal",
     "_phase_execute_signals",
-    "_phase_render_tradingview",
     "_build_trading_runtime",
 ]

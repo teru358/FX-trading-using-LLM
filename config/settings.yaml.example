@@ -279,12 +279,6 @@ notification:
   notify_on_signal_skipped: true   # スキップ（既存ポジション）/ 保留（hold）時に通知（判断理由付き）
   notify_on_price_alert: true      # 価格急変動（損失方向）を検知した場合
 
-# TradingView Desktop連携（オプション）
-tradingview:
-  enabled: false                # true で取引判定時にチャートへ自動反映
-  cdp_host: "127.0.0.1"         # CDP ホスト（WSLからWindowsへは `cat /etc/resolv.conf` の gateway IP を指定）
-  cdp_port: 9222                # TradingView Desktop の CDP ポート
-
 # 経済指標カレンダー（TradingView非公式API経由）
 economic_calendar:
   enabled: false                   # true で経済指標カレンダー連携を有効化

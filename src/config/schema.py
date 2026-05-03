@@ -470,14 +470,6 @@ class LoggingConfig:
 
 
 @dataclass
-class TradingViewConfig:
-    """TradingView Desktop 連携設定。"""
-    enabled: bool = False
-    cdp_host: str = "localhost"
-    cdp_port: int = 9222
-
-
-@dataclass
 class WeeklyDiagnosisConfig:
     """週次自己診断レポート設定。
 
@@ -575,7 +567,6 @@ class AppConfig:
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     keywords: KeywordsConfig = field(default_factory=KeywordsConfig)
     economic_calendar: EconomicCalendarConfig = field(default_factory=EconomicCalendarConfig)
-    tradingview: TradingViewConfig = field(default_factory=TradingViewConfig)
     weekly_diagnosis: "WeeklyDiagnosisConfig" = field(
         default_factory=lambda: WeeklyDiagnosisConfig()
     )

@@ -30,7 +30,6 @@ def _state_setup(tmp_path, monkeypatch):
     cfg.trading.trading_mode = "paper"
     cfg.trading.initial_balance = 100_000.0
     cfg.state_dir = tmp_path
-    cfg.tradingview.enabled = False
     cfg.mt5_bridge.bridge_url = ""
     cfg.tradeable_instruments = []
     cfg.price_provider.realtime_provider = "yfinance"
@@ -70,7 +69,6 @@ def test_health_lightweight(_state_setup):
     # 旧フィールドが残っていない (Phase 3b で /status に移動)
     assert "llm_circuit_breakers" not in data
     assert "snapshots" not in data
-    assert "tradingview" not in data
 
 
 def test_status_returns_subsystem_health(_state_setup):
@@ -79,7 +77,6 @@ def test_status_returns_subsystem_health(_state_setup):
     assert resp.status_code == 200
     data = resp.json()
     assert "llm_circuit_breakers" in data
-    assert "tradingview" in data
     assert "price_provider" in data
     assert "snapshots" in data
     assert "mt5_bridge" in data
