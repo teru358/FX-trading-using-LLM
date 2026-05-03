@@ -111,7 +111,6 @@ class TradingConfig:
     signal_deadband: float = 0.15
     min_lot_size: float = 1000.0
     lot_unit: float = 1000.0
-    trading_mode: str = "paper"
     # ポジション再評価（Phase 4a）
     position_review_enabled: bool = False
     reversal_confidence_min: float = 0.70    # Layer 1: 反転シグナルの最低信頼度
@@ -322,13 +321,6 @@ class TwelveDataConfig:
     per_minute_limit: int = 8
     use_for_monitor: bool = True
     indices: list[str] = field(default_factory=list)  # TD で取得検証済 ETF / index
-
-
-@dataclass
-class PriceProviderConfig:
-    """価格データプロバイダー設定。"""
-    realtime_provider: str = "yfinance"  # "yfinance" | "twelvedata"
-    twelvedata: TwelveDataConfig = field(default_factory=TwelveDataConfig)
 
 
 @dataclass
@@ -562,72 +554,32 @@ class ProvidersConfig:
 
 
 @dataclass
-class Mt5BridgeConfig:
-    """MT5 ブリッジサービス (Windows 側 FastAPI) との接続設定。
-
-    main PC で MetaTrader5 + Python ブリッジを動かし、stick PC の finance
-    から HTTP で発注・照会する構成。
-
-    機能別設定:
-    - 共通: enabled, bridge_url
-    - heartbeat (Phase 1+2): heartbeat_interval_minutes, request_timeout_seconds, log_path
-    - 発注 (Phase 3a, trading_mode = mt5_bridge / shadow): order_request_timeout_seconds,
-      lot_size_units, magic_number
-    - シャドートレード (trading_mode = shadow): shadow_log_path, shadow_observer_state_dir
-    - フォールバック (Phase 3b): fallback (Mt5FallbackConfig)
-    """
-    # ── 共通 ──
-    enabled: bool = False                                # true で heartbeat ジョブ起動
-    bridge_url: str = ""                                 # 例: "http://192.168.1.10:8812"
-
-    # ── heartbeat ──
-    heartbeat_interval_minutes: int = 60                 # 何分おきに /health を叩くか
-    request_timeout_seconds: float = 5.0                 # heartbeat /health タイムアウト
-    log_path: str = "data/state/mt5_heartbeat.jsonl"     # JSONL 追記ログ
-
-    # ── 発注 (trading_mode = mt5_bridge or shadow 時) ──
-    order_request_timeout_seconds: float = 10.0          # /order POST タイムアウト
-    lot_size_units: int = 100_000                        # 1 lot = 100,000 通貨 (FX 標準)
-    magic_number: int = 12345                            # MT5 発注時の bot 識別 ID
-
-    # ── 自動 soft halt 閾値 (Phase 3b タスク 14、発注経路専用) ──
-    bridge_offline_threshold_minutes: int = 30           # bridge 不通がこの分数継続したら auto soft halt
-    consecutive_reject_threshold: int = 3                # MT5 retcode REJECT 連発回数で auto soft halt
-
-    # ── シャドートレード (trading_mode = shadow 時のみ) ──
-    shadow_log_path: str = "data/state/shadow_trades.jsonl"
-    shadow_observer_state_dir: str = "data/shadow_state"  # observer 専用 state_store
-
-    # ── フォールバック (Phase 3b: MT5 → TD → yfinance チェーン) ──
-    fallback: Mt5FallbackConfig = field(default_factory=Mt5FallbackConfig)
-
-
-@dataclass
 class AppConfig:
-    trading: TradingConfig
-    instruments: list[InstrumentConfig]
-    schedule: ScheduleConfig
-    logging: LoggingConfig
-    news_collection: NewsCollectionConfig
-    news_sources: NewsSourcesConfig
-    rag: RagConfig
-    notifier: NotifierConfig
+    # ── トップレベル mode + provider 選択 (旧 trading.trading_mode + 暗黙判定を置換) ──
+    mode: str = "paper"                           # "paper" | "live" | "live_test"
+    paper_provider: str = "yfinance"              # "yfinance" | "twelvedata"
+    live_broker: str | None = None                # "mt5" | "oanda" | None
+
+    # ── 既存フィールド (順序維持) ──
+    trading: TradingConfig = field(default_factory=TradingConfig)
+    instruments: list[InstrumentConfig] = field(default_factory=list)
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
+    news_collection: NewsCollectionConfig = field(default_factory=NewsCollectionConfig)
+    news_sources: NewsSourcesConfig = field(default_factory=NewsSourcesConfig)
+    rag: RagConfig = field(default_factory=RagConfig)
+    notifier: NotifierConfig = field(default_factory=NotifierConfig)
     price_monitor: PriceMonitorConfig = field(default_factory=PriceMonitorConfig)
-    price_provider: PriceProviderConfig = field(default_factory=PriceProviderConfig)
     api: ApiConfig = field(default_factory=ApiConfig)
     llm: LLMConfig = field(default_factory=LLMConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     keywords: KeywordsConfig = field(default_factory=KeywordsConfig)
     economic_calendar: EconomicCalendarConfig = field(default_factory=EconomicCalendarConfig)
-    weekly_diagnosis: "WeeklyDiagnosisConfig" = field(
-        default_factory=lambda: WeeklyDiagnosisConfig()
-    )
-    data_backup: "DataBackupConfig" = field(
-        default_factory=lambda: DataBackupConfig()
-    )
-    mt5_bridge: "Mt5BridgeConfig" = field(
-        default_factory=lambda: Mt5BridgeConfig()
-    )
+    weekly_diagnosis: WeeklyDiagnosisConfig = field(default_factory=WeeklyDiagnosisConfig)
+    data_backup: DataBackupConfig = field(default_factory=DataBackupConfig)
+
+    # ── プロバイダー別設定 (旧 price_provider + mt5_bridge を統合) ──
+    providers: ProvidersConfig = field(default_factory=ProvidersConfig)
 
     @property
     def state_dir(self) -> Path:

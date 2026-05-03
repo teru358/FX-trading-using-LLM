@@ -36,7 +36,6 @@ from src.config.schema import (
     LLMConfig,
     LLMRoleConfig,
     LoggingConfig,
-    Mt5BridgeConfig,
     Mt5FallbackConfig,
     MultiTimeframeConfig,
     NewsCollectionConfig,
@@ -45,7 +44,6 @@ from src.config.schema import (
     ProviderConfig,
     ForecastAccuracyFeedbackConfig,
     PriceMonitorConfig,
-    PriceProviderConfig,
     RagConfig,
     ScheduleConfig,
     TimeframeConfig,
@@ -102,6 +100,120 @@ def _merge_split_configs(base: dict, config_dir: Path) -> dict:
                 for key, value in extra.items():
                     base[key] = value
     return base
+
+
+def _load_provider_yaml(name: str, config_dir: Path) -> dict | None:
+    """config/providers/{name}.yaml を読み込む。存在しなければ None。"""
+    fpath = config_dir / "providers" / f"{name}.yaml"
+    if not fpath.exists():
+        return None
+    with open(fpath, encoding="utf-8") as f:
+        data = yaml.safe_load(f)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ConfigError(
+            f"providers/{name}.yaml must contain a YAML mapping at the top level"
+        )
+    return data
+
+
+_VALID_MODES = ("paper", "live", "live_test")
+_VALID_PAPER_PROVIDERS = ("yfinance", "twelvedata")
+_VALID_LIVE_BROKERS = ("mt5", "oanda")
+
+
+def _build_providers_config(
+    mode: str,
+    paper_provider: str,
+    live_broker: str | None,
+    config_dir: Path,
+):
+    """mode + provider 選択に応じて、必須 provider yaml を読み込む。"""
+    from src.config.schema import (
+        Mt5Config,
+        Mt5FallbackConfig,
+        OandaConfig,
+        ProvidersConfig,
+        TwelveDataConfig,
+    )
+
+    td_cfg: TwelveDataConfig | None = None
+    if paper_provider == "twelvedata":
+        raw = _load_provider_yaml("twelvedata", config_dir)
+        if raw is None:
+            raise ConfigError(
+                "providers/twelvedata.yaml not found (required when "
+                "paper_provider=twelvedata). Copy providers/twelvedata.yaml.example."
+            )
+        td_cfg = _from_dict(TwelveDataConfig, raw)
+
+    mt5_cfg: Mt5Config | None = None
+    if live_broker == "mt5":
+        raw = _load_provider_yaml("mt5", config_dir)
+        if raw is None:
+            raise ConfigError(
+                "providers/mt5.yaml not found (required when live_broker=mt5). "
+                "Copy providers/mt5.yaml.example."
+            )
+        mt5_raw = dict(raw)
+        if "fallback" in mt5_raw and isinstance(mt5_raw["fallback"], dict):
+            mt5_raw["fallback"] = _from_dict(Mt5FallbackConfig, mt5_raw["fallback"])
+        mt5_cfg = _from_dict(Mt5Config, mt5_raw)
+        if not mt5_cfg.bridge_url:
+            raise ConfigError(
+                "providers/mt5.yaml: bridge_url is required (got empty string)."
+            )
+
+    oanda_cfg: OandaConfig | None = None
+    if live_broker == "oanda":
+        raw = _load_provider_yaml("oanda", config_dir)
+        if raw is None:
+            raise ConfigError(
+                "providers/oanda.yaml not found (required when live_broker=oanda). "
+                "Copy providers/oanda.yaml.example."
+            )
+        oanda_cfg = _from_dict(OandaConfig, raw)
+
+    return ProvidersConfig(twelvedata=td_cfg, mt5=mt5_cfg, oanda=oanda_cfg)
+
+
+def _validate_top_level(raw: dict) -> tuple[str, str, str | None]:
+    """settings.yaml トップレベルから mode/paper_provider/live_broker を検証して返す。"""
+    mode = raw.get("mode", "paper")
+    if mode not in _VALID_MODES:
+        raise ConfigError(
+            f"settings.yaml: mode={mode!r} is invalid. "
+            f"Must be one of {_VALID_MODES}."
+        )
+
+    paper_provider = raw.get("paper_provider", "yfinance")
+    if paper_provider not in _VALID_PAPER_PROVIDERS:
+        raise ConfigError(
+            f"settings.yaml: paper_provider={paper_provider!r} is invalid. "
+            f"Must be one of {_VALID_PAPER_PROVIDERS}."
+        )
+
+    live_broker = raw.get("live_broker", None)
+    if live_broker is not None and live_broker not in _VALID_LIVE_BROKERS:
+        raise ConfigError(
+            f"settings.yaml: live_broker={live_broker!r} is invalid. "
+            f"Must be one of {_VALID_LIVE_BROKERS} or null."
+        )
+
+    if mode in ("live", "live_test") and live_broker is None:
+        raise ConfigError(
+            f"settings.yaml: mode={mode!r} requires live_broker (got null). "
+            f"Set live_broker to one of {_VALID_LIVE_BROKERS}."
+        )
+
+    if mode == "live_test" and live_broker == "oanda":
+        raise ConfigError(
+            "settings.yaml: mode='live_test' is not supported with live_broker='oanda'. "
+            "Use live_broker='mt5'."
+        )
+
+    return mode, paper_provider, live_broker
 
 
 _DEPRECATED_TRADING_KEYS = {
@@ -233,6 +345,12 @@ def load_config(config_path: Path | None = None) -> AppConfig:
 
     raw = _merge_split_configs(raw, config_path.parent)
 
+    # ── トップレベル mode + provider 選択 ──
+    mode, paper_provider, live_broker = _validate_top_level(raw)
+    providers_cfg = _build_providers_config(
+        mode, paper_provider, live_broker, config_path.parent,
+    )
+
     # ── フラット configs (_from_dict で自動構築) ──────────────────
 
     trading_raw = _strip_deprecated_keys(raw.get("trading", {}) or {})
@@ -252,11 +370,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     economic_calendar_cfg = _from_dict(EconomicCalendarConfig, raw.get("economic_calendar", {}))
     weekly_diagnosis_cfg = _from_dict(WeeklyDiagnosisConfig, raw.get("weekly_diagnosis", {}))
     data_backup_cfg = _from_dict(DataBackupConfig, raw.get("data_backup", {}))
-    # mt5_bridge は nested fallback dataclass を含むため、専用処理で組立
-    mt5_raw = dict(raw.get("mt5_bridge", {}))
-    if "fallback" in mt5_raw and isinstance(mt5_raw["fallback"], dict):
-        mt5_raw["fallback"] = _from_dict(Mt5FallbackConfig, mt5_raw["fallback"])
-    mt5_bridge_cfg = _from_dict(Mt5BridgeConfig, mt5_raw)
 
     # ── 特殊ケース: YAML キー ≠ フィールド名 ─────────────────────
 
@@ -316,13 +429,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         feeds_global=ns.get("feeds_global", _default_ns.feeds_global),
         feeds_japan=ns.get("feeds_japan", _default_ns.feeds_japan),
         feedly=feedly_cfg,
-    )
-
-    # PriceProviderConfig (nested TwelveDataConfig)
-    pp = raw.get("price_provider", {})
-    price_provider = PriceProviderConfig(
-        realtime_provider=pp.get("realtime_provider", "yfinance"),
-        twelvedata=_from_dict(TwelveDataConfig, pp.get("twelvedata", {})),
     )
 
     # AnalysisConfig (nested indicators / chart_patterns / multi_timeframe)
@@ -386,6 +492,10 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     # ── AppConfig 組み立て ────────────────────────────────────────
 
     return AppConfig(
+        mode=mode,
+        paper_provider=paper_provider,
+        live_broker=live_broker,
+        providers=providers_cfg,
         trading=trading,
         instruments=instruments,
         schedule=schedule,
@@ -395,7 +505,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         rag=rag,
         notifier=notifier,
         price_monitor=price_monitor,
-        price_provider=price_provider,
         api=api_cfg,
         llm=llm_cfg,
         analysis=analysis_cfg,
@@ -403,5 +512,4 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         economic_calendar=economic_calendar_cfg,
         weekly_diagnosis=weekly_diagnosis_cfg,
         data_backup=data_backup_cfg,
-        mt5_bridge=mt5_bridge_cfg,
     )
