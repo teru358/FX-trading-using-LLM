@@ -36,12 +36,15 @@ from src.config.schema import (
     LLMConfig,
     LLMRoleConfig,
     LoggingConfig,
+    Mt5Config,
     Mt5FallbackConfig,
     MultiTimeframeConfig,
     NewsCollectionConfig,
     NewsSourcesConfig,
     NotifierConfig,
+    OandaConfig,
     ProviderConfig,
+    ProvidersConfig,
     ForecastAccuracyFeedbackConfig,
     PriceMonitorConfig,
     RagConfig,
@@ -130,14 +133,6 @@ def _build_providers_config(
     config_dir: Path,
 ):
     """mode + provider 選択に応じて、必須 provider yaml を読み込む。"""
-    from src.config.schema import (
-        Mt5Config,
-        Mt5FallbackConfig,
-        OandaConfig,
-        ProvidersConfig,
-        TwelveDataConfig,
-    )
-
     td_cfg: TwelveDataConfig | None = None
     if paper_provider == "twelvedata":
         raw = _load_provider_yaml("twelvedata", config_dir)
@@ -220,23 +215,27 @@ _DEPRECATED_TRADING_KEYS = {
     "max_total_positions",
     "max_positions_per_currency_group",
     "max_same_direction_per_group",
+    "trading_mode",
 }
 
 
 def _strip_deprecated_keys(trading_dict: dict) -> dict:
-    """deprecated trading キーを除去 (Phase 4 で本関数自体を削除予定)。
+    """deprecated trading キーを除去。
 
     Phase 3b で max_total_positions / max_positions_per_currency_group /
     max_same_direction_per_group を廃止し max_positions_per_pair に統合した。
-    旧 settings.yaml に残っていれば WARNING ログ + 無視。
+    Config restructure で trading.trading_mode を廃止し、トップレベル
+    mode フィールドに置換した。
     """
     result = dict(trading_dict)
     for key in list(result.keys()):
         if key in _DEPRECATED_TRADING_KEYS:
+            hint = ""
+            if key == "trading_mode":
+                hint = " Use top-level 'mode: paper|live|live_test' instead."
             logger.warning(
-                f"[CONFIG] '{key}' is deprecated and ignored. "
-                f"Remove it from settings.yaml. "
-                f"This warning will be removed in Phase 4."
+                f"[CONFIG] 'trading.{key}' is deprecated and ignored.{hint} "
+                f"Remove it from settings.yaml."
             )
             result.pop(key)
     return result

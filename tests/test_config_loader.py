@@ -46,6 +46,40 @@ def test_load_config_paper_yfinance_no_provider_files(tmp_path):
     assert cfg.providers.mt5 is None
 
 
+def test_load_config_paper_twelvedata_requires_provider_yaml(tmp_path):
+    """paper_provider=twelvedata で providers/twelvedata.yaml が無いと ConfigError。"""
+    _write(tmp_path / "settings.yaml", _minimal_settings("""
+mode: paper
+paper_provider: twelvedata
+live_broker: null
+"""))
+    with pytest.raises(ConfigError, match="providers/twelvedata.yaml not found"):
+        load_config(tmp_path / "settings.yaml")
+
+
+def test_load_config_paper_twelvedata_loads_provider_yaml(tmp_path):
+    """providers/twelvedata.yaml がロードされ、indices が反映される。"""
+    _write(tmp_path / "settings.yaml", _minimal_settings("""
+mode: paper
+paper_provider: twelvedata
+live_broker: null
+"""))
+    _write(tmp_path / "providers" / "twelvedata.yaml", """
+daily_limit: 1000
+per_minute_limit: 10
+use_for_monitor: false
+indices:
+  - GLD
+  - SPY
+""")
+    cfg = load_config(tmp_path / "settings.yaml")
+    assert cfg.providers.twelvedata is not None
+    assert cfg.providers.twelvedata.daily_limit == 1000
+    assert cfg.providers.twelvedata.per_minute_limit == 10
+    assert cfg.providers.twelvedata.use_for_monitor is False
+    assert cfg.providers.twelvedata.indices == ["GLD", "SPY"]
+
+
 def test_load_config_live_mt5_requires_provider_yaml(tmp_path):
     """mode=live + live_broker=mt5 で providers/mt5.yaml が無いと ConfigError。"""
     _write(tmp_path / "settings.yaml", _minimal_settings("""
@@ -77,6 +111,21 @@ fallback:
     assert cfg.providers.mt5.bridge_url == "http://localhost:8812"
     assert cfg.providers.mt5.api_key == "secret"
     assert cfg.providers.mt5.fallback.failure_window_sec == 600
+
+
+def test_load_config_mt5_empty_bridge_url_rejected(tmp_path):
+    """providers/mt5.yaml の bridge_url が空文字なら ConfigError。"""
+    _write(tmp_path / "settings.yaml", _minimal_settings("""
+mode: live
+paper_provider: yfinance
+live_broker: mt5
+"""))
+    _write(tmp_path / "providers" / "mt5.yaml", """
+bridge_url: ""
+api_key: "secret"
+""")
+    with pytest.raises(ConfigError, match="bridge_url is required"):
+        load_config(tmp_path / "settings.yaml")
 
 
 def test_load_config_live_test_mt5_works(tmp_path):
