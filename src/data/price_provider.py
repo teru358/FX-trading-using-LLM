@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from src.config.schema import Mt5FallbackConfig
 from src.data.mt5_ohlcv_fetcher import Mt5OhlcvFetcher, Mt5UnreachableError
 from src.data.price_fetcher import CurrentPrice, PriceData, fetch_current_price, fetch_ohlcv
 from src.data.provider_health_tracker import ProviderHealthTracker
@@ -94,10 +95,14 @@ class PriceProvider:
                 minutes=mt5_cfg.fallback.heartbeat_interval_degraded_min,
             )
         else:
+            _defaults = Mt5FallbackConfig()
             self._health_tracker = health_tracker or ProviderHealthTracker(
-                failure_window_sec=300, failure_threshold=2,
+                failure_window_sec=_defaults.failure_window_sec,
+                failure_threshold=_defaults.failure_threshold,
             )
-            self._health_check_interval = timedelta(minutes=15)
+            self._health_check_interval = timedelta(
+                minutes=_defaults.heartbeat_interval_degraded_min,
+            )
         self._notifier = notifier
         self._active_provider: dict[str, str] = {}
         self._last_health_check_at: datetime | None = None
