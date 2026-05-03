@@ -165,7 +165,7 @@ def _build_macro_context(config: AppConfig, analysis_store: AnalysisStore) -> st
             macro_snapshots.append(snaps[0])
     return format_macro_context_for_prompt(
         macro_snapshots, watch_only,
-        realtime_provider=config.price_provider.realtime_provider,
+        realtime_provider=config.paper_provider,
     )
 
 

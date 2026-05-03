@@ -813,21 +813,23 @@ def _build_trading_runtime(config: AppConfig):
 
     # Phase 3b: notifier を broker 構築前に生成 (mt5_bridge / shadow が利用)
     notifier = create_notifier(config.notifier.enabled)
+    mt5_cfg = config.providers.mt5
     broker = create_broker(
-        config.trading.trading_mode,
+        config.mode,
+        config.live_broker,
         max_positions_per_pair=config.trading.max_positions_per_pair,
         scale_in_enabled=config.trading.scale_in_enabled,
         scale_in_conf_margin=config.trading.scale_in_conf_margin,
         scale_in_score_margin=config.trading.scale_in_score_margin,
         notifier=notifier,
-        mt5_bridge_url=config.mt5_bridge.bridge_url,
-        mt5_lot_size_units=config.mt5_bridge.lot_size_units,
-        mt5_magic_number=config.mt5_bridge.magic_number,
-        mt5_order_timeout_seconds=config.mt5_bridge.order_request_timeout_seconds,
-        mt5_bridge_offline_threshold_minutes=config.mt5_bridge.bridge_offline_threshold_minutes,
-        mt5_consecutive_reject_threshold=config.mt5_bridge.consecutive_reject_threshold,
-        shadow_log_path=config.mt5_bridge.shadow_log_path,
-        shadow_observer_state_dir=config.mt5_bridge.shadow_observer_state_dir,
+        mt5_bridge_url=(mt5_cfg.bridge_url if mt5_cfg else ""),
+        mt5_lot_size_units=(mt5_cfg.lot_size_units if mt5_cfg else 100_000),
+        mt5_magic_number=(mt5_cfg.magic_number if mt5_cfg else 12345),
+        mt5_order_timeout_seconds=(mt5_cfg.order_request_timeout_seconds if mt5_cfg else 10.0),
+        mt5_bridge_offline_threshold_minutes=(mt5_cfg.bridge_offline_threshold_minutes if mt5_cfg else 30),
+        mt5_consecutive_reject_threshold=(mt5_cfg.consecutive_reject_threshold if mt5_cfg else 3),
+        live_test_log_path=(mt5_cfg.shadow_log_path if mt5_cfg else "data/state/shadow_trades.jsonl"),
+        live_test_observer_state_dir=(mt5_cfg.shadow_observer_state_dir if mt5_cfg else "data/shadow_state"),
         initial_balance=config.trading.initial_balance,
         **_dd_kwargs,
     )
@@ -853,7 +855,7 @@ async def trading_cycle(
     broker, adaptive_store, notifier, llm_price, llm_reflect = _build_trading_runtime(config)
 
     logger.info(
-        f"[TRADE] mode={config.trading.trading_mode} broker={type(broker).__name__} "
+        f"[TRADE] mode={config.mode} broker={type(broker).__name__} "
         f"notifier={type(notifier).__name__} "
         f"price={type(llm_price).__name__}({llm_price.model_name}) "
         f"reflect={type(llm_reflect).__name__}({llm_reflect.model_name})"

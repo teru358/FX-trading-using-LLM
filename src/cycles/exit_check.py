@@ -54,14 +54,16 @@ async def exit_check_cycle(
         f"({len(account.open_positions)} open positions) ==="
     )
 
+    mt5_cfg = config.providers.mt5
     broker = create_broker(
-        config.trading.trading_mode,
-        mt5_bridge_url=config.mt5_bridge.bridge_url,
-        mt5_lot_size_units=config.mt5_bridge.lot_size_units,
-        mt5_magic_number=config.mt5_bridge.magic_number,
-        mt5_order_timeout_seconds=config.mt5_bridge.order_request_timeout_seconds,
-        shadow_log_path=config.mt5_bridge.shadow_log_path,
-        shadow_observer_state_dir=config.mt5_bridge.shadow_observer_state_dir,
+        config.mode,
+        config.live_broker,
+        mt5_bridge_url=(mt5_cfg.bridge_url if mt5_cfg else ""),
+        mt5_lot_size_units=(mt5_cfg.lot_size_units if mt5_cfg else 100_000),
+        mt5_magic_number=(mt5_cfg.magic_number if mt5_cfg else 12345),
+        mt5_order_timeout_seconds=(mt5_cfg.order_request_timeout_seconds if mt5_cfg else 10.0),
+        live_test_log_path=(mt5_cfg.shadow_log_path if mt5_cfg else "data/state/shadow_trades.jsonl"),
+        live_test_observer_state_dir=(mt5_cfg.shadow_observer_state_dir if mt5_cfg else "data/shadow_state"),
         initial_balance=config.trading.initial_balance,
     )
     notifier = create_notifier(config.notifier.enabled)
