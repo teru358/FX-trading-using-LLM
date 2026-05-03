@@ -376,7 +376,7 @@ async def collect_all_technical(
             macro_snapshots.append(snaps[0])
     macro_ctx = format_macro_context_for_prompt(
         macro_snapshots, watch_only,
-        realtime_provider=config.price_provider.realtime_provider,
+        realtime_provider=config.paper_provider,
     )
 
     # Phase 1.5: trade×watch の価格相関を計算（LLMなし、キャッシュ参照のみ）

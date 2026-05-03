@@ -101,11 +101,11 @@ def main() -> None:
     _trade_n = len(config.tradeable_instruments)
     _watch_n = len(config.watch_only_instruments)
     _api = "on" if config.api.enabled else "off"
-    _pp = config.price_provider.realtime_provider
+    _pp = config.paper_provider
     _logger.info(
         "[SYSTEM] Startup — mode=%s daemon=%s instruments=%dtrade/%dwatch "
         "API=%s provider=%s",
-        config.trading.trading_mode, args.daemon,
+        config.mode, args.daemon,
         _trade_n, _watch_n,
         _api, _pp,
     )
@@ -123,7 +123,7 @@ def main() -> None:
     hold_store = HoldDecisionStore(config.prices_db_path)
     price_provider = PriceProvider(config)
 
-    if config.price_provider.realtime_provider == "twelvedata":
+    if config.paper_provider == "twelvedata":
         if price_provider._td_fetcher:
             _ok = price_provider._td_fetcher.probe()
             if _ok:
@@ -337,10 +337,10 @@ def main() -> None:
         )
 
     # MT5 ブリッジ稼働率測定 heartbeat (Phase 1 — 発注機能はまだ含めない)
-    if config.mt5_bridge.enabled:
+    if config.live_broker == "mt5" and config.providers.mt5 is not None:
         from src.jobs.mt5_heartbeat import run_mt5_heartbeat as _run_mt5_hb
 
-        _mt5_cfg = config.mt5_bridge
+        _mt5_cfg = config.providers.mt5
 
         def _mt5_heartbeat_run():
             _run_mt5_hb(config)

@@ -51,13 +51,14 @@ def _probe(url: str, timeout: float) -> tuple[bool, float | None, int | None, st
 def run_mt5_heartbeat(config: AppConfig) -> None:
     """schedule ライブラリから呼ばれる同期エントリポイント。
 
-    enabled=False または bridge_url 空ならノーオペで終了。
+    live_broker != "mt5" もしくは providers.mt5 未設定、または
+    bridge_url 空ならノーオペで終了。
     失敗してもデーモンは止まらない。
     """
-    cfg = config.mt5_bridge
-    if not cfg.enabled:
-        logger.debug("[MT5_HB] disabled, skipping")
+    if config.live_broker != "mt5" or config.providers.mt5 is None:
+        logger.debug("[MT5_HB] live_broker != mt5, skipping")
         return
+    cfg = config.providers.mt5
     base = cfg.bridge_url.rstrip("/")
     if not base:
         logger.debug("[MT5_HB] bridge_url not configured, skipping")

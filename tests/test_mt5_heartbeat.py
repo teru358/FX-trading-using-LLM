@@ -10,38 +10,36 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
-import pytest
 
-# TODO(Task 5-11): config restructure で Mt5BridgeConfig は Mt5Config に置換され、
-# cfg.mt5_bridge は cfg.providers.mt5 に移動。src/jobs/mt5_heartbeat.py の
-# consumer 側移行と合わせてこのテストを書き直す。それまではモジュール skip。
-pytest.skip(
-    "Disabled during config restructure (Task 2-4); will be migrated in Tasks 5-11.",
-    allow_module_level=True,
-)
-
-from src.config.schema import Mt5BridgeConfig, ScheduleConfig  # noqa: E402
-from src.jobs.mt5_heartbeat import _append_record, run_mt5_heartbeat  # noqa: E402
+from src.config.schema import Mt5Config, ProvidersConfig, ScheduleConfig
+from src.jobs.mt5_heartbeat import _append_record, run_mt5_heartbeat
 
 
-def _make_cfg(**overrides) -> object:
-    """テスト用の最小 AppConfig 風スタブ。"""
+def _make_cfg(*, live_broker: str | None = "mt5", **overrides) -> object:
+    """テスト用の最小 AppConfig 風スタブ。
+
+    live_broker=None (または "mt5" 以外) を指定すると providers.mt5 が
+    存在しても heartbeat は noop になる挙動を再現できる。
+    """
     @dataclass
     class _C:
-        mt5_bridge: Mt5BridgeConfig
+        live_broker: str | None
+        providers: ProvidersConfig
         schedule: ScheduleConfig = field(
             default_factory=lambda: ScheduleConfig(timezone="Asia/Tokyo")
         )
 
     base = dict(
-        enabled=True,
         bridge_url="http://example.local:8812",
         heartbeat_interval_minutes=60,
         request_timeout_seconds=2.0,
         log_path="data/state/mt5_heartbeat.jsonl",
     )
     base.update(overrides)
-    return _C(mt5_bridge=Mt5BridgeConfig(**base))
+    return _C(
+        live_broker=live_broker,
+        providers=ProvidersConfig(mt5=Mt5Config(**base)),
+    )
 
 
 # ── _append_record ────────────────────────────────────────────────
@@ -63,8 +61,9 @@ def test_append_record_creates_parent_and_writes_jsonl(tmp_path: Path):
 
 
 def test_disabled_is_noop(tmp_path: Path, monkeypatch):
+    """live_broker != "mt5" のとき heartbeat は noop。"""
     monkeypatch.setattr("src.jobs.mt5_heartbeat.BASE_DIR", tmp_path)
-    cfg = _make_cfg(enabled=False)
+    cfg = _make_cfg(live_broker=None)
     run_mt5_heartbeat(cfg)
     # JSONL は作成されない
     assert not (tmp_path / "data/state/mt5_heartbeat.jsonl").exists()
