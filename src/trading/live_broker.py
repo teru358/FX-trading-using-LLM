@@ -140,7 +140,6 @@ def create_broker(
     scale_in_enabled: bool = False,
     scale_in_conf_margin: float = 0.05,
     scale_in_score_margin: float = 0.05,
-    manual_position_mgr: "PositionManager | None" = None,
     notifier: "NotifierAdapter | None" = None,
     drawdown_kill_switch_enabled: bool = False,
     drawdown_kill_switch_max_pct: float = 0.10,
@@ -160,13 +159,12 @@ def create_broker(
     """trading_mode に応じた BrokerAdapter を返すファクトリ関数。
 
     Args:
-        trading_mode: "paper" | "live" | "signal" | "mt5_bridge" | "shadow"
+        trading_mode: "paper" | "live" | "mt5_bridge" | "shadow"
         max_positions_per_pair: 1ペアあたりの最大ポジション数 (scale-in上限)。
         scale_in_enabled: スケールインを許可するか。
         scale_in_conf_margin: スケールイン時に要求する追加信頼度マージン。
         scale_in_score_margin: スケールイン時に要求する追加スコアマージン。
-        manual_position_mgr: "signal" モード時に必須。manual ポジション管理用。
-        notifier: "signal" モード時に必須。通知アダプター。
+        notifier: 通知アダプター。
         drawdown_kill_switch_*: 新規エントリーの DD kill switch 設定。
         mt5_bridge_url: "mt5_bridge" or "shadow" 時に必須。
         shadow_*: "shadow" 時に observer 専用 state_store と比較ログの場所を指定。
@@ -186,27 +184,6 @@ def create_broker(
         )
     elif trading_mode == "live":
         return LiveBrokerAdapter()
-    elif trading_mode == "signal":
-        if manual_position_mgr is None:
-            raise ValueError(
-                "signal モードでは manual_position_mgr が必須です。"
-            )
-        if notifier is None:
-            raise ValueError(
-                "signal モードでは notifier が必須です。"
-            )
-        from src.trading.signal_broker import SignalBrokerAdapter
-        return SignalBrokerAdapter(
-            manual_position_mgr=manual_position_mgr,
-            notifier=notifier,
-            max_positions_per_pair=max_positions_per_pair,
-            scale_in_enabled=scale_in_enabled,
-            scale_in_conf_margin=scale_in_conf_margin,
-            scale_in_score_margin=scale_in_score_margin,
-            drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
-            drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
-            drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
-        )
     elif trading_mode == "mt5_bridge":
         from src.trading.mt5_bridge_broker import Mt5BridgeBrokerAdapter
         if not mt5_bridge_url:
@@ -278,5 +255,5 @@ def create_broker(
     else:
         raise ValueError(
             f"Unknown trading_mode: {trading_mode!r}. "
-            "Use 'paper', 'live', 'signal', 'mt5_bridge', or 'shadow'."
+            "Use 'paper', 'live', 'mt5_bridge', or 'shadow'."
         )

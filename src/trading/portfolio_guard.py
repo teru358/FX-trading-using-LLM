@@ -1,7 +1,7 @@
 """ポートフォリオレベルのリスク管理ガード。
 
 ペアごとのポジション数上限と drawdown kill switch を提供する。
-paper_trader / signal_broker / mt5_bridge_broker から呼び出す。
+paper_trader / mt5_bridge_broker から呼び出す。
 """
 from __future__ import annotations
 

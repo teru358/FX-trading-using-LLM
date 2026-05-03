@@ -25,8 +25,6 @@ from src.views import run_analysis_summary, run_ask, run_forecast_view, run_news
 _console = Console()
 logger = logging.getLogger(__name__)
 
-_pending_signals: list = []  # モジュールレベルで保持
-
 _HELP = """\
 [bold cyan]コマンド一覧[/bold cyan]
   [cyan]status[/cyan]  (s)          — 残高とオープンポジションを表示
@@ -37,7 +35,6 @@ _HELP = """\
   [cyan]run trade[/cyan]            — 取引判定ループを今すぐ実行（動作確認用）
   [cyan]compare[/cyan]  (pair)      — 複数モデルで分析を比較  例: compare USDJPY=X
   [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問・コメントを送信
-  [cyan]manual[/cyan]               — 手動ポジション管理 (signal モード)
   [cyan]audit[/cyan] (days)         — 過去トレードの統計診断レポート生成
   [cyan]audit review[/cyan] (days)  — audit + LLM 改善候補の対話選別 (教訓を audit_lessons.md に蓄積)
   [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
@@ -101,147 +98,6 @@ def _cmd_status(config: AppConfig) -> None:
         )
 
     _console.print(tbl)
-
-
-def _cmd_manual(config: AppConfig) -> None:
-    """Manual ポジション管理のインタラクティブモード。"""
-    if config.trading.trading_mode != "signal":
-        _console.print("[red]manual コマンドは signal モードでのみ利用可能です[/red]")
-        return
-
-    manual_state = StateStore(config.manual_state_dir)
-    manual_mgr = PositionManager(manual_state, config.trading.initial_balance, context="ManualCLI")
-
-    while True:
-        _console.print("\n[bold cyan]=== Manual Mode ===[/bold cyan]")
-
-        # Pending Signals
-        if _pending_signals:
-            _console.print("\n[bold]Pending Signals[/bold]")
-            for i, sig in enumerate(_pending_signals, 1):
-                _console.print(
-                    f"  {i}. {sig.pair} {sig.action.upper()}  "
-                    f"score={sig.combined_score:+.3f} "
-                    f"entry={sig.entry_price:.5f} "
-                    f"SL={sig.stop_loss:.5f} TP={sig.take_profit:.5f} "
-                    f"lot={sig.position_size:,.0f}"
-                )
-
-        # Open Positions
-        account = manual_mgr.get_account_state()
-        offset = len(_pending_signals)
-
-        _console.print(f"\n[bold]残高: {account.balance:,.2f}[/bold]")
-        if account.open_positions:
-            _console.print("[bold]Open Positions[/bold]")
-            for i, pos in enumerate(account.open_positions, offset + 1):
-                _console.print(
-                    f"  {i}. {pos.pair} {pos.direction.upper()}  "
-                    f"entry={pos.entry_price:.5f} "
-                    f"SL={pos.stop_loss:.5f} TP={pos.take_profit:.5f}"
-                )
-        else:
-            _console.print("[dim]オープンポジションなし[/dim]")
-
-        _console.print(
-            "\n[dim]<番号> open — ポジション登録  "
-            "<番号> close — 決済記録  "
-            "balance — 残高補正  "
-            "q — 終了[/dim]"
-        )
-
-        try:
-            line = pt_prompt("manual> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            break
-
-        if not line or line.lower() == "q":
-            break
-
-        if line.lower() == "balance":
-            try:
-                val = float(pt_prompt("新しい残高: "))
-                prev = account.balance
-                manual_mgr._balance = val
-                manual_mgr._save()
-                _console.print(f"✓ 残高: {prev:,.2f} → {val:,.2f}")
-            except (ValueError, EOFError, KeyboardInterrupt):
-                _console.print("[red]キャンセルしました[/red]")
-            continue
-
-        parts = line.split()
-        if len(parts) != 2:
-            _console.print("[red]<番号> open/close を入力してください[/red]")
-            continue
-
-        try:
-            idx = int(parts[0])
-            action = parts[1].lower()
-        except ValueError:
-            _console.print("[red]番号は整数で指定してください[/red]")
-            continue
-
-        n_signals = len(_pending_signals)
-        n_positions = len(account.open_positions)
-
-        if action == "open" and 1 <= idx <= n_signals:
-            sig = _pending_signals[idx - 1]
-            try:
-                confirm = pt_prompt(
-                    f"Confirm: {sig.pair} {sig.action.upper()} {sig.entry_price:.5f} "
-                    f"lot={sig.position_size:,.0f} "
-                    f"SL={sig.stop_loss:.5f} TP={sig.take_profit:.5f}? [Y/n/edit] "
-                ).strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                continue
-            if confirm in ("", "y", "yes"):
-                from src.trading.position_manager import Order
-                order = Order.new(
-                    pair=sig.pair, direction=sig.action,
-                    entry_price=sig.entry_price, stop_loss=sig.stop_loss,
-                    take_profit=sig.take_profit, position_size=sig.position_size,
-                    signal_reason=sig.signal_reason,
-                )
-                manual_mgr.open_position(order)
-                _console.print(f"✓ 登録完了 (order_id: {order.order_id[:8]})")
-            elif confirm == "edit":
-                try:
-                    lot = float(pt_prompt(f"  ロット [{sig.position_size:,.0f}]: ") or str(sig.position_size))
-                    sl = float(pt_prompt(f"  SL [{sig.stop_loss:.5f}]: ") or str(sig.stop_loss))
-                    tp = float(pt_prompt(f"  TP [{sig.take_profit:.5f}]: ") or str(sig.take_profit))
-                    from src.trading.position_manager import Order
-                    order = Order.new(
-                        pair=sig.pair, direction=sig.action,
-                        entry_price=sig.entry_price, stop_loss=sl,
-                        take_profit=tp, position_size=lot,
-                        signal_reason=sig.signal_reason,
-                    )
-                    manual_mgr.open_position(order)
-                    _console.print(f"✓ 登録完了 (order_id: {order.order_id[:8]})")
-                except (ValueError, EOFError, KeyboardInterrupt):
-                    _console.print("[red]キャンセルしました[/red]")
-
-        elif action == "close" and n_signals < idx <= n_signals + n_positions:
-            pos = account.open_positions[idx - n_signals - 1]
-            try:
-                close_price = float(pt_prompt(f"  決済価格: "))
-                reason = pt_prompt(f"  理由 [manual]: ").strip() or "manual"
-                closed = manual_mgr.close_position(pos.order_id, close_price, reason)
-                if closed:
-                    _console.print(
-                        f"✓ 決済完了 {closed.pair} PnL={closed.realized_pnl:+.2f} "
-                        f"残高={manual_mgr.get_account_state().balance:,.2f}"
-                    )
-                    # reflection 生成 + directional RAG 登録 (バックグラウンド実行)
-                    from src.rag.vector_store import VectorStore
-                    from src.trading.manual_reflection import run_manual_reflection
-                    store = VectorStore(config.rag_db_path)
-                    _console.print("[dim]reflection 生成中...[/dim]")
-                    asyncio.run(run_manual_reflection(config, store, closed))
-            except (ValueError, EOFError, KeyboardInterrupt):
-                _console.print("[red]キャンセルしました[/red]")
-        else:
-            _console.print("[red]無効な番号またはアクションです[/red]")
 
 
 def _cmd_close(config: AppConfig, pair_arg: str) -> None:
@@ -514,8 +370,6 @@ def run_commands(
                 _aio.run(_update_tv_chart(config, analysis_store))
             elif cmd == "feeds":
                 _cmd_feeds(config)
-            elif cmd == "manual":
-                _cmd_manual(config)
             elif cmd == "close":
                 if not args:
                     _console.print("[red]使い方: close <pair>  例: close USDJPY=X[/red]")

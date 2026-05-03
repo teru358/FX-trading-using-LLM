@@ -24,14 +24,12 @@ import threading
 from fastapi import FastAPI
 
 from src.api._state import state
-from src.api.routes import account, admin, ask, data, health, manual, trading
+from src.api.routes import account, admin, ask, data, health, trading
 from src.concurrency.priority_job_slot import PriorityJobSlot
 from src.config import AppConfig
 from src.data.analysis_store import AnalysisStore
 from src.data.price_store import PriceStore
-from src.persistence.state_store import StateStore
 from src.rag.vector_store import VectorStore
-from src.trading.position_manager import PositionManager
 from src.utils.clock import db_now
 
 logger = logging.getLogger(__name__)
@@ -78,14 +76,6 @@ def start_api_server(
     state.hold_store = hold_store
     state.forecast_store = forecast_store
     state.started_at = db_now()
-
-    if config.trading.trading_mode == "signal":
-        manual_state = StateStore(config.manual_state_dir)
-        state.manual_position_mgr = PositionManager(
-            manual_state, config.trading.initial_balance, context="ManualAPI",
-        )
-        app.include_router(manual.router)
-        logger.info("[API] Manual position routes enabled (signal mode)")
 
     def _run() -> None:
         import uvicorn

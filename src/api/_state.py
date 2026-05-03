@@ -31,7 +31,6 @@ class APIState:
     price_store: PriceStore | None = None
     hold_store: Any = None        # HoldDecisionStore
     forecast_store: Any = None    # ForecastStore
-    manual_position_mgr: Any = None  # PositionManager (signal モード用)
     started_at: datetime | None = None
 
 

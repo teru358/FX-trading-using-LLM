@@ -85,7 +85,6 @@ trading:
   lot_unit: 1000.0                 # ロット切り捨て単位
   # trading_mode:
   #   "paper"      — ローカルシミュレーション (state_store のみ更新)
-  #   "signal"     — シグナル通知のみ (発注しない、manual ポジション SL/TP のみ通知)
   #   "live"       — OANDA REST 実発注 (Phase 3 未実装、NotImplementedError)
   #   "mt5_bridge" — mt5_bridge 経由で MT5 へ発注 (DRY_RUN は bridge .env で制御)
   #   "shadow"     — paper を canonical で動かしつつ mt5_bridge にも発注して比較ログ取得
