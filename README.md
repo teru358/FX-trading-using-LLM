@@ -6,7 +6,7 @@
 
 | 項目 | 内容 |
 |---|---|
-| 取引モード | ペーパートレード / signal（手動発注支援） / OANDA本取引（スタブ） |
+| 取引モード | ペーパートレード / OANDA本取引（スタブ） |
 | 取引スタイル | スウィング（3〜10日） |
 | 価格データ | yfinance / Twelve Data（リアルタイムFX） |
 | ニュース | RSS / Feedly API |
@@ -111,10 +111,6 @@ config/
 | `POST` | `/close/{pair}` | ポジション決済 |
 | `POST` | `/run/trade` | 取引判定実行 |
 | `POST` | `/ask` | セマンティック検索で質問回答 |
-| `POST` | `/manual/open` | 手動ポジション登録 (signal) |
-| `POST` | `/manual/close/{order_id}` | 手動決済記録 (signal) |
-| `GET` | `/manual/list` | 手動ポジション一覧 (signal) |
-| `POST` | `/manual/balance` | 残高補正 (signal) |
 
 ## 詳細ドキュメント
 
