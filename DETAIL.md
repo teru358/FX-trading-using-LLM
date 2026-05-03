@@ -203,17 +203,6 @@ curl -H "X-API-Key: $KEY" $HOST/analyze
 curl -X POST -H "X-API-Key: $KEY" "$HOST/close/USDJPY%3DX"
 curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   -d '{"message":"ドル円の見通しは？"}' $HOST/ask
-
-# signal モード時のみ有効
-curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
-  -d '{"pair":"USDJPY=X","direction":"buy","entry_price":150.2,"position_size":5000,"stop_loss":149.8,"take_profit":151.2}' \
-  $HOST/manual/open
-curl -H "X-API-Key: $KEY" $HOST/manual/list
-curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
-  -d '{"close_price":151.0,"close_reason":"take_profit"}' \
-  "$HOST/manual/close/<order_id>"
-curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
-  -d '{"balance":500000}' $HOST/manual/balance
 ```
 
 ## ディレクトリ構成
@@ -290,11 +279,7 @@ MarketStateTracker が市場の開閉状態を管理:
 | `[CB/*]` | サーキットブレーカー状態遷移 |
 | `[RAG ADJ]` | 方向別RAGスコア補正 |
 | `[ECON]` | 経済指標カレンダー・影響分析 |
-| `[INTERNAL]` | signal モードの内部自動運用ログ |
 | `[AUDIT]` | Performance audit 実行・候補生成・教訓追記 |
-| `[SIGNAL-REC]` | signal モードのシグナル推奨・SL/TP到達通知 |
-| `[REVIEW/MANUAL]` | manual ポジションの Layer 1-3 推奨 |
-| `[MANUAL]` | 手動ポジション操作（REST API / TUI） |
 
 ## 状態ファイル
 
@@ -305,5 +290,4 @@ MarketStateTracker が市場の開閉状態を管理:
 | `data/state/trades.json` | クローズ済み取引履歴 |
 | `data/state/adaptive_params.yaml` | ペア別ATR倍率（動的更新） |
 | `data/rag/` | ChromaDB（ニュース・振り返り・洞察・方向別・経済指標分析） |
-| `data/manual_state/` | signal モードの手動ポジション・残高 |
 | `config/audit_lessons.md` | audit で承認された改善ルール (LLM プロンプト注入) |

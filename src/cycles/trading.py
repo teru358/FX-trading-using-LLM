@@ -881,7 +881,7 @@ async def trading_cycle(
     # Phase 1.5: 決済済オーダーの振り返り + adaptive params 更新 + RAG 蓄積
     if closed_this_run:
         for co in closed_this_run:
-            logger.info(f"[INTERNAL] Closed {co.pair} ({co.close_reason}) pnl={co.realized_pnl or 0:.2f}")
+            logger.info(f"[CLOSE] Closed {co.pair} ({co.close_reason}) pnl={co.realized_pnl or 0:.2f}")
     await _finalize_closed_orders(
         closed_this_run, config, store, embed_fn, llm_reflect,
         adaptive_store, session_store, log_source="[REFLECT/CLOSE]",
