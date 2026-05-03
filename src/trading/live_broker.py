@@ -15,8 +15,9 @@ from __future__ import annotations
    uv add oandapyV20
 
 # 注意事項
-- trading_mode: "live" に設定すると実際の注文が発注される
-- 本番移行前に必ず practice 環境 (trading_mode: "practice_live") でテストすること
+- mode: "live" + live_broker: "oanda" に設定すると実際の OANDA 注文が発注される
+- 本番移行前に必ず practice 環境 (providers/oanda.yaml の environment="practice") でテストすること
+- mode: "live_test" は paper + observer の同時実行で、実発注はしない (検証用)
 - ロットサイズ (position_size) の単位は通貨ペアによって異なる（OANDA: units）
 """
 
@@ -133,7 +134,8 @@ class LiveBrokerAdapter(BrokerAdapter):
 
 
 def create_broker(
-    trading_mode: str,
+    mode: str,
+    live_broker: str | None,
     position_mgr: PositionManager | None = None,
     *,
     max_positions_per_pair: int = 2,
@@ -144,69 +146,76 @@ def create_broker(
     drawdown_kill_switch_enabled: bool = False,
     drawdown_kill_switch_max_pct: float = 0.10,
     drawdown_kill_switch_lookback_days: int = 0,
-    # ── mt5_bridge / shadow 用 (Phase 3a) ──
+    # ── live_broker=mt5 のとき必須 ──
     mt5_bridge_url: str = "",
     mt5_lot_size_units: int = 100_000,
     mt5_magic_number: int = 12345,
     mt5_order_timeout_seconds: float = 10.0,
-    # ── Phase 3b: 自動 soft halt 閾値 (mt5_bridge / shadow) ──
     mt5_bridge_offline_threshold_minutes: int = 30,
     mt5_consecutive_reject_threshold: int = 3,
+    # ── mode=live_test のとき必須 ──
     shadow_log_path: str = "data/state/shadow_trades.jsonl",
     shadow_observer_state_dir: str = "data/shadow_state",
     initial_balance: float = 100_000.0,
 ) -> BrokerAdapter:
-    """trading_mode に応じた BrokerAdapter を返すファクトリ関数。
+    """mode + live_broker に応じた BrokerAdapter を返すファクトリ関数。
 
     Args:
-        trading_mode: "paper" | "live" | "mt5_bridge" | "shadow"
+        mode: "paper" | "live" | "live_test"
+        live_broker: "mt5" | "oanda" | None — mode in {live, live_test} で必須
         max_positions_per_pair: 1ペアあたりの最大ポジション数 (scale-in上限)。
         scale_in_enabled: スケールインを許可するか。
         scale_in_conf_margin: スケールイン時に要求する追加信頼度マージン。
         scale_in_score_margin: スケールイン時に要求する追加スコアマージン。
         notifier: 通知アダプター。
         drawdown_kill_switch_*: 新規エントリーの DD kill switch 設定。
-        mt5_bridge_url: "mt5_bridge" or "shadow" 時に必須。
-        shadow_*: "shadow" 時に observer 専用 state_store と比較ログの場所を指定。
-        initial_balance: shadow モードで observer 専用 PositionManager の初期残高。
+        mt5_bridge_url: live_broker="mt5" のとき必須。
+        shadow_*: mode="live_test" のとき observer 専用 state_store と比較ログの場所を指定。
+        initial_balance: mode="live_test" で observer 専用 PositionManager の初期残高。
     """
     from src.trading.paper_broker import PaperBrokerAdapter
 
-    if trading_mode == "paper":
-        return PaperBrokerAdapter(
-            max_positions_per_pair=max_positions_per_pair,
-            scale_in_enabled=scale_in_enabled,
-            scale_in_conf_margin=scale_in_conf_margin,
-            scale_in_score_margin=scale_in_score_margin,
-            drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
-            drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
-            drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
-        )
-    elif trading_mode == "live":
-        return LiveBrokerAdapter()
-    elif trading_mode == "mt5_bridge":
-        from src.trading.mt5_bridge_broker import Mt5BridgeBrokerAdapter
-        if not mt5_bridge_url:
-            raise ValueError(
-                "trading_mode='mt5_bridge' requires mt5_bridge.bridge_url"
+    paper_kwargs = dict(
+        max_positions_per_pair=max_positions_per_pair,
+        scale_in_enabled=scale_in_enabled,
+        scale_in_conf_margin=scale_in_conf_margin,
+        scale_in_score_margin=scale_in_score_margin,
+        drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
+        drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
+        drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
+    )
+
+    if mode == "paper":
+        return PaperBrokerAdapter(**paper_kwargs)
+
+    if mode == "live":
+        if live_broker == "oanda":
+            return LiveBrokerAdapter()
+        if live_broker == "mt5":
+            from src.trading.mt5_bridge_broker import Mt5BridgeBrokerAdapter
+            if not mt5_bridge_url:
+                raise ValueError(
+                    "mode='live' + live_broker='mt5' requires mt5_bridge_url"
+                )
+            return Mt5BridgeBrokerAdapter(
+                bridge_url=mt5_bridge_url,
+                request_timeout_seconds=mt5_order_timeout_seconds,
+                lot_size_units=mt5_lot_size_units,
+                magic_number=mt5_magic_number,
+                notifier=notifier,
+                bridge_offline_threshold_minutes=mt5_bridge_offline_threshold_minutes,
+                consecutive_reject_threshold=mt5_consecutive_reject_threshold,
+                **paper_kwargs,
             )
-        return Mt5BridgeBrokerAdapter(
-            bridge_url=mt5_bridge_url,
-            request_timeout_seconds=mt5_order_timeout_seconds,
-            lot_size_units=mt5_lot_size_units,
-            magic_number=mt5_magic_number,
-            max_positions_per_pair=max_positions_per_pair,
-            scale_in_enabled=scale_in_enabled,
-            scale_in_conf_margin=scale_in_conf_margin,
-            scale_in_score_margin=scale_in_score_margin,
-            drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
-            drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
-            drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
-            notifier=notifier,
-            bridge_offline_threshold_minutes=mt5_bridge_offline_threshold_minutes,
-            consecutive_reject_threshold=mt5_consecutive_reject_threshold,
+        raise ValueError(
+            f"mode='live' requires live_broker in ('mt5', 'oanda'), got {live_broker!r}"
         )
-    elif trading_mode == "shadow":
+
+    if mode == "live_test":
+        if live_broker != "mt5":
+            raise ValueError(
+                f"mode='live_test' requires live_broker='mt5', got {live_broker!r}"
+            )
         from pathlib import Path
         from src.persistence.state_store import StateStore
         from src.trading.mt5_bridge_broker import Mt5BridgeBrokerAdapter
@@ -214,46 +223,29 @@ def create_broker(
 
         if not mt5_bridge_url:
             raise ValueError(
-                "trading_mode='shadow' requires mt5_bridge.bridge_url"
+                "mode='live_test' requires mt5_bridge_url"
             )
-
-        primary = PaperBrokerAdapter(
-            max_positions_per_pair=max_positions_per_pair,
-            scale_in_enabled=scale_in_enabled,
-            scale_in_conf_margin=scale_in_conf_margin,
-            scale_in_score_margin=scale_in_score_margin,
-            drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
-            drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
-            drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
-        )
+        primary = PaperBrokerAdapter(**paper_kwargs)
         observer = Mt5BridgeBrokerAdapter(
             bridge_url=mt5_bridge_url,
             request_timeout_seconds=mt5_order_timeout_seconds,
             lot_size_units=mt5_lot_size_units,
             magic_number=mt5_magic_number,
-            max_positions_per_pair=max_positions_per_pair,
-            scale_in_enabled=scale_in_enabled,
-            scale_in_conf_margin=scale_in_conf_margin,
-            scale_in_score_margin=scale_in_score_margin,
-            drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
-            drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
-            drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
             notifier=notifier,
             bridge_offline_threshold_minutes=mt5_bridge_offline_threshold_minutes,
             consecutive_reject_threshold=mt5_consecutive_reject_threshold,
+            **paper_kwargs,
         )
-        # observer 専用 state_store + position_mgr (paper の state を汚染しない)
         obs_store = StateStore(Path(shadow_observer_state_dir))
         obs_pm = PositionManager(
-            obs_store, initial_balance, context="ShadowObserver",
+            obs_store, initial_balance, context="LiveTestObserver",
         )
         return ShadowBrokerAdapter(
             primary=primary, observer=observer,
             observer_position_mgr=obs_pm,
             comparison_log_path=Path(shadow_log_path),
         )
-    else:
-        raise ValueError(
-            f"Unknown trading_mode: {trading_mode!r}. "
-            "Use 'paper', 'live', 'mt5_bridge', or 'shadow'."
-        )
+
+    raise ValueError(
+        f"Unknown mode: {mode!r}. Use 'paper', 'live', or 'live_test'."
+    )
