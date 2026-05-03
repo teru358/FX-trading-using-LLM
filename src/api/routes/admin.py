@@ -31,18 +31,25 @@ class HaltRequest(BaseModel):
 
 def _bridge_url() -> str:
     """finance config から bridge URL を取得。未設定なら 503。"""
-    if state.config is None or not state.config.mt5_bridge.bridge_url:
-        raise HTTPException(503, "MT5 bridge not configured (mt5_bridge.bridge_url empty)")
-    return state.config.mt5_bridge.bridge_url.rstrip("/")
+    if state.config is None:
+        raise HTTPException(503, "config not loaded")
+    mt5_cfg = state.config.providers.mt5
+    if mt5_cfg is None or not mt5_cfg.bridge_url:
+        raise HTTPException(
+            503,
+            "MT5 bridge not configured (live_broker != 'mt5' or providers/mt5.yaml missing)",
+        )
+    return mt5_cfg.bridge_url.rstrip("/")
 
 
 def _bridge_headers() -> dict[str, str]:
     """bridge への認証ヘッダー (api_key 設定があれば)。"""
-    cfg = state.config.mt5_bridge if state.config else None
-    api_key = getattr(cfg, "api_key", "") if cfg else ""
     h = {"Content-Type": "application/json"}
-    if api_key:
-        h["X-Bridge-Api-Key"] = api_key
+    if state.config is None:
+        return h
+    mt5_cfg = state.config.providers.mt5
+    if mt5_cfg is not None and mt5_cfg.api_key:
+        h["X-Bridge-Api-Key"] = mt5_cfg.api_key
     return h
 
 

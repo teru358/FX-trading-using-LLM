@@ -38,11 +38,13 @@ def health() -> dict[str, Any]:
     if state.started_at is not None:
         uptime_seconds = (now - state.started_at).total_seconds()
 
-    trading_mode = state.config.trading.trading_mode if state.config else None
+    mode = state.config.mode if state.config else None
+    live_broker = state.config.live_broker if state.config else None
 
     return {
         "status":         "ok",
-        "trading_mode":   trading_mode,
+        "mode":           mode,
+        "live_broker":    live_broker,
         "started_at":     state.started_at.isoformat() if state.started_at else None,
         "uptime_seconds": uptime_seconds,
         "now":            now.isoformat(),
@@ -120,7 +122,7 @@ def _get_mt5_bridge_status() -> dict[str, Any]:
 
     タイムアウトは 2 秒、失敗時は reachable: false で error 内容を返す。
     """
-    cfg = state.config.mt5_bridge if state.config else None
+    cfg = state.config.providers.mt5 if state.config else None
     if cfg is None or not cfg.bridge_url:
         return {"configured": False}
 
