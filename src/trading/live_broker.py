@@ -169,7 +169,7 @@ def create_broker(
         notifier: 通知アダプター。
         drawdown_kill_switch_*: 新規エントリーの DD kill switch 設定。
         mt5_bridge_url: live_broker="mt5" のとき必須。
-        shadow_*: mode="live_test" のとき observer 専用 state_store と比較ログの場所を指定。
+        live_test_*: mode="live_test" のとき observer 専用 state_store と比較ログの場所を指定。
         initial_balance: mode="live_test" で observer 専用 PositionManager の初期残高。
     """
     from src.trading.paper_broker import PaperBrokerAdapter
