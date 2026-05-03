@@ -12,15 +12,24 @@ from src.data.price_provider import PriceProvider
 
 def _make_config(mt5_url: str = "http://x:8812"):
     cfg = MagicMock()
-    cfg.mt5_bridge.bridge_url = mt5_url
-    cfg.mt5_bridge.request_timeout_seconds = 5.0
-    cfg.mt5_bridge.fallback.failure_window_sec = 300
-    cfg.mt5_bridge.fallback.failure_threshold = 2
-    cfg.mt5_bridge.fallback.heartbeat_interval_degraded_min = 15
-    cfg.price_provider.realtime_provider = "yfinance"  # TD 無効化で簡素化
-    cfg.price_provider.twelvedata.daily_limit = 800
-    cfg.price_provider.twelvedata.watch_symbols = []
-    cfg.price_provider.twelvedata.use_for_monitor = True
+    if mt5_url:
+        cfg.mode = "live_test"
+        cfg.live_broker = "mt5"
+        cfg.providers.mt5 = MagicMock(
+            bridge_url=mt5_url,
+            request_timeout_seconds=5.0,
+            fallback=MagicMock(
+                failure_window_sec=300,
+                failure_threshold=2,
+                heartbeat_interval_degraded_min=15,
+            ),
+        )
+    else:
+        cfg.mode = "paper"
+        cfg.live_broker = None
+        cfg.providers.mt5 = None
+    cfg.paper_provider = "yfinance"  # TD 無効化で簡素化
+    cfg.providers.twelvedata = None
     cfg.tradeable_instruments = [MagicMock(symbol="USDJPY=X")]
     return cfg
 

@@ -27,22 +27,17 @@ def _api_key(monkeypatch):
 def _state_setup(tmp_path, monkeypatch):
     """state.config / state.analysis_store を最小構成で注入する。"""
     cfg = MagicMock()
-    cfg.trading.trading_mode = "paper"
+    cfg.mode = "paper"
+    cfg.paper_provider = "yfinance"
+    cfg.live_broker = None
     cfg.trading.initial_balance = 100_000.0
     cfg.state_dir = tmp_path
-    cfg.mt5_bridge.bridge_url = ""
     cfg.tradeable_instruments = []
-    cfg.price_provider.realtime_provider = "yfinance"
-    cfg.price_provider.twelvedata.daily_limit = 800
-    cfg.price_provider.twelvedata.watch_symbols = []
-    cfg.price_provider.twelvedata.use_for_monitor = True
-    cfg.price_provider.twelvedata.per_minute_limit = 8
+    cfg.providers.twelvedata = None
+    cfg.providers.mt5 = None
+    cfg.providers.oanda = None
     cfg.price_monitor.interval_minutes = 5
     cfg.schedule.run_times = []
-    cfg.mt5_bridge.request_timeout_seconds = 5.0
-    cfg.mt5_bridge.fallback.failure_window_sec = 300
-    cfg.mt5_bridge.fallback.failure_threshold = 2
-    cfg.mt5_bridge.fallback.heartbeat_interval_degraded_min = 15
 
     state.config = cfg
     state.analysis_store = None
@@ -63,7 +58,8 @@ def test_health_lightweight(_state_setup):
     assert resp.status_code == 200
     data = resp.json()
     assert "status" in data
-    assert "trading_mode" in data
+    assert "mode" in data
+    assert "live_broker" in data
     assert "uptime_seconds" in data
     assert "scheduler" in data
     # 旧フィールドが残っていない (Phase 3b で /status に移動)
@@ -113,15 +109,15 @@ def _client_post(path: str, **kw):
 
 
 def test_admin_halt_503_when_bridge_not_configured(_state_setup):
-    """bridge_url 未設定で /admin/halt → 503。"""
-    _state_setup.mt5_bridge.bridge_url = ""
+    """providers.mt5 = None で /admin/halt → 503。"""
+    _state_setup.providers.mt5 = None
     resp = _client_post("/admin/halt", json={"mode": "soft", "reason": "test"})
     assert resp.status_code == 503
 
 
 def test_admin_halt_proxies_to_bridge(_state_setup, monkeypatch):
     """bridge へ POST /admin/halt がプロキシされ、レスポンスがそのまま返る。"""
-    _state_setup.mt5_bridge.bridge_url = "http://x:8812"
+    _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
 
     captured: dict = {}
 
@@ -152,7 +148,7 @@ def test_admin_halt_proxies_to_bridge(_state_setup, monkeypatch):
 
 def test_admin_halt_502_when_bridge_unreachable(_state_setup, monkeypatch):
     """bridge HTTP error → 502。"""
-    _state_setup.mt5_bridge.bridge_url = "http://x:8812"
+    _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
 
     def _post(*a, **kw):
         raise httpx.ConnectError("down")
@@ -164,7 +160,7 @@ def test_admin_halt_502_when_bridge_unreachable(_state_setup, monkeypatch):
 
 
 def test_admin_resume_proxies_to_bridge(_state_setup, monkeypatch):
-    _state_setup.mt5_bridge.bridge_url = "http://x:8812"
+    _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
 
     class _R:
         status_code = 200
@@ -185,7 +181,7 @@ def test_admin_resume_proxies_to_bridge(_state_setup, monkeypatch):
 
 def test_admin_resume_403_when_hard_halted(_state_setup, monkeypatch):
     """bridge が 403 を返したら finance も 403 を返す (hard halt 中の resume 拒否)。"""
-    _state_setup.mt5_bridge.bridge_url = "http://x:8812"
+    _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
     import httpx
 
     class _Req:
