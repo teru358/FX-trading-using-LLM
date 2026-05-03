@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from src.signals.signal_combiner import TradeSignal
 from src.trading.broker_adapter import BrokerAdapter
@@ -134,9 +134,8 @@ class LiveBrokerAdapter(BrokerAdapter):
 
 
 def create_broker(
-    mode: str,
-    live_broker: str | None,
-    position_mgr: PositionManager | None = None,
+    mode: Literal["paper", "live", "live_test"],
+    live_broker: Literal["mt5", "oanda"] | None,
     *,
     max_positions_per_pair: int = 2,
     scale_in_enabled: bool = False,
@@ -154,8 +153,8 @@ def create_broker(
     mt5_bridge_offline_threshold_minutes: int = 30,
     mt5_consecutive_reject_threshold: int = 3,
     # ── mode=live_test のとき必須 ──
-    shadow_log_path: str = "data/state/shadow_trades.jsonl",
-    shadow_observer_state_dir: str = "data/shadow_state",
+    live_test_log_path: str = "data/state/shadow_trades.jsonl",
+    live_test_observer_state_dir: str = "data/shadow_state",
     initial_balance: float = 100_000.0,
 ) -> BrokerAdapter:
     """mode + live_broker に応じた BrokerAdapter を返すファクトリ関数。
@@ -236,14 +235,14 @@ def create_broker(
             consecutive_reject_threshold=mt5_consecutive_reject_threshold,
             **paper_kwargs,
         )
-        obs_store = StateStore(Path(shadow_observer_state_dir))
+        obs_store = StateStore(Path(live_test_observer_state_dir))
         obs_pm = PositionManager(
             obs_store, initial_balance, context="LiveTestObserver",
         )
         return ShadowBrokerAdapter(
             primary=primary, observer=observer,
             observer_position_mgr=obs_pm,
-            comparison_log_path=Path(shadow_log_path),
+            comparison_log_path=Path(live_test_log_path),
         )
 
     raise ValueError(
