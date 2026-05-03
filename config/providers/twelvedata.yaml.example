@@ -1,0 +1,12 @@
+# Twelve Data API 設定 (paper_provider=twelvedata のとき必須)
+# 取得には .env の TWELVEDATA_API_KEY が必要。
+daily_limit: 800
+per_minute_limit: 8
+use_for_monitor: true       # price_monitor で TD を使うか (false で yfinance)
+
+# TV Free 枠で取得検証済の ETF / index シンボル
+# instruments.yaml の watch 銘柄のうち、ここに含まれるものだけ TD 経由になる
+indices:
+  - GLD       # Gold ETF
+  - SPY       # S&P 500
+  - UUP       # USD Index ETF

@@ -18,6 +18,8 @@ docs/
 # 個人設定 — *.yaml はすべて非公開、*.yaml.example のみ公開
 config/*.yaml
 !config/*.yaml.example
+config/providers/*.yaml
+!config/providers/*.yaml.example
 
 # 状態・ログ・キャッシュ・ベクトルDB (chromadb 含む)
 data/state/

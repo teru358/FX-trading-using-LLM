@@ -1,0 +1,29 @@
+# MT5 bridge 設定 (live_broker=mt5 のとき必須)
+# bridge は Windows 側 (FastAPI) で MetaTrader5 SDK と通信し、
+# stick PC 側の finance から HTTP で発注する。
+bridge_url: "http://localhost:8812"   # 例: "http://192.168.1.10:8812"
+api_key: ""                            # X-Bridge-Api-Key (空ならヘッダー送信なし)
+
+# Heartbeat (定期 /health チェック)
+heartbeat_interval_minutes: 1
+request_timeout_seconds: 5.0
+log_path: "data/state/mt5_heartbeat.jsonl"
+
+# 発注関連
+order_request_timeout_seconds: 10.0
+lot_size_units: 100000                 # 1 lot = 100,000 通貨 (FX 標準)
+magic_number: 12345                    # MT5 発注時の bot 識別 ID
+
+# 自動 soft halt 閾値 (発注経路専用)
+bridge_offline_threshold_minutes: 30
+consecutive_reject_threshold: 3
+
+# live_test モード (paper + MT5 observer 同時実行) で使用
+shadow_log_path: "data/state/shadow_trades.jsonl"
+shadow_observer_state_dir: "data/shadow_state"
+
+# OHLCV 取得失敗時のフォールバック判定 (price_provider 用)
+fallback:
+  failure_window_sec: 300              # 5 分窓
+  failure_threshold: 2                 # 連続失敗回数で degraded 発動
+  heartbeat_interval_degraded_min: 15  # degraded 中の /health 確認間隔

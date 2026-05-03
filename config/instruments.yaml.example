@@ -1,15 +1,5 @@
-# ── 価格データプロバイダー ──────────────────────────────────────────
-# yfinance: デフォルト（無料、15-20分遅延）
-# twelvedata: リアルタイムFX（無料枠800req/日、要TWELVEDATA_API_KEY）
-price_provider:
-  realtime_provider: "yfinance"     # "yfinance" | "twelvedata"
-  twelvedata:
-    daily_limit: 800
-    per_minute_limit: 8
-    use_for_monitor: true           # price_monitorでもTwelve Dataを使うか（falseでyfinance）
-    watch_symbols: []               # Twelve Data Free枠で取得するwatch銘柄（例: ["GLD"]）
-
 # ── 取引・監視銘柄 ────────────────────────────────────────────────
+# 価格プロバイダ設定: settings.yaml の paper_provider + config/providers/twelvedata.yaml
 instruments:
   # ── FX（取引対象: mode=trade） ──
   - symbol: "USDJPY=X"

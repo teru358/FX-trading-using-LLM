@@ -1,0 +1,4 @@
+# OANDA REST API 設定 (live_broker=oanda のとき必須、現状未実装 placeholder)
+# API キーは .env の OANDA_API_KEY から読み込まれる。
+account_id: ""
+environment: "practice"     # "practice" | "live"
