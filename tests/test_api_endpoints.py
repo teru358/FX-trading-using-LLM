@@ -105,3 +105,103 @@ def test_account_returns_balance_and_positions(_state_setup):
     # 初期状態: 残高 = 初期残高、ポジションなし
     assert data["balance"] == 100_000.0
     assert data["open_positions"] == []
+
+
+# ── /admin/halt /admin/resume プロキシ ──
+
+def _client_post(path: str, **kw):
+    client = TestClient(app)
+    headers = {"X-API-Key": "test-key", **kw.pop("headers", {})}
+    return client.post(path, headers=headers, **kw)
+
+
+def test_admin_halt_503_when_bridge_not_configured(_state_setup):
+    """bridge_url 未設定で /admin/halt → 503。"""
+    _state_setup.mt5_bridge.bridge_url = ""
+    resp = _client_post("/admin/halt", json={"mode": "soft", "reason": "test"})
+    assert resp.status_code == 503
+
+
+def test_admin_halt_proxies_to_bridge(_state_setup, monkeypatch):
+    """bridge へ POST /admin/halt がプロキシされ、レスポンスがそのまま返る。"""
+    _state_setup.mt5_bridge.bridge_url = "http://x:8812"
+
+    captured: dict = {}
+
+    class _R:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"dry_run": False, "soft_halted": True, "is_hard_halted": False,
+                    "accepts_new_orders": False, "mt5_connected": True}
+
+    def _post(url, json=None, timeout=None, headers=None):
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        return _R()
+
+    monkeypatch.setattr("httpx.post", _post)
+
+    resp = _client_post("/admin/halt", json={"mode": "soft", "reason": "test"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["soft_halted"] is True
+    assert captured["url"] == "http://x:8812/admin/halt"
+    assert captured["json"]["mode"] == "soft"
+    assert captured["json"]["reason"] == "test"
+
+
+def test_admin_halt_502_when_bridge_unreachable(_state_setup, monkeypatch):
+    """bridge HTTP error → 502。"""
+    _state_setup.mt5_bridge.bridge_url = "http://x:8812"
+
+    def _post(*a, **kw):
+        raise httpx.ConnectError("down")
+
+    import httpx
+    monkeypatch.setattr("httpx.post", _post)
+    resp = _client_post("/admin/halt", json={"mode": "soft"})
+    assert resp.status_code == 502
+
+
+def test_admin_resume_proxies_to_bridge(_state_setup, monkeypatch):
+    _state_setup.mt5_bridge.bridge_url = "http://x:8812"
+
+    class _R:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"dry_run": False, "soft_halted": False, "is_hard_halted": False,
+                    "accepts_new_orders": True, "mt5_connected": True}
+
+    monkeypatch.setattr("httpx.post", lambda *a, **kw: _R())
+
+    resp = _client_post("/admin/resume")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["soft_halted"] is False
+    assert body["accepts_new_orders"] is True
+
+
+def test_admin_resume_403_when_hard_halted(_state_setup, monkeypatch):
+    """bridge が 403 を返したら finance も 403 を返す (hard halt 中の resume 拒否)。"""
+    _state_setup.mt5_bridge.bridge_url = "http://x:8812"
+    import httpx
+
+    class _Req:
+        url = "http://x:8812/admin/resume"
+
+    class _R:
+        status_code = 403
+        text = "hard halt cannot be resumed remotely"
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("403", request=_Req(), response=self)
+        def json(self):
+            return {}
+
+    monkeypatch.setattr("httpx.post", lambda *a, **kw: _R())
+    resp = _client_post("/admin/resume")
+    assert resp.status_code == 403

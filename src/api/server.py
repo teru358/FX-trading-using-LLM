@@ -8,6 +8,7 @@
 
 - ``routes.health``  — /health (軽量), /status (システム健全性), /logs, /usage, /schedule
 - ``routes.account`` — /account (残高 + ポジション一覧、Phase 3b で /status から分離)
+- ``routes.admin``   — /admin/halt, /admin/resume (MT5 bridge へのプロキシ)
 - ``routes.data``    — /news, /tech, /analyze, /forecast, /feeds
 - ``routes.trading`` — /run/trade, /close/{pair}
 - ``routes.ask``     — /ask
@@ -23,7 +24,7 @@ import threading
 from fastapi import FastAPI
 
 from src.api._state import state
-from src.api.routes import account, ask, data, health, manual, trading
+from src.api.routes import account, admin, ask, data, health, manual, trading
 from src.concurrency.priority_job_slot import PriorityJobSlot
 from src.config import AppConfig
 from src.data.analysis_store import AnalysisStore
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="FX Trading Bot API", docs_url=None, redoc_url=None)
 app.include_router(health.router)
 app.include_router(account.router)
+app.include_router(admin.router)
 app.include_router(data.router)
 app.include_router(trading.router)
 app.include_router(ask.router)
