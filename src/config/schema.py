@@ -316,11 +316,11 @@ class PriceMonitorConfig:
 
 @dataclass
 class TwelveDataConfig:
-    """Twelve Data API 設定。"""
+    """Twelve Data API 設定 (paper_provider=twelvedata のとき必須)。"""
     daily_limit: int = 800
     per_minute_limit: int = 8
-    watch_symbols: list[str] = field(default_factory=list)  # Twelve Dataで取得するwatch銘柄
-    use_for_monitor: bool = True  # price_monitorでもTwelve Dataを使うか
+    use_for_monitor: bool = True
+    indices: list[str] = field(default_factory=list)  # TD で取得検証済 ETF / index
 
 
 @dataclass
@@ -507,6 +507,57 @@ class Mt5FallbackConfig:
     failure_window_sec: int = 300              # 5 分窓
     failure_threshold: int = 2                 # 連続失敗回数で degraded 発動
     heartbeat_interval_degraded_min: int = 15  # degraded 中の /health ポーリング間隔
+
+
+@dataclass
+class Mt5Config:
+    """MT5 bridge 設定 (live_broker=mt5 のとき必須)。
+
+    旧 Mt5BridgeConfig を providers/mt5.yaml に再構成。
+    enabled フラグは廃止 (live_broker=mt5 が明示的な enable)。
+
+    shadow_log_path / shadow_observer_state_dir は live_test モード
+    (旧 shadow) で使う。フィールド名は内部 ShadowBrokerAdapter との
+    対応で "shadow_" プレフィックスを維持。
+    """
+    bridge_url: str = ""
+    api_key: str = ""                         # X-Bridge-Api-Key (空ならヘッダー送信なし)
+    heartbeat_interval_minutes: int = 1
+    request_timeout_seconds: float = 5.0
+    log_path: str = "data/state/mt5_heartbeat.jsonl"
+    # 発注関連
+    order_request_timeout_seconds: float = 10.0
+    lot_size_units: int = 100_000
+    magic_number: int = 12345
+    bridge_offline_threshold_minutes: int = 30
+    consecutive_reject_threshold: int = 3
+    # live_test mode (旧 shadow) で使用
+    shadow_log_path: str = "data/state/shadow_trades.jsonl"
+    shadow_observer_state_dir: str = "data/shadow_state"
+    # OHLCV フォールバック
+    fallback: Mt5FallbackConfig = field(default_factory=Mt5FallbackConfig)
+
+
+@dataclass
+class OandaConfig:
+    """OANDA REST API 設定 (live_broker=oanda のとき必須、未実装 placeholder)。"""
+    account_id: str = ""
+    environment: str = "practice"   # "practice" | "live"
+    # api_key は環境変数 OANDA_API_KEY から
+
+
+@dataclass
+class ProvidersConfig:
+    """プロバイダー別の詳細設定コンテナ。
+
+    各フィールドは対応するプロバイダーが選択されている場合のみ非 None。
+    例: paper_provider=twelvedata なら twelvedata は非 None、
+        live_broker=mt5 なら mt5 は非 None。
+    yfinance は設定不要 (デフォルト動作のみ)。
+    """
+    twelvedata: TwelveDataConfig | None = None
+    mt5: Mt5Config | None = None
+    oanda: OandaConfig | None = None
 
 
 @dataclass
