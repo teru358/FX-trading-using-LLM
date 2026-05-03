@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Literal
 
 BASE_DIR = Path(__file__).parent.parent.parent
 
@@ -542,7 +543,7 @@ class Mt5Config:
 class OandaConfig:
     """OANDA REST API 設定 (live_broker=oanda のとき必須、未実装 placeholder)。"""
     account_id: str = ""
-    environment: str = "practice"   # "practice" | "live"
+    environment: Literal["practice", "live"] = "practice"
     # api_key は環境変数 OANDA_API_KEY から
 
 
