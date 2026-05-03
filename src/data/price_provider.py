@@ -43,19 +43,24 @@ class PriceProvider:
         notifier=None,
     ) -> None:
         self._config = config
-        self._provider = config.price_provider.realtime_provider
+        self._provider = config.paper_provider
         self._trade_symbols: set[str] = {
             i.symbol for i in config.tradeable_instruments
         }
-        # Twelve Data対応シンボル（trade + 設定で指定されたwatch銘柄）
+        # Twelve Data 対応シンボル (trade + providers/twelvedata.yaml の indices)
         self._td_symbols: set[str] = set(self._trade_symbols)
-        for sym in config.price_provider.twelvedata.watch_symbols:
-            self._td_symbols.add(sym)
-        self._use_for_monitor = config.price_provider.twelvedata.use_for_monitor
+        td_cfg = config.providers.twelvedata
+        if td_cfg is not None:
+            for sym in td_cfg.indices:
+                self._td_symbols.add(sym)
+            self._use_for_monitor = td_cfg.use_for_monitor
+            self._daily_limit = td_cfg.daily_limit
+        else:
+            self._use_for_monitor = False
+            self._daily_limit = 0
         self._td_fetcher = None
         self._daily_count = 0
         self._daily_count_date: date | None = None
-        self._daily_limit = config.price_provider.twelvedata.daily_limit
 
         if self._provider == "twelvedata":
             api_key = os.environ.get("TWELVEDATA_API_KEY", "")
@@ -68,23 +73,34 @@ class PriceProvider:
                 )
                 self._provider = "yfinance"
 
-        # Phase 3b: MT5 chain
+        # MT5 chain (mode in {live, live_test} + live_broker=mt5 のときのみ有効)
         self._mt5_fetcher: Mt5OhlcvFetcher | None = None
-        if config.mt5_bridge.bridge_url:
+        self._mt5_enabled = (
+            config.mode in ("live", "live_test")
+            and config.live_broker == "mt5"
+            and config.providers.mt5 is not None
+        )
+        mt5_cfg = config.providers.mt5
+        if self._mt5_enabled and mt5_cfg is not None:
             self._mt5_fetcher = Mt5OhlcvFetcher(
-                bridge_url=config.mt5_bridge.bridge_url,
-                request_timeout=config.mt5_bridge.request_timeout_seconds,
+                bridge_url=mt5_cfg.bridge_url,
+                request_timeout=mt5_cfg.request_timeout_seconds,
             )
-        self._health_tracker = health_tracker or ProviderHealthTracker(
-            failure_window_sec=config.mt5_bridge.fallback.failure_window_sec,
-            failure_threshold=config.mt5_bridge.fallback.failure_threshold,
-        )
+            self._health_tracker = health_tracker or ProviderHealthTracker(
+                failure_window_sec=mt5_cfg.fallback.failure_window_sec,
+                failure_threshold=mt5_cfg.fallback.failure_threshold,
+            )
+            self._health_check_interval = timedelta(
+                minutes=mt5_cfg.fallback.heartbeat_interval_degraded_min,
+            )
+        else:
+            self._health_tracker = health_tracker or ProviderHealthTracker(
+                failure_window_sec=300, failure_threshold=2,
+            )
+            self._health_check_interval = timedelta(minutes=15)
         self._notifier = notifier
-        self._active_provider: dict[str, str] = {}        # symbol → provider name
+        self._active_provider: dict[str, str] = {}
         self._last_health_check_at: datetime | None = None
-        self._health_check_interval = timedelta(
-            minutes=config.mt5_bridge.fallback.heartbeat_interval_degraded_min,
-        )
 
     def _is_trade_pair(self, symbol: str) -> bool:
         return symbol in self._trade_symbols
@@ -142,7 +158,11 @@ class PriceProvider:
         prev = self._active_provider.get(symbol, "mt5")
 
         # Phase 3b: trade ペアは MT5 を最優先
-        if self._is_trade_pair(symbol) and self._mt5_fetcher is not None:
+        if (
+            self._is_trade_pair(symbol)
+            and self._mt5_enabled
+            and self._mt5_fetcher is not None
+        ):
             try:
                 data = self._mt5_fetcher.fetch(
                     symbol, period=period, interval=interval, price_store=price_store,
@@ -182,14 +202,13 @@ class PriceProvider:
             logger.warning(f"[PROVIDER] {symbol}: {prev} → {current}")
 
     def _maybe_check_bridge_health(self) -> None:
-        """degraded 中で 15 分以上経過していれば /health で復帰確認。
-
-        - 失敗時は failure 加算しない (degraded 中の確認失敗は当然なのでカウンタを汚さない)
-        - 取引時間外で get_ohlcv が呼ばれない期間は復帰検知が止まる (許容)
-        """
+        """degraded 中で 15 分以上経過していれば /health で復帰確認。"""
         if not self._health_tracker.is_degraded:
             return
-        if self._mt5_fetcher is None or not self._config.mt5_bridge.bridge_url:
+        if not self._mt5_enabled or self._mt5_fetcher is None:
+            return
+        mt5_cfg = self._config.providers.mt5
+        if mt5_cfg is None or not mt5_cfg.bridge_url:
             return
         now = datetime.now()
         if self._last_health_check_at is not None:
@@ -199,7 +218,7 @@ class PriceProvider:
 
         try:
             resp = httpx.get(
-                f"{self._config.mt5_bridge.bridge_url.rstrip('/')}/health",
+                f"{mt5_cfg.bridge_url.rstrip('/')}/health",
                 timeout=5.0,
             )
             resp.raise_for_status()
@@ -207,7 +226,6 @@ class PriceProvider:
                 if self._health_tracker.record_success(now):
                     self._notify_recovery(prev="twelvedata", current="mt5")
         except (httpx.HTTPError, ValueError):
-            # 復帰失敗 → 状態維持 (failure 加算はしない)
             pass
 
     def _notify_degraded(self, reason: str) -> None:
