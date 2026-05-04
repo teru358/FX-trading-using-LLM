@@ -150,7 +150,7 @@ def create_broker(
     mt5_lot_size_units: int = 100_000,
     mt5_magic_number: int = 12345,
     mt5_order_timeout_seconds: float = 10.0,
-    mt5_bridge_offline_threshold_minutes: int = 30,
+    mt5_consecutive_unreachable_threshold: int = 3,
     mt5_consecutive_reject_threshold: int = 3,
     # ── mode=live_test のとき必須 ──
     live_test_log_path: str = "data/state/shadow_trades.jsonl",
@@ -202,7 +202,7 @@ def create_broker(
                 lot_size_units=mt5_lot_size_units,
                 magic_number=mt5_magic_number,
                 notifier=notifier,
-                bridge_offline_threshold_minutes=mt5_bridge_offline_threshold_minutes,
+                consecutive_unreachable_threshold=mt5_consecutive_unreachable_threshold,
                 consecutive_reject_threshold=mt5_consecutive_reject_threshold,
                 **paper_kwargs,
             )
@@ -231,7 +231,7 @@ def create_broker(
             lot_size_units=mt5_lot_size_units,
             magic_number=mt5_magic_number,
             notifier=notifier,
-            bridge_offline_threshold_minutes=mt5_bridge_offline_threshold_minutes,
+            consecutive_unreachable_threshold=mt5_consecutive_unreachable_threshold,
             consecutive_reject_threshold=mt5_consecutive_reject_threshold,
             **paper_kwargs,
         )

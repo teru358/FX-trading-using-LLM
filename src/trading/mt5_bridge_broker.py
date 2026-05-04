@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import time as _time
-from datetime import datetime, timezone
 
 import httpx
 
@@ -50,7 +49,7 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         drawdown_kill_switch_max_pct: float = 0.10,
         drawdown_kill_switch_lookback_days: int = 0,
         notifier=None,
-        bridge_offline_threshold_minutes: int = 30,
+        consecutive_unreachable_threshold: int = 3,
         consecutive_reject_threshold: int = 3,
     ) -> None:
         if not bridge_url:
@@ -72,10 +71,11 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         self._cached_external_positions: list[dict] = []
         # Phase 3b タスク 14: 発注経路の auto soft halt 判定 (タスク 9 の OHLCV
         # ProviderHealthTracker とは別管理: 目的・閾値・発動アクションが異なる)
-        self._offline_threshold_min = bridge_offline_threshold_minutes
+        # Phase 3c で時間ベース廃止 → 連続不通 N 回で halt (heartbeat 経路と統一)
+        self._unreachable_threshold = consecutive_unreachable_threshold
         self._reject_threshold = consecutive_reject_threshold
+        self._consecutive_unreachable = 0
         self._consecutive_rejects = 0
-        self._last_bridge_success = datetime.now(tz=timezone.utc)
 
     def _headers(self) -> dict[str, str]:
         h = {"Content-Type": "application/json"}
@@ -497,12 +497,12 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[MT5_BRIDGE] notify partial close failed: {e}")
 
-    # ── Task 14: 発注経路の auto soft halt 判定 ──
+    # ── Task 14 (Phase 3c 改訂): 発注経路の auto soft halt 判定 ──
 
     def _record_bridge_success(self) -> None:
-        """発注成功または bridge 健全応答時に呼ぶ。カウンタリセット。"""
+        """発注成功または bridge 健全応答時に呼ぶ。両カウンタリセット。"""
         self._consecutive_rejects = 0
-        self._last_bridge_success = datetime.now(tz=timezone.utc)
+        self._consecutive_unreachable = 0
 
     def _record_bridge_reject(self) -> None:
         """MT5 retcode REJECT (HTTP 409) 受領時に呼ぶ。連続 N 回で auto soft halt。"""
@@ -513,13 +513,11 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             )
 
     def _record_bridge_unreachable(self) -> None:
-        """bridge 不通 (connection error / 5xx) 受領時に呼ぶ。N 分継続で auto soft halt。"""
-        offline_for = (
-            datetime.now(tz=timezone.utc) - self._last_bridge_success
-        ).total_seconds() / 60.0
-        if offline_for >= self._offline_threshold_min:
+        """bridge 不通 (connection error / 5xx) 受領時に呼ぶ。連続 N 回で auto soft halt。"""
+        self._consecutive_unreachable += 1
+        if self._consecutive_unreachable >= self._unreachable_threshold:
             self._auto_soft_halt(
-                f"bridge offline for {offline_for:.0f} min"
+                f"{self._unreachable_threshold} consecutive unreachable"
             )
 
     def _auto_soft_halt(self, reason: str) -> None:

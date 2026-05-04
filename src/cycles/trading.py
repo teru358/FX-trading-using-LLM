@@ -826,7 +826,7 @@ def _build_trading_runtime(config: AppConfig):
         mt5_lot_size_units=(mt5_cfg.lot_size_units if mt5_cfg else 100_000),
         mt5_magic_number=(mt5_cfg.magic_number if mt5_cfg else 12345),
         mt5_order_timeout_seconds=(mt5_cfg.order_request_timeout_seconds if mt5_cfg else 10.0),
-        mt5_bridge_offline_threshold_minutes=(mt5_cfg.bridge_offline_threshold_minutes if mt5_cfg else 30),
+        mt5_consecutive_unreachable_threshold=(mt5_cfg.consecutive_unreachable_threshold if mt5_cfg else 3),
         mt5_consecutive_reject_threshold=(mt5_cfg.consecutive_reject_threshold if mt5_cfg else 3),
         live_test_log_path=(mt5_cfg.shadow_log_path if mt5_cfg else "data/state/shadow_trades.jsonl"),
         live_test_observer_state_dir=(mt5_cfg.shadow_observer_state_dir if mt5_cfg else "data/shadow_state"),

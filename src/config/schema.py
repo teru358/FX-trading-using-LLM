@@ -515,14 +515,16 @@ class Mt5Config:
     """
     bridge_url: str = ""
     api_key: str = ""                         # X-Bridge-Api-Key (空ならヘッダー送信なし)
-    heartbeat_interval_minutes: int = 1
+    heartbeat_interval_minutes: int = 5       # /health プローブ間隔
     request_timeout_seconds: float = 5.0
     log_path: str = "data/state/mt5_heartbeat.jsonl"
     # 発注関連
     order_request_timeout_seconds: float = 10.0
     lot_size_units: int = 100_000
     magic_number: int = 12345
-    bridge_offline_threshold_minutes: int = 30
+    # auto soft halt 閾値 (heartbeat 経路 / 発注経路 共通)
+    # 連続 N 回不通 → halt 発動。heartbeat=5 分 × 3 = 約 15 分で halt。
+    consecutive_unreachable_threshold: int = 3
     consecutive_reject_threshold: int = 3
     # live_test mode (旧 shadow) で使用
     shadow_log_path: str = "data/state/shadow_trades.jsonl"
