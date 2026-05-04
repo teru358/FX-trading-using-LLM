@@ -37,6 +37,7 @@ def _make_cfg(
         live_broker: str | None
         providers: ProvidersConfig
         notifier: NotifierConfig
+        state_dir: Path = field(default_factory=lambda: Path("data/state"))
         schedule: ScheduleConfig = field(
             default_factory=lambda: ScheduleConfig(timezone="Asia/Tokyo")
         )
@@ -391,3 +392,205 @@ def test_notifier_skipped_when_disabled(tmp_path: Path, monkeypatch):
     run_mt5_heartbeat(cfg)
 
     assert create_calls == []  # 無効時は通知パス自体スキップ
+
+
+# ── Task 7: /account fetch + balance.json sync (paper → mt5 transition) ──
+
+
+def test_health_success_fetches_account_and_updates_balance(tmp_path: Path, monkeypatch):
+    """/health 成功時に /account も叩き、balance.json を MT5 値で更新する。
+
+    paper → mt5 切替も同時に検証 (deposit が MT5 値で確定)。
+    """
+    monkeypatch.setattr("src.jobs.mt5_heartbeat.BASE_DIR", tmp_path)
+
+    from src.persistence import balance_snapshot
+
+    state_dir = tmp_path / "data" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        "src.jobs.mt5_heartbeat._state_dir_for",
+        lambda config: state_dir,
+    )
+
+    class _Resp:
+        def __init__(self, payload, ok=True, status=200):
+            self._payload = payload
+            self.is_success = ok
+            self.status_code = status
+
+        def raise_for_status(self):
+            if not self.is_success:
+                raise httpx.HTTPStatusError("err", request=None, response=None)
+
+        def json(self):
+            return self._payload
+
+    def _get(url, *a, **kw):
+        if url.endswith("/health"):
+            return _Resp({}, ok=True, status=200)
+        if url.endswith("/account"):
+            return _Resp({
+                "balance": 49823.0, "equity": 50100.0,
+                "free_margin": 43000.0, "margin": 6432.0,
+            })
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(httpx, "get", _get)
+
+    cfg = _make_cfg()
+    run_mt5_heartbeat(cfg)
+
+    snap = balance_snapshot.read(state_dir)
+    assert snap.source == "mt5"
+    assert snap.balance == 49823.0
+    assert snap.deposit == 49823.0  # 初回 paper → mt5 で確定
+
+
+def test_account_fetch_failure_keeps_balance_unchanged(tmp_path: Path, monkeypatch):
+    """/health OK + /account fail → balance.json 据え置き、soft halt なし。"""
+    monkeypatch.setattr("src.jobs.mt5_heartbeat.BASE_DIR", tmp_path)
+    state_dir = tmp_path / "data" / "state"
+    monkeypatch.setattr(
+        "src.jobs.mt5_heartbeat._state_dir_for", lambda config: state_dir,
+    )
+    posts = _capture_post(monkeypatch)
+
+    class _OkResp:
+        is_success = True
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {}
+
+    def _get(url, *a, **kw):
+        if url.endswith("/health"):
+            return _OkResp()
+        raise httpx.ConnectError("/account down")
+
+    monkeypatch.setattr(httpx, "get", _get)
+
+    cfg = _make_cfg()
+    run_mt5_heartbeat(cfg)
+
+    # halt は呼ばれない
+    assert posts == []
+    # balance.json は paper デフォルト (¥10k) のまま (read で bootstrap される)
+    from src.persistence import balance_snapshot
+    snap = balance_snapshot.read(state_dir)
+    assert snap.source == "paper"
+
+
+def test_paper_to_mt5_transition_sends_discord(tmp_path: Path, monkeypatch):
+    """notifier 有効 + 初回 mt5 取得時に paper→mt5 通知が送られる。"""
+    monkeypatch.setattr("src.jobs.mt5_heartbeat.BASE_DIR", tmp_path)
+    state_dir = tmp_path / "data" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        "src.jobs.mt5_heartbeat._state_dir_for", lambda config: state_dir,
+    )
+
+    send_calls: list[dict] = []
+
+    class _StubNotifier:
+        async def send_embed(self, **kwargs):
+            send_calls.append(kwargs)
+
+        async def send(self, message: str):
+            pass
+
+    monkeypatch.setattr(
+        "src.notifications.notifier.create_notifier",
+        lambda enabled: _StubNotifier(),
+    )
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+            self.is_success = True
+            self.status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    def _get(url, *a, **kw):
+        if url.endswith("/health"):
+            return _Resp({})
+        if url.endswith("/account"):
+            return _Resp({"balance": 50000.0})
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(httpx, "get", _get)
+
+    cfg = _make_cfg(notifier_enabled=True)
+    run_mt5_heartbeat(cfg)
+
+    assert len(send_calls) == 1
+    assert "paper → mt5" in send_calls[0]["title"]
+
+
+def test_subsequent_mt5_fetch_does_not_resend_paper_to_mt5(tmp_path: Path, monkeypatch):
+    """既に source=mt5 の状態で /account 取得しても paper→mt5 通知は送らない。"""
+    monkeypatch.setattr("src.jobs.mt5_heartbeat.BASE_DIR", tmp_path)
+    state_dir = tmp_path / "data" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(
+        "src.jobs.mt5_heartbeat._state_dir_for", lambda config: state_dir,
+    )
+
+    # 既に mt5 source の balance.json を seed
+    from src.persistence import balance_snapshot
+    from src.persistence.balance_snapshot import BalanceSnapshot
+    balance_snapshot.write(state_dir, BalanceSnapshot(
+        balance=50000.0, deposit=50000.0, peak_balance=50500.0,
+        source="mt5", fetched_at="2026-05-04T00:00:00+00:00",
+    ))
+
+    send_calls: list[dict] = []
+
+    class _StubNotifier:
+        async def send_embed(self, **kwargs):
+            send_calls.append(kwargs)
+
+        async def send(self, message: str):
+            pass
+
+    monkeypatch.setattr(
+        "src.notifications.notifier.create_notifier",
+        lambda enabled: _StubNotifier(),
+    )
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+            self.is_success = True
+            self.status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    def _get(url, *a, **kw):
+        if url.endswith("/health"):
+            return _Resp({})
+        if url.endswith("/account"):
+            return _Resp({"balance": 49800.0})
+        raise AssertionError(f"unexpected url: {url}")
+
+    monkeypatch.setattr(httpx, "get", _get)
+
+    cfg = _make_cfg(notifier_enabled=True)
+    run_mt5_heartbeat(cfg)
+
+    assert send_calls == []  # 通知なし
+    snap = balance_snapshot.read(state_dir)
+    assert snap.balance == 49800.0  # 値は更新されている
+    assert snap.deposit == 50000.0  # 不変

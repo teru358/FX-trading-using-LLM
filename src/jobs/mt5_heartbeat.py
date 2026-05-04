@@ -43,6 +43,67 @@ def _reset_state_for_test() -> None:
     _state["auto_halt_triggered"] = False
 
 
+def _state_dir_for(config: AppConfig) -> Path:
+    """state_dir を解決 (テストでも置き換え可能 monkeypatch ポイント)。
+
+    AppConfig.state_dir は既に絶対 Path (BASE_DIR/data/state) を返すが、
+    テスト用スタブ config が Path("data/state") のような相対 Path を
+    持っているケースにも対応するため、BASE_DIR を常に基準にする。
+    Path 結合の規則上、引数が絶対 Path ならそちらが優先される。
+    """
+    return BASE_DIR / config.state_dir
+
+
+def _fetch_and_update_balance(
+    config: AppConfig, base: str, cfg, headers: dict,
+) -> None:
+    """bridge /account を叩いて balance.json を更新する。
+
+    /health 成功時の piggyback。失敗時は警告ログのみ (新規 soft halt 経路は作らない)。
+    paper → mt5 切替を検知したら Discord 通知を送る。
+    """
+    from src.persistence import balance_snapshot
+
+    state_dir = _state_dir_for(config)
+    try:
+        resp = httpx.get(
+            f"{base}/account", timeout=cfg.request_timeout_seconds, headers=headers,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        mt5_balance = float(data["balance"])
+    except Exception as e:  # noqa: BLE001 - piggyback 経路は heartbeat 本体を止めない
+        logger.warning(f"[MT5_HB] /account fetch failed: {e}")
+        return
+
+    # 直前のスナップショットを記憶しておき、source 切替を検知
+    prev_snap = balance_snapshot.read(state_dir)
+    new_snap = balance_snapshot.mutate(
+        state_dir,
+        lambda snap: balance_snapshot.refresh_from_mt5(snap, mt5_balance),
+    )
+
+    if prev_snap.source == "paper" and new_snap.source == "mt5":
+        logger.info(
+            f"[MT5_HB] balance.json source paper → mt5: "
+            f"deposit ${mt5_balance:.2f} (initial)"
+        )
+        if config.notifier.enabled:
+            try:
+                from src.notifications.notifier import create_notifier
+                notifier = create_notifier(config.notifier.enabled)
+                asyncio.run(notifier.send_embed(
+                    title="✅ MT5 残高同期 完了 (paper → mt5)",
+                    description=(
+                        f"deposit (ROI 分母) を ${mt5_balance:.2f} で確定しました。\n"
+                        f"以降の lot 計算・DD は MT5 実残高ベースで動作します。"
+                    ),
+                    color=0x2ECC71,
+                ))
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[MT5_HB] paper→mt5 notify failed: {e}")
+
+
 def _append_record(log_path: Path, record: dict) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as f:
@@ -142,6 +203,10 @@ def run_mt5_heartbeat(config: AppConfig) -> None:
             logger.info(
                 f"[MT5_HB] OK  status={status} latency={record['latency_ms']}ms"
             )
+            # Task 7: /health 成功時に /account も叩いて balance.json を同期
+            # (失敗してもデーモン継続、soft halt は heartbeat /health 専用)
+            headers = {"X-Bridge-Api-Key": cfg.api_key} if cfg.api_key else {}
+            _fetch_and_update_balance(config, base, cfg, headers)
             return
 
         _state["consecutive_failures"] += 1
