@@ -236,7 +236,8 @@ def create_broker(
         obs_state_dir = Path(live_test_observer_state_dir)
         obs_state_dir.mkdir(parents=True, exist_ok=True)
         # observer 用 balance.json は state_dir 内に独立 (主 balance.json と分離)。
-        # 初回 / 不在時に OBSERVER_DEFAULT (¥100,000) で seed する。
+        # Phase 3c 暫定: balance が OBSERVER_DEFAULT から drift していたら毎回リセット。
+        # observer balance は情報用のみで、取引判定には影響しない (Phase 4 で再設計)。
         obs_snap = balance_snapshot.read(obs_state_dir)
         if obs_snap.balance != OBSERVER_DEFAULT or obs_snap.source != "paper":
             from datetime import datetime, timezone

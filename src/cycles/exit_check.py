@@ -64,7 +64,6 @@ async def exit_check_cycle(
         mt5_order_timeout_seconds=(mt5_cfg.order_request_timeout_seconds if mt5_cfg else 10.0),
         live_test_log_path=(mt5_cfg.shadow_log_path if mt5_cfg else "data/state/shadow_trades.jsonl"),
         live_test_observer_state_dir=(mt5_cfg.shadow_observer_state_dir if mt5_cfg else "data/shadow_state"),
-        initial_balance=config.trading.initial_balance,
     )
     notifier = create_notifier(config.notifier.enabled)
 
