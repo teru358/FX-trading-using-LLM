@@ -240,6 +240,7 @@ def _client_post(path: str, **kw):
 
 def test_admin_halt_503_when_bridge_not_configured(_state_setup):
     """providers.mt5 = None で /admin/halt → 503。"""
+    _state_setup.mode = "live"
     _state_setup.providers.mt5 = None
     resp = _client_post("/admin/halt", json={"mode": "soft", "reason": "test"})
     assert resp.status_code == 503
@@ -247,6 +248,7 @@ def test_admin_halt_503_when_bridge_not_configured(_state_setup):
 
 def test_admin_halt_proxies_to_bridge(_state_setup, monkeypatch):
     """bridge へ POST /admin/halt がプロキシされ、レスポンスがそのまま返る。"""
+    _state_setup.mode = "live"
     _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
 
     captured: dict = {}
@@ -278,6 +280,7 @@ def test_admin_halt_proxies_to_bridge(_state_setup, monkeypatch):
 
 def test_admin_halt_502_when_bridge_unreachable(_state_setup, monkeypatch):
     """bridge HTTP error → 502。"""
+    _state_setup.mode = "live"
     _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
 
     def _post(*a, **kw):
@@ -290,6 +293,7 @@ def test_admin_halt_502_when_bridge_unreachable(_state_setup, monkeypatch):
 
 
 def test_admin_resume_proxies_to_bridge(_state_setup, monkeypatch):
+    _state_setup.mode = "live"
     _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
 
     class _R:
@@ -311,6 +315,7 @@ def test_admin_resume_proxies_to_bridge(_state_setup, monkeypatch):
 
 def test_admin_resume_403_when_hard_halted(_state_setup, monkeypatch):
     """bridge が 403 を返したら finance も 403 を返す (hard halt 中の resume 拒否)。"""
+    _state_setup.mode = "live"
     _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
     import httpx
 
@@ -328,3 +333,20 @@ def test_admin_resume_403_when_hard_halted(_state_setup, monkeypatch):
     monkeypatch.setattr("httpx.post", lambda *a, **kw: _R())
     resp = _client_post("/admin/resume")
     assert resp.status_code == 403
+
+
+def test_admin_halt_rejected_in_paper_mode(_state_setup):
+    """paper モードでは /admin/halt は 400 を返す (bridge が無いため)。"""
+    # _state_setup fixture のデフォルトは mode="paper"
+    assert _state_setup.mode == "paper"
+    resp = _client_post("/admin/halt", json={"mode": "soft", "reason": "test"})
+    assert resp.status_code == 400
+    assert "paper" in resp.json()["detail"].lower()
+
+
+def test_admin_resume_rejected_in_paper_mode(_state_setup):
+    """paper モードでは /admin/resume は 400 を返す (bridge が無いため)。"""
+    assert _state_setup.mode == "paper"
+    resp = _client_post("/admin/resume")
+    assert resp.status_code == 400
+    assert "paper" in resp.json()["detail"].lower()

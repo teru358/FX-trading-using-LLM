@@ -60,6 +60,11 @@ def admin_halt(req: HaltRequest) -> dict[str, Any]:
     soft: 新規 entry のみ停止、既存ポジ管理は継続。/admin/resume で再開可。
     hard: DRY_RUN 強制 + フラグファイル。**遠隔再開不可**、main PC で手動操作必要。
     """
+    if state.config is not None and state.config.mode == "paper":
+        raise HTTPException(
+            status_code=400,
+            detail="halt is not available in paper mode (no bridge to halt)",
+        )
     url = _bridge_url()
     try:
         resp = httpx.post(
@@ -87,6 +92,11 @@ def admin_resume() -> dict[str, Any]:
     hard halt 中は bridge 側が 403 を返し、ここでも 403 を返す (再開には main PC
     での手動操作が必要)。
     """
+    if state.config is not None and state.config.mode == "paper":
+        raise HTTPException(
+            status_code=400,
+            detail="resume is not available in paper mode (no bridge to resume)",
+        )
     url = _bridge_url()
     try:
         resp = httpx.post(
