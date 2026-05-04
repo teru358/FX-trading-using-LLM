@@ -25,6 +25,8 @@ import logging
 import os
 from typing import TYPE_CHECKING, Literal
 
+from src.persistence import balance_snapshot
+from src.persistence.balance_snapshot import OBSERVER_DEFAULT, BalanceSnapshot
 from src.signals.signal_combiner import TradeSignal
 from src.trading.broker_adapter import BrokerAdapter
 from src.trading.position_manager import Order, PositionManager
@@ -154,7 +156,6 @@ def create_broker(
     # ── mode=live_test のとき必須 ──
     live_test_log_path: str = "data/state/shadow_trades.jsonl",
     live_test_observer_state_dir: str = "data/shadow_state",
-    initial_balance: float = 100_000.0,
 ) -> BrokerAdapter:
     """mode + live_broker に応じた BrokerAdapter を返すファクトリ関数。
 
@@ -169,7 +170,6 @@ def create_broker(
         drawdown_kill_switch_*: 新規エントリーの DD kill switch 設定。
         mt5_bridge_url: live_broker="mt5" のとき必須。
         live_test_*: mode="live_test" のとき observer 専用 state_store と比較ログの場所を指定。
-        initial_balance: mode="live_test" で observer 専用 PositionManager の初期残高。
     """
     from src.trading.paper_broker import PaperBrokerAdapter
 
@@ -233,7 +233,19 @@ def create_broker(
             consecutive_reject_threshold=mt5_consecutive_reject_threshold,
             **paper_kwargs,
         )
-        obs_store = StateStore(Path(live_test_observer_state_dir))
+        obs_state_dir = Path(live_test_observer_state_dir)
+        obs_state_dir.mkdir(parents=True, exist_ok=True)
+        # observer 用 balance.json は state_dir 内に独立 (主 balance.json と分離)。
+        # 初回 / 不在時に OBSERVER_DEFAULT (¥100,000) で seed する。
+        obs_snap = balance_snapshot.read(obs_state_dir)
+        if obs_snap.balance != OBSERVER_DEFAULT or obs_snap.source != "paper":
+            from datetime import datetime, timezone
+            balance_snapshot.write(obs_state_dir, BalanceSnapshot(
+                balance=OBSERVER_DEFAULT, deposit=OBSERVER_DEFAULT,
+                peak_balance=OBSERVER_DEFAULT, source="paper",
+                fetched_at=datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
+            ))
+        obs_store = StateStore(obs_state_dir)
         obs_pm = PositionManager(obs_store, context="LiveTestObserver")
         return ShadowBrokerAdapter(
             primary=primary, observer=observer,

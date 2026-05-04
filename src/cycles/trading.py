@@ -829,7 +829,6 @@ def _build_trading_runtime(config: AppConfig):
         mt5_consecutive_reject_threshold=(mt5_cfg.consecutive_reject_threshold if mt5_cfg else 3),
         live_test_log_path=(mt5_cfg.shadow_log_path if mt5_cfg else "data/state/shadow_trades.jsonl"),
         live_test_observer_state_dir=(mt5_cfg.shadow_observer_state_dir if mt5_cfg else "data/shadow_state"),
-        initial_balance=config.trading.initial_balance,
         **_dd_kwargs,
     )
 
