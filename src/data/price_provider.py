@@ -205,6 +205,13 @@ class PriceProvider:
         self._active_provider[symbol] = current
         if prev != current:
             logger.warning(f"[PROVIDER] {symbol}: {prev} → {current}")
+            return
+        # 縮退ステディ状態 — 切替なしでも継続 fallback を info で可視化
+        if self._mt5_enabled and self._health_tracker.is_degraded and current != "mt5":
+            logger.info(
+                f"[PROVIDER] {symbol}: served via {current} "
+                f"(MT5 degraded — auto-fallback active)"
+            )
 
     def _maybe_check_bridge_health(self) -> None:
         """degraded 中で 15 分以上経過していれば /health で復帰確認。"""
@@ -228,10 +235,19 @@ class PriceProvider:
             )
             resp.raise_for_status()
             if resp.json().get("mt5_connected"):
+                logger.info("[PROVIDER] MT5 health check OK — recovery confirmed")
                 if self._health_tracker.record_success(now):
                     self._notify_recovery(prev="twelvedata", current="mt5")
-        except (httpx.HTTPError, ValueError):
-            pass
+            else:
+                logger.info(
+                    "[PROVIDER] MT5 health check: bridge reachable but "
+                    "mt5_connected=false — staying on fallback"
+                )
+        except (httpx.HTTPError, ValueError) as e:
+            logger.info(
+                f"[PROVIDER] MT5 health check failed — staying on fallback: "
+                f"{type(e).__name__}: {e}"
+            )
 
     def _notify_degraded(self, reason: str) -> None:
         if self._notifier is None:
