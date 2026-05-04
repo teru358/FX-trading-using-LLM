@@ -98,21 +98,136 @@ def test_status_returns_subsystem_health(_state_setup):
     assert "open_positions" not in data
 
 
-def test_account_returns_balance_and_positions(_state_setup):
-    """/account は残高 + ポジション形式 (旧 /status の内容)。"""
+def test_account_returns_internal_section(_state_setup):
+    """/account は internal / mt5 / divergence の 3 セクションを返す (Task 10)。
+
+    paper mode では mt5 / divergence は null。
+    """
     resp = _client_get("/account")
     assert resp.status_code == 200
     data = resp.json()
-    assert "balance" in data
-    assert "initial_balance" in data
-    assert "pnl" in data
-    assert "pnl_pct" in data
-    assert "total_trades" in data
-    assert "win_rate" in data
-    assert "open_positions" in data
-    # 初期状態: 残高 = 初期残高、ポジションなし
-    assert data["balance"] == 100_000.0
-    assert data["open_positions"] == []
+    # Top-level shape: exactly 3 keys
+    assert set(data.keys()) == {"internal", "mt5", "divergence"}
+
+    internal = data["internal"]
+    # internal 必須フィールド
+    for key in (
+        "balance", "deposit", "peak_balance", "drawdown_pct",
+        "pnl", "pnl_pct", "total_trades", "win_rate", "open_positions",
+    ):
+        assert key in internal, f"missing internal.{key}"
+    # 初期状態: 残高 = 入金額、DD/PnL ともに 0、ポジションなし
+    assert internal["balance"] == 100_000.0
+    assert internal["deposit"] == 100_000.0
+    assert internal["peak_balance"] == 100_000.0
+    assert internal["drawdown_pct"] == 0.0
+    assert internal["pnl"] == 0.0
+    assert internal["pnl_pct"] == 0.0
+    assert internal["open_positions"] == []
+
+    # paper mode → mt5 / divergence は null
+    assert data["mt5"] is None
+    assert data["divergence"] is None
+
+
+def test_account_returns_mt5_section_in_live_mode(_state_setup, monkeypatch):
+    """live mode + bridge /account 成功時に mt5 と divergence が入る (Task 10)。"""
+    _state_setup.mode = "live"
+    _state_setup.providers.mt5 = MagicMock(
+        bridge_url="http://x:8812", api_key="bridge-secret",
+    )
+
+    captured: dict = {}
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "balance": 105_000.0,
+                "equity": 104_500.0,
+                "free_margin": 100_000.0,
+                "margin": 4_500.0,
+            }
+
+    def _get(url, timeout=None, headers=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        return _R()
+
+    monkeypatch.setattr("httpx.get", _get)
+
+    resp = _client_get("/account")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # internal は常にあり
+    assert data["internal"]["balance"] == 100_000.0
+
+    # mt5 セクションが入る
+    assert data["mt5"] is not None
+    assert data["mt5"]["balance"] == 105_000.0
+    assert data["mt5"]["equity"] == 104_500.0
+    assert data["mt5"]["free_margin"] == 100_000.0
+    assert data["mt5"]["margin"] == 4_500.0
+    assert "fetched_at" in data["mt5"]
+
+    # divergence セクションが入る (mt5 105k - internal 100k = +5k = +5%)
+    assert data["divergence"] is not None
+    assert data["divergence"]["balance_diff"] == 5_000.0
+    assert data["divergence"]["balance_diff_pct"] == 5.0
+
+    # X-Bridge-Api-Key ヘッダーが送信される
+    assert captured["url"] == "http://x:8812/account"
+    assert captured["headers"]["X-Bridge-Api-Key"] == "bridge-secret"
+
+
+def test_account_mt5_null_when_bridge_unreachable(_state_setup, monkeypatch):
+    """live mode で bridge 不通時は mt5 / divergence が null (Task 10)。"""
+    _state_setup.mode = "live"
+    _state_setup.providers.mt5 = MagicMock(
+        bridge_url="http://x:8812", api_key="",
+    )
+
+    def _get(*a, **kw):
+        import httpx as _httpx
+        raise _httpx.ConnectError("down")
+
+    monkeypatch.setattr("httpx.get", _get)
+
+    resp = _client_get("/account")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    # internal は常にあり (paper-default seed)
+    assert data["internal"]["balance"] == 100_000.0
+    # bridge 不通 → mt5 / divergence は null
+    assert data["mt5"] is None
+    assert data["divergence"] is None
+
+
+def test_account_mt5_null_when_bridge_returns_invalid_json(_state_setup, monkeypatch):
+    """live mode で bridge が壊れた JSON / 不完全レスポンスを返したら mt5 / divergence は null。"""
+    _state_setup.mode = "live"
+    _state_setup.providers.mt5 = MagicMock(
+        bridge_url="http://x:8812", api_key="",
+    )
+
+    class _R:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            raise ValueError("invalid json")
+
+    monkeypatch.setattr("httpx.get", lambda *a, **kw: _R())
+
+    resp = _client_get("/account")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["mt5"] is None
+    assert data["divergence"] is None
 
 
 # ── /admin/halt /admin/resume プロキシ ──
