@@ -864,13 +864,23 @@ async def trading_cycle(
         return
 
     # Task 8: balance.json staleness check (live mode のみ警告)
+    _BALANCE_STALE_THRESHOLD_MIN = 30
     if config.mode in ("live", "live_test"):
+        from datetime import datetime, timezone
+
         from src.persistence import balance_snapshot
         snap = balance_snapshot.read(config.state_dir)
-        if snap.source == "mt5" and balance_snapshot.is_stale(snap, threshold_minutes=30):
+        if snap.source == "mt5" and balance_snapshot.is_stale(
+            snap, threshold_minutes=_BALANCE_STALE_THRESHOLD_MIN,
+        ):
+            age_min = (
+                datetime.now(tz=timezone.utc)
+                - datetime.fromisoformat(snap.fetched_at)
+            ).total_seconds() / 60.0
             logger.warning(
-                f"[TRADE] balance.json stale: fetched_at={snap.fetched_at} "
-                f"(>30min ago) — using last MT5 value for lot calc"
+                f"[TRADE] balance.json stale: age={age_min:.0f}min "
+                f"(threshold={_BALANCE_STALE_THRESHOLD_MIN}min) "
+                f"fetched_at={snap.fetched_at} — using last MT5 value for lot calc"
             )
 
     embed_fn = make_embed_fn(config)
