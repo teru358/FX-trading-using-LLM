@@ -808,7 +808,6 @@ def _build_trading_runtime(config: AppConfig):
     _dd_kwargs = {
         "drawdown_kill_switch_enabled": config.trading.drawdown_kill_switch_enabled,
         "drawdown_kill_switch_max_pct": config.trading.drawdown_kill_switch_max_pct,
-        "drawdown_kill_switch_lookback_days": config.trading.drawdown_kill_switch_lookback_days,
     }
 
     # Phase 3b: notifier を broker 構築前に生成 (mt5_bridge / shadow が利用)

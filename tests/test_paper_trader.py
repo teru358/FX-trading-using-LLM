@@ -68,7 +68,6 @@ def _common_kwargs(scale_in: bool = False) -> dict:
         scale_in_score_margin=0.05,
         drawdown_kill_switch_enabled=False,
         drawdown_kill_switch_max_pct=0.10,
-        drawdown_kill_switch_lookback_days=0,
     )
 
 

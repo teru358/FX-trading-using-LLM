@@ -17,7 +17,6 @@ class PaperBrokerAdapter(BrokerAdapter):
         scale_in_score_margin: float = 0.05,
         drawdown_kill_switch_enabled: bool = False,
         drawdown_kill_switch_max_pct: float = 0.10,
-        drawdown_kill_switch_lookback_days: int = 0,
     ) -> None:
         self._max_per_pair = max_positions_per_pair
         self._scale_in_enabled = scale_in_enabled
@@ -25,7 +24,6 @@ class PaperBrokerAdapter(BrokerAdapter):
         self._scale_in_score_margin = scale_in_score_margin
         self._dd_enabled = drawdown_kill_switch_enabled
         self._dd_max_pct = drawdown_kill_switch_max_pct
-        self._dd_lookback = drawdown_kill_switch_lookback_days
 
     def execute_signal(
         self,
@@ -41,7 +39,6 @@ class PaperBrokerAdapter(BrokerAdapter):
             scale_in_score_margin=self._scale_in_score_margin,
             drawdown_kill_switch_enabled=self._dd_enabled,
             drawdown_kill_switch_max_pct=self._dd_max_pct,
-            drawdown_kill_switch_lookback_days=self._dd_lookback,
         )
 
     def check_and_close_positions(

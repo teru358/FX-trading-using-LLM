@@ -20,7 +20,6 @@ def execute_signal(
     scale_in_score_margin: float = 0.05,
     drawdown_kill_switch_enabled: bool = False,
     drawdown_kill_switch_max_pct: float = 0.10,
-    drawdown_kill_switch_lookback_days: int = 0,
 ) -> Order | None:
     if signal.action == "hold":
         return None
@@ -33,7 +32,6 @@ def execute_signal(
         scale_in_score_margin=scale_in_score_margin,
         drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
         drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
-        drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
     )
     if result.status == "skip":
         logger.info(f"[SKIP] {signal.pair}: {result.reason}")

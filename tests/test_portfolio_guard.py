@@ -1,8 +1,9 @@
 """portfolio_guard.check_max_positions_per_pair() / check_drawdown_kill_switch() のテスト。"""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timezone
 
+from src.persistence.balance_snapshot import BalanceSnapshot
 from src.trading.portfolio_guard import (
     check_drawdown_kill_switch,
     check_max_positions_per_pair,
@@ -10,30 +11,15 @@ from src.trading.portfolio_guard import (
 from src.trading.position_manager import Order
 
 
-def _pos(pair: str, direction: str = "buy") -> Order:
-    return Order.new(
-        pair=pair,
-        direction=direction,
-        entry_price=150.0,
-        stop_loss=149.0,
-        take_profit=152.0,
-        position_size=10000.0,
+def _snap(balance: float, peak_balance: float, deposit: float = 10_000.0) -> BalanceSnapshot:
+    """テスト用 BalanceSnapshot ファクトリ。"""
+    return BalanceSnapshot(
+        balance=balance,
+        deposit=deposit,
+        peak_balance=peak_balance,
+        source="paper",
+        fetched_at=datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
     )
-
-
-def _closed(pnl: float, closed_at: datetime) -> Order:
-    """クローズ済み Order を生成 (kill switch テスト用)。"""
-    order = Order.new(
-        pair="USDJPY=X", direction="buy",
-        entry_price=150.0, stop_loss=149.0, take_profit=152.0,
-        position_size=10000.0,
-    )
-    order.status = "closed"
-    order.closed_at = closed_at
-    order.close_price = 150.0
-    order.close_reason = "take_profit" if pnl > 0 else "stop_loss"
-    order.realized_pnl = pnl
-    return order
 
 
 def _make_pair_order(pair: str, direction: str = "buy"):
@@ -70,112 +56,79 @@ def test_check_max_positions_per_pair_counts_only_target_pair():
 
 
 # ---------------------------------------------------------------------------
-# Drawdown kill switch
+# Drawdown kill switch (Task 5: BalanceSnapshot ベース、lookback_days 廃止)
 # ---------------------------------------------------------------------------
 
 
 def test_kill_switch_disabled_returns_none():
     """enabled=False なら違反状態でも None を返す。"""
-    now = datetime(2026, 4, 15, 12, 0)
-    trades = [_closed(-5000, now - timedelta(hours=1))]  # 50% DD
+    snap = _snap(balance=5_000.0, peak_balance=10_000.0)  # 50% DD
     result = check_drawdown_kill_switch(
-        initial_balance=10_000,
-        closed_trades=trades,
-        enabled=False,
-        max_drawdown_pct=0.10,
-        now=now,
+        snap, enabled=False, max_drawdown_pct=0.10,
     )
     assert result is None
+
+
+def test_kill_switch_max_pct_zero_returns_none():
+    """max_drawdown_pct <= 0 なら違反状態でも None を返す (kill switch 無効)。"""
+    snap = _snap(balance=5_000.0, peak_balance=10_000.0)  # 50% DD
+    result = check_drawdown_kill_switch(
+        snap, enabled=True, max_drawdown_pct=0.0,
+    )
+    assert result is None
+
+
+def test_kill_switch_peak_non_positive_returns_rejection():
+    """peak_balance <= 0 なら 'non-positive' で拒否される。"""
+    snap = _snap(balance=0.0, peak_balance=0.0)
+    result = check_drawdown_kill_switch(
+        snap, enabled=True, max_drawdown_pct=0.10,
+    )
+    assert result is not None
+    assert "non-positive" in result
 
 
 def test_kill_switch_allows_when_under_threshold():
     """DD がしきい値未満ならエントリー可 (None)。"""
-    now = datetime(2026, 4, 15, 12, 0)
-    trades = [
-        _closed(+500, now - timedelta(hours=4)),   # balance 10500, peak 10500
-        _closed(-400, now - timedelta(hours=2)),   # balance 10100, DD = (10500-10100)/10500 ≈ 3.8%
-    ]
+    # peak 10500, current 10100 → DD = 400/10500 ≈ 3.8%
+    snap = _snap(balance=10_100.0, peak_balance=10_500.0)
     result = check_drawdown_kill_switch(
-        initial_balance=10_000,
-        closed_trades=trades,
-        enabled=True,
-        max_drawdown_pct=0.10,
-        now=now,
+        snap, enabled=True, max_drawdown_pct=0.10,
     )
     assert result is None
 
 
+def test_kill_switch_blocks_at_exact_threshold():
+    """DD がしきい値ぴったりでも拒否される (>= 判定)。"""
+    # peak 10000, current 9000 → DD = 10.0%
+    snap = _snap(balance=9_000.0, peak_balance=10_000.0)
+    result = check_drawdown_kill_switch(
+        snap, enabled=True, max_drawdown_pct=0.10,
+    )
+    assert result is not None
+    assert "drawdown kill switch" in result
+    assert "10.0%" in result
+
+
 def test_kill_switch_blocks_when_dd_exceeds_threshold():
     """peak から 10% 以上落ちたら拒否される。"""
-    now = datetime(2026, 4, 15, 12, 0)
-    trades = [
-        _closed(+2000, now - timedelta(hours=6)),   # balance 12000, peak 12000
-        _closed(-1500, now - timedelta(hours=2)),   # balance 10500, DD = 12.5% > 10%
-    ]
+    # peak 12000, current 10500 → DD = 1500/12000 = 12.5%
+    snap = _snap(balance=10_500.0, peak_balance=12_000.0)
     result = check_drawdown_kill_switch(
-        initial_balance=10_000,
-        closed_trades=trades,
-        enabled=True,
-        max_drawdown_pct=0.10,
-        now=now,
+        snap, enabled=True, max_drawdown_pct=0.10,
     )
     assert result is not None
     assert "drawdown kill switch" in result
     assert "12.5%" in result
 
 
-def test_kill_switch_uses_initial_balance_as_initial_peak():
-    """利益が出ていない状態で損失が出たら initial_balance を peak として計算する。"""
-    now = datetime(2026, 4, 15, 12, 0)
-    trades = [
-        _closed(-1500, now - timedelta(hours=2)),  # 10000 → 8500, DD = 15%
-    ]
+def test_kill_switch_message_includes_peak_and_current():
+    """拒否メッセージに peak と current 値が含まれる。"""
+    snap = _snap(balance=8_500.0, peak_balance=10_000.0)  # DD = 15%
     result = check_drawdown_kill_switch(
-        initial_balance=10_000,
-        closed_trades=trades,
-        enabled=True,
-        max_drawdown_pct=0.10,
-        now=now,
+        snap, enabled=True, max_drawdown_pct=0.10,
     )
     assert result is not None
+    assert "peak=10000" in result
+    assert "current=8500" in result
     assert "15.0%" in result
-
-
-def test_kill_switch_lookback_scopes_trades():
-    """lookback_days 指定で古いトレードが peak 計算から除外される。"""
-    now = datetime(2026, 4, 15, 12, 0)
-    trades = [
-        # 古い大損 (lookback 外になるので peak 計算から除外される)
-        _closed(-3000, now - timedelta(days=30)),
-        # 直近の小さな利益と損失
-        _closed(+200, now - timedelta(days=2)),    # running +200 → peak +200
-        _closed(-100, now - timedelta(days=1)),    # running +100, DD = 100/(10000+200) ≈ 1%
-    ]
-    # lookback=0 (全期間): 古い大損で大きく凹み、peak=10000 → current=7100 → 29% DD
-    result_all = check_drawdown_kill_switch(
-        initial_balance=10_000, closed_trades=trades,
-        enabled=True, max_drawdown_pct=0.10, lookback_days=0, now=now,
-    )
-    assert result_all is not None
-
-    # lookback=7d: 古い大損は除外 → small DD → OK
-    result_recent = check_drawdown_kill_switch(
-        initial_balance=10_000, closed_trades=trades,
-        enabled=True, max_drawdown_pct=0.10, lookback_days=7, now=now,
-    )
-    assert result_recent is None
-
-
-def test_kill_switch_recovery_resets_peak():
-    """peak 更新後に DD が縮小すれば再び通過する。"""
-    now = datetime(2026, 4, 15, 12, 0)
-    trades = [
-        _closed(+2000, now - timedelta(hours=10)),  # 12000, peak 12000
-        _closed(-1500, now - timedelta(hours=6)),   # 10500, DD 12.5% — 本来ブロック
-        _closed(+2500, now - timedelta(hours=2)),   # 13000, peak 13000, DD 0%
-    ]
-    result = check_drawdown_kill_switch(
-        initial_balance=10_000, closed_trades=trades,
-        enabled=True, max_drawdown_pct=0.10, now=now,
-    )
-    assert result is None

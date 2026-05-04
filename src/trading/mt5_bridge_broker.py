@@ -47,7 +47,6 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         scale_in_score_margin: float = 0.05,
         drawdown_kill_switch_enabled: bool = False,
         drawdown_kill_switch_max_pct: float = 0.10,
-        drawdown_kill_switch_lookback_days: int = 0,
         notifier=None,
         consecutive_unreachable_threshold: int = 3,
         consecutive_reject_threshold: int = 3,
@@ -65,7 +64,6 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         self._scale_in_score_margin = scale_in_score_margin
         self._dd_enabled = drawdown_kill_switch_enabled
         self._dd_max_pct = drawdown_kill_switch_max_pct
-        self._dd_lookback = drawdown_kill_switch_lookback_days
         # Phase 3b: reconciliation 用キャッシュ + 通知
         self._notifier = notifier
         self._cached_external_positions: list[dict] = []
@@ -102,7 +100,6 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             scale_in_score_margin=self._scale_in_score_margin,
             drawdown_kill_switch_enabled=self._dd_enabled,
             drawdown_kill_switch_max_pct=self._dd_max_pct,
-            drawdown_kill_switch_lookback_days=self._dd_lookback,
         )
         if result.status == "skip":
             logger.info(f"[MT5_BRIDGE] [SKIP] {signal.pair}: {result.reason}")

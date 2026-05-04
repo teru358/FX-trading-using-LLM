@@ -144,7 +144,6 @@ def create_broker(
     notifier: "NotifierAdapter | None" = None,
     drawdown_kill_switch_enabled: bool = False,
     drawdown_kill_switch_max_pct: float = 0.10,
-    drawdown_kill_switch_lookback_days: int = 0,
     # ── live_broker=mt5 のとき必須 ──
     mt5_bridge_url: str = "",
     mt5_lot_size_units: int = 100_000,
@@ -181,7 +180,6 @@ def create_broker(
         scale_in_score_margin=scale_in_score_margin,
         drawdown_kill_switch_enabled=drawdown_kill_switch_enabled,
         drawdown_kill_switch_max_pct=drawdown_kill_switch_max_pct,
-        drawdown_kill_switch_lookback_days=drawdown_kill_switch_lookback_days,
     )
 
     if mode == "paper":

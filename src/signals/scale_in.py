@@ -125,7 +125,6 @@ def evaluate_pre_execution_checks(
     scale_in_score_margin: float,
     drawdown_kill_switch_enabled: bool,
     drawdown_kill_switch_max_pct: float,
-    drawdown_kill_switch_lookback_days: int,
 ) -> PreExecResult:
     """発注前の共通チェックを実施。"""
     # 1. ペアごと上限チェック
@@ -164,16 +163,18 @@ def evaluate_pre_execution_checks(
         is_scale_in = True
         decision_reason = decision.reason
 
-    # 3. DD kill switch
-    dd_rejection = check_drawdown_kill_switch(
-        initial_balance=account.initial_balance,
-        closed_trades=account.closed_trades,
-        enabled=drawdown_kill_switch_enabled,
-        max_drawdown_pct=drawdown_kill_switch_max_pct,
-        lookback_days=drawdown_kill_switch_lookback_days,
-    )
-    if dd_rejection:
-        return PreExecResult(status="skip", reason=dd_rejection, decision=decision)
+    # 3. DD kill switch — balance_snapshot.peak_balance を直接参照
+    # 無効時は balance.json の read を回避 (mock や非永続テストでの不要 IO 防止)
+    if drawdown_kill_switch_enabled and drawdown_kill_switch_max_pct > 0:
+        from src.persistence.balance_snapshot import read as read_balance
+        snap = read_balance(position_mgr._store.state_dir)
+        dd_rejection = check_drawdown_kill_switch(
+            snap,
+            enabled=drawdown_kill_switch_enabled,
+            max_drawdown_pct=drawdown_kill_switch_max_pct,
+        )
+        if dd_rejection:
+            return PreExecResult(status="skip", reason=dd_rejection, decision=decision)
 
     # 4. 結果決定
     if is_scale_in:

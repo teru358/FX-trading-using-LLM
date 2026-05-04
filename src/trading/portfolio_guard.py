@@ -6,10 +6,9 @@ paper_trader / mt5_bridge_broker から呼び出す。
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
 
+from src.persistence.balance_snapshot import BalanceSnapshot
 from src.trading.position_manager import Order
-from src.utils.clock import db_now
 
 logger = logging.getLogger(__name__)
 
@@ -36,50 +35,27 @@ def check_max_positions_per_pair(
 
 
 def check_drawdown_kill_switch(
-    initial_balance: float,
-    closed_trades: list[Order],
+    snap: BalanceSnapshot,
     *,
     enabled: bool,
     max_drawdown_pct: float,
-    lookback_days: int = 0,
-    now: datetime | None = None,
 ) -> str | None:
-    """Drawdown kill switch — peak equity から max_drawdown_pct 以上落ちたら新規エントリー停止。
+    """Drawdown kill switch — peak から max_drawdown_pct 以上落ちたら新規エントリー停止。
 
+    新方式 (Task 5): balance_snapshot.peak_balance を参照。closed_trades 走査・lookback_days は廃止。
     既存ポジションは決済しない。新規エントリーのみブロックする運用保険。
     """
     if not enabled or max_drawdown_pct <= 0:
         return None
 
-    now_ts = now or db_now()
-    if lookback_days and lookback_days > 0:
-        cutoff = now_ts - timedelta(days=lookback_days)
-        trades = [
-            t for t in closed_trades
-            if t.closed_at is not None and t.closed_at >= cutoff
-        ]
-    else:
-        trades = list(closed_trades)
+    if snap.peak_balance <= 0:
+        return f"drawdown kill switch: peak equity non-positive ({snap.peak_balance:.0f})"
 
-    trades.sort(key=lambda t: t.closed_at or datetime.max)
-
-    running = initial_balance
-    peak = initial_balance
-    for t in trades:
-        running += t.realized_pnl or 0
-        if running > peak:
-            peak = running
-
-    if peak <= 0:
-        return f"drawdown kill switch: peak equity non-positive ({peak:.0f})"
-
-    current = running
-    drawdown = (peak - current) / peak
+    drawdown = (snap.peak_balance - snap.balance) / snap.peak_balance
     if drawdown >= max_drawdown_pct:
         return (
             f"drawdown kill switch: DD {drawdown * 100:.1f}% >= "
-            f"{max_drawdown_pct * 100:.1f}% (peak={peak:.0f} current={current:.0f}"
-            + (f", lookback={lookback_days}d" if lookback_days else "")
-            + ")"
+            f"{max_drawdown_pct * 100:.1f}% (peak={snap.peak_balance:.0f} "
+            f"current={snap.balance:.0f})"
         )
     return None
