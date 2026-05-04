@@ -492,6 +492,31 @@ def _cmd_close(pair: str) -> None:
     )
 
 
+def _cmd_halt(args: list[str]) -> None:
+    """halt soft|hard [reason] — finance API 経由で bridge を halt。"""
+    if not args:
+        _console.print("[red]使い方: halt soft|hard [reason][/red]")
+        return
+    mode = args[0].lower()
+    if mode not in ("soft", "hard"):
+        _console.print(f"[red]不明: halt mode={mode!r} (soft|hard)[/red]")
+        return
+    reason = " ".join(args[1:]) or "manual via client"
+
+    data = _post("/admin/halt", json={"mode": mode, "reason": reason})
+    if data is None:
+        return
+    _console.print(f"[green]halt {mode}: {reason}[/green]")
+
+
+def _cmd_resume() -> None:
+    """resume — finance API 経由で soft halt 解除。"""
+    data = _post("/admin/resume")
+    if data is None:
+        return
+    _console.print("[green]resumed[/green]")
+
+
 def _cmd_feeds() -> None:
     """RSSフィード疎通確認（REST API経由）。"""
     data = _get("/feeds")
@@ -817,6 +842,8 @@ _HELP = """\
   [cyan]schedule[/cyan]             — スケジュール (取引/予測/ニュース/技術/exit_check)
   [cyan]hosts[/cyan]                — ホストプロファイル一覧
   [cyan]use[/cyan] <name>           — 接続先ホスト切替  例: use remote
+  [cyan]halt[/cyan] soft|hard [理由] — 取引停止 (soft=新規のみ停止 / hard=全決済)
+  [cyan]resume[/cyan]               — soft halt 解除
   [cyan]help[/cyan]   (h)           — このヘルプを表示
   [cyan]quit[/cyan]   (q)           — クライアントを終了（デーモンは継続稼働）"""
 
@@ -882,6 +909,10 @@ def _dispatch(raw: str) -> bool:
             _console.print("[red]使い方: use <host_name>  (hosts で一覧表示)[/red]")
         else:
             _cmd_use(args[0])
+    elif cmd == "halt":
+        _cmd_halt(args)
+    elif cmd == "resume":
+        _cmd_resume()
     else:
         _console.print(f"[red]不明なコマンド: {cmd!r}[/red]  ([cyan]help[/cyan] で一覧)")
 
