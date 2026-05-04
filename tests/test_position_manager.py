@@ -394,3 +394,28 @@ def test_get_open_positions_by_pair_excludes_closed(tmp_path):
 
     result = mgr.get_open_positions_by_pair("USDJPY=X")
     assert result == []
+
+
+# ── close_position → balance.json propagation (paper_broker / paper_trader hook) ──
+
+
+def test_close_position_updates_balance_json(tmp_state_store, buy_order):
+    """close_position 後 balance.json が balance + peak で正しく更新されている。
+
+    paper_broker / paper_trader は close 時に PositionManager.close_position を
+    呼ぶので、ここを通すだけで balance_snapshot.mutate(...) 経由で
+    balance.json が更新されるという回帰テスト。
+    """
+    from src.persistence import balance_snapshot
+
+    pm = PositionManager(tmp_state_store, context="Test")
+    pm.open_position(buy_order)  # entry=150.0, size=10000.0
+
+    # +1.0 price × 10000 size = +10000 PnL
+    pm.close_position(buy_order.order_id, 151.0, "test")
+
+    snap = balance_snapshot.read(tmp_state_store.state_dir)
+    assert snap.balance == pytest.approx(110_000.0)
+    assert snap.peak_balance == pytest.approx(110_000.0)  # peak は max 維持
+    assert snap.source == "paper"
+    assert snap.deposit == pytest.approx(100_000.0)  # deposit は不変
