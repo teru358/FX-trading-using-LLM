@@ -863,6 +863,16 @@ async def trading_cycle(
         # 休場中は無音スキップ (MarketStateTracker が遷移/ハートビートのみログ化)
         return
 
+    # Task 8: balance.json staleness check (live mode のみ警告)
+    if config.mode in ("live", "live_test"):
+        from src.persistence import balance_snapshot
+        snap = balance_snapshot.read(config.state_dir)
+        if snap.source == "mt5" and balance_snapshot.is_stale(snap, threshold_minutes=30):
+            logger.warning(
+                f"[TRADE] balance.json stale: fetched_at={snap.fetched_at} "
+                f"(>30min ago) — using last MT5 value for lot calc"
+            )
+
     embed_fn = make_embed_fn(config)
 
     # Phase 1: SL/TP クローズ
