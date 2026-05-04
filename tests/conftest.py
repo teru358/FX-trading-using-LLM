@@ -1,7 +1,7 @@
 """共通 fixture。"""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -9,14 +9,32 @@ import pytest
 from src.analysis.news_analyzer import NewsSentiment
 from src.analysis.price_analyzer import PriceAnalysis
 from src.config import InstrumentConfig
+from src.persistence.balance_snapshot import BalanceSnapshot
+from src.persistence.balance_snapshot import write as write_balance
 from src.persistence.state_store import StateStore
 from src.trading.position_manager import Order
 
 
 @pytest.fixture
 def tmp_state_store(tmp_path: Path) -> StateStore:
-    """実ファイルを tmp_path に書く StateStore。テスト間で干渉しない。"""
-    return StateStore(tmp_path)
+    """実ファイルを tmp_path に書く StateStore。テスト間で干渉しない。
+
+    balance.json を ¥100,000 で seed しておく (テストの想定初期残高)。
+    PositionManager は constructor から initial_balance を受け取らなくなり、
+    balance.json (balance_snapshot) を真実のソースとして読むようになったため。
+    """
+    store = StateStore(tmp_path)
+    write_balance(
+        store.state_dir,
+        BalanceSnapshot(
+            balance=100_000.0,
+            deposit=100_000.0,
+            peak_balance=100_000.0,
+            source="paper",
+            fetched_at=datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
+        ),
+    )
+    return store
 
 
 @pytest.fixture

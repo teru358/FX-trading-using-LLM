@@ -13,7 +13,7 @@ from src.trading.position_manager import Order, PositionManager
 
 def test_open_position(tmp_state_store, buy_order):
     """open_position 後にポジションが open_positions に追加される。"""
-    pm = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test")
+    pm = PositionManager(tmp_state_store, context="Test")
     pm.open_position(buy_order)
     account = pm.get_account_state()
     assert len(account.open_positions) == 1
@@ -23,7 +23,7 @@ def test_open_position(tmp_state_store, buy_order):
 
 def test_close_position_profit(tmp_state_store, buy_order):
     """利益決済: close_price > entry_price → realized_pnl > 0、balance が増加する。"""
-    pm = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test")
+    pm = PositionManager(tmp_state_store, context="Test")
     pm.open_position(buy_order)
 
     close_price = 151.0  # entry=150.0 → +1.0 × 10000 = +10000
@@ -39,7 +39,7 @@ def test_close_position_profit(tmp_state_store, buy_order):
 
 def test_close_position_loss(tmp_state_store, buy_order):
     """損失決済: close_price < entry_price → realized_pnl < 0、balance が減少する。"""
-    pm = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test")
+    pm = PositionManager(tmp_state_store, context="Test")
     pm.open_position(buy_order)
 
     close_price = 149.0  # entry=150.0 → -1.0 × 10000 = -10000
@@ -53,7 +53,7 @@ def test_close_position_loss(tmp_state_store, buy_order):
 
 def test_close_nonexistent_position(tmp_state_store):
     """存在しない order_id を close しようとすると None が返る。"""
-    pm = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test")
+    pm = PositionManager(tmp_state_store, context="Test")
     result = pm.close_position("nonexistent-id", 150.0, "manual")
     assert result is None
 
@@ -63,7 +63,7 @@ def test_close_nonexistent_position(tmp_state_store):
 
 def test_close_position_sell_profit(tmp_state_store, sell_order):
     """SELL 利益決済: close_price < entry_price → realized_pnl > 0。"""
-    pm = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test")
+    pm = PositionManager(tmp_state_store, context="Test")
     pm.open_position(sell_order)
 
     close_price = 149.0  # entry=150.0 → SELL なので (150-149) × 10000 = +10000
@@ -76,7 +76,7 @@ def test_close_position_sell_profit(tmp_state_store, sell_order):
 
 def test_close_position_sell_loss(tmp_state_store, sell_order):
     """SELL 損失決済: close_price > entry_price → realized_pnl < 0。"""
-    pm = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test")
+    pm = PositionManager(tmp_state_store, context="Test")
     pm.open_position(sell_order)
 
     close_price = 151.0
@@ -92,7 +92,7 @@ def test_close_position_sell_loss(tmp_state_store, sell_order):
 
 def test_get_account_state(tmp_state_store, buy_order, sell_order):
     """複数ポジションを追加後、get_account_state が正しい値を返す。"""
-    pm = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test")
+    pm = PositionManager(tmp_state_store, context="Test")
     pm.open_position(buy_order)
     pm.open_position(sell_order)
 
@@ -106,7 +106,7 @@ def test_get_account_state(tmp_state_store, buy_order, sell_order):
 
 
 def test_get_open_position_returns_matching(tmp_state_store, buy_order):
-    pm = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test")
+    pm = PositionManager(tmp_state_store, context="Test")
     pm.open_position(buy_order)
     found = pm.get_open_position("USDJPY=X")
     assert found is not None
@@ -114,7 +114,7 @@ def test_get_open_position_returns_matching(tmp_state_store, buy_order):
 
 
 def test_get_open_position_none_when_not_open(tmp_state_store):
-    pm = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test")
+    pm = PositionManager(tmp_state_store, context="Test")
     assert pm.get_open_position("USDJPY=X") is None
 
 
@@ -123,7 +123,7 @@ def test_get_open_position_none_when_not_open(tmp_state_store):
 
 def test_update_stop_loss_buy_success(tmp_state_store, buy_order):
     """BUY: 新 SL が既存 SL より高ければ更新成功。"""
-    pm = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test")
+    pm = PositionManager(tmp_state_store, context="Test")
     pm.open_position(buy_order)  # SL=149.0
 
     assert pm.update_stop_loss(buy_order.order_id, 149.5) is True
@@ -133,7 +133,7 @@ def test_update_stop_loss_buy_success(tmp_state_store, buy_order):
 
 def test_update_stop_loss_buy_rejects_equal_or_lower(tmp_state_store, buy_order):
     """BUY: 新 SL が既存 SL 以下 (同値含む) なら False で拒否。"""
-    pm = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test")
+    pm = PositionManager(tmp_state_store, context="Test")
     pm.open_position(buy_order)  # SL=149.0
 
     assert pm.update_stop_loss(buy_order.order_id, 149.0) is False  # 同値
@@ -147,7 +147,7 @@ def test_update_stop_loss_buy_rejects_equal_or_lower(tmp_state_store, buy_order)
 
 def test_update_stop_loss_sell_success(tmp_state_store, sell_order):
     """SELL: 新 SL が既存 SL より低ければ更新成功。"""
-    pm = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test")
+    pm = PositionManager(tmp_state_store, context="Test")
     pm.open_position(sell_order)  # SL=151.0
 
     assert pm.update_stop_loss(sell_order.order_id, 150.5) is True
@@ -157,7 +157,7 @@ def test_update_stop_loss_sell_success(tmp_state_store, sell_order):
 
 def test_update_stop_loss_sell_rejects_equal_or_higher(tmp_state_store, sell_order):
     """SELL: 新 SL が既存 SL 以上 (同値含む) なら False で拒否。"""
-    pm = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test")
+    pm = PositionManager(tmp_state_store, context="Test")
     pm.open_position(sell_order)  # SL=151.0
 
     assert pm.update_stop_loss(sell_order.order_id, 151.0) is False  # 同値
@@ -167,7 +167,7 @@ def test_update_stop_loss_sell_rejects_equal_or_higher(tmp_state_store, sell_ord
 
 
 def test_update_stop_loss_unknown_id_returns_false(tmp_state_store):
-    pm = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test")
+    pm = PositionManager(tmp_state_store, context="Test")
     assert pm.update_stop_loss("nonexistent-id", 150.0) is False
 
 
@@ -177,11 +177,11 @@ def test_update_stop_loss_unknown_id_returns_false(tmp_state_store):
 def test_position_persists_across_instances(tmp_state_store, buy_order):
     """PositionManager は state_store から毎回 load するので、別インスタンスでも
     同じ state_dir を指していれば open positions / balance が再現される。"""
-    pm1 = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test1")
+    pm1 = PositionManager(tmp_state_store, context="Test1")
     pm1.open_position(buy_order)
 
     # 同じ store で別インスタンスを作ると既存ポジションがロードされる
-    pm2 = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test2")
+    pm2 = PositionManager(tmp_state_store, context="Test2")
     account = pm2.get_account_state()
     assert len(account.open_positions) == 1
     assert account.open_positions[0].order_id == buy_order.order_id
@@ -190,11 +190,11 @@ def test_position_persists_across_instances(tmp_state_store, buy_order):
 def test_closed_trades_and_balance_persist(tmp_state_store, buy_order):
     """close_position で balance / closed_trades が保存され、新インスタンスに
     引き継がれる。"""
-    pm1 = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test1")
+    pm1 = PositionManager(tmp_state_store, context="Test1")
     pm1.open_position(buy_order)
     pm1.close_position(buy_order.order_id, 151.0, "take_profit")
 
-    pm2 = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test2")
+    pm2 = PositionManager(tmp_state_store, context="Test2")
     account = pm2.get_account_state()
     assert account.balance == pytest.approx(110_000.0)
     assert len(account.open_positions) == 0
@@ -206,7 +206,7 @@ def test_initial_stop_loss_preserved_after_trailing(tmp_state_store):
     """Order.initial_stop_loss は Order.new で SL と同じ値にセットされ、
     その後 update_stop_loss で SL が更新されても initial_stop_loss は変わらない。
     これは trailing stop の follow ステージで「元の SL 距離」を再現するため必須。"""
-    pm = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test")
+    pm = PositionManager(tmp_state_store, context="Test")
     order = Order.new(
         pair="USDJPY=X",
         direction="buy",
@@ -224,7 +224,7 @@ def test_initial_stop_loss_preserved_after_trailing(tmp_state_store):
     assert pm.update_stop_loss(order.order_id, 100.0, stage="breakeven") is True
     assert pm.update_stop_loss(order.order_id, 103.0, stage="follow") is True
 
-    reloaded = PositionManager(tmp_state_store, initial_balance=100_000.0, context="Test2")
+    reloaded = PositionManager(tmp_state_store, context="Test2")
     pos = reloaded.get_open_position("USDJPY=X")
     assert pos is not None
     assert pos.stop_loss == pytest.approx(103.0), "最新 SL は反映"
@@ -241,8 +241,8 @@ def test_concurrent_mutations_sync_across_instances(tmp_state_store, buy_order, 
     ポジションを close したあと、古い在メモリ state を持つ B が save すると
     A の変更が巻き戻っていた。transaction + reload で原子化されたことを検証する。
     """
-    pm_a = PositionManager(tmp_state_store, initial_balance=100_000.0, context="A")
-    pm_b = PositionManager(tmp_state_store, initial_balance=100_000.0, context="B")
+    pm_a = PositionManager(tmp_state_store, context="A")
+    pm_b = PositionManager(tmp_state_store, context="B")
 
     # A が BUY を open — B はまだ知らない (__init__ 時点の load のみ)
     pm_a.open_position(buy_order)
@@ -252,7 +252,7 @@ def test_concurrent_mutations_sync_across_instances(tmp_state_store, buy_order, 
     pm_b.open_position(sell_order)
 
     # disk 上には 2 つのポジションが存在するはず
-    fresh = PositionManager(tmp_state_store, initial_balance=100_000.0, context="fresh")
+    fresh = PositionManager(tmp_state_store, context="fresh")
     pairs = {p.order_id for p in fresh.get_account_state().open_positions}
     assert buy_order.order_id in pairs
     assert sell_order.order_id in pairs
@@ -261,11 +261,11 @@ def test_concurrent_mutations_sync_across_instances(tmp_state_store, buy_order, 
 
 def test_close_by_stale_instance_does_not_resurrect_other_positions(tmp_state_store, buy_order, sell_order):
     """B のクローズ操作が A の在メモリ state によって巻き戻らないこと。"""
-    pm_a = PositionManager(tmp_state_store, initial_balance=100_000.0, context="A")
+    pm_a = PositionManager(tmp_state_store, context="A")
     pm_a.open_position(buy_order)
     pm_a.open_position(sell_order)
 
-    pm_b = PositionManager(tmp_state_store, initial_balance=100_000.0, context="B")
+    pm_b = PositionManager(tmp_state_store, context="B")
     # A が BUY をクローズ
     pm_a.close_position(buy_order.order_id, 151.0, "take_profit")
 
@@ -275,7 +275,7 @@ def test_close_by_stale_instance_does_not_resurrect_other_positions(tmp_state_st
     assert closed_sell is not None
 
     # disk 上にオープンポジションは残っていない
-    fresh = PositionManager(tmp_state_store, initial_balance=100_000.0, context="fresh")
+    fresh = PositionManager(tmp_state_store, context="fresh")
     assert len(fresh.get_account_state().open_positions) == 0
     assert len(fresh.get_account_state().closed_trades) == 2
 
@@ -358,7 +358,6 @@ def _setup_position_manager(tmp_path: Path) -> PositionManager:
     from src.persistence.state_store import StateStore
     return PositionManager(
         StateStore(tmp_path),
-        initial_balance=10000.0,
         context="Test",
     )
 

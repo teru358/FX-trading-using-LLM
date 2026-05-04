@@ -98,12 +98,23 @@ class StateStore:
             return {"account_balance": None, "open_positions": []}
         return data
 
-    def save_positions(self, account_balance: float, open_positions: list[dict]) -> None:
-        data = {
-            "account_balance": account_balance,
+    def save_positions(
+        self,
+        account_balance: float | None,
+        open_positions: list[dict],
+    ) -> None:
+        """positions.json を書く。
+
+        account_balance is None なら "account_balance" キーを書き出さない
+        (balance.json が真実のソースになった移行後の通常運用)。後方互換のため
+        非 None の場合のみキーを残す。
+        """
+        data: dict[str, Any] = {
             "last_updated": datetime.now().isoformat(),
             "open_positions": open_positions,
         }
+        if account_balance is not None:
+            data["account_balance"] = account_balance
         with self._lock:
             self._atomic_write(self._positions_path(), data)
         logger.debug(f"Saved {len(open_positions)} open positions.")

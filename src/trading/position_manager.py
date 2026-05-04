@@ -132,9 +132,8 @@ class AccountState:
 
 
 class PositionManager:
-    def __init__(self, state_store: StateStore, initial_balance: float, context: str = "PositionManager") -> None:
+    def __init__(self, state_store: StateStore, context: str = "PositionManager") -> None:
         self._store = state_store
-        self._initial_balance = initial_balance
         self._context = context
         self._load()
 
@@ -142,13 +141,20 @@ class PositionManager:
         self._reload_from_disk(verbose=True)
 
     def _reload_from_disk(self, verbose: bool = False) -> None:
-        """positions.json と trades.json から完全に再読込する。
+        """positions.json と trades.json と balance.json から完全に再読込する。
 
         複数の PositionManager インスタンスが同じ state_dir を共有する状況下で、
         ミューテーション直前に disk と同期するために使用する。
+        balance / deposit / peak_balance は balance.json (balance_snapshot 経由) が
+        単一のソースオブトゥルース。
         """
+        from src.persistence import balance_snapshot
+
         raw_pos = self._store.load_positions_raw()
-        self._balance: float = raw_pos.get("account_balance") or self._initial_balance
+        snap = balance_snapshot.read(self._store.state_dir)
+        self._balance: float = snap.balance
+        self._deposit: float = snap.deposit
+        self._peak_balance: float = snap.peak_balance
         self._open: list[Order] = [
             Order.from_dict(p) for p in raw_pos.get("open_positions", [])
         ]
@@ -157,19 +163,21 @@ class PositionManager:
         if verbose:
             logger.info(
                 f"[{self._context}] balance=${self._balance:.2f}, "
+                f"deposit=${self._deposit:.2f}, peak=${self._peak_balance:.2f}, "
                 f"open={len(self._open)}, closed={len(self._closed)}"
             )
 
     def _save(self) -> None:
+        # positions.json には open_positions のみ書く (balance は balance.json 担当)
         self._store.save_positions(
-            account_balance=self._balance,
+            account_balance=None,  # balance.json が真実
             open_positions=[o.to_dict() for o in self._open],
         )
 
     def get_account_state(self) -> AccountState:
         return AccountState(
             balance=self._balance,
-            initial_balance=self._initial_balance,
+            initial_balance=self._deposit,
             open_positions=list(self._open),
             closed_trades=list(self._closed),
         )
@@ -282,16 +290,26 @@ class PositionManager:
 
         transaction を取得し disk から再読込した上で balance のみ書き換える。
         open_positions は維持される。旧残高を返す。
+        balance.json (balance_snapshot) も同時に更新する (peak は max 維持)。
         """
+        from src.persistence import balance_snapshot
+
         with self._store.transaction():
             self._reload_from_disk()
             previous = self._balance
             self._balance = new_balance
             self._save()
+            new_snap = balance_snapshot.mutate(
+                self._store.state_dir,
+                lambda snap: balance_snapshot.update_peak(snap, self._balance),
+            )
+            self._peak_balance = new_snap.peak_balance
         logger.info(f"[{self._context}] Balance adjusted: {previous:.2f} → {new_balance:.2f}")
         return previous
 
     def close_position(self, order_id: str, close_price: float, reason: str) -> Optional[Order]:
+        from src.persistence import balance_snapshot
+
         with self._store.transaction():
             self._reload_from_disk()
             for i, pos in enumerate(self._open):
@@ -317,6 +335,14 @@ class PositionManager:
                     self._closed.append(pos)
                     self._store.append_trade(pos.to_dict())
                     self._save()
+                    # balance.json も更新 (peak は max 維持)
+                    # mutate は state_dir 単位の RLock を使うので
+                    # 既に取得済みの transaction() ロックと安全に共存する。
+                    new_snap = balance_snapshot.mutate(
+                        self._store.state_dir,
+                        lambda snap: balance_snapshot.update_peak(snap, self._balance),
+                    )
+                    self._peak_balance = new_snap.peak_balance
                     logger.info(
                         f"[TRADE] Closed {pos.direction.upper()} {pos.pair} "
                         f"@ {close_price:.5f} [{reason}] PnL={pnl:+.2f} | "
