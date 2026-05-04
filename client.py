@@ -842,7 +842,7 @@ _HELP = """\
   [cyan]schedule[/cyan]             — スケジュール (取引/予測/ニュース/技術/exit_check)
   [cyan]hosts[/cyan]                — ホストプロファイル一覧
   [cyan]use[/cyan] <name>           — 接続先ホスト切替  例: use remote
-  [cyan]halt[/cyan] soft|hard [理由] — 取引停止 (soft=新規のみ停止 / hard=全決済)
+  [cyan]halt[/cyan] soft|hard       — 取引停止 (soft=新規のみ停止 / hard=全決済 / 理由 任意)
   [cyan]resume[/cyan]               — soft halt 解除
   [cyan]help[/cyan]   (h)           — このヘルプを表示
   [cyan]quit[/cyan]   (q)           — クライアントを終了（デーモンは継続稼働）"""

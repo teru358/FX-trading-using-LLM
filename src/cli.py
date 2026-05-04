@@ -38,7 +38,7 @@ _HELP = """\
   [cyan]audit[/cyan] (days)         — 過去トレードの統計診断レポート生成
   [cyan]audit review[/cyan] (days)  — audit + LLM 改善候補の対話選別 (教訓を audit_lessons.md に蓄積)
   [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
-  [cyan]halt[/cyan] soft|hard [reason] — bridge を halt 状態にする
+  [cyan]halt[/cyan] soft|hard       — bridge を halt 状態にする (reason 任意)
   [cyan]resume[/cyan]               — soft halt を解除 (hard halt 中は手動 .env 編集が必要)
   [cyan]feeds[/cyan]                — RSSフィード疎通確認
   [cyan]notify[/cyan]  (n)          — 通知テストメッセージを送信
