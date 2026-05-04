@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,6 +17,8 @@ from fastapi.testclient import TestClient
 
 from src.api._state import state
 from src.api.server import app
+from src.persistence.balance_snapshot import BalanceSnapshot
+from src.persistence.balance_snapshot import write as write_balance
 
 
 @pytest.fixture(autouse=True)
@@ -38,6 +41,19 @@ def _state_setup(tmp_path, monkeypatch):
     cfg.providers.oanda = None
     cfg.price_monitor.interval_minutes = 5
     cfg.schedule.run_times = []
+
+    # PositionManager は balance.json (balance_snapshot) を真実のソースとして
+    # 読むため、テストで残高 ¥100,000 を期待する場合は事前に seed する。
+    write_balance(
+        tmp_path,
+        BalanceSnapshot(
+            balance=100_000.0,
+            deposit=100_000.0,
+            peak_balance=100_000.0,
+            source="paper",
+            fetched_at=datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
+        ),
+    )
 
     state.config = cfg
     state.analysis_store = None

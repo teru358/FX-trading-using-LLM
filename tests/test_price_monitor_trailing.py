@@ -18,7 +18,7 @@ def _mk_cfg() -> PriceMonitorConfig:
 
 
 def _mk_mgr(tmp_state_store: StateStore, order) -> PositionManager:
-    mgr = PositionManager(tmp_state_store, initial_balance=100_000.0, context="TrailTest")
+    mgr = PositionManager(tmp_state_store, context="TrailTest")
     mgr.open_position(order)
     return mgr
 

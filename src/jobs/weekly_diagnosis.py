@@ -34,7 +34,7 @@ def _build_performance_section(
 ) -> str:
     """直近 N 日のクローズトレードからサマリを作る。"""
     state_store = StateStore(config.state_dir)
-    pm = PositionManager(state_store, config.trading.initial_balance, context="WeeklyDiag")
+    pm = PositionManager(state_store, context="WeeklyDiag")
     account = pm.get_account_state()
 
     cutoff = db_now() - timedelta(days=lookback_days)

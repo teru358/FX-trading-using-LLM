@@ -21,9 +21,7 @@ def account() -> dict[str, Any]:
     """残高 + 損益 + 取引数 + 勝率 + オープンポジション。"""
     assert state.config is not None
     state_store = StateStore(state.config.state_dir)
-    pm = PositionManager(
-        state_store, state.config.trading.initial_balance, context="API_Account",
-    )
+    pm = PositionManager(state_store, context="API_Account")
     acc = pm.get_account_state()
 
     positions = []

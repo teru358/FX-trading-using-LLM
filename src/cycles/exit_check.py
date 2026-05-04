@@ -165,9 +165,7 @@ def run_exit_check_cycle(
 ) -> None:
     """schedule ライブラリから呼び出す同期ラッパー。"""
     state_store = StateStore(config.state_dir)
-    position_mgr = PositionManager(
-        state_store, config.trading.initial_balance, context="ExitCheck",
-    )
+    position_mgr = PositionManager(state_store, context="ExitCheck")
     asyncio.run(exit_check_cycle(
         config, position_mgr, store, analysis_store, price_provider=price_provider,
     ))

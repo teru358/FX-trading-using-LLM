@@ -49,7 +49,7 @@ _HELP = """\
 
 def _cmd_status(config: AppConfig) -> None:
     state_store = StateStore(config.state_dir)
-    pm = PositionManager(state_store, config.trading.initial_balance, context="CLI_Status")
+    pm = PositionManager(state_store, context="CLI_Status")
     account = pm.get_account_state()
 
     pnl = account.balance - account.initial_balance
@@ -102,7 +102,7 @@ def _cmd_status(config: AppConfig) -> None:
 def _cmd_close(config: AppConfig, pair_arg: str) -> None:
     async def _do() -> None:
         state_store = StateStore(config.state_dir)
-        pm = PositionManager(state_store, config.trading.initial_balance, context="CLI_Close")
+        pm = PositionManager(state_store, context="CLI_Close")
         account = pm.get_account_state()
 
         pos = next(

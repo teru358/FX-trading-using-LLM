@@ -236,9 +236,7 @@ def create_broker(
             **paper_kwargs,
         )
         obs_store = StateStore(Path(live_test_observer_state_dir))
-        obs_pm = PositionManager(
-            obs_store, initial_balance, context="LiveTestObserver",
-        )
+        obs_pm = PositionManager(obs_store, context="LiveTestObserver")
         return ShadowBrokerAdapter(
             primary=primary, observer=observer,
             observer_position_mgr=obs_pm,

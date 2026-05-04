@@ -99,7 +99,7 @@ def run_analysis_summary(
 ) -> None:
     """CLI/API から呼び出す同期ラッパー。"""
     state_store = StateStore(config.state_dir)
-    position_mgr = PositionManager(state_store, config.trading.initial_balance, context="AnalysisSummary")
+    position_mgr = PositionManager(state_store, context="AnalysisSummary")
     asyncio.run(_analysis_summary(config, position_mgr, store, analysis_store))
 
 
@@ -209,7 +209,7 @@ async def _run_ask(
     analysis_store: AnalysisStore,
 ) -> str:
     state_store = StateStore(config.state_dir)
-    position_mgr = PositionManager(state_store, config.trading.initial_balance, context="Ask")
+    position_mgr = PositionManager(state_store, context="Ask")
     session_store = SessionStore(config.prices_db_path)
     forecast_store = ForecastStore(config.prices_db_path)
 

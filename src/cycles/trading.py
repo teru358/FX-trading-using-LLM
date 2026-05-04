@@ -928,9 +928,7 @@ def run_trading_cycle(
     from src.data.analysis_store import ForecastStore
     from src.data.session_store import SessionStore
     state_store = StateStore(config.state_dir)
-    position_mgr = PositionManager(
-        state_store, config.trading.initial_balance, context="TradingCycle",
-    )
+    position_mgr = PositionManager(state_store, context="TradingCycle")
     session_store = SessionStore(config.prices_db_path)
     forecast_store = ForecastStore(config.prices_db_path)
     asyncio.run(trading_cycle(

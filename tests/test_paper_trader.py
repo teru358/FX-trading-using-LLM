@@ -1,11 +1,13 @@
 """paper_trader.execute_signal の統合テスト (scale-in フロー含む)。"""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
+from src.persistence.balance_snapshot import BalanceSnapshot
+from src.persistence.balance_snapshot import write as write_balance
 from src.persistence.state_store import StateStore
 from src.signals.signal_combiner import TradeSignal
 from src.trading.paper_trader import execute_signal
@@ -44,7 +46,18 @@ def _signal(action: str = "buy", conf: float = 0.75, combined_score: float = 0.5
 
 @pytest.fixture
 def mgr(tmp_path):
-    return PositionManager(StateStore(tmp_path), initial_balance=10000.0, context="Test")
+    store = StateStore(tmp_path)
+    write_balance(
+        store.state_dir,
+        BalanceSnapshot(
+            balance=10000.0,
+            deposit=10000.0,
+            peak_balance=10000.0,
+            source="paper",
+            fetched_at=datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
+        ),
+    )
+    return PositionManager(store, context="Test")
 
 
 def _common_kwargs(scale_in: bool = False) -> dict:

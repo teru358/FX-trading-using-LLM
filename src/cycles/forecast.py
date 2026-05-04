@@ -134,9 +134,7 @@ def run_forecast_cycle(
 ) -> None:
     """schedule ライブラリから呼び出す同期ラッパー。"""
     state_store = StateStore(config.state_dir)
-    position_mgr = PositionManager(
-        state_store, config.trading.initial_balance, context="ForecastCycle",
-    )
+    position_mgr = PositionManager(state_store, context="ForecastCycle")
     asyncio.run(forecast_cycle(
         config, position_mgr, store, analysis_store, forecast_store,
         price_provider=price_provider, price_store=price_store,

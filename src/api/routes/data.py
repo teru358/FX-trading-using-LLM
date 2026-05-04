@@ -92,7 +92,7 @@ async def analyze() -> dict[str, Any]:
     from src.cycles._helpers import _summarize_pair
 
     state_store = StateStore(state.config.state_dir)
-    pm = PositionManager(state_store, state.config.trading.initial_balance, context="API_Analyze")
+    pm = PositionManager(state_store, context="API_Analyze")
 
     results = await asyncio.gather(
         *[_summarize_pair(p, state.config, pm, state.store, state.analysis_store)

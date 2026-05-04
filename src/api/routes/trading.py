@@ -33,9 +33,7 @@ def _build_run_trade_response(started_at, status: str = "completed") -> dict[str
     assert state.config is not None
     elapsed = (db_now() - started_at).total_seconds()
     state_store = StateStore(state.config.state_dir)
-    pm = PositionManager(
-        state_store, state.config.trading.initial_balance, context="API_RunTrade",
-    )
+    pm = PositionManager(state_store, context="API_RunTrade")
     account = pm.get_account_state()
     return {
         "status": status,
@@ -127,7 +125,7 @@ async def close_position(pair: str) -> dict[str, Any]:
     # disk から再読込した上で読み書きするため、呼び出し側で明示的にロックを取る
     # 必要はない (read-modify-write の原子性は PositionManager が保証する)。
     state_store = StateStore(state.config.state_dir)
-    pm = PositionManager(state_store, state.config.trading.initial_balance, context="API_Close")
+    pm = PositionManager(state_store, context="API_Close")
     account = pm.get_account_state()
 
     pos = next(

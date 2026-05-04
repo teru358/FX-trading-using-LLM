@@ -187,7 +187,23 @@ from src.trading.position_manager import PositionManager
 
 @pytest.fixture
 def position_mgr(tmp_path):
-    return PositionManager(StateStore(tmp_path), initial_balance=10000.0, context="Test")
+    from datetime import datetime, timezone
+
+    from src.persistence.balance_snapshot import BalanceSnapshot
+    from src.persistence.balance_snapshot import write as write_balance
+
+    store = StateStore(tmp_path)
+    write_balance(
+        store.state_dir,
+        BalanceSnapshot(
+            balance=10000.0,
+            deposit=10000.0,
+            peak_balance=10000.0,
+            source="paper",
+            fetched_at=datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
+        ),
+    )
+    return PositionManager(store, context="Test")
 
 
 def _common_kwargs(scale_in_enabled: bool = False) -> dict:

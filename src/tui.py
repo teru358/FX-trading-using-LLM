@@ -236,7 +236,7 @@ class TuiApp(App):
         from src.trading.position_manager import PositionManager
 
         state_store = StateStore(self._config.state_dir)
-        pm = PositionManager(state_store, self._config.trading.initial_balance, context="TUI_Status")
+        pm = PositionManager(state_store, context="TUI_Status")
         account = pm.get_account_state()
 
         pnl = account.balance - account.initial_balance
