@@ -42,11 +42,24 @@ def _flatten_keys(node, prefix: str = "") -> set[str]:
 # ── キー欠損チェック ──────────────────────────────────────────
 
 
+# Loader が起動時に warn しつつ silently 落とす deprecated キー。
+# 個人設定ファイルに残っていても .example に書き戻す必要はない。
+_DEPRECATED_KEYS_ALLOWED_IN_REAL: set[str] = {
+    "trading.max_total_positions",
+    "trading.max_positions_per_currency_group",
+    "trading.max_same_direction_per_group",
+    "trading.trading_mode",
+    "trading.initial_balance",
+    "trading.drawdown_kill_switch_lookback_days",
+}
+
+
 @pytest.mark.parametrize("real_name,example_name", PAIRS)
 def test_example_has_all_keys_from_real(real_name, example_name):
     """個人設定ファイル (*.yaml) のキーは全て *.yaml.example にも存在すること。
 
     個人設定ファイルが存在しない環境 (CI / 新規 clone) ではスキップ。
+    Loader 側で warn + drop される deprecated キーは比較対象外。
     """
     real = CONFIG_DIR / real_name
     example = CONFIG_DIR / example_name
@@ -58,7 +71,7 @@ def test_example_has_all_keys_from_real(real_name, example_name):
     real_keys = _flatten_keys(yaml.safe_load(real.read_text(encoding="utf-8")) or {})
     example_keys = _flatten_keys(yaml.safe_load(example.read_text(encoding="utf-8")) or {})
 
-    missing = real_keys - example_keys
+    missing = (real_keys - example_keys) - _DEPRECATED_KEYS_ALLOWED_IN_REAL
     assert not missing, (
         f"{real_name} にあるが {example_name} にないキー: {sorted(missing)}\n"
         f"新機能を追加したら .example にも雛形を書き足してください。"

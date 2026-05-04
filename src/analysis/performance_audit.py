@@ -101,8 +101,16 @@ def run_audit(
         report_path = _write_empty_report(config, days, now)
         return AuditResult(report_path=report_path, session_count=0)
 
-    # 通貨非依存の NOISE/CONF_MISS 判定用リスク予算 (1R = risk_per_trade × initial_balance)
-    risk_budget = config.trading.initial_balance * config.trading.risk_per_trade
+    # 通貨非依存の NOISE/CONF_MISS 判定用リスク予算 (1R = risk_per_trade × deposit)
+    # 残高は balance.json (balance_snapshot) を真実のソースとして読む。
+    from src.persistence.balance_snapshot import read as _read_balance
+    try:
+        _snap = _read_balance(config.state_dir)
+        _deposit = _snap.deposit if _snap is not None else 0.0
+    except Exception as _e:  # pragma: no cover - defensive
+        logger.warning(f"[AUDIT] balance_snapshot.read failed: {_e}")
+        _deposit = 0.0
+    risk_budget = _deposit * config.trading.risk_per_trade
 
     # post_hoc 計算
     pair_distributions: dict[str, list[float]] = {}

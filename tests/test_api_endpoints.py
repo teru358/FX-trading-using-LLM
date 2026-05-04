@@ -33,7 +33,6 @@ def _state_setup(tmp_path, monkeypatch):
     cfg.mode = "paper"
     cfg.paper_provider = "yfinance"
     cfg.live_broker = None
-    cfg.trading.initial_balance = 100_000.0
     cfg.state_dir = tmp_path
     cfg.tradeable_instruments = []
     cfg.providers.twelvedata = None

@@ -216,6 +216,8 @@ _DEPRECATED_TRADING_KEYS = {
     "max_positions_per_currency_group",
     "max_same_direction_per_group",
     "trading_mode",
+    "initial_balance",
+    "drawdown_kill_switch_lookback_days",
 }
 
 
@@ -226,6 +228,9 @@ def _strip_deprecated_keys(trading_dict: dict) -> dict:
     max_same_direction_per_group を廃止し max_positions_per_pair に統合した。
     Config restructure で trading.trading_mode を廃止し、トップレベル
     mode フィールドに置換した。
+    Config restructure (Task 9) で trading.initial_balance を廃止し
+    balance.json (balance_snapshot) に一本化、trading.drawdown_kill_switch_lookback_days
+    を廃止し balance_snapshot.peak_balance を直接参照するようにした。
     """
     result = dict(trading_dict)
     for key in list(result.keys()):
@@ -233,6 +238,10 @@ def _strip_deprecated_keys(trading_dict: dict) -> dict:
             hint = ""
             if key == "trading_mode":
                 hint = " Use top-level 'mode: paper|live|live_test' instead."
+            elif key == "initial_balance":
+                hint = " Balance is now read from state/balance.json (balance_snapshot)."
+            elif key == "drawdown_kill_switch_lookback_days":
+                hint = " DD now reads balance_snapshot.peak_balance directly."
             logger.warning(
                 f"[CONFIG] 'trading.{key}' is deprecated and ignored.{hint} "
                 f"Remove it from settings.yaml."

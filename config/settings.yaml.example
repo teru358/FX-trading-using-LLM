@@ -90,7 +90,8 @@ llm:
 # price_provider 設定 → config/providers/twelvedata.yaml (paper_provider=twelvedata 時)
 
 trading:
-  initial_balance: 10000.0
+  # 残高は state/balance.json (balance_snapshot) を真実のソースとして読む。
+  # paper モードは初期化時に ¥100,000 で seed、live/live_test モードは MT5 から取得する。
   risk_per_trade: 0.02
   signal_confidence_threshold: 0.55     # この confidence 未満は hold
   # min_rr_ratio — planned R:R がこの値未満なら hold に差し戻す (0 = 無効)
@@ -142,7 +143,6 @@ trading:
   # 運用保険。新規運用時は false のままで OK、audit で DD 履歴を確認してから有効化を検討
   drawdown_kill_switch_enabled: false
   drawdown_kill_switch_max_pct: 0.10    # peak equity からこの割合以上落ちたら新規停止 (0.10 = 10%)
-  drawdown_kill_switch_lookback_days: 0 # 0 = 全期間、>0 = 直近 N 日のクローズトレードのみで peak/DD 計算
   # ボラレジーム (EWMA ベース position sizing)
   vol_regime_enabled: false
   vol_regime_ewma_span: 20              # ATR(14) の EWMA 期間 (bar 数)

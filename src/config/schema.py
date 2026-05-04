@@ -100,7 +100,6 @@ class ProviderConfig:
 
 @dataclass
 class TradingConfig:
-    initial_balance: float = 10000.0
     risk_per_trade: float = 0.02
     signal_confidence_threshold: float = 0.55
     min_rr_ratio: float = 0.0           # >0 で有効化: planned R:R がこの値未満なら hold
@@ -149,7 +148,6 @@ class TradingConfig:
     # Drawdown kill switch (新規エントリーのみ停止、既存ポジションは保持)
     drawdown_kill_switch_enabled: bool = False
     drawdown_kill_switch_max_pct: float = 0.10   # peak からこの割合以上落ちたら新規停止 (例: 0.10 = 10%)
-    drawdown_kill_switch_lookback_days: int = 0  # 0 = 全期間、>0 = 直近 N 日のクローズトレードのみ参照
     # ボラレジーム (EWMA ベース position sizing)
     vol_regime_enabled: bool = False
     vol_regime_ewma_span: int = 20           # ATR の EWMA 期間 (bar 数)
