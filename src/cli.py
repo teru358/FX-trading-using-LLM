@@ -38,6 +38,8 @@ _HELP = """\
   [cyan]audit[/cyan] (days)         — 過去トレードの統計診断レポート生成
   [cyan]audit review[/cyan] (days)  — audit + LLM 改善候補の対話選別 (教訓を audit_lessons.md に蓄積)
   [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
+  [cyan]halt[/cyan] soft|hard [reason] — bridge を halt 状態にする
+  [cyan]resume[/cyan]               — soft halt を解除 (hard halt 中は手動 .env 編集が必要)
   [cyan]feeds[/cyan]                — RSSフィード疎通確認
   [cyan]notify[/cyan]  (n)          — 通知テストメッセージを送信
   [cyan]edit[/cyan]   (e)           — user_notes.md を vim で編集
@@ -186,6 +188,66 @@ def _cmd_audit(config: AppConfig, args: list[str]) -> None:
     _console.print(Panel(tbl, title="Audit Summary", border_style="cyan"))
 
 
+def _cmd_halt(config: AppConfig, args: list[str]) -> None:
+    """halt {soft|hard} [reason] — bridge を halt 状態にする。
+
+    paper モードでは bridge 非依存のため no-op (warning ログのみ)。
+    """
+    if config.mode == "paper":
+        _console.print("[yellow]paper モードでは halt は不要です (bridge 非依存)[/yellow]")
+        return
+    if not args:
+        _console.print("[red]使い方: halt soft|hard [reason][/red]")
+        return
+    mode = args[0].lower()
+    if mode not in ("soft", "hard"):
+        _console.print(f"[red]不明: halt mode={mode!r} (soft|hard)[/red]")
+        return
+    reason = " ".join(args[1:]) or "manual via cli"
+
+    mt5_cfg = config.providers.mt5
+    if mt5_cfg is None or not mt5_cfg.bridge_url:
+        _console.print("[red]bridge_url 未設定[/red]")
+        return
+
+    import httpx
+    headers = {"X-Bridge-Api-Key": mt5_cfg.api_key} if mt5_cfg.api_key else {}
+    try:
+        resp = httpx.post(
+            f"{mt5_cfg.bridge_url.rstrip('/')}/admin/halt",
+            json={"mode": mode, "reason": reason},
+            timeout=5.0, headers=headers,
+        )
+        resp.raise_for_status()
+        _console.print(f"[green]halt {mode}: {reason}[/green]")
+    except httpx.HTTPError as e:
+        _console.print(f"[red]halt 失敗: {e}[/red]")
+
+
+def _cmd_resume(config: AppConfig) -> None:
+    """resume — soft halt 解除 (hard halt 中は手動 .env 編集が必要)。"""
+    if config.mode == "paper":
+        _console.print("[yellow]paper モードでは resume は不要です[/yellow]")
+        return
+
+    mt5_cfg = config.providers.mt5
+    if mt5_cfg is None or not mt5_cfg.bridge_url:
+        _console.print("[red]bridge_url 未設定[/red]")
+        return
+
+    import httpx
+    headers = {"X-Bridge-Api-Key": mt5_cfg.api_key} if mt5_cfg.api_key else {}
+    try:
+        resp = httpx.post(
+            f"{mt5_cfg.bridge_url.rstrip('/')}/admin/resume",
+            timeout=5.0, headers=headers,
+        )
+        resp.raise_for_status()
+        _console.print("[green]resumed[/green]")
+    except httpx.HTTPError as e:
+        _console.print(f"[red]resume 失敗 (hard halt 中なら手動 .env 編集): {e}[/red]")
+
+
 def _cmd_notify(config: AppConfig) -> None:
     async def _do() -> None:
         notifier = create_notifier(config.notifier.enabled)
@@ -332,6 +394,10 @@ def run_commands(
                     _console.print("[red]使い方: close <pair>  例: close USDJPY=X[/red]")
                     continue
                 _cmd_close(config, args[0])
+            elif cmd == "halt":
+                _cmd_halt(config, args)
+            elif cmd == "resume":
+                _cmd_resume(config)
             elif cmd == "audit":
                 _cmd_audit(config, args)
             else:
