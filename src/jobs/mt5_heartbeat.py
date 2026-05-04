@@ -55,12 +55,15 @@ def _state_dir_for(config: AppConfig) -> Path:
 
 
 def _fetch_and_update_balance(
-    config: AppConfig, base: str, cfg, headers: dict,
+    config: AppConfig, base: str, cfg, headers: dict[str, str],
 ) -> None:
     """bridge /account を叩いて balance.json を更新する。
 
     /health 成功時の piggyback。失敗時は警告ログのみ (新規 soft halt 経路は作らない)。
     paper → mt5 切替を検知したら Discord 通知を送る。
+
+    transition 検出は mutate のクロージャ内で prev source を捕捉することで
+    race-free。
     """
     from src.persistence import balance_snapshot
 
@@ -72,21 +75,24 @@ def _fetch_and_update_balance(
         resp.raise_for_status()
         data = resp.json()
         mt5_balance = float(data["balance"])
-    except Exception as e:  # noqa: BLE001 - piggyback 経路は heartbeat 本体を止めない
-        logger.warning(f"[MT5_HB] /account fetch failed: {e}")
+    except (httpx.HTTPError, KeyError, ValueError, TypeError) as e:
+        logger.warning(f"[MT5_HB] /account fetch failed: {type(e).__name__}: {e}")
         return
 
-    # 直前のスナップショットを記憶しておき、source 切替を検知
-    prev_snap = balance_snapshot.read(state_dir)
-    new_snap = balance_snapshot.mutate(
-        state_dir,
-        lambda snap: balance_snapshot.refresh_from_mt5(snap, mt5_balance),
-    )
+    # クロージャで prev source を mutate のロック下で捕捉 → transition 検出を race-free に
+    captured: dict = {}
 
-    if prev_snap.source == "paper" and new_snap.source == "mt5":
+    def _swap(snap: "balance_snapshot.BalanceSnapshot") -> "balance_snapshot.BalanceSnapshot":
+        captured["prev_source"] = snap.source
+        return balance_snapshot.refresh_from_mt5(snap, mt5_balance)
+
+    new_snap = balance_snapshot.mutate(state_dir, _swap)
+    prev_source = captured.get("prev_source")
+
+    if prev_source == "paper" and new_snap.source == "mt5":
         logger.info(
             f"[MT5_HB] balance.json source paper → mt5: "
-            f"deposit ${mt5_balance:.2f} (initial)"
+            f"deposit ¥{mt5_balance:,.0f} (initial)"
         )
         if config.notifier.enabled:
             try:
@@ -95,7 +101,7 @@ def _fetch_and_update_balance(
                 asyncio.run(notifier.send_embed(
                     title="✅ MT5 残高同期 完了 (paper → mt5)",
                     description=(
-                        f"deposit (ROI 分母) を ${mt5_balance:.2f} で確定しました。\n"
+                        f"deposit (ROI 分母) を ¥{mt5_balance:,.0f} で確定しました。\n"
                         f"以降の lot 計算・DD は MT5 実残高ベースで動作します。"
                     ),
                     color=0x2ECC71,
