@@ -44,10 +44,11 @@ def audit_config(tmp_path: Path):
     cfg.llm.news_analysis = MagicMock(model="test", temperature=0.3)
     cfg.llm.price_analysis = MagicMock(model="test", temperature=0.1)
 
-    # trading 設定 — risk_budget (= initial_balance × risk_per_trade) の計算に使う
+    # trading 設定 — risk_budget (= deposit × risk_per_trade) の計算に使う
+    # deposit は balance.json から read される (cfg.state_dir 経由 → tmp_path → paper bootstrap)
     cfg.trading = MagicMock()
-    cfg.trading.initial_balance = 10000.0
     cfg.trading.risk_per_trade = 0.02
+    cfg.state_dir = tmp_path  # balance_snapshot.read() がここを参照
 
     return cfg
 

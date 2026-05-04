@@ -103,14 +103,10 @@ def run_audit(
 
     # 通貨非依存の NOISE/CONF_MISS 判定用リスク予算 (1R = risk_per_trade × deposit)
     # 残高は balance.json (balance_snapshot) を真実のソースとして読む。
+    # read() は不在/破損時に paper bootstrap で常に有効な snapshot を返す契約。
     from src.persistence.balance_snapshot import read as _read_balance
-    try:
-        _snap = _read_balance(config.state_dir)
-        _deposit = _snap.deposit if _snap is not None else 0.0
-    except Exception as _e:  # pragma: no cover - defensive
-        logger.warning(f"[AUDIT] balance_snapshot.read failed: {_e}")
-        _deposit = 0.0
-    risk_budget = _deposit * config.trading.risk_per_trade
+    snap = _read_balance(config.state_dir)
+    risk_budget = snap.deposit * config.trading.risk_per_trade
 
     # post_hoc 計算
     pair_distributions: dict[str, list[float]] = {}
