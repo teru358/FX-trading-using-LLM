@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from src.persistence.balance_snapshot import (
     PAPER_DEFAULT,
     BalanceSnapshot,
     is_stale,
+    mutate,
     read,
     refresh_from_mt5,
     update_peak,
@@ -112,7 +114,6 @@ def test_refresh_from_mt5_updates_peak():
 
 
 def test_is_stale_true_for_old_fetched_at():
-    from datetime import datetime, timedelta, timezone
     old = (datetime.now(tz=timezone.utc) - timedelta(minutes=45)).isoformat(timespec="seconds")
     snap = BalanceSnapshot(
         balance=1.0, deposit=1.0, peak_balance=1.0, source="mt5", fetched_at=old,
@@ -121,7 +122,6 @@ def test_is_stale_true_for_old_fetched_at():
 
 
 def test_is_stale_false_for_fresh_fetched_at():
-    from datetime import datetime, timezone
     fresh = datetime.now(tz=timezone.utc).isoformat(timespec="seconds")
     snap = BalanceSnapshot(
         balance=1.0, deposit=1.0, peak_balance=1.0, source="mt5", fetched_at=fresh,
@@ -144,3 +144,58 @@ def test_atomic_write_no_partial_on_existing_file(tmp_path: Path):
     assert data["balance"] == 100.0
     # tmp ファイルは残らない
     assert not (tmp_path / "balance.json.tmp").exists()
+
+
+def test_mutate_returns_updated_snapshot_and_persists(tmp_path: Path):
+    """mutate(fn) でロック下に read → fn → write を行い、結果を返す。"""
+    write(tmp_path, BalanceSnapshot(
+        balance=100.0, deposit=100.0, peak_balance=100.0,
+        source="paper", fetched_at="2026-05-04T10:00:00+00:00",
+    ))
+
+    out = mutate(tmp_path, lambda snap: update_peak(snap, 150.0))
+
+    assert out.balance == 150.0
+    assert out.peak_balance == 150.0
+    # ディスクにも反映されている
+    on_disk = read(tmp_path)
+    assert on_disk.balance == 150.0
+
+
+def test_invalid_source_value_regenerates_paper(tmp_path: Path):
+    """source が 'paper'|'mt5' 以外なら paper bootstrap で復旧。"""
+    p = tmp_path / "balance.json"
+    p.write_text(json.dumps({
+        "balance": 50.0, "deposit": 50.0, "peak_balance": 50.0,
+        "source": "garbage", "fetched_at": "2026-05-04T10:00:00+00:00",
+    }), encoding="utf-8")
+    snap = read(tmp_path)
+    assert snap.source == "paper"
+    assert snap.balance == PAPER_DEFAULT
+
+
+def test_balance_snapshot_rejects_invalid_source():
+    """直接コンストラクト時も invalid source は ValueError。"""
+    with pytest.raises(ValueError, match="invalid source"):
+        BalanceSnapshot(
+            balance=1.0, deposit=1.0, peak_balance=1.0,
+            source="garbage", fetched_at="2026-05-04T10:00:00+00:00",
+        )
+
+
+def test_update_peak_rejects_nan():
+    snap = BalanceSnapshot(
+        balance=100.0, deposit=100.0, peak_balance=120.0,
+        source="paper", fetched_at="2026-05-04T10:00:00+00:00",
+    )
+    with pytest.raises(ValueError, match="must be finite"):
+        update_peak(snap, float("nan"))
+
+
+def test_refresh_from_mt5_rejects_inf():
+    snap = BalanceSnapshot(
+        balance=100.0, deposit=100.0, peak_balance=100.0,
+        source="paper", fetched_at="2026-05-04T10:00:00+00:00",
+    )
+    with pytest.raises(ValueError, match="must be finite"):
+        refresh_from_mt5(snap, float("inf"))
