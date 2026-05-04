@@ -191,7 +191,7 @@ def _cmd_audit(config: AppConfig, args: list[str]) -> None:
 def _cmd_halt(config: AppConfig, args: list[str]) -> None:
     """halt {soft|hard} [reason] — bridge を halt 状態にする。
 
-    paper モードでは bridge 非依存のため no-op (warning ログのみ)。
+    paper モードでは bridge 非依存のため no-op (REPL に警告メッセージを表示)。
     """
     if config.mode == "paper":
         _console.print("[yellow]paper モードでは halt は不要です (bridge 非依存)[/yellow]")

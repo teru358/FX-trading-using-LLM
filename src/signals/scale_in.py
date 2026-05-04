@@ -163,13 +163,24 @@ def evaluate_pre_execution_checks(
         is_scale_in = True
         decision_reason = decision.reason
 
-    # 3. DD kill switch — balance_snapshot.peak_balance を直接参照
-    # 無効時は balance.json の read を回避 (mock や非永続テストでの不要 IO 防止)
+    # 3. DD kill switch — account.peak_balance / account.balance から判定
+    # DD 無効時は早期 return で skip。
+    # 注: テストの MagicMock(spec=PositionManager) は get_account_state を持つが
+    # 内部 _store/_peak_balance は持たないため、AccountState 経由の値を使う。
+    # check_drawdown_kill_switch は BalanceSnapshot を要求するので、DD 判定に
+    # 必要な balance/peak だけ詰めた placeholder snapshot を構築する
+    # (source/fetched_at は DD ロジック内で参照されないため安全)。
     if drawdown_kill_switch_enabled and drawdown_kill_switch_max_pct > 0:
-        from src.persistence.balance_snapshot import read as read_balance
-        snap = read_balance(position_mgr._store.state_dir)
+        from src.persistence.balance_snapshot import BalanceSnapshot
+        _snap = BalanceSnapshot(
+            balance=account.balance,
+            deposit=account.initial_balance,
+            peak_balance=account.peak_balance,
+            source="paper",  # placeholder — DD logic only reads balance/peak
+            fetched_at="",  # placeholder — is_stale() not called here
+        )
         dd_rejection = check_drawdown_kill_switch(
-            snap,
+            _snap,
             enabled=drawdown_kill_switch_enabled,
             max_drawdown_pct=drawdown_kill_switch_max_pct,
         )

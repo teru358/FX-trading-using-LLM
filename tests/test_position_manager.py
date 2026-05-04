@@ -99,10 +99,37 @@ def test_get_account_state(tmp_state_store, buy_order, sell_order):
     account = pm.get_account_state()
     assert account.balance == pytest.approx(100_000.0)
     assert account.initial_balance == pytest.approx(100_000.0)
+    assert account.peak_balance == pytest.approx(100_000.0)
     assert len(account.open_positions) == 2
     assert account.total_trades == 0
     directions = {p.direction for p in account.open_positions}
     assert directions == {"buy", "sell"}
+
+
+def test_get_account_state_includes_peak_balance(tmp_path):
+    """get_account_state は balance.json の peak_balance を返す (DD 計算用)。"""
+    from datetime import datetime, timezone
+
+    from src.persistence.balance_snapshot import BalanceSnapshot
+    from src.persistence.balance_snapshot import write as write_balance
+    from src.persistence.state_store import StateStore
+
+    store = StateStore(tmp_path)
+    write_balance(
+        store.state_dir,
+        BalanceSnapshot(
+            balance=95_000.0,
+            deposit=100_000.0,
+            peak_balance=110_000.0,
+            source="paper",
+            fetched_at=datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
+        ),
+    )
+    pm = PositionManager(store, context="Test")
+    account = pm.get_account_state()
+    assert account.balance == pytest.approx(95_000.0)
+    assert account.initial_balance == pytest.approx(100_000.0)
+    assert account.peak_balance == pytest.approx(110_000.0)
 
 
 def test_get_open_position_returns_matching(tmp_state_store, buy_order):

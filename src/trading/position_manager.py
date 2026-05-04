@@ -93,6 +93,7 @@ class Order:
 class AccountState:
     balance: float
     initial_balance: float
+    peak_balance: float  # balance.json の peak (DD 計算用、drift-resilient)
     open_positions: list[Order]
     closed_trades: list[Order]
 
@@ -178,6 +179,7 @@ class PositionManager:
         return AccountState(
             balance=self._balance,
             initial_balance=self._deposit,
+            peak_balance=self._peak_balance,
             open_positions=list(self._open),
             closed_trades=list(self._closed),
         )
