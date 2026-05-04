@@ -171,7 +171,7 @@ def test_account_returns_mt5_section_in_live_mode(_state_setup, monkeypatch):
     assert data["mt5"]["equity"] == 104_500.0
     assert data["mt5"]["free_margin"] == 100_000.0
     assert data["mt5"]["margin"] == 4_500.0
-    assert "fetched_at" in data["mt5"]
+    assert "snapshot_fetched_at" in data["mt5"]
 
     # divergence セクションが入る (mt5 105k - internal 100k = +5k = +5%)
     assert data["divergence"] is not None

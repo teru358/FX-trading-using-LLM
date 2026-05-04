@@ -91,16 +91,22 @@ def account() -> dict[str, Any]:
                     "equity":      d.get("equity"),
                     "free_margin": d.get("free_margin"),
                     "margin":      d.get("margin"),
-                    "fetched_at":  snap.fetched_at,
+                    # snapshot_fetched_at: balance.json の最終更新時刻 (heartbeat 由来)。
+                    # この /account 呼出のタイムスタンプではない点に注意 (誤読防止のため命名変更)。
+                    "snapshot_fetched_at": snap.fetched_at,
                 }
                 if mt5_data["balance"] is not None:
                     diff = mt5_data["balance"] - snap.balance
-                    diff_pct = (diff / snap.balance * 100) if snap.balance > 0 else 0.0
+                    # 内部 balance が 0 のときは divergence_pct を None (誤った 0% 表示を防ぐ)
+                    diff_pct = (
+                        round(diff / snap.balance * 100, 2)
+                        if snap.balance > 0 else None
+                    )
                     divergence = {
                         "balance_diff":     round(diff, 2),
-                        "balance_diff_pct": round(diff_pct, 2),
+                        "balance_diff_pct": diff_pct,
                     }
-            except (httpx.HTTPError, ValueError, KeyError):
+            except (httpx.HTTPError, ValueError):
                 pass  # 失敗時は mt5/divergence を null のまま
 
     return {
