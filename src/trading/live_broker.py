@@ -32,6 +32,8 @@ from src.trading.broker_adapter import BrokerAdapter
 from src.trading.position_manager import Order, PositionManager
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from src.notifications.notifier import NotifierAdapter
 
 logger = logging.getLogger(__name__)
@@ -144,6 +146,7 @@ def create_broker(
     scale_in_conf_margin: float = 0.05,
     scale_in_score_margin: float = 0.05,
     notifier: "NotifierAdapter | None" = None,
+    state_dir: "Path | None" = None,
     drawdown_kill_switch_enabled: bool = False,
     drawdown_kill_switch_max_pct: float = 0.10,
     # ── live_broker=mt5 のとき必須 ──
@@ -202,6 +205,7 @@ def create_broker(
                 notifier=notifier,
                 consecutive_unreachable_threshold=mt5_consecutive_unreachable_threshold,
                 consecutive_reject_threshold=mt5_consecutive_reject_threshold,
+                state_dir=state_dir,
                 **paper_kwargs,
             )
         raise ValueError(
@@ -231,6 +235,7 @@ def create_broker(
             notifier=notifier,
             consecutive_unreachable_threshold=mt5_consecutive_unreachable_threshold,
             consecutive_reject_threshold=mt5_consecutive_reject_threshold,
+            state_dir=state_dir,
             **paper_kwargs,
         )
         obs_state_dir = Path(live_test_observer_state_dir)

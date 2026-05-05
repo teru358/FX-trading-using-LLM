@@ -29,10 +29,11 @@ def _mock_resp(positions_payload):
 
 # ── 完全 close ──
 
-def test_reconcile_full_close_when_missing_from_mt5(monkeypatch):
+def test_reconcile_full_close_when_missing_from_mt5(monkeypatch, tmp_path):
     """完全 close: 内部 open かつ MT5 不在 → 内部 close。"""
     adapter = Mt5BridgeBrokerAdapter(
         bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+        state_dir=tmp_path,
     )
     open_pos = [_mt5_order(111), _mt5_order(222, pair="EURUSD=X")]
     monkeypatch.setattr("httpx.get", lambda *a, **kw: _mock_resp(
@@ -48,10 +49,11 @@ def test_reconcile_full_close_when_missing_from_mt5(monkeypatch):
     pm.close_position.assert_called_once_with("mt5:111", 158.0, "server_sl_tp")
 
 
-def test_reconcile_skips_paper_orders(monkeypatch):
+def test_reconcile_skips_paper_orders(monkeypatch, tmp_path):
     """paper orders (mt5: prefix なし) は MT5 ポジ無くても close されない。"""
     adapter = Mt5BridgeBrokerAdapter(
         bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+        state_dir=tmp_path,
     )
     paper_order = Order.new("USDJPY=X", "buy", 159.0, 158.0, 160.0, 1000)
     monkeypatch.setattr("httpx.get", lambda *a, **kw: _mock_resp([]))
@@ -61,10 +63,11 @@ def test_reconcile_skips_paper_orders(monkeypatch):
     pm.close_position.assert_not_called()
 
 
-def test_reconcile_bridge_unreachable_returns_empty(monkeypatch, caplog):
+def test_reconcile_bridge_unreachable_returns_empty(monkeypatch, caplog, tmp_path):
     """bridge 不通: noop, 空リスト返却 + warning。"""
     adapter = Mt5BridgeBrokerAdapter(
         bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+        state_dir=tmp_path,
     )
     monkeypatch.setattr(
         "httpx.get",
@@ -80,7 +83,7 @@ def test_reconcile_bridge_unreachable_returns_empty(monkeypatch, caplog):
 
 # ── 部分 close ──
 
-def test_reconcile_partial_close_within_normal_range(monkeypatch):
+def test_reconcile_partial_close_within_normal_range(monkeypatch, tmp_path):
     """部分 close 1-30% (正常範囲): adjust_position_size 呼出。
 
     25% 削減を例にとる (0.01 → 0.0075 lot)。30% は HIGH threshold で hard halt 側
@@ -88,6 +91,7 @@ def test_reconcile_partial_close_within_normal_range(monkeypatch):
     """
     adapter = Mt5BridgeBrokerAdapter(
         bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+        state_dir=tmp_path,
     )
     open_pos = [_mt5_order(111, position_size=1000.0)]    # 0.01 lot
     monkeypatch.setattr("httpx.get", lambda *a, **kw: _mock_resp(
@@ -101,10 +105,11 @@ def test_reconcile_partial_close_within_normal_range(monkeypatch):
     assert args[0][1] == pytest.approx(750.0, rel=0.01)
 
 
-def test_reconcile_partial_close_below_threshold_ignored(monkeypatch):
+def test_reconcile_partial_close_below_threshold_ignored(monkeypatch, tmp_path):
     """端数 < 1%: 無視。"""
     adapter = Mt5BridgeBrokerAdapter(
         bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+        state_dir=tmp_path,
     )
     open_pos = [_mt5_order(111, position_size=1000.0)]
     monkeypatch.setattr("httpx.get", lambda *a, **kw: _mock_resp(
@@ -116,10 +121,11 @@ def test_reconcile_partial_close_below_threshold_ignored(monkeypatch):
     pm.close_position.assert_not_called()
 
 
-def test_reconcile_volume_mismatch_above_threshold_triggers_halt(monkeypatch):
+def test_reconcile_volume_mismatch_above_threshold_triggers_halt(monkeypatch, tmp_path):
     """volume 差 ≥ 30%: hard halt。"""
     adapter = Mt5BridgeBrokerAdapter(
         bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+        state_dir=tmp_path,
     )
     open_pos = [_mt5_order(111, position_size=1000.0)]
     monkeypatch.setattr("httpx.get", lambda *a, **kw: _mock_resp(
@@ -134,10 +140,11 @@ def test_reconcile_volume_mismatch_above_threshold_triggers_halt(monkeypatch):
     pm.adjust_position_size.assert_not_called()
 
 
-def test_reconcile_orphan_bot_magic_triggers_halt(monkeypatch):
+def test_reconcile_orphan_bot_magic_triggers_halt(monkeypatch, tmp_path):
     """MT5 にあるが内部に無い (bot magic): hard halt。"""
     adapter = Mt5BridgeBrokerAdapter(
         bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+        state_dir=tmp_path,
     )
     monkeypatch.setattr("httpx.get", lambda *a, **kw: _mock_resp(
         [{"ticket": 999, "symbol": "USDJPY", "volume": 0.01, "magic": 12345}]
@@ -150,10 +157,11 @@ def test_reconcile_orphan_bot_magic_triggers_halt(monkeypatch):
     assert "orphan" in halt_called[0].lower()
 
 
-def test_reconcile_external_magic_ignored_and_cached(monkeypatch):
+def test_reconcile_external_magic_ignored_and_cached(monkeypatch, tmp_path):
     """他 magic ポジ: 干渉せず、表示用キャッシュに保持。"""
     adapter = Mt5BridgeBrokerAdapter(
         bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+        state_dir=tmp_path,
     )
     monkeypatch.setattr("httpx.get", lambda *a, **kw: _mock_resp(
         [{"ticket": 5555, "symbol": "USDJPY", "volume": 0.05, "magic": 99999}]
@@ -169,10 +177,11 @@ def test_reconcile_external_magic_ignored_and_cached(monkeypatch):
 
 # ── safe_close ──
 
-def test_safe_close_succeeds_first_attempt(monkeypatch):
+def test_safe_close_succeeds_first_attempt(monkeypatch, tmp_path):
     """safe_close: 1 回目で確認できれば成功。"""
     adapter = Mt5BridgeBrokerAdapter(
         bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+        state_dir=tmp_path,
     )
     monkeypatch.setattr("httpx.post", lambda *a, **kw: _mock_resp({}))
     monkeypatch.setattr("httpx.get", lambda *a, **kw: _mock_resp([]))    # 既に消えている
@@ -182,10 +191,11 @@ def test_safe_close_succeeds_first_attempt(monkeypatch):
     assert adapter.safe_close(111) is True
 
 
-def test_safe_close_triggers_halt_after_3_retries(monkeypatch):
+def test_safe_close_triggers_halt_after_3_retries(monkeypatch, tmp_path):
     """safe_close: 3 回失敗で hard halt。"""
     adapter = Mt5BridgeBrokerAdapter(
         bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+        state_dir=tmp_path,
     )
     monkeypatch.setattr("httpx.post", lambda *a, **kw: _mock_resp({}))
     monkeypatch.setattr("httpx.get", lambda *a, **kw: _mock_resp(
@@ -204,10 +214,11 @@ def test_safe_close_triggers_halt_after_3_retries(monkeypatch):
 
 # ── 能動 close (BrokerAdapter.close_position 経由) ──
 
-def test_active_close_mt5_ticket_calls_safe_close(monkeypatch):
+def test_active_close_mt5_ticket_calls_safe_close(monkeypatch, tmp_path):
     """mt5: prefix の order_id は safe_close 経由で MT5 へ close 指令を送る。"""
     adapter = Mt5BridgeBrokerAdapter(
         bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+        state_dir=tmp_path,
     )
     safe_close_called: list[int] = []
     monkeypatch.setattr(
@@ -225,10 +236,11 @@ def test_active_close_mt5_ticket_calls_safe_close(monkeypatch):
     pm.close_position.assert_called_once_with("mt5:111", 158.0, "exit_review")
 
 
-def test_active_close_safe_close_failure_preserves_state(monkeypatch):
+def test_active_close_safe_close_failure_preserves_state(monkeypatch, tmp_path):
     """safe_close 失敗時は内部 state を変更せず None を返す (reconcile に委譲)。"""
     adapter = Mt5BridgeBrokerAdapter(
         bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+        state_dir=tmp_path,
     )
     monkeypatch.setattr(adapter, "safe_close", lambda t, max_retries=3: False)
     pm = MagicMock()
@@ -239,10 +251,11 @@ def test_active_close_safe_close_failure_preserves_state(monkeypatch):
     pm.close_position.assert_not_called()
 
 
-def test_active_close_paper_order_skips_mt5(monkeypatch):
+def test_active_close_paper_order_skips_mt5(monkeypatch, tmp_path):
     """非 mt5: order_id (paper UUID) は safe_close を呼ばず内部 close のみ。"""
     adapter = Mt5BridgeBrokerAdapter(
         bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+        state_dir=tmp_path,
     )
     safe_close_calls: list[int] = []
     monkeypatch.setattr(

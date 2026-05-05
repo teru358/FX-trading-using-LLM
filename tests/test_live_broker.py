@@ -20,6 +20,7 @@ def test_create_broker_live_test_seeds_observer_balance(tmp_path: Path):
         mt5_bridge_url="http://example.local:8812",
         live_test_observer_state_dir=str(obs_dir),
         live_test_log_path=str(tmp_path / "shadow.jsonl"),
+        state_dir=tmp_path,
     )
 
     snap = balance_snapshot.read(obs_dir)
@@ -45,6 +46,7 @@ def test_create_broker_live_test_reseeds_drifted_observer(tmp_path: Path):
         mt5_bridge_url="http://example.local:8812",
         live_test_observer_state_dir=str(obs_dir),
         live_test_log_path=str(tmp_path / "shadow.jsonl"),
+        state_dir=tmp_path,
     )
 
     snap = balance_snapshot.read(obs_dir)

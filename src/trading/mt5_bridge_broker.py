@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time as _time
+from pathlib import Path
 
 import httpx
 
@@ -50,9 +51,12 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         notifier=None,
         consecutive_unreachable_threshold: int = 3,
         consecutive_reject_threshold: int = 3,
+        state_dir: Path | None = None,
     ) -> None:
         if not bridge_url:
             raise ValueError("bridge_url is required")
+        if state_dir is None:
+            raise ValueError("state_dir is required (halt state lookup)")
         self._url = bridge_url.rstrip("/")
         self._api_key = api_key
         self._timeout = request_timeout_seconds
@@ -74,6 +78,8 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         self._reject_threshold = consecutive_reject_threshold
         self._consecutive_unreachable = 0
         self._consecutive_rejects = 0
+        # finance halt 状態の参照先 (data/state/)
+        self._state_dir = state_dir
 
     def _headers(self) -> dict[str, str]:
         h = {"Content-Type": "application/json"}
@@ -86,6 +92,16 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         macro_context: str = "",
     ) -> Order | None:
         if signal.action == "hold":
+            return None
+
+        # finance 側 halt 状態を確認。bridge が halted 中の場合 (heartbeat / order
+        # 経路で auto halt 発動済 or 手動 halt 中)、ここで早期 return して bridge
+        # への発注を行わない。bridge 不通時にも有効 (halt.json はローカル読出)。
+        from src.persistence import halt_state
+        if halt_state.is_halted(self._state_dir):
+            logger.info(
+                f"[MT5_BRIDGE] {signal.pair} skipped — soft-halted (finance state)"
+            )
             return None
 
         direction = "buy" if signal.action == "buy" else "sell"

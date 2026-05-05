@@ -821,6 +821,7 @@ def _build_trading_runtime(config: AppConfig):
         scale_in_conf_margin=config.trading.scale_in_conf_margin,
         scale_in_score_margin=config.trading.scale_in_score_margin,
         notifier=notifier,
+        state_dir=config.state_dir,
         mt5_bridge_url=(mt5_cfg.bridge_url if mt5_cfg else ""),
         mt5_lot_size_units=(mt5_cfg.lot_size_units if mt5_cfg else 100_000),
         mt5_magic_number=(mt5_cfg.magic_number if mt5_cfg else 12345),
