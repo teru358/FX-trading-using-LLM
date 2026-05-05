@@ -9,7 +9,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.analysis.article_fetcher import fetch_article_body, fetch_bodies_concurrent
+from src.analysis.article_fetcher import (
+    _is_google_news_url,
+    fetch_article_body,
+    fetch_bodies_concurrent,
+)
 from src.analysis.rss_fetcher import NewsItem
 
 
@@ -23,10 +27,15 @@ def _mock_async_session(response):
     return async_ctx, session
 
 
-def _mock_response(status_code: int = 200, text: str = "<html><body>article</body></html>"):
+def _mock_response(
+    status_code: int = 200,
+    text: str = "<html><body>article</body></html>",
+    final_url: str = "",
+):
     resp = MagicMock()
     resp.status_code = status_code
     resp.text = text
+    resp.url = final_url
     if status_code >= 400:
         resp.raise_for_status = MagicMock(
             side_effect=RuntimeError(f"HTTP {status_code}")
@@ -126,6 +135,73 @@ async def test_fetch_article_body_truncates_to_max_chars():
         )
     assert body is not None
     assert len(body) == 500
+
+
+def test_is_google_news_url_detection():
+    """news.google.com のホストを含む URL のみ True。"""
+    assert _is_google_news_url("https://news.google.com/rss/articles/CBMixxx")
+    assert _is_google_news_url("https://news.google.com/articles/CBMixxx")
+    assert _is_google_news_url("http://news.google.com/anything")
+    assert not _is_google_news_url("https://www.bloomberg.com/news/x")
+    assert not _is_google_news_url("https://google.com/foo")  # news. prefix が必須
+    assert not _is_google_news_url("")
+    assert not _is_google_news_url(None)
+
+
+@pytest.mark.asyncio
+async def test_fetch_article_body_google_news_unresolved_returns_none():
+    """Google News wrapper のまま consent ページが返ったら trafilatura に投げず None。"""
+    # 最終 URL がまだ news.google.com に閉じている = publisher に到達できていない
+    response = _mock_response(
+        200, "<html>consent page</html>",
+        final_url="https://news.google.com/consent/redirect",
+    )
+    async_ctx, _ = _mock_async_session(response)
+
+    extract_mock = MagicMock(return_value=None)
+    with patch("src.analysis.article_fetcher.AsyncSession", return_value=async_ctx), \
+         patch("src.analysis.article_fetcher.trafilatura.extract", new=extract_mock):
+        body = await fetch_article_body(
+            "https://news.google.com/rss/articles/CBMiwE",
+            timeout_seconds=8.0, max_chars=3000, user_agent="test/1.0",
+        )
+    assert body is None
+    # 早期 return → trafilatura.extract は呼ばれない
+    assert extract_mock.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_article_body_google_news_resolved_extracts():
+    """Google News URL が publisher に redirect 完了したら通常 fetch + 抽出。"""
+    response = _mock_response(
+        200, "<html><body>article</body></html>",
+        final_url="https://www.bloomberg.com/news/articles/x",
+    )
+    async_ctx, _ = _mock_async_session(response)
+
+    with patch("src.analysis.article_fetcher.AsyncSession", return_value=async_ctx), \
+         patch("src.analysis.article_fetcher.trafilatura.extract", return_value="Article body"):
+        body = await fetch_article_body(
+            "https://news.google.com/rss/articles/CBMiwE",
+            timeout_seconds=8.0, max_chars=3000, user_agent="test/1.0",
+        )
+    assert body == "Article body"
+
+
+@pytest.mark.asyncio
+async def test_fetch_article_body_non_google_url_skips_resolution_check():
+    """非 Google URL は最終 URL チェックを行わず通常 fetch。"""
+    # final_url が空でも非 Google URL なら抽出に進む
+    response = _mock_response(200, final_url="")
+    async_ctx, _ = _mock_async_session(response)
+
+    with patch("src.analysis.article_fetcher.AsyncSession", return_value=async_ctx), \
+         patch("src.analysis.article_fetcher.trafilatura.extract", return_value="ok"):
+        body = await fetch_article_body(
+            "https://www.example.com/article",
+            timeout_seconds=8.0, max_chars=3000, user_agent="test/1.0",
+        )
+    assert body == "ok"
 
 
 @pytest.mark.asyncio

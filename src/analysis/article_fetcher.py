@@ -6,6 +6,10 @@
 Cloudflare 等の bot 対策で UA だけでなく TLS フィンガープリントを検査するサイト
 (investing.com 等) があるため、curl_cffi で Chrome を impersonate して TLS 層
 から偽装する。httpx では HTTP 403 が返り本文取得に失敗していた。
+
+Google News RSS 経由のリンク (news.google.com/rss/articles/...) は wrapper URL で、
+curl_cffi の redirect 追従で publisher に到達できれば抽出成功。Google の consent
+ページに閉じ込められた場合は trafilatura に投げず早期 None で抜ける (ノイズ抑制)。
 """
 from __future__ import annotations
 
@@ -18,6 +22,18 @@ from curl_cffi.requests import AsyncSession
 from src.analysis.rss_fetcher import NewsItem
 
 logger = logging.getLogger(__name__)
+
+# trafilatura は抽出失敗ごとに "discarding data: None" を WARNING で吐く。
+# paywall や JS-only ページでは normal な失敗のため、ノイズとして抑制する。
+# 本文取得の成否は news_collector の "deep fetch X/Y succeeded" ログで追跡する。
+logging.getLogger("trafilatura.core").setLevel(logging.ERROR)
+
+
+def _is_google_news_url(url: str | None) -> bool:
+    """URL が news.google.com の wrapper かどうか。"""
+    if not url:
+        return False
+    return "://news.google.com/" in url
 
 
 async def fetch_article_body(
@@ -34,6 +50,7 @@ async def fetch_article_body(
     """
     if not url:
         return None
+    is_google = _is_google_news_url(url)
     try:
         async with AsyncSession() as session:
             resp = await session.get(
@@ -44,6 +61,19 @@ async def fetch_article_body(
                 allow_redirects=True,
             )
             resp.raise_for_status()
+
+            # Google News wrapper の redirect 追従後、最終 URL がまだ news.google.com
+            # に閉じている (= consent ページ等で publisher に到達できていない) 場合は
+            # trafilatura で抽出しても "discarding data" になるだけなので早期 None。
+            if is_google:
+                final_url = str(getattr(resp, "url", "") or "")
+                if not final_url or _is_google_news_url(final_url):
+                    logger.debug(
+                        f"[ARTICLE] google news wrapper not resolved: "
+                        f"{url} → {final_url or '<no final url>'}"
+                    )
+                    return None
+
             html = resp.text
 
         body = trafilatura.extract(html, include_comments=False, no_fallback=False)
