@@ -31,16 +31,16 @@ logger = logging.getLogger(__name__)
 
 
 # ── モジュールレベル状態 (単一プロセス前提、再起動でリセット) ──
+# halt 状態自体は data/state/halt.json に永続化される (halt_state モジュール経由)。
+# ここはあくまで「連続失敗カウンタ」のみを保持する。
 _state: dict = {
     "consecutive_failures": 0,
-    "auto_halt_triggered": False,
 }
 
 
 def _reset_state_for_test() -> None:
     """ユニットテスト用: モジュール状態をリセット。"""
     _state["consecutive_failures"] = 0
-    _state["auto_halt_triggered"] = False
 
 
 def _state_dir_for(config: AppConfig) -> Path:
@@ -135,42 +135,55 @@ def _trigger_auto_soft_halt(
     config: AppConfig, base_url: str, api_key: str, timeout: float,
     failure_count: int,
 ) -> None:
-    """bridge /admin/halt mode=soft を発動し、Discord 通知を送る。
+    """finance halt 状態を先に確定し、Discord 通知を送ってから bridge POST。
 
-    halt API 呼出失敗時は通知も諦める (logger.error のみ)。
-    notifier が無効でも asyncio.run(NullNotifier.send_embed(...)) は安全。
+    bridge 不通時にも Discord 通知が確実に出ることを保証する (本仕様の核心)。
     """
-    headers = {"X-Bridge-Api-Key": api_key} if api_key else {}
+    from src.persistence import halt_state
+
+    state_dir = _state_dir_for(config)
     reason = f"{failure_count} consecutive /health failures"
+
+    # ① finance halt 状態を確定 (常に成功)
+    _new_state, changed = halt_state.trigger_auto(state_dir, reason, "heartbeat")
+    if not changed:
+        logger.debug(
+            "[MT5_HB] auto halt skipped: finance state already halted"
+        )
+        return  # 二重通知防止
+
+    # ② Discord 通知 (bridge 状態に依存しない)
+    if config.notifier.enabled:
+        try:
+            from src.notifications.notifier import create_notifier
+            notifier = create_notifier(config.notifier.enabled)
+            asyncio.run(notifier.send_embed(
+                title="🛑 MT5 ブリッジ /health 不通 → 自動 SOFT HALT",
+                description=(
+                    f"reason: {reason}\n\n"
+                    f"bridge `/health` が {failure_count} 回連続応答なし。\n"
+                    f"新規発注をブロックしました (既存ポジ管理は継続)。\n\n"
+                    f"復帰: bridge 復活確認後 `?resume`"
+                ),
+                color=0xE74C3C,
+            ))
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[MT5_HB] auto halt notify failed: {e}")
+    logger.error(f"[MT5_HB] AUTO SOFT HALT triggered: {reason}")
+
+    # ③ bridge /admin/halt POST (best-effort、失敗しても finance 状態は確定済)
+    headers = {"X-Bridge-Api-Key": api_key} if api_key else {}
     try:
         httpx.post(
             f"{base_url}/admin/halt",
             json={"mode": "soft", "reason": f"auto: {reason}"},
             timeout=timeout, headers=headers,
         )
-        logger.error(f"[MT5_HB] AUTO SOFT HALT triggered: {reason}")
     except Exception as e:  # noqa: BLE001
-        logger.error(f"[MT5_HB] auto halt API call failed: {e}")
-        return
-
-    if not config.notifier.enabled:
-        return
-
-    try:
-        from src.notifications.notifier import create_notifier
-        notifier = create_notifier(config.notifier.enabled)
-        asyncio.run(notifier.send_embed(
-            title="🛑 MT5 ブリッジ /health 不通 → 自動 SOFT HALT",
-            description=(
-                f"reason: {reason}\n\n"
-                f"bridge `/health` が {failure_count} 回連続応答なし。\n"
-                f"新規発注をブロックしました (既存ポジ管理は継続)。\n\n"
-                f"復帰: bridge 復活確認後 `?resume`"
-            ),
-            color=0xE74C3C,
-        ))
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"[MT5_HB] auto halt notify failed: {e}")
+        logger.warning(
+            f"[MT5_HB] bridge halt POST failed "
+            f"(state already set locally): {e}"
+        )
 
 
 def run_mt5_heartbeat(config: AppConfig) -> None:
@@ -205,7 +218,6 @@ def run_mt5_heartbeat(config: AppConfig) -> None:
 
         if ok:
             _state["consecutive_failures"] = 0
-            _state["auto_halt_triggered"] = False
             logger.info(
                 f"[MT5_HB] OK  status={status} latency={record['latency_ms']}ms"
             )
@@ -223,14 +235,13 @@ def run_mt5_heartbeat(config: AppConfig) -> None:
         )
 
         # ── auto soft halt 判定 ──
-        if _state["auto_halt_triggered"]:
-            return  # 既発動 → 復帰 (=success) するまで再発動しない
+        # 二重発動防止は halt_state.trigger_auto 内の changed=False 判定で行う
+        # (旧 _state["auto_halt_triggered"] は削除済)
         if _state["consecutive_failures"] >= cfg.consecutive_unreachable_threshold:
             _trigger_auto_soft_halt(
                 config, base, cfg.api_key,
                 cfg.request_timeout_seconds,
                 _state["consecutive_failures"],
             )
-            _state["auto_halt_triggered"] = True
     except Exception as e:  # noqa: BLE001 - デーモン停止防止
         logger.error(f"[MT5_HB] heartbeat job failed: {e}", exc_info=True)

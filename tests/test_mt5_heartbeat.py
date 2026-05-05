@@ -230,11 +230,12 @@ def test_failures_below_threshold_do_not_halt(tmp_path: Path, monkeypatch):
 
     assert _state["consecutive_failures"] == 2
     assert posts == []
-    assert _state["auto_halt_triggered"] is False
 
 
 def test_third_consecutive_failure_triggers_halt(tmp_path: Path, monkeypatch):
     """3 連続失敗で /admin/halt を呼ぶ + 以降は再発動しない。"""
+    from src.persistence import halt_state
+
     monkeypatch.setattr("src.jobs.mt5_heartbeat.BASE_DIR", tmp_path)
     _stub_failing_get(monkeypatch)
     posts = _capture_post(monkeypatch)
@@ -253,7 +254,7 @@ def test_third_consecutive_failure_triggers_halt(tmp_path: Path, monkeypatch):
     assert posts[0]["json"]["mode"] == "soft"
     assert "3 consecutive" in posts[0]["json"]["reason"]
     assert posts[0]["headers"] == {"X-Bridge-Api-Key": "test-key"}
-    assert _state["auto_halt_triggered"] is True
+    assert halt_state.is_halted(tmp_path / "data/state")
 
     # 4 回目以降の失敗でも再発動しない
     run_mt5_heartbeat(cfg)
@@ -261,7 +262,7 @@ def test_third_consecutive_failure_triggers_halt(tmp_path: Path, monkeypatch):
 
 
 def test_success_resets_failure_counter(tmp_path: Path, monkeypatch):
-    """成功プローブで連続失敗カウンタと auto_halt_triggered がリセットされる。"""
+    """成功プローブで連続失敗カウンタがリセットされる。"""
     monkeypatch.setattr("src.jobs.mt5_heartbeat.BASE_DIR", tmp_path)
 
     class _Resp:
@@ -272,13 +273,11 @@ def test_success_resets_failure_counter(tmp_path: Path, monkeypatch):
     posts = _capture_post(monkeypatch)
 
     _state["consecutive_failures"] = 5
-    _state["auto_halt_triggered"] = True
 
     cfg = _make_cfg()
     run_mt5_heartbeat(cfg)
 
     assert _state["consecutive_failures"] == 0
-    assert _state["auto_halt_triggered"] is False
     assert posts == []  # 成功時は halt API 呼ばない
 
 
@@ -326,11 +325,11 @@ def test_halt_api_failure_does_not_crash(tmp_path: Path, monkeypatch, caplog):
     _state["consecutive_failures"] = 2  # 次の失敗で 3 連続到達
 
     cfg = _make_cfg(consecutive_unreachable_threshold=3)
-    with caplog.at_level("ERROR"):
+    with caplog.at_level("WARNING"):
         run_mt5_heartbeat(cfg)
 
     assert any(
-        "auto halt API call failed" in r.message
+        "bridge halt POST failed" in r.message
         for r in caplog.records
     )
 
@@ -594,3 +593,99 @@ def test_subsequent_mt5_fetch_does_not_resend_paper_to_mt5(tmp_path: Path, monke
     snap = balance_snapshot.read(state_dir)
     assert snap.balance == 49800.0  # 値は更新されている
     assert snap.deposit == 50000.0  # 不変
+
+
+def test_auto_halt_writes_finance_state_and_notifies_when_bridge_post_fails(
+    tmp_path, monkeypatch
+):
+    """auto halt 発動時、bridge への halt POST が失敗しても finance state は確定し
+    Discord 通知が送られる (この仕様の核心)。"""
+    from src.persistence import halt_state
+    from src.jobs import mt5_heartbeat
+
+    # 既存の _make_cfg は **overrides を Mt5Config に渡すため、
+    # consecutive_unreachable_threshold をキー名そのままで指定する。
+    cfg = _make_cfg(
+        notifier_enabled=True,
+        consecutive_unreachable_threshold=2,
+    )
+    monkeypatch.setattr("src.jobs.mt5_heartbeat.BASE_DIR", tmp_path)
+    mt5_heartbeat._reset_state_for_test()
+
+    notify_calls: list[dict] = []
+
+    class _NotifierStub:
+        async def send_embed(self, **kwargs):
+            notify_calls.append(kwargs)
+
+    def _make_notifier(_enabled):
+        return _NotifierStub()
+
+    monkeypatch.setattr(
+        "src.notifications.notifier.create_notifier", _make_notifier
+    )
+
+    # /health は連続失敗、/admin/halt POST も connect error (bridge 不通のため)
+    def _http_post(*args, **kwargs):
+        raise httpx.ConnectError("bridge down")
+
+    def _http_get(*args, **kwargs):
+        raise httpx.ConnectError("bridge down")
+
+    monkeypatch.setattr("httpx.post", _http_post)
+    monkeypatch.setattr("httpx.get", _http_get)
+
+    # threshold=2 → 2 回呼んで halt 発動
+    mt5_heartbeat.run_mt5_heartbeat(cfg)
+    mt5_heartbeat.run_mt5_heartbeat(cfg)
+
+    # ① finance halt state が確定している
+    # _state_dir_for(cfg) は BASE_DIR + cfg.state_dir = tmp_path / "data/state"
+    state = halt_state.read(tmp_path / "data/state")
+    assert state.soft_halted is True
+    assert state.auto_triggered is True
+    assert state.triggered_by == "heartbeat"
+
+    # ② Discord 通知が 1 回呼ばれている (bridge POST 失敗にもかかわらず)
+    assert len(notify_calls) == 1
+    assert "SOFT HALT" in notify_calls[0]["title"]
+
+
+def test_auto_halt_does_not_double_notify_when_already_halted(
+    tmp_path, monkeypatch
+):
+    """既に halted 中の場合、heartbeat が再度発動しても Discord 通知は出ない。"""
+    from src.persistence import halt_state
+    from src.jobs import mt5_heartbeat
+
+    # 事前に halt state を「halted」にセット (BASE_DIR/data/state が _state_dir_for の戻り値)
+    halt_state.trigger_auto(tmp_path / "data/state", "preexisting", "heartbeat")
+
+    cfg = _make_cfg(
+        notifier_enabled=True,
+        consecutive_unreachable_threshold=1,
+    )
+    monkeypatch.setattr("src.jobs.mt5_heartbeat.BASE_DIR", tmp_path)
+    mt5_heartbeat._reset_state_for_test()
+
+    notify_calls: list[dict] = []
+
+    class _NotifierStub:
+        async def send_embed(self, **kwargs):
+            notify_calls.append(kwargs)
+
+    monkeypatch.setattr(
+        "src.notifications.notifier.create_notifier",
+        lambda _enabled: _NotifierStub(),
+    )
+
+    def _err(*a, **k):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr("httpx.post", _err)
+    monkeypatch.setattr("httpx.get", _err)
+
+    mt5_heartbeat.run_mt5_heartbeat(cfg)
+
+    # 既に halted 中だったので Discord 通知は出ない
+    assert notify_calls == []
