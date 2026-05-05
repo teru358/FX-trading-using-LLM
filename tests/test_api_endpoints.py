@@ -106,8 +106,8 @@ def test_account_returns_internal_section(_state_setup):
     resp = _client_get("/account")
     assert resp.status_code == 200
     data = resp.json()
-    # Top-level shape: exactly 3 keys
-    assert set(data.keys()) == {"internal", "mt5", "divergence"}
+    # Top-level shape: exactly 4 keys
+    assert set(data.keys()) == {"internal", "mt5", "divergence", "halt"}
 
     internal = data["internal"]
     # internal 必須フィールド
@@ -228,6 +228,40 @@ def test_account_mt5_null_when_bridge_returns_invalid_json(_state_setup, monkeyp
     data = resp.json()
     assert data["mt5"] is None
     assert data["divergence"] is None
+
+
+def test_account_includes_halt_section_when_not_halted(_state_setup, tmp_path):
+    """halt 状態でなくても halt セクションは常に dict として返る (null ではない)。"""
+    _state_setup.state_dir = tmp_path  # halt.json 不在 → default 値
+
+    resp = _client_get("/account")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "halt" in data
+    halt = data["halt"]
+    assert halt["soft_halted"] is False
+    assert halt["auto_triggered"] is False
+    assert halt["reason"] == ""
+    assert halt["since"] is None
+    assert halt["triggered_by"] == ""
+
+
+def test_account_halt_section_when_auto_halted(_state_setup, tmp_path):
+    """auto halt 中は halt セクションに soft_halted=true + 詳細が入る。"""
+    from src.persistence import halt_state
+
+    _state_setup.state_dir = tmp_path
+    halt_state.trigger_auto(tmp_path, "5 consecutive /health failures", "heartbeat")
+
+    resp = _client_get("/account")
+    assert resp.status_code == 200
+    data = resp.json()
+    halt = data["halt"]
+    assert halt["soft_halted"] is True
+    assert halt["auto_triggered"] is True
+    assert halt["triggered_by"] == "heartbeat"
+    assert halt["reason"] == "5 consecutive /health failures"
+    assert halt["since"]
 
 
 # ── /admin/halt /admin/resume プロキシ ──

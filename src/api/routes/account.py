@@ -109,8 +109,20 @@ def account() -> dict[str, Any]:
             except (httpx.HTTPError, ValueError):
                 pass  # 失敗時は mt5/divergence を null のまま
 
+    # halt 状態を読み込み (paper モードでは halt.json 不在 → default 値)
+    from src.persistence import halt_state
+    halt = halt_state.read(state.config.state_dir)
+    halt_section = {
+        "soft_halted":    halt.soft_halted,
+        "auto_triggered": halt.auto_triggered,
+        "reason":         halt.reason,
+        "since":          halt.since,
+        "triggered_by":   halt.triggered_by,
+    }
+
     return {
         "internal":   internal,
         "mt5":        mt5_data,
         "divergence": divergence,
+        "halt":       halt_section,
     }
