@@ -97,3 +97,75 @@ def mutate(
         new_state = fn(state)
         write(state_dir, new_state)
         return new_state
+
+
+def is_halted(state_dir: Path) -> bool:
+    """soft_halted を読み出すショートカット (execute_signal が cycle 毎に呼ぶ)。"""
+    return read(state_dir).soft_halted
+
+
+def trigger_auto(
+    state_dir: Path,
+    reason: str,
+    triggered_by: str,
+) -> tuple[HaltState, bool]:
+    """auto soft halt を発動する。既に halted 中なら no-op。
+
+    Returns:
+        (state, changed): changed=True なら今回の呼出で状態が変化した
+                          (Discord 通知などをトリガすべき)。
+                          changed=False なら既に halted 中で no-op。
+    """
+
+    def _swap(current: HaltState) -> HaltState:
+        if current.soft_halted:
+            return current  # 既存 state を保持
+        return HaltState(
+            soft_halted=True,
+            auto_triggered=True,
+            reason=reason,
+            since=_now_iso(),
+            triggered_by=triggered_by,
+        )
+
+    before_halted = read(state_dir).soft_halted
+    new_state = mutate(state_dir, _swap)
+    return new_state, (not before_halted)
+
+
+def trigger_manual(
+    state_dir: Path,
+    reason: str,
+) -> tuple[HaltState, bool]:
+    """manual soft halt を発動する。既に halted 中なら no-op。
+
+    Returns:
+        (state, changed): trigger_auto と同じ意味論。
+    """
+
+    def _swap(current: HaltState) -> HaltState:
+        if current.soft_halted:
+            return current
+        return HaltState(
+            soft_halted=True,
+            auto_triggered=False,
+            reason=reason,
+            since=_now_iso(),
+            triggered_by="manual",
+        )
+
+    before_halted = read(state_dir).soft_halted
+    new_state = mutate(state_dir, _swap)
+    return new_state, (not before_halted)
+
+
+def clear(state_dir: Path) -> HaltState:
+    """halt 状態を default にリセットする (resume の最終ステップ)。
+
+    既に解除済の場合も冪等に default を返す。
+    """
+
+    def _swap(_current: HaltState) -> HaltState:
+        return _DEFAULT
+
+    return mutate(state_dir, _swap)
