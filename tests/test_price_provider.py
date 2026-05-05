@@ -133,3 +133,65 @@ def test_get_current_price_skips_mt5_for_watch_only_symbols():
 
     assert cp is fallback_price
     provider._mt5_fetcher.fetch_current_price.assert_not_called()
+
+
+def test_mt5_degraded_transition_triggers_halt(tmp_path, monkeypatch):
+    """live モードで MT5 連続失敗 → degraded 遷移時に halt_state.trigger_auto 発火。"""
+    from src.data.mt5_ohlcv_fetcher import Mt5UnreachableError
+    from src.persistence import halt_state
+
+    cfg = _make_mt5_config()
+    cfg.state_dir = tmp_path  # halt.json を tmp_path に書く
+    cfg.mode = "live"
+
+    # bridge halt POST を no-op にする
+    monkeypatch.setattr("src.data.price_provider.httpx.post", lambda *a, **kw: None)
+
+    provider = PriceProvider(cfg)
+    assert provider._halt_state_dir == tmp_path
+
+    # MT5 fetcher が常に Mt5UnreachableError を raise
+    provider._mt5_fetcher = MagicMock()
+    provider._mt5_fetcher.fetch_current_price.side_effect = Mt5UnreachableError("down")
+
+    # threshold=3 (failure_threshold from config) → 3 回失敗で degraded
+    fallback = CurrentPrice(price=1.0, timestamp=datetime.now())
+    with patch(
+        "src.data.price_provider.fetch_current_price", return_value=fallback,
+    ):
+        for _ in range(3):
+            provider.get_current_price("USDJPY=X", is_monitor=True)
+
+    # halt.json が更新されている
+    state = halt_state.read(tmp_path)
+    assert state.soft_halted is True
+    assert state.auto_triggered is True
+    assert state.triggered_by == "price_provider"
+
+
+def test_mt5_degraded_does_not_trigger_halt_in_live_test_mode(tmp_path, monkeypatch):
+    """live_test モードでは halt をトリガしない (paper 同等で halt 不要)。"""
+    from src.data.mt5_ohlcv_fetcher import Mt5UnreachableError
+    from src.persistence import halt_state
+
+    cfg = _make_mt5_config()
+    cfg.state_dir = tmp_path
+    cfg.mode = "live_test"  # ← halt 抑制対象
+
+    monkeypatch.setattr("src.data.price_provider.httpx.post", lambda *a, **kw: None)
+
+    provider = PriceProvider(cfg)
+    assert provider._halt_state_dir is None
+
+    provider._mt5_fetcher = MagicMock()
+    provider._mt5_fetcher.fetch_current_price.side_effect = Mt5UnreachableError("down")
+
+    fallback = CurrentPrice(price=1.0, timestamp=datetime.now())
+    with patch(
+        "src.data.price_provider.fetch_current_price", return_value=fallback,
+    ):
+        for _ in range(5):
+            provider.get_current_price("USDJPY=X", is_monitor=True)
+
+    state = halt_state.read(tmp_path)
+    assert state.soft_halted is False  # halt は発動しない

@@ -106,6 +106,13 @@ class PriceProvider:
         self._notifier = notifier
         self._active_provider: dict[str, str] = {}
         self._last_health_check_at: datetime | None = None
+        # halt 連携: MT5 fetcher 連続失敗 → halt_state.trigger_auto を発火する経路。
+        # state_dir / bridge URL / api_key は config から取得 (heartbeat と同じ
+        # halt.json を共有する)。mode=live のときのみ halt をトリガする
+        # (live_test は paper 同等で halt 不要)。
+        self._halt_state_dir = (
+            config.state_dir if (config.mode == "live" and self._mt5_enabled) else None
+        )
 
     def _is_trade_pair(self, symbol: str) -> bool:
         return symbol in self._trade_symbols
@@ -157,6 +164,9 @@ class PriceProvider:
             except Mt5UnreachableError as e:
                 if self._health_tracker.record_failure(datetime.now()):
                     self._notify_degraded(reason=str(e))
+                    self._trigger_halt_via_provider(
+                        reason=f"MT5 current price unreachable: {e}",
+                    )
                 logger.warning(
                     f"[PROVIDER] {symbol} MT5 current price fetch failed: {e}"
                 )
@@ -208,6 +218,9 @@ class PriceProvider:
             except Mt5UnreachableError as e:
                 if self._health_tracker.record_failure(datetime.now()):
                     self._notify_degraded(reason=str(e))
+                    self._trigger_halt_via_provider(
+                        reason=f"MT5 OHLCV unreachable: {e}",
+                    )
                 logger.warning(f"[PROVIDER] {symbol} MT5 fetch failed: {e}")
             except Exception as e:
                 logger.error(f"[PROVIDER] {symbol} MT5 unexpected error: {e}")
@@ -293,6 +306,52 @@ class PriceProvider:
             )
         except Exception as e:
             logger.warning(f"[PROVIDER] degraded notification failed: {e}")
+
+    def _trigger_halt_via_provider(self, reason: str) -> None:
+        """price provider 経路で MT5 連続失敗 → soft halt を発火する。
+
+        heartbeat / order broker と同じ halt.json を共有 (changed=False で二重発動
+        防止)。bridge POST best-effort。Discord 通知は _notify_degraded が既に行うため
+        ここでは追加で出さない。
+
+        mode=live + live_broker=mt5 のときのみ有効 (live_test は paper 同等で halt 不要)。
+        """
+        if self._halt_state_dir is None:
+            return
+        try:
+            from src.persistence import halt_state as _halt
+            _, changed = _halt.trigger_auto(
+                self._halt_state_dir, reason, "price_provider",
+            )
+            if not changed:
+                return
+            logger.error(
+                f"[PROVIDER] AUTO SOFT HALT triggered (price_provider): {reason}"
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                f"[PROVIDER] halt_state update failed: {e}", exc_info=True,
+            )
+            return
+
+        # bridge /admin/halt POST best-effort (heartbeat と同パターン)
+        mt5_cfg = self._config.providers.mt5
+        if mt5_cfg is None or not mt5_cfg.bridge_url:
+            return
+        headers = (
+            {"X-Bridge-Api-Key": mt5_cfg.api_key} if mt5_cfg.api_key else {}
+        )
+        try:
+            httpx.post(
+                f"{mt5_cfg.bridge_url.rstrip('/')}/admin/halt",
+                json={"mode": "soft", "reason": f"auto: {reason}"},
+                timeout=5.0, headers=headers,
+            )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[PROVIDER] bridge halt POST failed "
+                f"(state already set locally): {e}"
+            )
 
     def _notify_recovery(self, prev: str, current: str) -> None:
         if self._notifier is None or prev == current:
