@@ -221,10 +221,12 @@ def run_mt5_heartbeat(config: AppConfig) -> None:
             logger.info(
                 f"[MT5_HB] OK  status={status} latency={record['latency_ms']}ms"
             )
-            # Task 7: /health 成功時に /account も叩いて balance.json を同期
-            # (失敗してもデーモン継続、soft halt は heartbeat /health 専用)
-            headers = {"X-Bridge-Api-Key": cfg.api_key} if cfg.api_key else {}
-            _fetch_and_update_balance(config, base, cfg, headers)
+            # /health 成功時に /account も叩いて balance.json を同期。
+            # mode=live のときだけ実行する。live_test は paper 運用と同等
+            # (実資金が動かない) ため balance.json を MT5 値で上書きしない。
+            if config.mode == "live":
+                headers = {"X-Bridge-Api-Key": cfg.api_key} if cfg.api_key else {}
+                _fetch_and_update_balance(config, base, cfg, headers)
             return
 
         _state["consecutive_failures"] += 1

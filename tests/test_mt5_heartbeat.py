@@ -25,18 +25,22 @@ from src.jobs.mt5_heartbeat import (
 def _make_cfg(
     *, live_broker: str | None = "mt5",
     notifier_enabled: bool = False,
+    mode: str = "live",
     **overrides,
 ) -> object:
     """テスト用の最小 AppConfig 風スタブ。
 
     live_broker=None (または "mt5" 以外) を指定すると providers.mt5 が
     存在しても heartbeat は noop になる挙動を再現できる。
+    mode のデフォルトは "live" (balance.json sync が走る側)。paper / live_test
+    でも heartbeat 自体は走るが /account fetch は skip される。
     """
     @dataclass
     class _C:
         live_broker: str | None
         providers: ProvidersConfig
         notifier: NotifierConfig
+        mode: str = "live"
         state_dir: Path = field(default_factory=lambda: Path("data/state"))
         schedule: ScheduleConfig = field(
             default_factory=lambda: ScheduleConfig(timezone="Asia/Tokyo")
@@ -53,6 +57,7 @@ def _make_cfg(
         live_broker=live_broker,
         providers=ProvidersConfig(mt5=Mt5Config(**base)),
         notifier=NotifierConfig(enabled=notifier_enabled),
+        mode=mode,
     )
 
 
@@ -593,6 +598,82 @@ def test_subsequent_mt5_fetch_does_not_resend_paper_to_mt5(tmp_path: Path, monke
     snap = balance_snapshot.read(state_dir)
     assert snap.balance == 49800.0  # 値は更新されている
     assert snap.deposit == 50000.0  # 不変
+
+
+# ── balance.json sync は mode=live のみ ───────────────────────────
+
+
+def test_account_fetch_skipped_in_live_test_mode(tmp_path: Path, monkeypatch):
+    """live_test モードでは /health 成功でも /account fetch しない (paper 運用同等)。"""
+    monkeypatch.setattr("src.jobs.mt5_heartbeat.BASE_DIR", tmp_path)
+    state_dir = tmp_path / "data" / "state"
+    monkeypatch.setattr(
+        "src.jobs.mt5_heartbeat._state_dir_for", lambda config: state_dir,
+    )
+
+    fetched_urls: list[str] = []
+
+    class _OkResp:
+        is_success = True
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"balance": 99999.0}
+
+    def _get(url, *a, **kw):
+        fetched_urls.append(url)
+        return _OkResp()
+
+    monkeypatch.setattr(httpx, "get", _get)
+
+    cfg = _make_cfg(mode="live_test")
+    run_mt5_heartbeat(cfg)
+
+    # /health のみ叩かれ、/account は叩かれない
+    assert any(u.endswith("/health") for u in fetched_urls)
+    assert not any(u.endswith("/account") for u in fetched_urls)
+    # balance.json は default (paper) のまま
+    from src.persistence import balance_snapshot
+    snap = balance_snapshot.read(state_dir)
+    assert snap.source == "paper"
+
+
+def test_account_fetch_skipped_in_paper_mode(tmp_path: Path, monkeypatch):
+    """paper モードでは /account fetch しない (heartbeat 自体がそもそも live_broker
+    判定で skip されるが、防御的にも mode 判定を通っていることを確認)。"""
+    monkeypatch.setattr("src.jobs.mt5_heartbeat.BASE_DIR", tmp_path)
+    state_dir = tmp_path / "data" / "state"
+    monkeypatch.setattr(
+        "src.jobs.mt5_heartbeat._state_dir_for", lambda config: state_dir,
+    )
+
+    fetched_urls: list[str] = []
+
+    class _OkResp:
+        is_success = True
+        status_code = 200
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"balance": 99999.0}
+
+    def _get(url, *a, **kw):
+        fetched_urls.append(url)
+        return _OkResp()
+
+    monkeypatch.setattr(httpx, "get", _get)
+
+    # paper モードでも live_broker=mt5 を強制 (heartbeat 自体は走らせる)
+    cfg = _make_cfg(mode="paper")
+    run_mt5_heartbeat(cfg)
+
+    # /account は叩かれない
+    assert not any(u.endswith("/account") for u in fetched_urls)
 
 
 def test_auto_halt_writes_finance_state_and_notifies_when_bridge_post_fails(
