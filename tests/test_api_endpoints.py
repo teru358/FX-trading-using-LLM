@@ -272,24 +272,11 @@ def test_admin_halt_proxies_to_bridge(_state_setup, monkeypatch):
     resp = _client_post("/admin/halt", json={"mode": "soft", "reason": "test"})
     assert resp.status_code == 200
     body = resp.json()
-    assert body["soft_halted"] is True
+    assert body["bridge"]["soft_halted"] is True   # mode=soft now wraps in {finance, bridge}
+    assert body["finance"]["soft_halted"] is True   # finance state also set
     assert captured["url"] == "http://x:8812/admin/halt"
     assert captured["json"]["mode"] == "soft"
     assert captured["json"]["reason"] == "test"
-
-
-def test_admin_halt_502_when_bridge_unreachable(_state_setup, monkeypatch):
-    """bridge HTTP error → 502。"""
-    _state_setup.mode = "live"
-    _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
-
-    def _post(*a, **kw):
-        raise httpx.ConnectError("down")
-
-    import httpx
-    monkeypatch.setattr("httpx.post", _post)
-    resp = _client_post("/admin/halt", json={"mode": "soft"})
-    assert resp.status_code == 502
 
 
 def test_admin_resume_proxies_to_bridge(_state_setup, monkeypatch):
@@ -350,3 +337,88 @@ def test_admin_resume_rejected_in_paper_mode(_state_setup):
     resp = _client_post("/admin/resume")
     assert resp.status_code == 400
     assert "paper" in resp.json()["detail"].lower()
+
+
+def test_admin_halt_updates_finance_state(_state_setup, monkeypatch, tmp_path):
+    """POST /admin/halt mode=soft で finance halt.json が更新される。"""
+    from src.persistence import halt_state
+
+    _state_setup.mode = "live"
+    _state_setup.state_dir = tmp_path
+    _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
+
+    class _R:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"soft_halted": True}
+
+    monkeypatch.setattr("httpx.post", lambda *a, **kw: _R())
+
+    resp = _client_post("/admin/halt", json={"mode": "soft", "reason": "manual test"})
+    assert resp.status_code == 200
+
+    # finance halt.json も更新されている
+    state = halt_state.read(tmp_path)
+    assert state.soft_halted is True
+    assert state.auto_triggered is False
+    assert state.reason == "manual test"
+    assert state.triggered_by == "manual"
+
+    # レスポンスに finance / bridge 両セクションが含まれる
+    body = resp.json()
+    assert "finance" in body
+    assert "bridge" in body
+    assert body["finance"]["soft_halted"] is True
+
+
+def test_admin_halt_updates_finance_state_even_when_bridge_post_fails(
+    _state_setup, monkeypatch, tmp_path
+):
+    """bridge POST が失敗しても finance state は確定し、502 ではなく 200 を返す。"""
+    from src.persistence import halt_state
+    import httpx as _httpx
+
+    _state_setup.mode = "live"
+    _state_setup.state_dir = tmp_path
+    _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
+
+    monkeypatch.setattr(
+        "httpx.post",
+        lambda *a, **kw: (_ for _ in ()).throw(_httpx.ConnectError("down")),
+    )
+
+    resp = _client_post("/admin/halt", json={"mode": "soft", "reason": "test"})
+    # finance state は更新済 → 200 を返す (bridge エラーはレスポンスに含める)
+    assert resp.status_code == 200
+    state = halt_state.read(tmp_path)
+    assert state.soft_halted is True
+    body = resp.json()
+    assert body["finance"]["soft_halted"] is True
+    assert "error" in body["bridge"]
+
+
+def test_admin_halt_hard_remains_proxy_only(_state_setup, monkeypatch, tmp_path):
+    """mode=hard は本仕様 out-of-scope。finance state を更新しない。"""
+    from src.persistence import halt_state
+
+    _state_setup.mode = "live"
+    _state_setup.state_dir = tmp_path
+    _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
+
+    class _R:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"hard_halted": True}
+
+    monkeypatch.setattr("httpx.post", lambda *a, **kw: _R())
+
+    resp = _client_post("/admin/halt", json={"mode": "hard", "reason": "emergency"})
+    assert resp.status_code == 200
+
+    # mode=hard では finance state は更新されない
+    state = halt_state.read(tmp_path)
+    assert state.soft_halted is False

@@ -55,16 +55,60 @@ def _bridge_headers() -> dict[str, str]:
 
 @router.post("/halt", dependencies=[Depends(verify_api_key)])
 def admin_halt(req: HaltRequest) -> dict[str, Any]:
-    """bridge を soft / hard halt する。bridge /admin/halt のプロキシ。
+    """bridge を soft / hard halt する。
 
-    soft: 新規 entry のみ停止、既存ポジ管理は継続。/admin/resume で再開可。
-    hard: DRY_RUN 強制 + フラグファイル。**遠隔再開不可**、main PC で手動操作必要。
+    soft: finance halt.json を権威的に更新し、bridge へは best-effort で伝搬。
+          bridge 不通でも finance halt は確定する (Discord 通知は admin 経路で
+          は出さない — manual 操作はユーザーが既に意図しているため)。
+    hard: 既存通り bridge へのプロキシのみ (本仕様 out of scope)。
     """
     if state.config is not None and state.config.mode == "paper":
         raise HTTPException(
             status_code=400,
             detail="halt is not available in paper mode (no bridge to halt)",
         )
+
+    # mode=hard は out of scope。既存挙動 (proxy only) を維持。
+    if req.mode == "hard":
+        return _proxy_bridge_halt(req)
+
+    # mode=soft: finance state を権威的に更新
+    from src.persistence import halt_state
+    assert state.config is not None
+    new_state, _changed = halt_state.trigger_manual(
+        state.config.state_dir, reason=req.reason or "manual halt"
+    )
+    logger.warning(
+        f"[ADMIN] manual halt finance state set "
+        f"(soft_halted={new_state.soft_halted}, reason={req.reason!r})"
+    )
+
+    # bridge POST best-effort
+    bridge_url = _bridge_url()
+    bridge_response: dict[str, Any]
+    try:
+        resp = httpx.post(
+            f"{bridge_url}/admin/halt",
+            json={"mode": "soft", "reason": req.reason},
+            timeout=5.0,
+            headers=_bridge_headers(),
+        )
+        resp.raise_for_status()
+        bridge_response = resp.json()
+    except httpx.HTTPError as e:
+        logger.warning(
+            f"[ADMIN] bridge halt POST failed (finance state set): {e}"
+        )
+        bridge_response = {"error": f"bridge unreachable: {type(e).__name__}: {e}"}
+
+    return {
+        "finance": _state_to_dict(new_state),
+        "bridge": bridge_response,
+    }
+
+
+def _proxy_bridge_halt(req: HaltRequest) -> dict[str, Any]:
+    """mode=hard 用: bridge にそのままプロキシ (現状維持)。"""
     url = _bridge_url()
     try:
         resp = httpx.post(
@@ -74,7 +118,9 @@ def admin_halt(req: HaltRequest) -> dict[str, Any]:
             headers=_bridge_headers(),
         )
         resp.raise_for_status()
-        logger.warning(f"[ADMIN] proxy halt mode={req.mode} reason={req.reason!r}")
+        logger.warning(
+            f"[ADMIN] proxy halt mode={req.mode} reason={req.reason!r}"
+        )
         return resp.json()
     except httpx.HTTPStatusError as e:
         raise HTTPException(
@@ -83,6 +129,17 @@ def admin_halt(req: HaltRequest) -> dict[str, Any]:
         )
     except httpx.HTTPError as e:
         raise HTTPException(502, f"bridge unreachable: {type(e).__name__}: {e}")
+
+
+def _state_to_dict(s) -> dict[str, Any]:
+    """HaltState → JSON-serializable dict (asdict 相当)。"""
+    return {
+        "soft_halted": s.soft_halted,
+        "auto_triggered": s.auto_triggered,
+        "reason": s.reason,
+        "since": s.since,
+        "triggered_by": s.triggered_by,
+    }
 
 
 @router.post("/resume", dependencies=[Depends(verify_api_key)])
