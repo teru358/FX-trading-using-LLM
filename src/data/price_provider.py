@@ -135,7 +135,36 @@ class PriceProvider:
         self._daily_count += 1
 
     def get_current_price(self, symbol: str, is_monitor: bool = False) -> CurrentPrice:
-        """現在価格を取得する（同期）。Twelve Data有効時は非同期を同期ラップ。"""
+        """現在価格を取得する（同期）。
+
+        trade ペア + MT5 有効時: MT5 (1m バー終値) → Twelve Data → yfinance。
+        Layer 4 価格監視 (price_monitor) は live_broker=mt5 のとき bridge 値を権威と
+        する必要があるためこの順序になっている。
+        """
+        # MT5 chain (trade ペア + MT5 有効時のみ)
+        if (
+            self._is_trade_pair(symbol)
+            and self._mt5_enabled
+            and self._mt5_fetcher is not None
+        ):
+            prev = self._active_provider.get(symbol, "mt5")
+            try:
+                cp = self._mt5_fetcher.fetch_current_price(symbol)
+                if self._health_tracker.record_success(datetime.now()):
+                    self._notify_recovery(prev, "mt5")
+                self._record_provider(symbol, prev, "mt5")
+                return cp
+            except Mt5UnreachableError as e:
+                if self._health_tracker.record_failure(datetime.now()):
+                    self._notify_degraded(reason=str(e))
+                logger.warning(
+                    f"[PROVIDER] {symbol} MT5 current price fetch failed: {e}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"[PROVIDER] {symbol} MT5 unexpected error: {e}"
+                )
+
         if self._use_twelvedata(symbol, is_monitor=is_monitor):
             try:
                 cp = self._td_fetcher.fetch_current_price(symbol)

@@ -57,3 +57,79 @@ class TestFallback:
             provider = PriceProvider(cfg)
         assert provider._is_trade_pair("USDJPY=X") is True
         assert provider._is_trade_pair("^N225") is False
+
+
+def _make_mt5_config():
+    """live_broker=mt5 の最小スタブ。"""
+    cfg = MagicMock()
+    cfg.mode = "live"
+    cfg.paper_provider = "yfinance"
+    cfg.live_broker = "mt5"
+    cfg.providers.twelvedata = None
+    mt5 = MagicMock()
+    mt5.bridge_url = "http://x:8812"
+    mt5.request_timeout_seconds = 5.0
+    mt5.api_key = ""
+    mt5.fallback.failure_window_sec = 300
+    mt5.fallback.failure_threshold = 3
+    mt5.fallback.heartbeat_interval_degraded_min = 15
+    cfg.providers.mt5 = mt5
+    cfg.trading.lookback_days = 90
+    cfg.trading.ohlcv_interval = "1h"
+    cfg.tradeable_instruments = [MagicMock(symbol="USDJPY=X", asset_type="fx")]
+    cfg.price_monitor.interval_minutes = 5
+    cfg.schedule.run_times = ["09:30"]
+    return cfg
+
+
+def test_get_current_price_uses_mt5_for_trade_pairs():
+    """live_broker=mt5 + trade pair → MT5 fetcher が呼ばれる (TD/yfinance より優先)。"""
+    cfg = _make_mt5_config()
+    provider = PriceProvider(cfg)
+    assert provider._mt5_enabled is True
+
+    expected = CurrentPrice(price=153.42, timestamp=datetime.now())
+    provider._mt5_fetcher = MagicMock()
+    provider._mt5_fetcher.fetch_current_price.return_value = expected
+
+    cp = provider.get_current_price("USDJPY=X", is_monitor=True)
+
+    assert cp is expected
+    provider._mt5_fetcher.fetch_current_price.assert_called_once_with("USDJPY=X")
+
+
+def test_get_current_price_falls_back_when_mt5_unreachable():
+    """MT5 fetcher 失敗時は Twelve Data → yfinance にフォールバック。"""
+    from src.data.mt5_ohlcv_fetcher import Mt5UnreachableError
+
+    cfg = _make_mt5_config()
+    provider = PriceProvider(cfg)
+
+    provider._mt5_fetcher = MagicMock()
+    provider._mt5_fetcher.fetch_current_price.side_effect = Mt5UnreachableError("down")
+
+    fallback_price = CurrentPrice(price=152.99, timestamp=datetime.now())
+    with patch(
+        "src.data.price_provider.fetch_current_price", return_value=fallback_price,
+    ):
+        cp = provider.get_current_price("USDJPY=X", is_monitor=True)
+
+    assert cp is fallback_price
+    provider._mt5_fetcher.fetch_current_price.assert_called_once()
+
+
+def test_get_current_price_skips_mt5_for_watch_only_symbols():
+    """trade ペアでないシンボルは MT5 を経由しない (TD/yfinance のみ)。"""
+    cfg = _make_mt5_config()
+    provider = PriceProvider(cfg)
+
+    provider._mt5_fetcher = MagicMock()  # 呼ばれてはいけない
+
+    fallback_price = CurrentPrice(price=200.0, timestamp=datetime.now())
+    with patch(
+        "src.data.price_provider.fetch_current_price", return_value=fallback_price,
+    ):
+        cp = provider.get_current_price("SPY", is_monitor=True)  # watch only
+
+    assert cp is fallback_price
+    provider._mt5_fetcher.fetch_current_price.assert_not_called()

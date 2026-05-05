@@ -70,6 +70,58 @@ def test_unreachable_raises_mt5_unreachable_error(monkeypatch):
         fetcher.fetch("USDJPY=X", period="90d", interval="1h", price_store=store)
 
 
+def test_fetch_current_price_returns_last_close(monkeypatch):
+    """fetch_current_price は 1m バーの最終 Close を返す。"""
+    fetcher = Mt5OhlcvFetcher(bridge_url="http://x:8812", request_timeout=5.0)
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "symbol": "USDJPY", "interval": "1m",
+                "bars": [
+                    {"time": "2026-05-05T03:45:00+00:00", "open": 153.10,
+                     "high": 153.15, "low": 153.08, "close": 153.12,
+                     "volume": 100.0},
+                    {"time": "2026-05-05T03:46:00+00:00", "open": 153.12,
+                     "high": 153.20, "low": 153.10, "close": 153.18,
+                     "volume": 110.0},
+                ],
+            }
+
+    captured_params: list[dict] = []
+
+    def _fake_get(url, **kw):
+        captured_params.append(kw.get("params", {}))
+        return _Resp()
+
+    monkeypatch.setattr("httpx.get", _fake_get)
+
+    cp = fetcher.fetch_current_price("USDJPY=X")
+    assert cp.price == 153.18  # 最終 Close
+    # 1m interval が渡されている
+    assert captured_params[-1]["interval"] == "1m"
+
+
+def test_fetch_current_price_zero_bars_raises(monkeypatch):
+    """0 バーレスポンスは Mt5UnreachableError を raise する。"""
+    fetcher = Mt5OhlcvFetcher(bridge_url="http://x:8812", request_timeout=5.0)
+
+    class _EmptyResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"symbol": "USDJPY", "interval": "1m", "bars": []}
+
+    monkeypatch.setattr("httpx.get", lambda *a, **kw: _EmptyResp())
+
+    with pytest.raises(Mt5UnreachableError):
+        fetcher.fetch_current_price("USDJPY=X")
+
+
 def test_skip_yf_suffix_in_request(monkeypatch):
     """yfinance 形式 USDJPY=X が MT5 形式 USDJPY で送信されることを確認。"""
     fetcher = Mt5OhlcvFetcher(bridge_url="http://x:8812", request_timeout=5.0)

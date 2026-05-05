@@ -60,6 +60,27 @@ class Mt5OhlcvFetcher:
             {"X-Bridge-Api-Key": api_key} if api_key else {}
         )
 
+    def fetch_current_price(self, symbol: str) -> "CurrentPrice":
+        """直近の 1m バーから現在価格を取得 (bridge `/ohlcv` 経由)。
+
+        live_broker=mt5 のとき price_monitor (Layer 4 トレーリング) で
+        参照する「現在値」の権威ソース。bridge 不通や 0 バー応答は
+        Mt5UnreachableError で raise → 上位で TD/yfinance fallback。
+        """
+        from src.data.price_fetcher import CurrentPrice
+
+        end = datetime.now()
+        start = end - timedelta(minutes=5)
+        df = self._fetch_dataframe(symbol, start, end, interval="1m")
+        if df.empty:
+            raise Mt5UnreachableError(
+                f"bridge /ohlcv returned 0 bars for {symbol}"
+            )
+        return CurrentPrice(
+            price=float(df["Close"].iloc[-1]),
+            timestamp=datetime.now(),
+        )
+
     def fetch(
         self, symbol: str, *,
         period: str = "90d", interval: str = "1h",
