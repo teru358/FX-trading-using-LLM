@@ -144,30 +144,80 @@ def _state_to_dict(s) -> dict[str, Any]:
 
 @router.post("/resume", dependencies=[Depends(verify_api_key)])
 def admin_resume() -> dict[str, Any]:
-    """bridge の soft halt を解除する。bridge /admin/resume のプロキシ。
+    """soft halt を解除する (finance + bridge の両方)。
 
-    hard halt 中は bridge 側が 403 を返し、ここでも 403 を返す (再開には main PC
-    での手動操作が必要)。
+    フロー:
+      ① bridge /health を同期確認 (timeout=5s)。失敗時は 503 で拒否し halt 維持。
+      ② finance halt.json をクリア (常に成功)。
+      ③ bridge /admin/resume POST best-effort (失敗時はレスポンスに error を含める)。
+
+    ① で gate することで、resume 直後に trading_cycle が走った際に bridge が
+    まだ不通という gap を防ぐ (ユーザー意図と実態を一致させる)。
+
+    hard halt 中は bridge /admin/resume が 403 を返し、ここでも 403 を返す。
     """
     if state.config is not None and state.config.mode == "paper":
         raise HTTPException(
             status_code=400,
             detail="resume is not available in paper mode (no bridge to resume)",
         )
-    url = _bridge_url()
+    bridge_url = _bridge_url()
+
+    # ① bridge /health を同期確認
+    try:
+        r = httpx.get(
+            f"{bridge_url}/health",
+            timeout=5.0,
+            headers=_bridge_headers(),
+        )
+        r.raise_for_status()
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"bridge /health unreachable: {type(e).__name__}: {e}. "
+                "fix bridge first then retry."
+            ),
+        )
+
+    # ② finance halt.json クリア
+    from src.persistence import halt_state
+    assert state.config is not None
+    new_state = halt_state.clear(state.config.state_dir)
+    logger.warning("[ADMIN] manual resume — finance halt cleared")
+
+    # ③ bridge /admin/resume POST best-effort
+    bridge_response: dict[str, Any]
     try:
         resp = httpx.post(
-            f"{url}/admin/resume",
+            f"{bridge_url}/admin/resume",
             timeout=5.0,
             headers=_bridge_headers(),
         )
         resp.raise_for_status()
-        logger.warning("[ADMIN] proxy resume")
-        return resp.json()
+        bridge_response = resp.json()
     except httpx.HTTPStatusError as e:
+        # bridge が 403 を返したら finance も 403 (hard halt 中の resume 拒否)
+        # finance state はもう clear 済みだが、bridge との整合性を取るため halt
+        # を再設定する (rare path)
+        if e.response.status_code == 403:
+            halt_state.trigger_manual(
+                state.config.state_dir,
+                reason="bridge rejected resume (hard halt)",
+            )
+            raise HTTPException(403, e.response.text)
         raise HTTPException(
             e.response.status_code,
             f"bridge returned {e.response.status_code}: {e.response.text}",
         )
     except httpx.HTTPError as e:
-        raise HTTPException(502, f"bridge unreachable: {type(e).__name__}: {e}")
+        logger.warning(
+            f"[ADMIN] bridge resume POST failed "
+            f"(finance halt already cleared): {e}"
+        )
+        bridge_response = {"error": f"bridge: {type(e).__name__}: {e}"}
+
+    return {
+        "finance": _state_to_dict(new_state),
+        "bridge": bridge_response,
+    }

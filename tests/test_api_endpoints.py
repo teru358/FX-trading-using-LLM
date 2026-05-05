@@ -279,9 +279,15 @@ def test_admin_halt_proxies_to_bridge(_state_setup, monkeypatch):
     assert captured["json"]["reason"] == "test"
 
 
-def test_admin_resume_proxies_to_bridge(_state_setup, monkeypatch):
+def test_admin_resume_proxies_to_bridge(_state_setup, monkeypatch, tmp_path):
     _state_setup.mode = "live"
+    _state_setup.state_dir = tmp_path
     _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
+
+    class _HealthOK:
+        status_code = 200
+        def raise_for_status(self):
+            pass
 
     class _R:
         status_code = 200
@@ -291,20 +297,28 @@ def test_admin_resume_proxies_to_bridge(_state_setup, monkeypatch):
             return {"dry_run": False, "soft_halted": False, "is_hard_halted": False,
                     "accepts_new_orders": True, "mt5_connected": True}
 
+    monkeypatch.setattr("httpx.get", lambda *a, **kw: _HealthOK())
     monkeypatch.setattr("httpx.post", lambda *a, **kw: _R())
 
     resp = _client_post("/admin/resume")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["soft_halted"] is False
-    assert body["accepts_new_orders"] is True
+    assert body["bridge"]["soft_halted"] is False
+    assert body["bridge"]["accepts_new_orders"] is True
+    assert body["finance"]["soft_halted"] is False
 
 
-def test_admin_resume_403_when_hard_halted(_state_setup, monkeypatch):
+def test_admin_resume_403_when_hard_halted(_state_setup, monkeypatch, tmp_path):
     """bridge が 403 を返したら finance も 403 を返す (hard halt 中の resume 拒否)。"""
     _state_setup.mode = "live"
+    _state_setup.state_dir = tmp_path
     _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
     import httpx
+
+    class _HealthOK:
+        status_code = 200
+        def raise_for_status(self):
+            pass
 
     class _Req:
         url = "http://x:8812/admin/resume"
@@ -317,6 +331,7 @@ def test_admin_resume_403_when_hard_halted(_state_setup, monkeypatch):
         def json(self):
             return {}
 
+    monkeypatch.setattr("httpx.get", lambda *a, **kw: _HealthOK())
     monkeypatch.setattr("httpx.post", lambda *a, **kw: _R())
     resp = _client_post("/admin/resume")
     assert resp.status_code == 403
@@ -422,3 +437,99 @@ def test_admin_halt_hard_remains_proxy_only(_state_setup, monkeypatch, tmp_path)
     # mode=hard では finance state は更新されない
     state = halt_state.read(tmp_path)
     assert state.soft_halted is False
+
+
+def test_admin_resume_rejects_when_bridge_health_unreachable(
+    _state_setup, monkeypatch, tmp_path
+):
+    """bridge /health が不通の場合、resume は 503 で拒否し halt は維持される。"""
+    from src.persistence import halt_state
+    import httpx as _httpx
+
+    _state_setup.mode = "live"
+    _state_setup.state_dir = tmp_path
+    _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
+
+    # 事前に halt 状態にしておく
+    halt_state.trigger_manual(tmp_path, "preexisting")
+
+    monkeypatch.setattr(
+        "httpx.get",
+        lambda *a, **kw: (_ for _ in ()).throw(_httpx.ConnectError("down")),
+    )
+
+    resp = _client_post("/admin/resume")
+    assert resp.status_code == 503
+    assert "bridge" in resp.json()["detail"].lower()
+
+    # halt は維持されている
+    state = halt_state.read(tmp_path)
+    assert state.soft_halted is True
+
+
+def test_admin_resume_clears_finance_state_when_bridge_health_ok(
+    _state_setup, monkeypatch, tmp_path
+):
+    """bridge /health OK → finance halt.json をクリアし bridge resume を best-effort POST。"""
+    from src.persistence import halt_state
+
+    _state_setup.mode = "live"
+    _state_setup.state_dir = tmp_path
+    _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
+    halt_state.trigger_auto(tmp_path, "5 failures", "heartbeat")
+
+    class _HealthOK:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+
+    class _ResumeOK:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"soft_halted": False, "accepts_new_orders": True}
+
+    monkeypatch.setattr("httpx.get", lambda *a, **kw: _HealthOK())
+    monkeypatch.setattr("httpx.post", lambda *a, **kw: _ResumeOK())
+
+    resp = _client_post("/admin/resume")
+    assert resp.status_code == 200
+
+    state = halt_state.read(tmp_path)
+    assert state.soft_halted is False
+
+    body = resp.json()
+    assert body["finance"]["soft_halted"] is False
+    assert body["bridge"]["soft_halted"] is False
+
+
+def test_admin_resume_clears_finance_state_even_when_bridge_resume_post_fails(
+    _state_setup, monkeypatch, tmp_path
+):
+    """bridge /health OK だが /admin/resume POST が失敗 → finance はクリアし bridge エラーを返す。"""
+    from src.persistence import halt_state
+    import httpx as _httpx
+
+    _state_setup.mode = "live"
+    _state_setup.state_dir = tmp_path
+    _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
+    halt_state.trigger_manual(tmp_path, "pre")
+
+    class _HealthOK:
+        status_code = 200
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr("httpx.get", lambda *a, **kw: _HealthOK())
+    monkeypatch.setattr(
+        "httpx.post",
+        lambda *a, **kw: (_ for _ in ()).throw(_httpx.ConnectError("post down")),
+    )
+
+    resp = _client_post("/admin/resume")
+    assert resp.status_code == 200
+    state = halt_state.read(tmp_path)
+    assert state.soft_halted is False
+    body = resp.json()
+    assert "error" in body["bridge"]
