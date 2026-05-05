@@ -289,3 +289,26 @@ def test_execute_signal_proceeds_when_not_halted(tmp_path, monkeypatch):
 
     # halt チェック通過 → PreExec で skip 判定 → None を返す
     assert result is None
+
+
+def test_auto_soft_halt_updates_finance_state_when_bridge_post_fails(
+    tmp_path, monkeypatch
+):
+    """_auto_soft_halt は finance state を確定させ、bridge POST 失敗を許容する。"""
+    import httpx
+    from src.persistence import halt_state
+
+    adapter = _make_adapter_with_state(tmp_path)
+
+    # bridge POST は接続エラー
+    def _post(*a, **kw):
+        raise httpx.ConnectError("bridge down")
+
+    monkeypatch.setattr("httpx.post", _post)
+
+    adapter._auto_soft_halt("3 consecutive rejects", triggered_by="order_reject")
+
+    state = halt_state.read(tmp_path)
+    assert state.soft_halted is True
+    assert state.auto_triggered is True
+    assert state.triggered_by == "order_reject"

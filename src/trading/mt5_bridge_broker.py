@@ -511,18 +511,18 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             logger.warning(f"[MT5_BRIDGE] notify partial close failed: {e}")
 
     # ── Task 14 (Phase 3c 改訂): 発注経路の auto soft halt 判定 ──
-
     def _record_bridge_success(self) -> None:
-        """発注成功または bridge 健全応答時に呼ぶ。両カウンタリセット。"""
-        self._consecutive_rejects = 0
+        """発注成功時にカウンタリセット。"""
         self._consecutive_unreachable = 0
+        self._consecutive_rejects = 0
 
     def _record_bridge_reject(self) -> None:
         """MT5 retcode REJECT (HTTP 409) 受領時に呼ぶ。連続 N 回で auto soft halt。"""
         self._consecutive_rejects += 1
         if self._consecutive_rejects >= self._reject_threshold:
             self._auto_soft_halt(
-                f"{self._reject_threshold} consecutive rejects"
+                f"{self._consecutive_rejects} consecutive order rejects",
+                triggered_by="order_reject",
             )
 
     def _record_bridge_unreachable(self) -> None:
@@ -530,26 +530,55 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         self._consecutive_unreachable += 1
         if self._consecutive_unreachable >= self._unreachable_threshold:
             self._auto_soft_halt(
-                f"{self._unreachable_threshold} consecutive unreachable"
+                f"{self._consecutive_unreachable} consecutive bridge unreachable",
+                triggered_by="order_unreachable",
             )
 
-    def _auto_soft_halt(self, reason: str) -> None:
-        """bridge を soft halt 状態にする (auto)。再開は手動 (POST /admin/resume)。"""
+    def _auto_soft_halt(self, reason: str, triggered_by: str = "order_unreachable") -> None:
+        """finance halt 状態を確定し、Discord 通知後 bridge POST best-effort。
+
+        bridge 不通時にも Discord 通知が確実に出ることを保証する (heartbeat 経路と
+        統一: state→通知→bridge POST の順)。
+        """
+        import asyncio
+        from src.persistence import halt_state
+
+        # ① finance halt 状態を確定 (常に成功)
+        _new_state, changed = halt_state.trigger_auto(
+            self._state_dir, reason, triggered_by
+        )
+        if not changed:
+            logger.debug(
+                "[MT5_BRIDGE] auto halt skipped: finance state already halted"
+            )
+            return
+
+        # ② Discord 通知 (bridge 状態に依存しない)
+        if self._notifier is not None:
+            try:
+                asyncio.run(self._notifier.send_embed(
+                    title="🛑 MT5 発注経路 → 自動 SOFT HALT",
+                    description=(
+                        f"reason: {reason}\n"
+                        f"trigger: `{triggered_by}`\n\n"
+                        f"新規発注をブロックしました (既存ポジ管理は継続)。\n"
+                        f"復帰: 原因解消後 `?resume`"
+                    ),
+                    color=0xE74C3C,
+                ))
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[MT5_BRIDGE] notify auto soft halt failed: {e}")
+        logger.error(f"[MT5_BRIDGE] AUTO SOFT HALT triggered: {reason}")
+
+        # ③ bridge /admin/halt POST (best-effort)
         try:
             httpx.post(
                 f"{self._url}/admin/halt",
                 json={"mode": "soft", "reason": f"auto: {reason}"},
                 timeout=self._timeout, headers=self._headers(),
             )
-            logger.error(f"[MT5_BRIDGE] AUTO SOFT HALT triggered: {reason}")
-            if self._notifier:
-                try:
-                    self._notifier.send_embed(
-                        title="🛑 MT5 ブリッジ 自動 SOFT HALT 発動",
-                        description=f"reason: {reason}\n\n手動再開: /resume",
-                        color=0xE74C3C,
-                    )
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(f"[MT5_BRIDGE] notify auto soft halt failed: {e}")
         except Exception as e:  # noqa: BLE001
-            logger.error(f"[MT5_BRIDGE] auto halt API failed: {e}")
+            logger.warning(
+                f"[MT5_BRIDGE] bridge halt POST failed "
+                f"(state already set locally): {e}"
+            )
