@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 from src.config import AppConfig
 from src.data.price_provider import PriceProvider
@@ -18,6 +19,9 @@ from src.notifications.notifier import OrderClosedEvent, PriceAlertEvent, create
 from src.persistence.state_store import StateStore
 from src.trading.market_hours import is_market_open
 from src.trading.position_manager import PositionManager
+
+if TYPE_CHECKING:
+    from src.trading.bridge_health_gate import BridgeHealthGate
 
 logger = logging.getLogger(__name__)
 
@@ -196,8 +200,16 @@ async def monitor_open_positions(
             logger.warning(f"[MONITOR] {pos.pair}: price check failed: {e}")
 
 
-def run_price_monitor(config: AppConfig, price_provider: PriceProvider) -> None:
-    """schedule ライブラリから呼び出す同期ラッパー。"""
+def run_price_monitor(
+    config: AppConfig,
+    price_provider: PriceProvider,
+    gate: "BridgeHealthGate | None" = None,
+) -> None:
+    """schedule ライブラリから呼び出す同期ラッパー。
+
+    gate が渡されたら冒頭で probe する (sync_balance=False、頻度過剰のため)。
+    probe 失敗時も monitor は fallback で続行する (TD/yfinance)。
+    """
     if not config.price_monitor.enabled:
         return
     if not is_market_open():
@@ -206,4 +218,6 @@ def run_price_monitor(config: AppConfig, price_provider: PriceProvider) -> None:
     position_mgr = PositionManager(state_store, context="PriceMonitor")
     if not position_mgr.get_account_state().open_positions:
         return
+    if gate is not None:
+        gate.probe(caller="monitor", sync_balance=False)
     asyncio.run(monitor_open_positions(config, position_mgr, price_provider))
