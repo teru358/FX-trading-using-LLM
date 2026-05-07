@@ -160,6 +160,13 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             return None    # 証拠金不足は bridge 健全 → カウンタ非増加
         if resp.status_code == 423:
             logger.info(f"[MT5_BRIDGE] {signal.pair} skipped — bridge soft-halted")
+            # bridge が直接 halt されたケースの最小同期: finance halt にもミラー。
+            # 常時ポーリングは不要 (発注時の偶発観測のみ)。
+            halt_state.trigger_auto(
+                self._state_dir,
+                reason="bridge returned 423 soft-halted",
+                triggered_by="bridge_423",
+            )
             return None    # soft halt は意図的 → カウンタ非増加
         if resp.status_code == 409:
             logger.warning(f"[MT5_BRIDGE] {signal.pair} order rejected: {resp.text}")

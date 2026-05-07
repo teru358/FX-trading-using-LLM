@@ -312,3 +312,25 @@ def test_auto_soft_halt_updates_finance_state_when_bridge_post_fails(
     assert state.soft_halted is True
     assert state.auto_triggered is True
     assert state.triggered_by == "order_reject"
+
+
+def test_execute_signal_mirrors_423_to_finance_halt(monkeypatch, tmp_path):
+    """bridge が /order で 423 を返したら finance halt.json にも soft halt を立てる。"""
+    from src.persistence import halt_state
+
+    class _Resp:
+        is_success = False
+        status_code = 423
+        text = '{"detail":"soft halted"}'
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **kw: _Resp())
+    pm = _make_pm()
+    adapter = Mt5BridgeBrokerAdapter(bridge_url="http://x:8812", state_dir=tmp_path)
+
+    order = adapter.execute_signal(_make_signal(action="buy"), pm)
+
+    assert order is None
+    s = halt_state.read(tmp_path)
+    assert s.soft_halted is True
+    assert s.triggered_by == "bridge_423"
+    assert "423" in s.reason
