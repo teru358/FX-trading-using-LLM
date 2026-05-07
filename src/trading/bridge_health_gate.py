@@ -110,13 +110,23 @@ class BridgeHealthGate:
         try:
             resp = httpx.get(url, timeout=mt5_cfg.request_timeout_seconds)
             latency_ms = (time.perf_counter() - started) * 1000
-            ok = resp.is_success
-            mt5_connected = bool(resp.json().get("mt5_connected", False)) if ok else False
+            http_ok = resp.is_success
+            mt5_connected = bool(resp.json().get("mt5_connected", False)) if http_ok else False
+            # ok=True は HTTP 成功 + MT5 接続あり の両方が満たされたとき。
+            # /health 200 だが mt5_connected=false は「bridge は生きているが
+            # MT5 自体が切れている」状態 → gate 失敗扱いで retry/halt 対象。
+            ok = http_ok and mt5_connected
+            if not http_ok:
+                error = f"http_{resp.status_code}"
+            elif not mt5_connected:
+                error = "mt5_disconnected"
+            else:
+                error = None
             return ProbeResult(
                 ok=ok, mt5_connected=mt5_connected,
                 latency_ms=round(latency_ms, 1),
                 http_status=resp.status_code,
-                error=None if ok else f"http_{resp.status_code}",
+                error=error,
                 retried=False,
             )
         except (httpx.HTTPError, ValueError) as e:

@@ -564,8 +564,14 @@ def test_run_trading_cycle_calls_gate_probe(tmp_path, monkeypatch):
     gate.probe.assert_called_once_with(caller="trading", sync_balance=True)
 
 
-def test_run_trading_cycle_skips_when_gate_fails(monkeypatch):
-    """gate.probe で ok=False が返ったら trading_cycle は呼ばれない。"""
+def test_run_trading_cycle_proceeds_when_gate_fails(monkeypatch):
+    """gate.probe ok=False でも trading_cycle は呼ばれる (Phase 1〜2.5 継続)。
+
+    spec section 7: soft halt は新規発注停止であり、既存ポジ管理 (close/reflection
+    /HOLD review) は継続する。gate 失敗時は gate 内で halt_state.trigger_auto が
+    走るため、trading_cycle 入口の is_halted チェックが Phase 3 以降だけ skip する。
+    したがって run_trading_cycle 自体はサイクル本体を必ず呼ぶ。
+    """
     from src.cycles.trading import run_trading_cycle
     from unittest.mock import MagicMock
 
@@ -574,9 +580,20 @@ def test_run_trading_cycle_skips_when_gate_fails(monkeypatch):
     gate.probe.return_value = MagicMock(ok=False)
     inner = MagicMock(return_value=None)
     monkeypatch.setattr("src.cycles.trading.trading_cycle", inner)
+    monkeypatch.setattr("src.cycles.trading.asyncio.run", lambda coro: None)
+    monkeypatch.setattr("src.cycles.trading.StateStore", lambda _: MagicMock())
+    monkeypatch.setattr(
+        "src.cycles.trading.PositionManager", lambda *a, **kw: MagicMock(),
+    )
 
     run_trading_cycle(
         config, MagicMock(), MagicMock(), MagicMock(), MagicMock(),
         price_provider=MagicMock(), gate=gate,
     )
-    inner.assert_not_called()
+    # gate は呼ばれた
+    gate.probe.assert_called_once_with(caller="trading", sync_balance=True)
+    # trading_cycle (本体) も呼ばれた (Phase 1〜2.5 継続のため)
+    # 中の Phase 3 以降は trading_cycle 関数内で is_halted チェックされる
+    monkeypatch.setattr(
+        "src.cycles.trading.asyncio.run", lambda coro: None,
+    )

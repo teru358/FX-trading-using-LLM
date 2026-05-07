@@ -128,9 +128,29 @@ def _proxy_bridge_halt(req: HaltRequest) -> dict[str, Any]:
         )
         return resp.json()
     except httpx.HTTPStatusError as e:
+        # bridge が 4xx/5xx を返した = hard halt 未達の可能性 →
+        # finance soft halt で発注を止める fail-safe (接続エラー時と同じ扱い)
+        from src.persistence import halt_state
+        assert state.config is not None
+        new_state, _changed = halt_state.trigger_manual(
+            state.config.state_dir,
+            reason=(
+                f"manual hard halt delivery failed: HTTP "
+                f"{e.response.status_code}: {e.response.text}"
+            ),
+        )
+        logger.error(
+            f"[ADMIN] hard halt POST returned {e.response.status_code}; "
+            f"finance soft halt set: {e.response.text}"
+        )
         raise HTTPException(
             e.response.status_code,
-            f"bridge returned {e.response.status_code}: {e.response.text}",
+            {
+                "message": "bridge hard halt failed; finance soft halt is active",
+                "finance": _state_to_dict(new_state),
+                "bridge_status": e.response.status_code,
+                "bridge_body": e.response.text,
+            },
         )
     except httpx.HTTPError as e:
         # bridge 不通 = hard halt 未達 → finance soft halt で発注を止める

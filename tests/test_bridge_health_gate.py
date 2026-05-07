@@ -241,6 +241,65 @@ def test_balance_sync_failure_does_not_halt(tmp_path, monkeypatch):
     assert halt_state.read(tmp_path).soft_halted is False
 
 
+def test_health_200_but_mt5_disconnected_is_failure(tmp_path, monkeypatch):
+    """/health 200 でも mt5_connected=false なら ok=False 扱い (retry/halt 対象)。"""
+    cfg = _make_config(mode="live", live_broker="mt5", has_mt5=True)
+    cfg.state_dir = tmp_path
+    sleep_calls = []
+    # 2 回連続で mt5_connected=false → halt 発動
+    monkeypatch.setattr(
+        "httpx.get", lambda *a, **kw: _Resp(payload={"mt5_connected": False}),
+    )
+    monkeypatch.setattr(
+        "src.trading.bridge_health_gate.httpx.post", lambda *a, **kw: None,
+    )
+
+    gate = BridgeHealthGate(
+        config=cfg, log_path=tmp_path / "bridge_health.jsonl",
+        sleep_fn=lambda s: sleep_calls.append(s),
+    )
+    gate._sync_balance = lambda: None
+
+    result = gate.probe(caller="trading", sync_balance=True)
+    assert result.ok is False
+    assert result.mt5_connected is False
+    assert result.error == "mt5_disconnected"
+    assert result.retried is True
+    assert sleep_calls == [60.0]
+
+    from src.persistence import halt_state
+    state = halt_state.read(tmp_path)
+    assert state.soft_halted is True
+    assert state.triggered_by == "bridge_health_gate"
+    assert "mt5_disconnected" in state.reason
+
+
+def test_health_mt5_disconnected_then_connected_recovers(tmp_path, monkeypatch):
+    """1回目 mt5_connected=false → 60秒待機 → 2回目 mt5_connected=true で ok=True。"""
+    cfg = _make_config(mode="live", live_broker="mt5", has_mt5=True)
+    cfg.state_dir = tmp_path
+    sleep_calls = []
+    responses = iter([
+        _Resp(payload={"mt5_connected": False}),
+        _Resp(payload={"mt5_connected": True}),
+    ])
+    monkeypatch.setattr("httpx.get", lambda *a, **kw: next(responses))
+
+    gate = BridgeHealthGate(
+        config=cfg, log_path=tmp_path / "bridge_health.jsonl",
+        sleep_fn=lambda s: sleep_calls.append(s),
+    )
+    gate._sync_balance = lambda: None
+
+    result = gate.probe(caller="trading", sync_balance=True)
+    assert result.ok is True
+    assert result.retried is True
+    assert sleep_calls == [60.0]
+
+    from src.persistence import halt_state
+    assert halt_state.read(tmp_path).soft_halted is False
+
+
 def test_oanda_broker_enabled_returns_ok_placeholder(tmp_path):
     """live_broker=oanda で _enabled=True、probe は placeholder ok=True。"""
     cfg = _make_config(mode="live", live_broker="oanda", has_oanda=True)

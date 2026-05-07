@@ -533,11 +533,48 @@ def test_admin_halt_hard_fallbacks_to_finance_soft_halt_on_bridge_failure(
     assert s.triggered_by == "manual"  # trigger_manual を使う
     assert "manual hard halt delivery failed" in s.reason
 
-    # レスポンスに finance state が含まれる
+
+def test_admin_halt_hard_fallbacks_to_finance_soft_halt_on_5xx(
+    _state_setup, monkeypatch, tmp_path,
+):
+    """mode=hard で bridge が 5xx を返したら finance soft halt を立てて元の status code で返す。"""
+    from src.persistence import halt_state
+    import httpx as _httpx
+
+    _state_setup.mode = "live"
+    _state_setup.state_dir = tmp_path
+    _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
+
+    class _Req:
+        url = "http://x:8812/admin/halt"
+
+    class _R500:
+        status_code = 500
+        text = "internal error"
+        def raise_for_status(self):
+            raise _httpx.HTTPStatusError("500", request=_Req(), response=self)
+        def json(self):
+            return {}
+
+    monkeypatch.setattr("httpx.post", lambda *a, **kw: _R500())
+
+    resp = _client_post("/admin/halt", json={"mode": "hard", "reason": "test"})
+    # bridge が返したステータスコードで応答
+    assert resp.status_code == 500
+
+    # finance soft halt は立っている (fail-safe)
+    s = halt_state.read(tmp_path)
+    assert s.soft_halted is True
+    assert s.triggered_by == "manual"
+    assert "manual hard halt delivery failed" in s.reason
+    assert "500" in s.reason
+
+    # レスポンスに finance state + bridge 情報が含まれる
     body = resp.json()
     detail = body["detail"]
     assert detail["finance"]["soft_halted"] is True
-    assert "error" in detail
+    assert detail["bridge_status"] == 500
+    assert detail["bridge_body"] == "internal error"
 
 
 def test_admin_resume_rejects_when_bridge_health_unreachable(

@@ -959,15 +959,14 @@ def run_trading_cycle(
 ) -> None:
     """schedule ライブラリから呼び出す同期ラッパー。
 
-    gate が渡されたら冒頭で probe する。失敗時は cycle 全体を skip。
+    gate が渡されたら冒頭で probe する。probe 失敗時は gate 内で halt_state.trigger_auto
+    が走るため、その後の trading_cycle が Phase 2.5 → Phase 3 の入口で is_halted を読んで
+    新規エントリー分析だけを skip する (Phase 1 SL/TP・Phase 1.5 reflection・Phase 2.5
+    HOLD review は halt 中でも継続する設計、spec section 7「既存ポジ管理は継続」)。
+    したがってここでは probe するのみで、結果が ok=False でも trading_cycle に進む。
     """
     if gate is not None:
-        result = gate.probe(caller="trading", sync_balance=True)
-        if not result.ok:
-            logger.info(
-                "[CYCLE] bridge unreachable (gate probe failed), skipping trading cycle"
-            )
-            return
+        gate.probe(caller="trading", sync_balance=True)
     from src.data.analysis_store import ForecastStore
     from src.data.session_store import SessionStore
     state_store = StateStore(config.state_dir)
