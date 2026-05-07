@@ -35,6 +35,7 @@ from src.trading.market_hours import is_market_open
 
 if TYPE_CHECKING:
     from src.data.price_fetcher import PriceData
+    from src.trading.bridge_health_gate import BridgeHealthGate
 
 logger = logging.getLogger(__name__)
 
@@ -558,6 +559,15 @@ def run_technical_collection(
     analysis_store: AnalysisStore,
     force: bool = False,
     price_provider: "PriceProvider | None" = None,
+    gate: "BridgeHealthGate | None" = None,
 ) -> None:
-    """schedule ライブラリから呼び出す同期ラッパー。"""
-    asyncio.run(collect_all_technical(config, store, price_store, analysis_store, force=force, price_provider=price_provider))
+    """schedule ライブラリから呼び出す同期ラッパー。
+
+    gate が渡されたら冒頭で probe する (sync_balance=True、毎時の balance 更新)。
+    """
+    if gate is not None:
+        gate.probe(caller="tech", sync_balance=True)
+    asyncio.run(collect_all_technical(
+        config, store, price_store, analysis_store,
+        force=force, price_provider=price_provider,
+    ))
