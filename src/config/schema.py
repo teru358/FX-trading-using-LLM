@@ -506,7 +506,6 @@ class Mt5Config:
     bridge_url: str = ""
     api_key: str = ""                         # X-Bridge-Api-Key (空ならヘッダー送信なし)
     request_timeout_seconds: float = 5.0
-    log_path: str = "data/state/mt5_heartbeat.jsonl"
     # 発注関連
     order_request_timeout_seconds: float = 10.0
     lot_size_units: int = 100_000

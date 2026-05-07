@@ -6,7 +6,6 @@ api_key: ""                            # X-Bridge-Api-Key (空ならヘッダー
 
 # Bridge プローブ
 request_timeout_seconds: 5.0
-log_path: "data/state/mt5_heartbeat.jsonl"
 
 # 発注関連
 order_request_timeout_seconds: 10.0
