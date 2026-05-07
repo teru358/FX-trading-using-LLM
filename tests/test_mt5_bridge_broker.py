@@ -380,3 +380,63 @@ def test_execute_signal_mirrors_423_fires_notifier_on_first_observation(
     order2 = adapter.execute_signal(_make_signal(action="buy"), pm)
     assert order2 is None
     assert notifier.send_embed.call_count == 1
+
+
+def test_trigger_hard_halt_fallbacks_to_finance_soft_halt_on_bridge_failure(
+    monkeypatch, tmp_path,
+):
+    """bridge /admin/halt mode=hard が失敗したら finance に soft halt を立てる fail-safe。"""
+    import httpx
+    from src.persistence import halt_state
+
+    def _raise(*a, **kw):
+        raise httpx.ConnectError("bridge down")
+
+    monkeypatch.setattr(httpx, "post", _raise)
+
+    notifier = MagicMock()
+
+    # asyncio.run の coroutine を消費するモック (notifier.send_embed の呼出回数だけ確認)
+    async def _consume(coro):
+        try:
+            coro.send(None)
+        except (StopIteration, AttributeError):
+            pass
+    monkeypatch.setattr("asyncio.run", lambda coro: _consume(coro))
+
+    adapter = Mt5BridgeBrokerAdapter(
+        bridge_url="http://x:8812", state_dir=tmp_path, notifier=notifier,
+    )
+    adapter._trigger_hard_halt("orphan position detected")
+
+    # finance soft halt が立つ
+    s = halt_state.read(tmp_path)
+    assert s.soft_halted is True
+    assert s.triggered_by == "hard_halt_delivery_failed"
+    assert "orphan" in s.reason
+
+    # Discord に「hard halt 未達」通知が出る
+    assert notifier.send_embed.call_count >= 1
+
+
+def test_trigger_hard_halt_succeeds_when_bridge_reachable(monkeypatch, tmp_path):
+    """bridge POST 成功時は finance soft halt は立たない (hard halt 経路は bridge 側のみ)。"""
+    from src.persistence import halt_state
+
+    class _Resp:
+        def raise_for_status(self):
+            pass
+        def json(self):
+            return {"ok": True}
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **kw: _Resp())
+
+    notifier = MagicMock()
+    adapter = Mt5BridgeBrokerAdapter(
+        bridge_url="http://x:8812", state_dir=tmp_path, notifier=notifier,
+    )
+    adapter._trigger_hard_halt("test reason")
+
+    # bridge POST 成功時は finance soft halt は立たない
+    s = halt_state.read(tmp_path)
+    assert s.soft_halted is False

@@ -384,7 +384,11 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         return False
 
     def _trigger_hard_halt(self, reason: str) -> None:
-        """bridge /admin/halt mode=hard を叩く + Discord 通知。"""
+        """bridge /admin/halt mode=hard を叩く + Discord 通知。
+
+        bridge POST が失敗した場合は finance 側に soft halt を立てて
+        新規発注を必ず止める fail-safe (hard halt 未達でも最低限の防御)。
+        """
         try:
             httpx.post(
                 f"{self._url}/admin/halt",
@@ -406,6 +410,31 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
                 )
         except Exception as e:
             logger.error(f"[MT5_BRIDGE] auto hard halt API failed: {e}")
+            # bridge 不通 = hard halt が届かない = 新規発注継続の最悪経路。
+            # finance 側 soft halt で発注を止める fail-safe。
+            from src.persistence import halt_state
+            halt_state.trigger_auto(
+                self._state_dir,
+                reason=f"hard halt delivery failed: {reason}",
+                triggered_by="hard_halt_delivery_failed",
+            )
+            if self._notifier is not None:
+                try:
+                    import asyncio
+                    asyncio.run(self._notifier.send_embed(
+                        title="⚠️ HARD HALT 未達 — finance SOFT HALT で代替",
+                        description=(
+                            f"reason: {reason}\n"
+                            f"bridge POST failed: {type(e).__name__}: {e}\n\n"
+                            f"finance 側で新規発注を止めました。bridge 復旧後に "
+                            f"hard halt 状態を手動確認してください。"
+                        ),
+                        color=0xE67E22,
+                    ))
+                except Exception as notif_err:  # noqa: BLE001
+                    logger.warning(
+                        f"[MT5_BRIDGE] hard-halt-failed notify failed: {notif_err}"
+                    )
 
     def check_and_close_positions(
         self, open_positions: list[Order],
