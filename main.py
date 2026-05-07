@@ -46,7 +46,6 @@ _guards: dict[str, JobGuard] = {
     "econ": JobGuard("econ_calendar"),
     "weekly_diagnosis": JobGuard("weekly_diagnosis"),
     "data_backup": JobGuard("data_backup"),
-    "mt5_heartbeat": JobGuard("mt5_heartbeat"),
 }
 
 
@@ -334,23 +333,6 @@ def main() -> None:
         _logger.info(
             f"[BACKUP] Scheduled: daily {_bk_cfg.at_time} ({news_tz}), "
             f"keep {_bk_cfg.retention_count} archives in {_bk_cfg.output_dir}"
-        )
-
-    # MT5 ブリッジ稼働率測定 heartbeat (Phase 1 — 発注機能はまだ含めない)
-    if config.live_broker == "mt5" and config.providers.mt5 is not None:
-        from src.jobs.mt5_heartbeat import run_mt5_heartbeat as _run_mt5_hb
-
-        _mt5_cfg = config.providers.mt5
-
-        def _mt5_heartbeat_run():
-            _run_mt5_hb(config)
-
-        schedule.every(_mt5_cfg.heartbeat_interval_minutes).minutes.do(
-            _run_with_guard, _guards["mt5_heartbeat"], _mt5_heartbeat_run,
-        )
-        _logger.info(
-            f"[MT5_HB] Scheduled: every {_mt5_cfg.heartbeat_interval_minutes}min "
-            f"→ {_mt5_cfg.bridge_url or '(unset)'}/health"
         )
 
     # REST API サーバー（有効時のみ — Initial collection 前に起動）

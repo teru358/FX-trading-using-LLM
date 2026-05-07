@@ -66,7 +66,6 @@ _PREFIX_REGISTRY: tuple[tuple[str, str | None, bool], ...] = (
     ("[RAG ADJ]",      "dim magenta",   True),   # RAG スコア補正
     ("[ADAPTIVE]",     "magenta",       True),   # adaptive params 更新
     # Phase 3c: bridge 連携 / halt 系イベント (本番運用で activity.log に必須)
-    ("[MT5_HB]",       "bright_red",    True),   # heartbeat 失敗 / 自動 SOFT HALT
     ("[MT5_BRIDGE]",   "red",           True),   # 発注経路の bridge 通信
     ("[PROVIDER]",     "yellow",        True),   # price provider degradation / fallback
     ("[ADMIN]",        "bold red",      True),   # /admin/halt / /admin/resume 操作ログ
