@@ -334,3 +334,49 @@ def test_execute_signal_mirrors_423_to_finance_halt(monkeypatch, tmp_path):
     assert s.soft_halted is True
     assert s.triggered_by == "bridge_423"
     assert "423" in s.reason
+
+
+def test_execute_signal_mirrors_423_fires_notifier_on_first_observation(
+    monkeypatch, tmp_path,
+):
+    """初回 423 観測時のみ Discord 通知 (changed=True 1 回)。
+
+    2 回目は execute_signal 冒頭の is_halted で早期 return されるため、
+    notifier.send_embed の呼び出しは累計 1 回のままになる (idempotent)。
+    """
+    class _Resp:
+        is_success = False
+        status_code = 423
+        text = '{"detail":"soft halted"}'
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **kw: _Resp())
+
+    notifier = MagicMock()
+    notifier.send_embed = MagicMock()
+
+    # asyncio.run を no-op にして coroutine を消費する。
+    # 実装側は asyncio.run(notifier.send_embed(...)) と呼ぶため、
+    # send_embed 自体は coroutine を返さない MagicMock でも、
+    # ここで coroutine を捨てれば送信そのものが 1 回行われたことを
+    # send_embed.call_count で計測できる。
+    def _consume(coro):
+        try:
+            coro.send(None)
+        except (StopIteration, AttributeError):
+            pass
+    monkeypatch.setattr("asyncio.run", lambda coro: _consume(coro))
+
+    pm = _make_pm()
+    adapter = Mt5BridgeBrokerAdapter(
+        bridge_url="http://x:8812", state_dir=tmp_path, notifier=notifier,
+    )
+
+    # 1 回目: 423 観測 → halt.json mirror + Discord 1 通
+    order1 = adapter.execute_signal(_make_signal(action="buy"), pm)
+    assert order1 is None
+    assert notifier.send_embed.call_count == 1
+
+    # 2 回目: 既に halted なので冒頭 is_halted で早期 return → Discord は増えない
+    order2 = adapter.execute_signal(_make_signal(action="buy"), pm)
+    assert order2 is None
+    assert notifier.send_embed.call_count == 1

@@ -5,7 +5,8 @@
     auto_triggered:  True = heartbeat/order 連続失敗 / False = manual
     reason:          halt の理由 (Discord 通知 / API レスポンスで使う)
     since:           halt 発動時刻 (ISO 8601 UTC) / 解除時 None
-    triggered_by:    "heartbeat" / "order_unreachable" / "order_reject" / "manual"
+    triggered_by:    "heartbeat" / "order_unreachable" / "order_reject" /
+                     "manual" / "bridge_423" / "corruption" / "price_provider"
 
 balance_snapshot と異なり、不在時に bootstrap はしない (default を返すだけ)。
 理由: paper モードでは halt.json は不要で、ファイルが無い状態 = 「halted=False」を

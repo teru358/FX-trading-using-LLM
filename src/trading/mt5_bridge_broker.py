@@ -162,11 +162,32 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             logger.info(f"[MT5_BRIDGE] {signal.pair} skipped — bridge soft-halted")
             # bridge が直接 halt されたケースの最小同期: finance halt にもミラー。
             # 常時ポーリングは不要 (発注時の偶発観測のみ)。
-            halt_state.trigger_auto(
+            # 次回以降は execute_signal 冒頭の is_halted で早期 return されるため
+            # ここを通るのは通常 1 回のみ (changed=True の経路)。
+            _state, changed = halt_state.trigger_auto(
                 self._state_dir,
                 reason="bridge returned 423 soft-halted",
                 triggered_by="bridge_423",
             )
+            if changed and self._notifier is not None:
+                try:
+                    import asyncio
+                    asyncio.run(self._notifier.send_embed(
+                        title="⚠️ Bridge 423 検出 → finance SOFT HALT ミラー",
+                        description=(
+                            f"bridge が `/order` で 423 (soft halted) を返したため "
+                            f"finance halt.json にもミラーしました。\n"
+                            f"pair: `{signal.pair}`\n"
+                            f"reason: bridge returned 423 soft-halted\n\n"
+                            f"bridge 側は手動・他経路で halt されている可能性あり。"
+                            f"復帰: bridge を resume してから finance `?resume`。"
+                        ),
+                        color=0xE67E22,
+                    ))
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        f"[MT5_BRIDGE] notify bridge-423 mirror failed: {e}"
+                    )
             return None    # soft halt は意図的 → カウンタ非増加
         if resp.status_code == 409:
             logger.warning(f"[MT5_BRIDGE] {signal.pair} order rejected: {resp.text}")
