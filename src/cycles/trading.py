@@ -901,6 +901,16 @@ async def trading_cycle(
     # Phase 2.5: 前回 HOLD 判断のレビュー
     await _review_hold_decisions(config, hold_store, store, price_provider=price_provider, price_store=price_store)
 
+    # halt 中は新規エントリー分析・発注を skip (既存ポジ管理 Phase 1〜2.5 は継続済)
+    # 二重チェック: ここと execute_signal 入口の両方で is_halted を確認する。
+    from src.persistence import halt_state
+    if halt_state.is_halted(config.state_dir):
+        logger.info(
+            "[CYCLE] soft-halted — skipping new entry analysis "
+            "(existing positions still managed)"
+        )
+        return
+
     # Phase 3: 並列ペア分析
     signals, macro_ctxs = await _phase_analyze_pairs(
         config, position_mgr, store, price_store, analysis_store, llm_price, price_provider,
