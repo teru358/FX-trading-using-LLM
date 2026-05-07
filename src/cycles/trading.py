@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 from src.analysis.price_analyzer import analyze_price_action, load_user_notes
 from src.analysis.reflector import generate_close_reflection
@@ -53,6 +54,9 @@ from src.trading.market_hours import is_market_open
 from src.trading.position_manager import PositionManager
 from src.trading.position_reviewer import review_open_positions
 from src.utils.clock import db_now, local_now
+
+if TYPE_CHECKING:
+    from src.trading.bridge_health_gate import BridgeHealthGate
 
 logger = logging.getLogger(__name__)
 
@@ -952,8 +956,19 @@ def run_trading_cycle(
     analysis_store: AnalysisStore,
     hold_store: HoldDecisionStore,
     price_provider: PriceProvider | None = None,
+    gate: "BridgeHealthGate | None" = None,
 ) -> None:
-    """schedule ライブラリから呼び出す同期ラッパー。"""
+    """schedule ライブラリから呼び出す同期ラッパー。
+
+    gate が渡されたら冒頭で probe する。失敗時は cycle 全体を skip。
+    """
+    if gate is not None:
+        result = gate.probe(caller="trading", sync_balance=True)
+        if not result.ok:
+            logger.info(
+                "[CYCLE] bridge unreachable (gate probe failed), skipping trading cycle"
+            )
+            return
     from src.data.analysis_store import ForecastStore
     from src.data.session_store import SessionStore
     state_store = StateStore(config.state_dir)

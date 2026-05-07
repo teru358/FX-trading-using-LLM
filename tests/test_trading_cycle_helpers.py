@@ -533,3 +533,50 @@ async def test_finalize_closed_orders_calls_reflection_and_record(monkeypatch):
     assert adaptive.updates == []
     # session_store.close_session は 1 回呼ばれる
     assert len(session.closed) == 1
+
+
+def test_run_trading_cycle_calls_gate_probe(tmp_path, monkeypatch):
+    """trading cycle 冒頭で gate.probe(caller='trading', sync_balance=True)。"""
+    from src.cycles.trading import run_trading_cycle
+    from unittest.mock import MagicMock
+
+    config = MagicMock()
+    config.state_dir = tmp_path
+    gate = MagicMock()
+    gate.probe.return_value = MagicMock(ok=True)
+    monkeypatch.setattr(
+        "src.cycles.trading.trading_cycle",
+        MagicMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "src.cycles.trading.asyncio.run", lambda coro: None,
+    )
+    monkeypatch.setattr(
+        "src.cycles.trading.StateStore", lambda _: MagicMock(),
+    )
+    monkeypatch.setattr(
+        "src.cycles.trading.PositionManager", lambda *a, **kw: MagicMock(),
+    )
+    run_trading_cycle(
+        config, MagicMock(), MagicMock(), MagicMock(), MagicMock(),
+        price_provider=MagicMock(), gate=gate,
+    )
+    gate.probe.assert_called_once_with(caller="trading", sync_balance=True)
+
+
+def test_run_trading_cycle_skips_when_gate_fails(monkeypatch):
+    """gate.probe で ok=False が返ったら trading_cycle は呼ばれない。"""
+    from src.cycles.trading import run_trading_cycle
+    from unittest.mock import MagicMock
+
+    config = MagicMock()
+    gate = MagicMock()
+    gate.probe.return_value = MagicMock(ok=False)
+    inner = MagicMock(return_value=None)
+    monkeypatch.setattr("src.cycles.trading.trading_cycle", inner)
+
+    run_trading_cycle(
+        config, MagicMock(), MagicMock(), MagicMock(), MagicMock(),
+        price_provider=MagicMock(), gate=gate,
+    )
+    inner.assert_not_called()
