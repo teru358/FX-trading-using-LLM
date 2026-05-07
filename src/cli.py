@@ -125,7 +125,9 @@ def _cmd_close(config: AppConfig, pair_arg: str) -> None:
             _console.print(f"[red]価格取得失敗: {e}[/red]")
             return
 
-        closed = pm.close_position(pos.order_id, current, "manual")
+        from src.trading.live_broker import build_close_broker
+        broker = build_close_broker(config)
+        closed = broker.close_position(pos.order_id, current, "manual", pm)
         if closed:
             _console.print(
                 f"[green]決済完了: {closed.pair} {closed.direction.upper()} "

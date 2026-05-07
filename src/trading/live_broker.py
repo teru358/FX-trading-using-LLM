@@ -262,3 +262,44 @@ def create_broker(
     raise ValueError(
         f"Unknown mode: {mode!r}. Use 'paper', 'live', or 'live_test'."
     )
+
+
+def build_close_broker(config) -> BrokerAdapter:
+    """close-only 用途で broker を構築する (新規発注は想定しない)。
+
+    `/close/{pair}` API、CLI close、price_monitor emergency_stop など、
+    halt 中でも実 MT5 ポジを閉じる必要がある経路から呼ばれる。
+
+    paper モードでは PaperBrokerAdapter.close_position の default 実装が
+    pm.close_position に委譲するので、内部 state 更新だけで済む。
+
+    live/live_test + MT5 では Mt5BridgeBrokerAdapter.close_position が
+    実 MT5 サーバーへ close 指令を送る。
+    """
+    mt5_cfg = getattr(config.providers, "mt5", None)
+    return create_broker(
+        config.mode,
+        config.live_broker,
+        notifier=None,    # close 経路は呼出側で個別に通知する
+        state_dir=config.state_dir,
+        mt5_bridge_url=(mt5_cfg.bridge_url if mt5_cfg else ""),
+        mt5_lot_size_units=(mt5_cfg.lot_size_units if mt5_cfg else 100_000),
+        mt5_magic_number=(mt5_cfg.magic_number if mt5_cfg else 12345),
+        mt5_order_timeout_seconds=(
+            getattr(mt5_cfg, "order_request_timeout_seconds", 10.0) if mt5_cfg else 10.0
+        ),
+        mt5_consecutive_unreachable_threshold=(
+            getattr(mt5_cfg, "consecutive_unreachable_threshold", 3) if mt5_cfg else 3
+        ),
+        mt5_consecutive_reject_threshold=(
+            getattr(mt5_cfg, "consecutive_reject_threshold", 3) if mt5_cfg else 3
+        ),
+        live_test_log_path=(
+            getattr(mt5_cfg, "shadow_log_path", "data/state/shadow_trades.jsonl")
+            if mt5_cfg else "data/state/shadow_trades.jsonl"
+        ),
+        live_test_observer_state_dir=(
+            getattr(mt5_cfg, "shadow_observer_state_dir", "data/shadow_state")
+            if mt5_cfg else "data/shadow_state"
+        ),
+    )

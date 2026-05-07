@@ -144,7 +144,10 @@ async def close_position(pair: str) -> dict[str, Any]:
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Price fetch failed: {e}")
 
-    closed = pm.close_position(pos.order_id, current, "manual")
+    # live/MT5 経路では実 MT5 ポジ close を broker に依頼。paper は内部 state のみ。
+    from src.trading.live_broker import build_close_broker
+    broker = build_close_broker(state.config)
+    closed = broker.close_position(pos.order_id, current, "manual", pm)
 
     if closed is None:
         raise HTTPException(status_code=500, detail="Close failed")

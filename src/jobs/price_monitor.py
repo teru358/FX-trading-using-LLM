@@ -174,7 +174,9 @@ async def monitor_open_positions(
                     f"[MONITOR] {pos.pair}: emergency close triggered "
                     f"(adverse={adverse_pct:.2%} >= threshold={cfg.emergency_close_pct:.2%})"
                 )
-                closed = position_mgr.close_position(pos.order_id, current, "emergency_stop")
+                from src.trading.live_broker import build_close_broker
+                broker = build_close_broker(config)
+                closed = broker.close_position(pos.order_id, current, "emergency_stop", position_mgr)
                 _alert_state.pop(pos.order_id, None)
 
                 if closed and config.notifier.notify_on_order_close:
