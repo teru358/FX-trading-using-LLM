@@ -70,9 +70,6 @@ def _make_mt5_config():
     mt5.bridge_url = "http://x:8812"
     mt5.request_timeout_seconds = 5.0
     mt5.api_key = ""
-    mt5.fallback.failure_window_sec = 300
-    mt5.fallback.failure_threshold = 3
-    mt5.fallback.heartbeat_interval_degraded_min = 15
     cfg.providers.mt5 = mt5
     cfg.trading.lookback_days = 90
     cfg.trading.ohlcv_interval = "1h"

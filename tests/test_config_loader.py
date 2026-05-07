@@ -101,8 +101,7 @@ live_broker: mt5
     _write(tmp_path / "providers" / "mt5.yaml", """
 bridge_url: "http://localhost:8812"
 api_key: "secret"
-fallback:
-  failure_window_sec: 600
+health_retry_after_sec: 90.0
 """)
     cfg = load_config(tmp_path / "settings.yaml")
     assert cfg.mode == "live"
@@ -110,7 +109,7 @@ fallback:
     assert cfg.providers.mt5 is not None
     assert cfg.providers.mt5.bridge_url == "http://localhost:8812"
     assert cfg.providers.mt5.api_key == "secret"
-    assert cfg.providers.mt5.fallback.failure_window_sec == 600
+    assert cfg.providers.mt5.health_retry_after_sec == 90.0
 
 
 def test_load_config_mt5_empty_bridge_url_rejected(tmp_path):

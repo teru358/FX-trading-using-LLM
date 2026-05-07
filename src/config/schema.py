@@ -493,14 +493,6 @@ class DataBackupConfig:
 
 
 @dataclass
-class Mt5FallbackConfig:
-    """MT5 → TD → yfinance チェーンのフォールバック判定設定 (Phase 3b タスク 10)。"""
-    failure_window_sec: int = 300              # 5 分窓
-    failure_threshold: int = 2                 # 連続失敗回数で degraded 発動
-    heartbeat_interval_degraded_min: int = 15  # degraded 中の /health ポーリング間隔
-
-
-@dataclass
 class Mt5Config:
     """MT5 bridge 設定 (live_broker=mt5 のとき必須)。
 
@@ -513,22 +505,19 @@ class Mt5Config:
     """
     bridge_url: str = ""
     api_key: str = ""                         # X-Bridge-Api-Key (空ならヘッダー送信なし)
-    heartbeat_interval_minutes: int = 5       # /health プローブ間隔
     request_timeout_seconds: float = 5.0
     log_path: str = "data/state/mt5_heartbeat.jsonl"
     # 発注関連
     order_request_timeout_seconds: float = 10.0
     lot_size_units: int = 100_000
     magic_number: int = 12345
-    # auto soft halt 閾値 (heartbeat 経路 / 発注経路 共通)
-    # 連続 N 回不通 → halt 発動。heartbeat=5 分 × 3 = 約 15 分で halt。
-    consecutive_unreachable_threshold: int = 3
+    # auto soft halt 閾値 (発注経路 REJECT のみ。bridge 不通検出は BridgeHealthGate)
     consecutive_reject_threshold: int = 3
+    # BridgeHealthGate のリトライ間隔
+    health_retry_after_sec: float = 60.0
     # live_test mode (旧 shadow) で使用
     shadow_log_path: str = "data/state/shadow_trades.jsonl"
     shadow_observer_state_dir: str = "data/shadow_state"
-    # OHLCV フォールバック
-    fallback: Mt5FallbackConfig = field(default_factory=Mt5FallbackConfig)
 
 
 @dataclass

@@ -37,7 +37,6 @@ from src.config.schema import (
     LLMRoleConfig,
     LoggingConfig,
     Mt5Config,
-    Mt5FallbackConfig,
     MultiTimeframeConfig,
     NewsCollectionConfig,
     NewsSourcesConfig,
@@ -151,10 +150,7 @@ def _build_providers_config(
                 "providers/mt5.yaml not found (required when live_broker=mt5). "
                 "Copy providers/mt5.yaml.example."
             )
-        mt5_raw = dict(raw)
-        if "fallback" in mt5_raw and isinstance(mt5_raw["fallback"], dict):
-            mt5_raw["fallback"] = _from_dict(Mt5FallbackConfig, mt5_raw["fallback"])
-        mt5_cfg = _from_dict(Mt5Config, mt5_raw)
+        mt5_cfg = _from_dict(Mt5Config, raw)
         if not mt5_cfg.bridge_url:
             raise ConfigError(
                 "providers/mt5.yaml: bridge_url is required (got empty string)."
