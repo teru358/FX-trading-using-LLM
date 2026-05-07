@@ -166,17 +166,18 @@ def _state_to_dict(s) -> dict[str, Any]:
 
 @router.post("/resume", dependencies=[Depends(verify_api_key)])
 def admin_resume() -> dict[str, Any]:
-    """soft halt を解除する (finance + bridge の両方)。
+    """soft halt を解除する (finance + bridge の両方の受付状態確認)。
 
     フロー:
-      ① bridge /health を同期確認 (timeout=5s)。失敗時は 503 で拒否し halt 維持。
-      ② finance halt.json をクリア (常に成功)。
-      ③ bridge /admin/resume POST best-effort (失敗時はレスポンスに error を含める)。
+      ① bridge /health を同期確認 (mt5_connected=true まで含めて)
+      ② bridge /admin/resume POST (must succeed)
+      ③ bridge /admin/status で受付状態確認
+         - live: accepts_new_orders=true 必須
+         - live_test: soft_halted=false + mt5_connected=true 必須
+      ④ finance halt.json クリア (上記すべて成功時のみ)
 
-    ① で gate することで、resume 直後に trading_cycle が走った際に bridge が
-    まだ不通という gap を防ぐ (ユーザー意図と実態を一致させる)。
-
-    hard halt 中は bridge /admin/resume が 403 を返し、ここでも 403 を返す。
+    途中で失敗した場合 finance halt は維持する。
+    hard halt 中 (bridge resume 403) は finance halt も維持。
     """
     if state.config is not None and state.config.mode == "paper":
         raise HTTPException(
@@ -184,8 +185,9 @@ def admin_resume() -> dict[str, Any]:
             detail="resume is not available in paper mode (no bridge to resume)",
         )
     bridge_url = _bridge_url()
+    assert state.config is not None
 
-    # ① bridge /health を同期確認
+    # ① bridge /health 同期確認
     try:
         r = httpx.get(
             f"{bridge_url}/health",
@@ -193,6 +195,7 @@ def admin_resume() -> dict[str, Any]:
             headers=_bridge_headers(),
         )
         r.raise_for_status()
+        health_data = r.json()
     except httpx.HTTPError as e:
         raise HTTPException(
             status_code=503,
@@ -202,14 +205,16 @@ def admin_resume() -> dict[str, Any]:
             ),
         )
 
-    # ② finance halt.json クリア
-    from src.persistence import halt_state
-    assert state.config is not None
-    new_state = halt_state.clear(state.config.state_dir)
-    logger.warning("[ADMIN] manual resume — finance halt cleared")
+    if not health_data.get("mt5_connected"):
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "bridge is reachable but MT5 is not connected. "
+                "fix MT5 first then retry."
+            ),
+        )
 
-    # ③ bridge /admin/resume POST best-effort
-    bridge_response: dict[str, Any]
+    # ② bridge /admin/resume POST (must succeed)
     try:
         resp = httpx.post(
             f"{bridge_url}/admin/resume",
@@ -219,27 +224,61 @@ def admin_resume() -> dict[str, Any]:
         resp.raise_for_status()
         bridge_response = resp.json()
     except httpx.HTTPStatusError as e:
-        # bridge が 403 を返したら finance も 403 (hard halt 中の resume 拒否)
-        # finance state はもう clear 済みだが、bridge との整合性を取るため halt
-        # を再設定する (rare path)
         if e.response.status_code == 403:
-            halt_state.trigger_manual(
-                state.config.state_dir,
-                reason="bridge rejected resume (hard halt)",
-            )
+            # hard halt 中 → finance halt は維持 (clear しない)
             raise HTTPException(403, e.response.text)
         raise HTTPException(
             e.response.status_code,
             f"bridge returned {e.response.status_code}: {e.response.text}",
         )
     except httpx.HTTPError as e:
-        logger.warning(
-            f"[ADMIN] bridge resume POST failed "
-            f"(finance halt already cleared): {e}"
+        raise HTTPException(
+            503, f"bridge resume POST failed: {type(e).__name__}: {e}",
         )
-        bridge_response = {"error": f"bridge: {type(e).__name__}: {e}"}
+
+    # ③ bridge /admin/status で受付状態確認
+    try:
+        sresp = httpx.get(
+            f"{bridge_url}/admin/status",
+            timeout=5.0,
+            headers=_bridge_headers(),
+        )
+        sresp.raise_for_status()
+        status_data = sresp.json()
+    except httpx.HTTPError as e:
+        raise HTTPException(
+            503, f"bridge status check failed: {type(e).__name__}: {e}",
+        )
+
+    if state.config.mode == "live":
+        ready = bool(status_data.get("accepts_new_orders"))
+    else:
+        # live_test は DRY_RUN=true で accepts_new_orders=false になり得る。
+        # soft_halted が解除され MT5 接続があることを確認する。
+        ready = (
+            not status_data.get("soft_halted")
+            and bool(status_data.get("mt5_connected"))
+        )
+
+    if not ready:
+        raise HTTPException(
+            503,
+            {
+                "message": "bridge resumed but not ready to accept the configured mode",
+                "bridge_status": status_data,
+            },
+        )
+
+    # ④ finance halt.json クリア
+    from src.persistence import halt_state
+    new_state = halt_state.clear(state.config.state_dir)
+    logger.warning(
+        f"[ADMIN] manual resume — bridge accepted "
+        f"(mode={state.config.mode}, ready=True), finance halt cleared"
+    )
 
     return {
-        "finance": _state_to_dict(new_state),
-        "bridge": bridge_response,
+        "finance":       _state_to_dict(new_state),
+        "bridge":        bridge_response,
+        "bridge_status": status_data,
     }

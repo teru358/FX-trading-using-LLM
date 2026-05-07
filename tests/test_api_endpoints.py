@@ -346,25 +346,34 @@ def test_admin_resume_proxies_to_bridge(_state_setup, monkeypatch, tmp_path):
 
     class _HealthOK:
         status_code = 200
-        def raise_for_status(self):
-            pass
+        def raise_for_status(self): pass
+        def json(self): return {"mt5_connected": True}
 
-    class _R:
+    class _ResumeOK:
         status_code = 200
-        def raise_for_status(self):
-            pass
+        def raise_for_status(self): pass
         def json(self):
-            return {"dry_run": False, "soft_halted": False, "is_hard_halted": False,
-                    "accepts_new_orders": True, "mt5_connected": True}
+            return {"dry_run": False, "soft_halted": False, "is_hard_halted": False}
 
-    monkeypatch.setattr("httpx.get", lambda *a, **kw: _HealthOK())
-    monkeypatch.setattr("httpx.post", lambda *a, **kw: _R())
+    class _StatusOK:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self):
+            return {"soft_halted": False, "mt5_connected": True,
+                    "accepts_new_orders": True, "is_hard_halted": False,
+                    "dry_run": False}
+
+    def _fake_get(url, **kw):
+        if url.endswith("/admin/status"):
+            return _StatusOK()
+        return _HealthOK()
+    monkeypatch.setattr("httpx.get", _fake_get)
+    monkeypatch.setattr("httpx.post", lambda *a, **kw: _ResumeOK())
 
     resp = _client_post("/admin/resume")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["bridge"]["soft_halted"] is False
-    assert body["bridge"]["accepts_new_orders"] is True
+    assert body["bridge_status"]["accepts_new_orders"] is True
     assert body["finance"]["soft_halted"] is False
 
 
@@ -377,8 +386,8 @@ def test_admin_resume_403_when_hard_halted(_state_setup, monkeypatch, tmp_path):
 
     class _HealthOK:
         status_code = 200
-        def raise_for_status(self):
-            pass
+        def raise_for_status(self): pass
+        def json(self): return {"mt5_connected": True}
 
     class _Req:
         url = "http://x:8812/admin/resume"
@@ -562,7 +571,7 @@ def test_admin_resume_rejects_when_bridge_health_unreachable(
 def test_admin_resume_clears_finance_state_when_bridge_health_ok(
     _state_setup, monkeypatch, tmp_path
 ):
-    """bridge /health OK → finance halt.json をクリアし bridge resume を best-effort POST。"""
+    """bridge /health OK + resume POST OK + status ready → finance halt.json をクリア。"""
     from src.persistence import halt_state
 
     _state_setup.mode = "live"
@@ -572,17 +581,27 @@ def test_admin_resume_clears_finance_state_when_bridge_health_ok(
 
     class _HealthOK:
         status_code = 200
-        def raise_for_status(self):
-            pass
+        def raise_for_status(self): pass
+        def json(self): return {"mt5_connected": True}
 
     class _ResumeOK:
         status_code = 200
-        def raise_for_status(self):
-            pass
+        def raise_for_status(self): pass
         def json(self):
             return {"soft_halted": False, "accepts_new_orders": True}
 
-    monkeypatch.setattr("httpx.get", lambda *a, **kw: _HealthOK())
+    class _StatusOK:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self):
+            return {"soft_halted": False, "mt5_connected": True,
+                    "accepts_new_orders": True}
+
+    def _fake_get(url, **kw):
+        if url.endswith("/admin/status"):
+            return _StatusOK()
+        return _HealthOK()
+    monkeypatch.setattr("httpx.get", _fake_get)
     monkeypatch.setattr("httpx.post", lambda *a, **kw: _ResumeOK())
 
     resp = _client_post("/admin/resume")
@@ -594,12 +613,11 @@ def test_admin_resume_clears_finance_state_when_bridge_health_ok(
     body = resp.json()
     assert body["finance"]["soft_halted"] is False
     assert body["bridge"]["soft_halted"] is False
+    assert body["bridge_status"]["accepts_new_orders"] is True
 
 
-def test_admin_resume_clears_finance_state_even_when_bridge_resume_post_fails(
-    _state_setup, monkeypatch, tmp_path
-):
-    """bridge /health OK だが /admin/resume POST が失敗 → finance はクリアし bridge エラーを返す。"""
+def test_admin_resume_503_when_resume_post_fails(_state_setup, monkeypatch, tmp_path):
+    """bridge /health OK だが /admin/resume POST が失敗 → 503 で拒否、halt 維持。"""
     from src.persistence import halt_state
     import httpx as _httpx
 
@@ -610,8 +628,8 @@ def test_admin_resume_clears_finance_state_even_when_bridge_resume_post_fails(
 
     class _HealthOK:
         status_code = 200
-        def raise_for_status(self):
-            pass
+        def raise_for_status(self): pass
+        def json(self): return {"mt5_connected": True}
 
     monkeypatch.setattr("httpx.get", lambda *a, **kw: _HealthOK())
     monkeypatch.setattr(
@@ -620,8 +638,111 @@ def test_admin_resume_clears_finance_state_even_when_bridge_resume_post_fails(
     )
 
     resp = _client_post("/admin/resume")
+    assert resp.status_code == 503
+    # halt 維持
+    assert halt_state.read(tmp_path).soft_halted is True
+
+
+def test_admin_resume_503_when_health_ok_but_mt5_not_connected(
+    _state_setup, monkeypatch, tmp_path,
+):
+    """bridge /health 200 だが mt5_connected=false → 503, halt 維持。"""
+    from src.persistence import halt_state
+
+    _state_setup.mode = "live"
+    _state_setup.state_dir = tmp_path
+    _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
+    halt_state.trigger_manual(tmp_path, "pre")
+
+    class _HealthMt5Down:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"mt5_connected": False}
+
+    monkeypatch.setattr("httpx.get", lambda *a, **kw: _HealthMt5Down())
+
+    resp = _client_post("/admin/resume")
+    assert resp.status_code == 503
+    assert "MT5 is not connected" in resp.json()["detail"]
+    assert halt_state.read(tmp_path).soft_halted is True
+
+
+def test_admin_resume_503_when_status_not_ready_in_live(
+    _state_setup, monkeypatch, tmp_path,
+):
+    """live モード時、/admin/status.accepts_new_orders=false → 503, halt 維持。"""
+    from src.persistence import halt_state
+
+    _state_setup.mode = "live"
+    _state_setup.state_dir = tmp_path
+    _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
+    halt_state.trigger_manual(tmp_path, "pre")
+
+    class _HealthOK:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"mt5_connected": True}
+
+    class _ResumeOK:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"resumed": True}
+
+    class _StatusNotReady:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self):
+            return {"soft_halted": False, "mt5_connected": True,
+                    "accepts_new_orders": False}  # ← live で reject される
+
+    def _fake_get(url, **kw):
+        if url.endswith("/admin/status"):
+            return _StatusNotReady()
+        return _HealthOK()
+    monkeypatch.setattr("httpx.get", _fake_get)
+    monkeypatch.setattr("httpx.post", lambda *a, **kw: _ResumeOK())
+
+    resp = _client_post("/admin/resume")
+    assert resp.status_code == 503
+    # halt 維持
+    assert halt_state.read(tmp_path).soft_halted is True
+
+
+def test_admin_resume_succeeds_in_live_test_when_dry_run_but_mt5_connected(
+    _state_setup, monkeypatch, tmp_path,
+):
+    """live_test モード時、accepts_new_orders=false (DRY_RUN) でも soft_halted=false + mt5_connected=true なら成功。"""
+    from src.persistence import halt_state
+
+    _state_setup.mode = "live_test"
+    _state_setup.state_dir = tmp_path
+    _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
+    halt_state.trigger_manual(tmp_path, "pre")
+
+    class _HealthOK:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"mt5_connected": True}
+
+    class _ResumeOK:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self): return {"resumed": True}
+
+    class _StatusDryRun:
+        status_code = 200
+        def raise_for_status(self): pass
+        def json(self):
+            return {"soft_halted": False, "mt5_connected": True,
+                    "accepts_new_orders": False, "dry_run": True}  # live_test では OK
+
+    def _fake_get(url, **kw):
+        if url.endswith("/admin/status"):
+            return _StatusDryRun()
+        return _HealthOK()
+    monkeypatch.setattr("httpx.get", _fake_get)
+    monkeypatch.setattr("httpx.post", lambda *a, **kw: _ResumeOK())
+
+    resp = _client_post("/admin/resume")
     assert resp.status_code == 200
-    state = halt_state.read(tmp_path)
-    assert state.soft_halted is False
-    body = resp.json()
-    assert "error" in body["bridge"]
+    assert halt_state.read(tmp_path).soft_halted is False
