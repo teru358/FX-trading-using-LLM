@@ -122,6 +122,17 @@ def main() -> None:
     hold_store = HoldDecisionStore(config.prices_db_path)
     price_provider = PriceProvider(config)
 
+    # BridgeHealthGate: bridge プリフライト + halt 連携の単一ゲート。
+    # 各 cycle (tech / 取引 / price_monitor) 冒頭で probe を呼び、health 連続2回失敗で
+    # soft halt 発動。balance 同期 (live モード時のみ) も同経路に集約。
+    from src.notifications.notifier import create_notifier as _create_notifier
+    from src.trading.bridge_health_gate import BridgeHealthGate
+    bridge_gate = BridgeHealthGate(
+        config=config,
+        notifier=_create_notifier(config.notifier.enabled),
+        log_path=config.state_dir.parent / "logs" / "bridge_health.jsonl",
+    )
+
     if config.paper_provider == "twelvedata":
         if price_provider._td_fetcher:
             _ok = price_provider._td_fetcher.probe()
@@ -228,7 +239,8 @@ def main() -> None:
         ]
         for t in monitor_times:
             schedule.every().day.at(t, tz).do(
-                _run_with_guard, _guards["price_monitor"], run_price_monitor, config, price_provider
+                _run_with_guard, _guards["price_monitor"],
+                run_price_monitor, config, price_provider, bridge_gate,
             )
 
     # 2. SL/TP確認・ポジション再評価（毎時:00・LLMなし）
@@ -253,6 +265,7 @@ def main() -> None:
             _run_with_slot,
             run_technical_collection, config, store, price_store, analysis_store,
             price_provider=price_provider,
+            gate=bridge_gate,
             _market_aware=True,
         )
 
@@ -273,6 +286,7 @@ def main() -> None:
             _run_with_slot,
             run_trading_cycle, config, store, price_store, analysis_store, hold_store,
             price_provider=price_provider,
+            gate=bridge_gate,
             _market_aware=True,
         )
 
@@ -360,7 +374,10 @@ def main() -> None:
     if args.skip_tech:
         _console.print("[dim]--skip-tech: 初回テクニカル収集をスキップ[/dim]")
     else:
-        run_technical_collection(config, store, price_store, analysis_store, force=is_fresh_start, price_provider=price_provider)
+        run_technical_collection(
+            config, store, price_store, analysis_store,
+            force=is_fresh_start, price_provider=price_provider, gate=bridge_gate,
+        )
 
     # スケジューラをバックグラウンドスレッドで起動
     scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True, name="scheduler")
