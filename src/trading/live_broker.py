@@ -154,7 +154,6 @@ def create_broker(
     mt5_lot_size_units: int = 100_000,
     mt5_magic_number: int = 12345,
     mt5_order_timeout_seconds: float = 10.0,
-    mt5_consecutive_unreachable_threshold: int = 3,
     mt5_consecutive_reject_threshold: int = 3,
     # ── mode=live_test のとき必須 ──
     live_test_log_path: str = "data/state/shadow_trades.jsonl",
@@ -203,7 +202,6 @@ def create_broker(
                 lot_size_units=mt5_lot_size_units,
                 magic_number=mt5_magic_number,
                 notifier=notifier,
-                consecutive_unreachable_threshold=mt5_consecutive_unreachable_threshold,
                 consecutive_reject_threshold=mt5_consecutive_reject_threshold,
                 state_dir=state_dir,
                 **paper_kwargs,
@@ -233,7 +231,6 @@ def create_broker(
             lot_size_units=mt5_lot_size_units,
             magic_number=mt5_magic_number,
             notifier=notifier,
-            consecutive_unreachable_threshold=mt5_consecutive_unreachable_threshold,
             consecutive_reject_threshold=mt5_consecutive_reject_threshold,
             state_dir=state_dir,
             **paper_kwargs,
@@ -287,9 +284,6 @@ def build_close_broker(config) -> BrokerAdapter:
         mt5_magic_number=(mt5_cfg.magic_number if mt5_cfg else 12345),
         mt5_order_timeout_seconds=(
             getattr(mt5_cfg, "order_request_timeout_seconds", 10.0) if mt5_cfg else 10.0
-        ),
-        mt5_consecutive_unreachable_threshold=(
-            getattr(mt5_cfg, "consecutive_unreachable_threshold", 3) if mt5_cfg else 3
         ),
         mt5_consecutive_reject_threshold=(
             getattr(mt5_cfg, "consecutive_reject_threshold", 3) if mt5_cfg else 3

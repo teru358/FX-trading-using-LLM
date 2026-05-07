@@ -20,7 +20,6 @@ def _live_config(state_dir):
         lot_size_units=100_000,
         magic_number=12345,
         order_request_timeout_seconds=10.0,
-        consecutive_unreachable_threshold=3,
         consecutive_reject_threshold=3,
         shadow_log_path="data/state/shadow_trades.jsonl",
         shadow_observer_state_dir="data/shadow_state",

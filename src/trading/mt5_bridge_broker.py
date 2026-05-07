@@ -49,7 +49,6 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         drawdown_kill_switch_enabled: bool = False,
         drawdown_kill_switch_max_pct: float = 0.10,
         notifier=None,
-        consecutive_unreachable_threshold: int = 3,
         consecutive_reject_threshold: int = 3,
         state_dir: Path | None = None,
     ) -> None:
@@ -71,12 +70,9 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         # Phase 3b: reconciliation 用キャッシュ + 通知
         self._notifier = notifier
         self._cached_external_positions: list[dict] = []
-        # Phase 3b タスク 14: 発注経路の auto soft halt 判定 (タスク 9 の OHLCV
-        # ProviderHealthTracker とは別管理: 目的・閾値・発動アクションが異なる)
-        # Phase 3c で時間ベース廃止 → 連続不通 N 回で halt (heartbeat 経路と統一)
-        self._unreachable_threshold = consecutive_unreachable_threshold
+        # Phase 3b タスク 14: 発注経路の auto soft halt 判定 (REJECT のみ)。
+        # bridge 不通検出は BridgeHealthGate に移管済み。
         self._reject_threshold = consecutive_reject_threshold
-        self._consecutive_unreachable = 0
         self._consecutive_rejects = 0
         # finance halt 状態の参照先 (data/state/)
         self._state_dir = state_dir
@@ -141,7 +137,7 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             )
         except httpx.HTTPError as e:
             logger.error(f"[MT5_BRIDGE] bridge order failed: {e}")
-            self._record_bridge_unreachable()
+            # bridge 不通検出は BridgeHealthGate が担う。ここでは単に発注失敗。
             return None
         except Exception as e:  # noqa: BLE001
             logger.error(f"[MT5_BRIDGE] unexpected error: {e}", exc_info=True)
@@ -197,7 +193,7 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             logger.error(
                 f"[MT5_BRIDGE] {signal.pair} bridge unavailable: {resp.status_code}"
             )
-            self._record_bridge_unreachable()
+            # bridge 不通検出は BridgeHealthGate が担う。ここでは単に発注失敗。
             return None
         if resp.status_code != 200:
             logger.error(
@@ -567,10 +563,9 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[MT5_BRIDGE] notify partial close failed: {e}")
 
-    # ── Task 14 (Phase 3c 改訂): 発注経路の auto soft halt 判定 ──
+    # ── Task 14 (Phase 3c 改訂): 発注経路の auto soft halt 判定 (REJECT のみ) ──
     def _record_bridge_success(self) -> None:
-        """発注成功時にカウンタリセット。"""
-        self._consecutive_unreachable = 0
+        """発注成功時にカウンタリセット (REJECT のみ)。"""
         self._consecutive_rejects = 0
 
     def _record_bridge_reject(self) -> None:
@@ -582,16 +577,7 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
                 triggered_by="order_reject",
             )
 
-    def _record_bridge_unreachable(self) -> None:
-        """bridge 不通 (connection error / 5xx) 受領時に呼ぶ。連続 N 回で auto soft halt。"""
-        self._consecutive_unreachable += 1
-        if self._consecutive_unreachable >= self._unreachable_threshold:
-            self._auto_soft_halt(
-                f"{self._consecutive_unreachable} consecutive bridge unreachable",
-                triggered_by="order_unreachable",
-            )
-
-    def _auto_soft_halt(self, reason: str, triggered_by: str = "order_unreachable") -> None:
+    def _auto_soft_halt(self, reason: str, triggered_by: str = "order_reject") -> None:
         """finance halt 状態を確定し、Discord 通知後 bridge POST best-effort。
 
         bridge 不通時にも Discord 通知が確実に出ることを保証する (heartbeat 経路と
