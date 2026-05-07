@@ -71,6 +71,7 @@ _PREFIX_REGISTRY: tuple[tuple[str, str | None, bool], ...] = (
     ("[PROVIDER]",     "yellow",        True),   # price provider degradation / fallback
     ("[ADMIN]",        "bold red",      True),   # /admin/halt / /admin/resume 操作ログ
     ("[HALT]",         "bold red",      True),   # halt_state I/O (corruption など)
+    ("[BRIDGE_GATE]",  "bright_red",    True),   # bridge プリフライト + halt 判定
 )
 
 _PREFIX_STYLES: dict[str, str] = {
