@@ -264,6 +264,32 @@ def test_account_halt_section_when_auto_halted(_state_setup, tmp_path):
     assert halt["since"]
 
 
+def test_account_halt_section_has_derived_fields_when_halted(_state_setup, tmp_path):
+    """halt 中に blocks_new_orders=True、allows_position_management=True が導出される。"""
+    from src.persistence import halt_state
+
+    _state_setup.state_dir = tmp_path
+    halt_state.trigger_manual(tmp_path, reason="test")
+
+    resp = _client_get("/account")
+    assert resp.status_code == 200
+    halt = resp.json()["halt"]
+    assert halt["soft_halted"] is True
+    assert halt["blocks_new_orders"] is True
+    assert halt["allows_position_management"] is True
+
+
+def test_account_halt_section_derived_fields_when_not_halted(_state_setup, tmp_path):
+    """halt 解除中も blocks_new_orders=False で形を一定に保つ。"""
+    _state_setup.state_dir = tmp_path  # halt.json 不在
+
+    resp = _client_get("/account")
+    halt = resp.json()["halt"]
+    assert halt["soft_halted"] is False
+    assert halt["blocks_new_orders"] is False
+    assert halt["allows_position_management"] is True
+
+
 # ── /admin/halt /admin/resume プロキシ ──
 
 def _client_post(path: str, **kw):

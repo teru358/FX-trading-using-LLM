@@ -113,11 +113,15 @@ def account() -> dict[str, Any]:
     from src.persistence import halt_state
     halt = halt_state.read(state.config.state_dir)
     halt_section = {
-        "soft_halted":    halt.soft_halted,
-        "auto_triggered": halt.auto_triggered,
-        "reason":         halt.reason,
-        "since":          halt.since,
-        "triggered_by":   halt.triggered_by,
+        "soft_halted":                halt.soft_halted,
+        "auto_triggered":             halt.auto_triggered,
+        "reason":                     halt.reason,
+        "since":                      halt.since,
+        "triggered_by":               halt.triggered_by,
+        # 導出フィールド: 永続化せず API 応答時に計算する。
+        # 「halt = 全停止」ではなく「新規発注停止、既存ポジション管理は継続」の明示。
+        "blocks_new_orders":          halt.soft_halted,
+        "allows_position_management": True,
     }
 
     return {
