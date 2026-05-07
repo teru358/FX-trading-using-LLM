@@ -50,9 +50,12 @@ def _now_iso() -> str:
 
 
 def read(state_dir: Path) -> HaltState:
-    """halt.json を読む。不在/破損なら default (soft_halted=False) を返す。
+    """halt.json を読む。
 
-    破損時は上書きしない (cycle が止まらないことを優先 / 復元はユーザー操作で)。
+    - 不在: default (soft_halted=False) を返す
+    - 破損 (JSON parse error / スキーマ不一致): fail-safe halted (soft_halted=True) を返す
+      → reason="halt.json corrupted (...)" / triggered_by="corruption"
+      → ユーザーが手動確認・修復・?resume するまで新規発注を止める
     """
     p = _path(state_dir)
     if not p.exists():
@@ -63,10 +66,16 @@ def read(state_dir: Path) -> HaltState:
         return HaltState(**data)
     except (json.JSONDecodeError, TypeError, KeyError, ValueError) as e:
         logger.error(
-            f"[HALT] halt.json corrupted ({type(e).__name__}: {e}), "
-            f"returning default (soft_halted=False)"
+            f"[HALT] halt.json corrupted ({type(e).__name__}: {e}) — "
+            f"fail-safe halted, manual ?resume required"
         )
-        return _DEFAULT
+        return HaltState(
+            soft_halted=True,
+            auto_triggered=True,
+            reason=f"halt.json corrupted: {type(e).__name__}: {e}",
+            since=_now_iso(),
+            triggered_by="corruption",
+        )
 
 
 def write(state_dir: Path, state: HaltState) -> None:
@@ -111,15 +120,19 @@ def trigger_auto(
 ) -> tuple[HaltState, bool]:
     """auto soft halt を発動する。既に halted 中なら no-op。
 
+    changed 判定は mutate のロック内で行う (race-free)。
+
     Returns:
         (state, changed): changed=True なら今回の呼出で状態が変化した
                           (Discord 通知などをトリガすべき)。
                           changed=False なら既に halted 中で no-op。
     """
+    captured = {"changed": False}
 
     def _swap(current: HaltState) -> HaltState:
         if current.soft_halted:
             return current  # 既存 state を保持
+        captured["changed"] = True
         return HaltState(
             soft_halted=True,
             auto_triggered=True,
@@ -128,9 +141,8 @@ def trigger_auto(
             triggered_by=triggered_by,
         )
 
-    before_halted = read(state_dir).soft_halted
     new_state = mutate(state_dir, _swap)
-    return new_state, (not before_halted)
+    return new_state, captured["changed"]
 
 
 def trigger_manual(
@@ -139,13 +151,14 @@ def trigger_manual(
 ) -> tuple[HaltState, bool]:
     """manual soft halt を発動する。既に halted 中なら no-op。
 
-    Returns:
-        (state, changed): trigger_auto と同じ意味論。
+    changed 判定は trigger_auto と同じく lock 内 atomic。
     """
+    captured = {"changed": False}
 
     def _swap(current: HaltState) -> HaltState:
         if current.soft_halted:
             return current
+        captured["changed"] = True
         return HaltState(
             soft_halted=True,
             auto_triggered=False,
@@ -154,9 +167,8 @@ def trigger_manual(
             triggered_by="manual",
         )
 
-    before_halted = read(state_dir).soft_halted
     new_state = mutate(state_dir, _swap)
-    return new_state, (not before_halted)
+    return new_state, captured["changed"]
 
 
 def clear(state_dir: Path) -> HaltState:

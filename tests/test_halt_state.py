@@ -42,12 +42,38 @@ def test_write_then_read_roundtrip(tmp_path: Path):
     assert json.loads(p.read_text())["soft_halted"] is True
 
 
-def test_corrupted_json_returns_default(tmp_path: Path):
-    """halt.json 破損時は default を返し、ログに ERROR を出す (上書きはしない)。"""
+def test_read_returns_halted_on_corruption(tmp_path):
+    """halt.json が JSON 破損していたら fail-safe で soft_halted=True を返す。"""
+    from src.persistence import halt_state
+
     p = tmp_path / "halt.json"
-    p.write_text("{ invalid json", encoding="utf-8")
-    state = read(tmp_path)
-    assert state.soft_halted is False
+    p.write_text("{this is not json", encoding="utf-8")
+
+    s = halt_state.read(tmp_path)
+    assert s.soft_halted is True
+    assert s.triggered_by == "corruption"
+    assert "corrupted" in s.reason
+
+
+def test_read_returns_halted_on_schema_mismatch(tmp_path):
+    """halt.json のキー欠損も fail-safe で halted を返す。"""
+    from src.persistence import halt_state
+
+    p = tmp_path / "halt.json"
+    p.write_text('{"soft_halted": true}', encoding="utf-8")  # 他のキー欠損
+
+    s = halt_state.read(tmp_path)
+    assert s.soft_halted is True
+    assert s.triggered_by == "corruption"
+
+
+def test_is_halted_corruption_fail_safe(tmp_path):
+    """is_halted も corruption 時に True を返す。"""
+    from src.persistence import halt_state
+
+    p = tmp_path / "halt.json"
+    p.write_text("garbage", encoding="utf-8")
+    assert halt_state.is_halted(tmp_path) is True
 
 
 from src.persistence.halt_state import (
@@ -144,3 +170,38 @@ def test_mutate_is_atomic_under_lock(tmp_path: Path):
     )
     assert new_state.reason == "initial_mutated"
     assert read(tmp_path) == new_state
+
+
+def test_trigger_auto_changed_determined_in_lock(tmp_path, monkeypatch):
+    """changed 判定は lock 内で行う必要がある (lock 外 read だと race condition)。
+
+    現実装の race を再現するため、_swap 呼び出し前に halt 状態を変える攻撃。
+    本テストは regression guard。
+    """
+    from src.persistence import halt_state, state_store
+
+    captured_changed = []
+
+    # 通常呼出: 1 回目で changed=True、2 回目以降は changed=False
+    _, c1 = halt_state.trigger_auto(tmp_path, "first", "heartbeat")
+    captured_changed.append(c1)
+    _, c2 = halt_state.trigger_auto(tmp_path, "second", "order_unreachable")
+    captured_changed.append(c2)
+    _, c3 = halt_state.trigger_auto(tmp_path, "third", "price_provider")
+    captured_changed.append(c3)
+
+    assert captured_changed == [True, False, False]
+
+
+def test_trigger_auto_changed_when_corruption(tmp_path):
+    """corruption 状態 (read で fail-safe halted) を経由しても trigger_auto は changed=False を返す。
+
+    fail-safe halted が既に立っているので、新たな halt は重複扱い。
+    """
+    from src.persistence import halt_state
+
+    p = tmp_path / "halt.json"
+    p.write_text("garbage", encoding="utf-8")
+    # 1 回目: corruption により既に halted 状態 → changed=False
+    _new, changed = halt_state.trigger_auto(tmp_path, "heartbeat fail", "heartbeat")
+    assert changed is False
