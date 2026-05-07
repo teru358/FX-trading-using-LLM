@@ -499,6 +499,38 @@ def test_admin_halt_hard_remains_proxy_only(_state_setup, monkeypatch, tmp_path)
     assert state.soft_halted is False
 
 
+def test_admin_halt_hard_fallbacks_to_finance_soft_halt_on_bridge_failure(
+    _state_setup, monkeypatch, tmp_path,
+):
+    """mode=hard で bridge POST が失敗したら finance soft halt を立てて 502。"""
+    from src.persistence import halt_state
+    import httpx as _httpx
+
+    _state_setup.mode = "live"
+    _state_setup.state_dir = tmp_path
+    _state_setup.providers.mt5 = MagicMock(bridge_url="http://x:8812", api_key="")
+
+    monkeypatch.setattr(
+        "httpx.post",
+        lambda *a, **kw: (_ for _ in ()).throw(_httpx.ConnectError("bridge down")),
+    )
+
+    resp = _client_post("/admin/halt", json={"mode": "hard", "reason": "manual emergency"})
+    assert resp.status_code == 502
+
+    # finance soft halt が立つ
+    s = halt_state.read(tmp_path)
+    assert s.soft_halted is True
+    assert s.triggered_by == "manual"  # trigger_manual を使う
+    assert "manual hard halt delivery failed" in s.reason
+
+    # レスポンスに finance state が含まれる
+    body = resp.json()
+    detail = body["detail"]
+    assert detail["finance"]["soft_halted"] is True
+    assert "error" in detail
+
+
 def test_admin_resume_rejects_when_bridge_health_unreachable(
     _state_setup, monkeypatch, tmp_path
 ):

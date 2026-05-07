@@ -108,7 +108,12 @@ def admin_halt(req: HaltRequest) -> dict[str, Any]:
 
 
 def _proxy_bridge_halt(req: HaltRequest) -> dict[str, Any]:
-    """mode=hard 用: bridge にそのままプロキシ (現状維持)。"""
+    """mode=hard 用: bridge にプロキシ。
+
+    bridge POST が失敗した場合は finance 側 soft halt を立てて新規発注を止める
+    fail-safe (hard halt 未達でも最低限の防御)。レスポンスは 502 で finance state
+    を含めて返す。
+    """
     url = _bridge_url()
     try:
         resp = httpx.post(
@@ -128,7 +133,24 @@ def _proxy_bridge_halt(req: HaltRequest) -> dict[str, Any]:
             f"bridge returned {e.response.status_code}: {e.response.text}",
         )
     except httpx.HTTPError as e:
-        raise HTTPException(502, f"bridge unreachable: {type(e).__name__}: {e}")
+        # bridge 不通 = hard halt 未達 → finance soft halt で発注を止める
+        from src.persistence import halt_state
+        assert state.config is not None
+        new_state, _changed = halt_state.trigger_manual(
+            state.config.state_dir,
+            reason=f"manual hard halt delivery failed: {type(e).__name__}: {e}",
+        )
+        logger.error(
+            f"[ADMIN] hard halt POST failed; finance soft halt set: {e}"
+        )
+        raise HTTPException(
+            502,
+            {
+                "message": "bridge hard halt failed; finance soft halt is active",
+                "finance": _state_to_dict(new_state),
+                "error": f"{type(e).__name__}: {e}",
+            },
+        )
 
 
 def _state_to_dict(s) -> dict[str, Any]:
