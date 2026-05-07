@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from src.persistence import halt_state
 from src.persistence.halt_state import (
     HaltState,
     mutate,
@@ -44,8 +45,6 @@ def test_write_then_read_roundtrip(tmp_path: Path):
 
 def test_read_returns_halted_on_corruption(tmp_path):
     """halt.json が JSON 破損していたら fail-safe で soft_halted=True を返す。"""
-    from src.persistence import halt_state
-
     p = tmp_path / "halt.json"
     p.write_text("{this is not json", encoding="utf-8")
 
@@ -57,8 +56,6 @@ def test_read_returns_halted_on_corruption(tmp_path):
 
 def test_read_returns_halted_on_schema_mismatch(tmp_path):
     """halt.json のキー欠損も fail-safe で halted を返す。"""
-    from src.persistence import halt_state
-
     p = tmp_path / "halt.json"
     p.write_text('{"soft_halted": true}', encoding="utf-8")  # 他のキー欠損
 
@@ -69,8 +66,6 @@ def test_read_returns_halted_on_schema_mismatch(tmp_path):
 
 def test_is_halted_corruption_fail_safe(tmp_path):
     """is_halted も corruption 時に True を返す。"""
-    from src.persistence import halt_state
-
     p = tmp_path / "halt.json"
     p.write_text("garbage", encoding="utf-8")
     assert halt_state.is_halted(tmp_path) is True
@@ -172,25 +167,49 @@ def test_mutate_is_atomic_under_lock(tmp_path: Path):
     assert read(tmp_path) == new_state
 
 
-def test_trigger_auto_changed_determined_in_lock(tmp_path, monkeypatch):
-    """changed 判定は lock 内で行う必要がある (lock 外 read だと race condition)。
+def test_trigger_auto_changed_returns_true_only_on_first_call(tmp_path):
+    """trigger_auto の changed は 1 回目のみ True、以降の二重発動では False。
 
-    現実装の race を再現するため、_swap 呼び出し前に halt 状態を変える攻撃。
-    本テストは regression guard。
+    smoke test: 同一 cycle 内の連続発動が冪等であることを確認する。
+    実際の race condition (並行スレッドからの呼出) は test_trigger_auto_atomic_under_concurrency
+    で扱う。
     """
-    from src.persistence import halt_state, state_store
-
-    captured_changed = []
-
-    # 通常呼出: 1 回目で changed=True、2 回目以降は changed=False
     _, c1 = halt_state.trigger_auto(tmp_path, "first", "heartbeat")
-    captured_changed.append(c1)
     _, c2 = halt_state.trigger_auto(tmp_path, "second", "order_unreachable")
-    captured_changed.append(c2)
     _, c3 = halt_state.trigger_auto(tmp_path, "third", "price_provider")
-    captured_changed.append(c3)
+    assert (c1, c2, c3) == (True, False, False)
 
-    assert captured_changed == [True, False, False]
+
+def test_trigger_auto_atomic_under_concurrency(tmp_path):
+    """並行スレッドから同時に trigger_auto を呼んでも changed=True は 1 回だけ。
+
+    旧実装は lock 外で `before_halted = read(...)` を行っていたため、両スレッドが
+    halted=False を読んだ直後に交互に mutate に入ると、両方が changed=True と判定し
+    Discord 通知が二重発火する race があった。captured["changed"] を _swap 内で
+    確定する atomic 版なら、後発スレッドは current.soft_halted=True を見て changed=False
+    のまま終わる。
+    """
+    import threading
+
+    results: list[bool] = []
+    barrier = threading.Barrier(8)
+
+    def worker(idx: int) -> None:
+        barrier.wait()  # 全スレッド揃ってから一斉発火
+        _, changed = halt_state.trigger_auto(
+            tmp_path, f"worker {idx}", "heartbeat"
+        )
+        results.append(changed)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # 8 スレッドのうち changed=True を返したのは 1 つだけ
+    assert results.count(True) == 1
+    assert results.count(False) == 7
 
 
 def test_trigger_auto_changed_when_corruption(tmp_path):
@@ -198,8 +217,6 @@ def test_trigger_auto_changed_when_corruption(tmp_path):
 
     fail-safe halted が既に立っているので、新たな halt は重複扱い。
     """
-    from src.persistence import halt_state
-
     p = tmp_path / "halt.json"
     p.write_text("garbage", encoding="utf-8")
     # 1 回目: corruption により既に halted 状態 → changed=False
