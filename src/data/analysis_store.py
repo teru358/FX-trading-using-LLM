@@ -99,6 +99,17 @@ class AnalysisStore:
             )
             return list(session.execute(stmt).scalars().all())
 
+    def get_latest_snapshot(self, symbol: str) -> _TechnicalSnapshot | None:
+        """保存済みの最新スナップショットを1件返す (表示用途)。"""
+        with Session(self._engine) as session:
+            stmt = (
+                select(_TechnicalSnapshot)
+                .where(_TechnicalSnapshot.symbol == symbol)
+                .order_by(_TechnicalSnapshot.analyzed_at.desc())
+                .limit(1)
+            )
+            return session.execute(stmt).scalars().first()
+
     _MAX_SNAPSHOTS = 16  # 集約対象の最大件数（直近N件に限定）
     _DECAY_HALF_LIFE_H = 2.0  # 指数減衰の半減期（時間）
 

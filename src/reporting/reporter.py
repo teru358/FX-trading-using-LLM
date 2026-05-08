@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from rich.console import Console
 from rich.panel import Panel
@@ -11,6 +11,7 @@ from rich import box
 
 from src.signals.signal_combiner import TradeSignal
 from src.trading.position_manager import AccountState, Order
+from src.utils.clock import db_now
 
 _CATEGORY_LABELS = {"fx": "FX Market", "global": "Global Economy", "japan": "Japan / JPY"}
 
@@ -277,7 +278,7 @@ def print_tech_summary(
         expand=False,
     )
     tbl.add_column("Pair",       width=10)
-    tbl.add_column("Analyzed",   width=16, style="dim")
+    tbl.add_column("Analyzed",   width=22, style="dim")
     tbl.add_column("Direction",  width=14)
     tbl.add_column("Score",      width=7,  justify="right")
     tbl.add_column("Conf",       width=5,  justify="right")
@@ -296,6 +297,8 @@ def print_tech_summary(
         any_data = True
         s = snaps[0]
         analyzed = s.analyzed_at.strftime("%m-%d %H:%M") if s.analyzed_at else "-"
+        if s.analyzed_at and s.analyzed_at < db_now() - timedelta(hours=lookback_hours):
+            analyzed = f"[yellow]{analyzed} stale[/yellow]"
         rr_str   = f"{s.risk_reward_ratio:.1f}" if s.risk_reward_ratio else "-"
         entry_str = (
             f"{s.entry_zone_low:.5f}–{s.entry_zone_high:.5f}"
@@ -324,5 +327,4 @@ def print_tech_summary(
             "スケジューラーによる自動収集をお待ちください。[/dim yellow]"
         )
     console.print()
-
 

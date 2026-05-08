@@ -48,12 +48,15 @@ def run_news_view(config: AppConfig, store: VectorStore) -> None:
 def run_tech_view(config: AppConfig, analysis_store: AnalysisStore) -> None:
     """保存済みテクニカルスナップショットを表示する（新規取得なし）。"""
     all_instruments = config.watch_only_instruments + config.tradeable_instruments
-    snapshots_by_symbol = {
-        inst.symbol: analysis_store.get_recent_snapshots(
+    snapshots_by_symbol = {}
+    for inst in all_instruments:
+        snaps = analysis_store.get_recent_snapshots(
             inst.symbol, hours=config.rag.analysis_lookback_hours
         )
-        for inst in all_instruments
-    }
+        if not snaps:
+            latest = analysis_store.get_latest_snapshot(inst.symbol)
+            snaps = [latest] if latest is not None else []
+        snapshots_by_symbol[inst.symbol] = snaps
     display_names = {inst.symbol: inst.display_name for inst in all_instruments}
     print_tech_summary(snapshots_by_symbol, display_names, config.rag.analysis_lookback_hours)
 

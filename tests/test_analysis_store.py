@@ -53,6 +53,19 @@ def test_aggregate_direction_threshold_long(store: AnalysisStore):
     assert result.direction_bias == "long"
 
 
+def test_get_latest_snapshot_returns_most_recent_even_outside_lookback(
+    store: AnalysisStore,
+):
+    """表示用途では lookback 外でも保存済み最新 snapshot を取得できる。"""
+    store.upsert_snapshot(_snapshot(bias=0.1, hours_ago=24))
+    store.upsert_snapshot(_snapshot(bias=0.4, hours_ago=12))
+
+    latest = store.get_latest_snapshot("USDJPY=X")
+
+    assert latest is not None
+    assert latest.bias_score == 0.4
+
+
 def test_aggregate_direction_threshold_short(store: AnalysisStore):
     """bias < -0.05 → direction = 'short'"""
     store.upsert_snapshot(_snapshot(direction="short", bias=-0.06))
