@@ -1,7 +1,7 @@
 """データ参照系のエンドポイント。
 
 GET /news      — カテゴリ別の最新ニュースセンチメント
-GET /tech      — 銘柄別の最新テクニカルスナップショット
+GET /tech      — 銘柄別の最新収集行 (全 status) + 最新 ok 行 (run tech と同等)
 GET /analyze   — 保存済みスナップショット + ニュースから総合シグナル算出 (LLM 不使用)
 GET /forecast  — 直近 N 時間の予測サイクルレコード
 GET /feeds     — RSS フィード疎通確認
@@ -49,37 +49,50 @@ def news() -> dict[str, Any]:
 
 @router.get("/tech", dependencies=[Depends(verify_api_key)])
 def tech() -> dict[str, Any]:
-    """銘柄別の最新テクニカルスナップショット (run tech と同等)。"""
+    """銘柄別の最新収集行 (全 status) と最新 ok 行 (run tech と同等)。"""
     assert state.config is not None and state.analysis_store is not None
 
-    all_instruments = state.config.watch_only_instruments + state.config.tradeable_instruments
+    all_instruments = (
+        state.config.watch_only_instruments + state.config.tradeable_instruments
+    )
     snapshots = []
     for inst in all_instruments:
-        # Task 1: 互換のため最新 1 行 (status 不問) を返す。Task 3 で latest_collect / latest_ok 二段に変更。
-        s = state.analysis_store.get_latest_collect_row(inst.symbol)
-        if s is not None:
-            snapshots.append({
-                "symbol":            s.symbol,
-                "display_name":      inst.display_name,
-                "analyzed_at":       s.analyzed_at.isoformat() if s.analyzed_at else None,
-                "direction_bias":    s.direction_bias,
-                "bias_score":        s.bias_score,
-                "confidence":        s.confidence,
-                "entry_zone_low":    s.entry_zone_low,
-                "entry_zone_high":   s.entry_zone_high,
-                "stop_loss":         s.stop_loss,
-                "take_profit":       s.take_profit,
-                "risk_reward_ratio": s.risk_reward_ratio,
-                "reasoning_summary": s.reasoning_summary,
-            })
-        else:
-            snapshots.append({
-                "symbol":       inst.symbol,
-                "display_name": inst.display_name,
-                "analyzed_at":  None,
-            })
+        latest_collect = state.analysis_store.get_latest_collect_row(inst.symbol)
+        latest_ok = state.analysis_store.get_latest_ok_row(inst.symbol)
 
-    return {"lookback_hours": state.config.rag.analysis_lookback_hours, "snapshots": snapshots}
+        latest_collect_dict = None
+        if latest_collect is not None:
+            latest_collect_dict = {
+                "analyzed_at": latest_collect.analyzed_at.isoformat() if latest_collect.analyzed_at else None,
+                "collect_status": latest_collect.collect_status,
+                "reason": latest_collect.reasoning_summary,
+            }
+
+        latest_ok_dict = None
+        if latest_ok is not None:
+            latest_ok_dict = {
+                "analyzed_at": latest_ok.analyzed_at.isoformat() if latest_ok.analyzed_at else None,
+                "direction_bias": latest_ok.direction_bias,
+                "bias_score": latest_ok.bias_score,
+                "confidence": latest_ok.confidence,
+                "entry_zone_low": latest_ok.entry_zone_low,
+                "entry_zone_high": latest_ok.entry_zone_high,
+                "stop_loss": latest_ok.stop_loss,
+                "take_profit": latest_ok.take_profit,
+                "risk_reward_ratio": latest_ok.risk_reward_ratio,
+                "reasoning_summary": latest_ok.reasoning_summary,
+                "market_regime": latest_ok.market_regime,
+            }
+
+        snapshots.append({
+            "symbol": inst.symbol,
+            "display_name": inst.display_name,
+            "mode": getattr(inst, "mode", None),
+            "latest_collect": latest_collect_dict,
+            "latest_ok": latest_ok_dict,
+        })
+
+    return {"snapshots": snapshots}
 
 
 @router.get("/analyze", dependencies=[Depends(verify_api_key)])

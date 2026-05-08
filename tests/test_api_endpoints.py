@@ -783,3 +783,72 @@ def test_admin_resume_succeeds_in_live_test_when_dry_run_but_mt5_connected(
     resp = _client_post("/admin/resume")
     assert resp.status_code == 200
     assert halt_state.read(tmp_path).soft_halted is False
+
+
+# ── /tech エンドポイント (Task 3.3: latest_collect / latest_ok 分離) ──
+
+
+def test_tech_endpoint_returns_latest_collect_and_latest_ok(
+    _state_setup, tmp_path,
+):
+    """/tech は latest_collect (全 status) と latest_ok (ok のみ) を返す。"""
+    from datetime import timedelta
+    from types import SimpleNamespace
+    from src.data.analysis_store import AnalysisStore
+    from src.analysis.price_analyzer import PriceAnalysis
+    from src.utils.clock import db_now
+
+    store = AnalysisStore(tmp_path / "prices.db")
+    state.analysis_store = store
+
+    inst = SimpleNamespace(
+        symbol="USDJPY=X", display_name="USD/JPY", mode="trade",
+    )
+    state.config.tradeable_instruments = [inst]
+    state.config.watch_only_instruments = []
+
+    # 古い ok + 直近 sentinel を投入
+    store.add_snapshot(PriceAnalysis(
+        pair="USDJPY=X", direction_bias="long", bias_score=0.2, confidence=0.6,
+        entry_zone=(149.5, 150.5), stop_loss=149.0, take_profit=152.0,
+        risk_reward_ratio=2.0, reasoning_summary="ok",
+        analyzed_at=db_now() - timedelta(hours=4),
+    ))
+    store.add_sentinel(symbol="USDJPY=X", status="stale_price", reason="latest bar 7h ago")
+
+    resp = _client_get("/tech")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "snapshots" in body
+    snaps = body["snapshots"]
+    assert len(snaps) == 1
+    s = snaps[0]
+    assert s["symbol"] == "USDJPY=X"
+    assert s["latest_collect"] is not None
+    assert s["latest_collect"]["collect_status"] == "stale_price"
+    assert s["latest_ok"] is not None
+    assert s["latest_ok"]["direction_bias"] == "long"
+
+
+def test_tech_endpoint_returns_null_when_no_data(
+    _state_setup, tmp_path,
+):
+    """データなし → latest_collect / latest_ok とも null。"""
+    from types import SimpleNamespace
+    from src.data.analysis_store import AnalysisStore
+
+    store = AnalysisStore(tmp_path / "prices.db")
+    state.analysis_store = store
+
+    inst = SimpleNamespace(
+        symbol="GBPUSD=X", display_name="GBP/USD", mode="trade",
+    )
+    state.config.tradeable_instruments = [inst]
+    state.config.watch_only_instruments = []
+
+    resp = _client_get("/tech")
+    assert resp.status_code == 200
+    body = resp.json()
+    s = body["snapshots"][0]
+    assert s["latest_collect"] is None
+    assert s["latest_ok"] is None
