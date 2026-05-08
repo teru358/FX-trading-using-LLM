@@ -36,6 +36,7 @@ class _TechnicalSnapshot(_Base):
     reasoning_summary = Column(String)
     market_regime     = Column(String)
     confidence_modifier = Column(Float)
+    collect_status    = Column(String, nullable=False, default="ok")
 
 
 class AnalysisStore:
@@ -52,6 +53,7 @@ class AnalysisStore:
         migrations = [
             ("technical_snapshots", "market_regime", "VARCHAR"),
             ("technical_snapshots", "confidence_modifier", "FLOAT"),
+            ("technical_snapshots", "collect_status", "VARCHAR NOT NULL DEFAULT 'ok'"),
         ]
         with self._engine.connect() as conn:
             for table, col, col_type in migrations:

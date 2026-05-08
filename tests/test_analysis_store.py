@@ -148,3 +148,43 @@ def test_aggregate_confidence_reduced_by_inconsistency(store: AnalysisStore):
     assert consistent is not None
     assert inconsistent is not None
     assert inconsistent.confidence < consistent.confidence
+
+
+def test_migration_adds_collect_status_column_with_ok_default(tmp_path):
+    """ALTER TABLE で collect_status が追加され、既存行は 'ok' で埋まる。"""
+    from sqlalchemy import create_engine, text
+
+    db_path = tmp_path / "test.db"
+    # 旧スキーマで 1 行 INSERT (collect_status カラム無し状態をシミュレート)。
+    # _get_engine は create_all で全 ORM カラムを作ってしまうので、ここでは raw engine を使う。
+    raw_engine = create_engine(f"sqlite:///{db_path}", echo=False)
+    with raw_engine.connect() as conn:
+        conn.execute(text(
+            "CREATE TABLE technical_snapshots ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "symbol VARCHAR NOT NULL, "
+            "analyzed_at DATETIME NOT NULL, "
+            "bias_score FLOAT, confidence FLOAT, direction_bias VARCHAR, "
+            "stop_loss FLOAT, take_profit FLOAT, "
+            "entry_zone_low FLOAT, entry_zone_high FLOAT, "
+            "risk_reward_ratio FLOAT, reasoning_summary VARCHAR, "
+            "market_regime VARCHAR, confidence_modifier FLOAT)"
+        ))
+        conn.execute(text(
+            "INSERT INTO technical_snapshots (symbol, analyzed_at) "
+            "VALUES ('USDJPY=X', '2026-05-01 12:00:00')"
+        ))
+        conn.commit()
+    raw_engine.dispose()
+
+    # 新 AnalysisStore を生成 → migration 走行
+    AnalysisStore(db_path)
+
+    # 既存行に collect_status='ok' が埋まる
+    verify_engine = create_engine(f"sqlite:///{db_path}", echo=False)
+    with verify_engine.connect() as conn:
+        result = conn.execute(text(
+            "SELECT collect_status FROM technical_snapshots WHERE symbol='USDJPY=X'"
+        )).scalar_one()
+    verify_engine.dispose()
+    assert result == "ok"
