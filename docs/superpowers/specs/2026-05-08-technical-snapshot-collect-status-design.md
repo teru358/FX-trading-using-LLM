@@ -25,13 +25,17 @@
 
 ## 2. ゴール
 
-1. **市場オープン中は毎収集サイクルで必ず 1 行書く**: `collect_all_technical` が実行に進んだサイクル (= `is_market_open()` が True) では、enabled instrument 1 銘柄あたり必ず 1 行が `technical_snapshots` に書かれる (成功/失敗いずれでも)
+1. **収集サイクル本体に進んだら必ず 1 行書く**: `collect_all_technical` の冒頭ガード (`if not force and not is_market_open(): return`) を通過したサイクル (`is_market_open()` が True、または `force=True`) では、enabled instrument 1 銘柄あたり必ず 1 行が `technical_snapshots` に書かれる (成功/失敗いずれでも)
 2. **取引判定への汚染を防ぐ**: sentinel 行 (失敗ログ) は `aggregate()` / LLM プロンプト / RAG context に絶対混ざらない
 3. **`run tech` で 2 種類の状態を分離表示する**:
    - 「直近の収集試行は何時に・どの結果だったか」(全 status の最新)
    - 「直近の有効な分析は何時の・どんな内容か」(ok 行の最新)
 
-**注:** `collect_all_technical` 冒頭の `if not force and not is_market_open(): return` は維持する。FX 市場休場中 (週末等) は sentinel も含めて何も書かない。これは仕様。`run tech` から見ると休場期間は「Last collect が古い (X 時間前)」として age 表示で確認できる。`market_closed` status は導入しない (休場期間 sentinel が DB を膨張させる割に診断価値が薄い)。
+**注 1 (休場時の挙動):** `collect_all_technical` 冒頭ガードを `force=False` で通過しなかったサイクルは何も書かない。これは仕様。`run tech` 表示は **lookback 非依存の最新 1 行取得 API** (`get_latest_collect_row` / `get_latest_ok_row`、4.2 参照) を使うため、休場中は最後に書かれた行 (例: 金曜 17:00 の ok 行) が age 付きで表示される。`_prune_old` は INSERT 時にしか走らない (symbol-scoped) ため、休場期間中は対象銘柄の行が prune されず保持される。週明けの最初の収集サイクルで新規行が書かれるとともに 48h 超の旧行が prune される。
+
+**注 2 (`market_closed` status 不採用):** 休場期間も sentinel を書く案 (`market_closed` status) は不採用。理由: (a) 休場期間 sentinel が DB を膨張させる、(b) 上記注 1 の age 表示で「休場で動いていない」が判別可能、(c) 真に診断したい「市場オープン中なのに動いていない」は本仕様の sentinel で捕捉される。
+
+**注 3 (`force=True` の扱い):** 手動デバッグや管理操作で `force=True` を渡して収集を実行した場合も、本仕様の sentinel 書き込みは適用される (休場中の stale_price sentinel が積まれる)。これは意図された挙動 (force 時はユーザーが明示的に状態を確認しに行っているため、結果を残す価値がある)。
 
 ## 3. 非ゴール (スコープ外)
 
@@ -119,21 +123,40 @@ truncated_reason = reason if len(reason) <= 512 else reason[:512] + " ... [trunc
 
 #### Read 経路 (用途別 method、`get_recent_snapshots` / `get_latest_snapshot` は削除)
 
+リスト取得 (lookback 内、複数行) と 単一最新行取得 (lookback 非依存、1 行) を別 API に分離。
+
 ```python
 def get_recent_ok_snapshots(
     self, symbol: str, hours: int = 8,
 ) -> list[_TechnicalSnapshot]:
-    """ok status のみ。取引判定・LLM プロンプト・econ 分析で使う。
+    """ok status のみ、lookback 内の複数行。
+    取引判定 (aggregate 内部) / LLM プロンプト / RAG context / econ 分析で使う。
     WHERE collect_status='ok' AND analyzed_at >= now-hours, 新しい順。"""
 
-def get_recent_snapshots_for_display(
-    self, symbol: str, hours: int = 8,
-) -> list[_TechnicalSnapshot]:
-    """全 status。run tech / /tech エンドポイント表示用。
-    WHERE analyzed_at >= now-hours (status 制約なし), 新しい順。"""
+def get_latest_collect_row(
+    self, symbol: str,
+) -> _TechnicalSnapshot | None:
+    """全 status の最新 1 行 (lookback 非依存)。
+    run tech / /tech 表示の「Last collect / Status / Reason」用。
+    WHERE symbol=? ORDER BY analyzed_at DESC LIMIT 1。
+    `_prune_old`(48h) で 48h より古い行は INSERT 時に消えるが、休場中で
+    INSERT が走らない期間は古い行が保持される (e.g., 金曜 17:00 の行が
+    日曜まで残る)。"""
+
+def get_latest_ok_row(
+    self, symbol: str,
+) -> _TechnicalSnapshot | None:
+    """ok status の最新 1 行 (lookback 非依存)。
+    run tech / /tech 表示の「Last ok / Bias / Conf / Dir」用。
+    WHERE symbol=? AND collect_status='ok' ORDER BY analyzed_at DESC LIMIT 1。
+    取引判定の入力には絶対使わない (lookback 非依存だと古すぎる ok を拾い得る)。"""
 ```
 
-`aggregate(symbol, hours)` は内部で **必ず** `get_recent_ok_snapshots()` を呼ぶ → sentinel が取引判定に混ざらない。
+**設計ポイント:**
+
+- `aggregate(symbol, hours)` は内部で **必ず** `get_recent_ok_snapshots()` を呼ぶ → sentinel も古すぎる ok も取引判定に混ざらない
+- `get_latest_collect_row` / `get_latest_ok_row` は **表示専用**。取引判定・LLM・aggregate からは絶対呼ばない (lookback 非依存ゆえ古いデータ汚染リスクあり)
+- `get_recent_snapshots_for_display` (前案) は不採用 — 表示は最新 1 行で足り、lookback bound を入れると休場期間に `latest_collect=None` となり「いつ最後に動いたか」を伝えられない
 
 ### 4.3 Caller 振り分け
 
@@ -147,8 +170,8 @@ def get_recent_snapshots_for_display(
 | `src/data/analysis_store.py:128` (`aggregate` 内部) | aggregate 内部呼び出し | `get_recent_ok_snapshots` |
 | `src/rag/ask_context_builder.py:273` | ask LLM コンテキスト | `get_recent_ok_snapshots` |
 | `src/api/routes/health.py:94` | health 概況 | `get_recent_ok_snapshots` (健全性確認は ok 必要) |
-| `src/views.py:53` (`run_tech_view`) | run tech 表示 | `get_recent_snapshots_for_display` |
-| `src/api/routes/data.py:58` (`/tech` endpoint) | run tech と同等 API | `get_recent_snapshots_for_display` |
+| `src/views.py:53` (`run_tech_view`) | run tech 表示 | `get_latest_collect_row` + `get_latest_ok_row` (両方使う) |
+| `src/api/routes/data.py:58` (`/tech` endpoint) | run tech と同等 API | `get_latest_collect_row` + `get_latest_ok_row` (両方使う) |
 
 `src/views.py:56-58` の `get_latest_snapshot` フォールバックは **削除** (新設計で不要)。
 
@@ -290,19 +313,16 @@ if pd_cached is None:
 def run_tech_view(config, analysis_store):
     all_instruments = config.watch_only_instruments + config.tradeable_instruments
     rows = []
-    lookback_h = config.rag.analysis_lookback_hours
     for inst in all_instruments:
-        # ① 表示用: 全 status の最新行 (collect_status を取得)
-        all_snaps = analysis_store.get_recent_snapshots_for_display(inst.symbol, hours=lookback_h)
-        latest_collect = all_snaps[0] if all_snaps else None
-
-        # ② 取引判定相当: ok のみの最新行 (bias/conf/dir を取得)
-        ok_snaps = analysis_store.get_recent_ok_snapshots(inst.symbol, hours=lookback_h)
-        latest_ok = ok_snaps[0] if ok_snaps else None
-
+        # ① 表示用: 全 status の最新 1 行 (collect_status / reason を取得)
+        latest_collect = analysis_store.get_latest_collect_row(inst.symbol)
+        # ② ok 限定の最新 1 行 (bias / conf / dir を取得)
+        latest_ok = analysis_store.get_latest_ok_row(inst.symbol)
         rows.append((inst, latest_collect, latest_ok))
-    print_tech_summary(rows, lookback_h)
+    print_tech_summary(rows)
 ```
+
+両 API は lookback 非依存なので、休場中で 8h 以上経過しても直近の sentinel/ok 行が表示できる。`_prune_old`(48h) を超えた古い行は消えているので、48h+ 何も書かれていない instrument は `None` が返り `(no data)` 表示になる (= 真に何も動いていない、診断対象)。
 
 `print_tech_summary` 表示フォーマット案 (テーブル形式):
 
@@ -330,11 +350,10 @@ ok 行が見つからない場合 `Bias / Conf / Dir` は `—` 表示、`Last o
 
 ### 4.6 /tech エンドポイントの形状変更
 
-`src/api/routes/data.py:tech()` も同じ二段分離方針で返す:
+`src/api/routes/data.py:tech()` も `get_latest_collect_row` + `get_latest_ok_row` を使った二段分離で返す:
 
 ```json
 {
-  "lookback_hours": 8,
   "snapshots": [
     {
       "symbol": "USDJPY=X",
@@ -358,7 +377,9 @@ ok 行が見つからない場合 `Bias / Conf / Dir` は `—` 表示、`Last o
 }
 ```
 
-`latest_ok` が無いペアは `null`。`latest_collect` が無いペア (新規 instrument 等) も `null`。
+- `latest_ok` が無いペア (48h 以上 ok 行が無い) は `null`
+- `latest_collect` が無いペア (48h 以上何も書かれていない、新規 instrument 等) も `null`
+- `lookback_hours` フィールドは廃止 (lookback 非依存になったため)
 
 ### 4.7 既存の `get_latest_snapshot` フォールバック撤去
 
@@ -369,9 +390,9 @@ if not snaps:
     snaps = [latest] if latest is not None else []
 ```
 
-新設計では `get_recent_snapshots_for_display` で sentinel も含めて取れるので、lookback 内に行が無い = 本当に何も走っていない (= 真にデータなし)。lookback 外の古いデータを表示する band-aid は不要。
+新設計では `get_latest_collect_row` / `get_latest_ok_row` が lookback 非依存で最新 1 行を返すので、休場中も最後の収集行を age 付きで表示できる。応急的な「lookback 内が空なら latest を取り直す」二段アクセスは不要。
 
-`get_latest_snapshot()` メソッド本体も削除、テストも更新。
+`get_latest_snapshot()` メソッド本体も削除、テストも更新 (新設計の `get_latest_collect_row` / `get_latest_ok_row` テストに置き換え)。
 
 ## 5. テスト戦略
 
@@ -383,8 +404,11 @@ if not snaps:
 | `test_add_sentinel_failed` | `add_sentinel('failed', "...")` で同様に書かれる |
 | `test_add_sentinel_invalid_status_raises` | `add_sentinel('weird')` は ValueError |
 | `test_add_sentinel_long_reason_truncated` | 1000 文字 reason → 512 + "... [truncated]" で保存 |
-| `test_get_recent_ok_snapshots_excludes_sentinel` | ok + sentinel 混在 → ok のみ返す |
-| `test_get_recent_snapshots_for_display_includes_all` | 全 status 返す (新しい順) |
+| `test_get_recent_ok_snapshots_excludes_sentinel` | ok + sentinel 混在 → ok のみ返す (lookback 内のみ) |
+| `test_get_latest_collect_row_returns_newest_any_status` | sentinel + ok + 古い ok → 最新 sentinel が返る (lookback 非依存) |
+| `test_get_latest_collect_row_returns_none_when_empty` | symbol 無 → None |
+| `test_get_latest_ok_row_skips_sentinel` | 最新 sentinel + 古い ok → 古い ok が返る (lookback 非依存) |
+| `test_get_latest_ok_row_returns_none_when_only_sentinel` | sentinel のみ → None |
 | `test_aggregate_ignores_sentinel` | sentinel + ok 混在 → aggregate は ok のみで集計 |
 | `test_aggregate_with_only_sentinel_returns_none` | sentinel のみ → aggregate は None |
 | `test_migration_existing_rows_get_ok` | migration 前 (collect_status カラム不在) → 後で全行 'ok' |
@@ -428,7 +452,7 @@ if not snaps:
 ### Task 1: AnalysisStore API 刷新 + 全 caller リネーム
 - schema migration (collect_status カラム追加、`_migrate()` に 1 エントリ)
 - **ORM model 更新**: `_TechnicalSnapshot` に `collect_status = Column(String, nullable=False, default="ok")` 追加
-- `add_snapshot` (内部で `_prune_old(symbol)` 呼出) / `add_sentinel` (status バリデーション + reason truncate + `_prune_old(symbol)` 呼出) / `get_recent_ok_snapshots` / `get_recent_snapshots_for_display` 追加
+- `add_snapshot` (内部で `_prune_old(symbol)` 呼出) / `add_sentinel` (status バリデーション + reason truncate + `_prune_old(symbol)` 呼出) / `get_recent_ok_snapshots` / `get_latest_collect_row` / `get_latest_ok_row` 追加
 - `upsert_snapshot` / `get_recent_snapshots` / `get_latest_snapshot` 削除
 - 全 caller 置換 (4.3 の表すべて、views の get_latest_snapshot fallback 削除含む)
 - `aggregate` 内部を `get_recent_ok_snapshots` 経由に
