@@ -25,21 +25,26 @@
 
 ## 2. ゴール
 
-1. **毎時 1 行を保証する**: enabled instrument に対し、技術収集サイクルごとに必ず 1 行が `technical_snapshots` に書かれる (成功/失敗いずれでも)
+1. **市場オープン中は毎収集サイクルで必ず 1 行書く**: `collect_all_technical` が実行に進んだサイクル (= `is_market_open()` が True) では、enabled instrument 1 銘柄あたり必ず 1 行が `technical_snapshots` に書かれる (成功/失敗いずれでも)
 2. **取引判定への汚染を防ぐ**: sentinel 行 (失敗ログ) は `aggregate()` / LLM プロンプト / RAG context に絶対混ざらない
 3. **`run tech` で 2 種類の状態を分離表示する**:
    - 「直近の収集試行は何時に・どの結果だったか」(全 status の最新)
    - 「直近の有効な分析は何時の・どんな内容か」(ok 行の最新)
+
+**注:** `collect_all_technical` 冒頭の `if not force and not is_market_open(): return` は維持する。FX 市場休場中 (週末等) は sentinel も含めて何も書かない。これは仕様。`run tech` から見ると休場期間は「Last collect が古い (X 時間前)」として age 表示で確認できる。`market_closed` status は導入しない (休場期間 sentinel が DB を膨張させる割に診断価値が薄い)。
 
 ## 3. 非ゴール (スコープ外)
 
 - 過去 2 日 trade Phase 2 が止まった真因の特定 — 本変更後 sentinel が残るので次回失敗時は可視化される。過去ログ調査は別タスク
 - SL/TP/RR 列の deprecated 問題 — 現挙動 (LLM 出力 0.0) 維持、別判断
 - 失敗時のリトライ・通知 — 本変更は記録のみ。Discord 通知や自動再実行は将来検討
+- 市場休場中の sentinel 書き込み — 上記注のとおり対象外
 
 ## 4. 設計
 
 ### 4.1 Schema
+
+#### DB Migration
 
 ```sql
 ALTER TABLE technical_snapshots
@@ -49,6 +54,19 @@ ALTER TABLE technical_snapshots
 - 値: `'ok'` / `'stale_price'` / `'failed'`
 - SQLite の `NOT NULL DEFAULT 'ok'` で既存行は 'ok' で埋まる
 - migration は既存の `AnalysisStore._migrate()` パターンに 1 エントリ追加
+
+#### ORM Model
+
+`_TechnicalSnapshot` クラス (`src/data/analysis_store.py`) にカラム宣言を追加:
+
+```python
+class _TechnicalSnapshot(_Base):
+    __tablename__ = "technical_snapshots"
+    # ... 既存カラム ...
+    collect_status = Column(String, nullable=False, default="ok")
+```
+
+migration の `ALTER TABLE` だけだと ORM が認識せず、`add_snapshot` / `add_sentinel` / 表示側で `snap.collect_status` 属性参照が失敗する。Task 1 のチェックリストに明示する。
 
 ### 4.2 AnalysisStore API
 
@@ -86,6 +104,9 @@ def add_sentinel(
         - risk_reward_ratio=0.0
         - market_regime='unknown'
         - confidence_modifier=0.0
+
+    保存後 _prune_old(symbol) を呼ぶ (add_snapshot と同じ。失敗が連続しても
+    sentinel 行が 48h 保持方針から漏れて DB が膨張しないようにする)。
     """
 ```
 
@@ -402,40 +423,42 @@ if not snaps:
 
 各 Task は前 Task の API に依存するため **直列実装、直列マージ**。Task 1 は API 削除を含む基盤変更で大きめだが 1 コミット。
 
+**重要 — Task 2 と Task 3 はマージ単位で結合する**: Task 2 単独でデプロイすると、collector が sentinel 行を書き始めるが既存 `print_tech_summary` は先頭行の `direction_bias='neutral'` / `bias=0.0` / `conf=0.0` をそのまま「有効な分析結果」として表示してしまい、ユーザーから見ると「中立判定が出ている」と誤読される。これを避けるため Task 2 と Task 3 は **同一 PR・同一マージ** とする (内部的にコミット分割は可、ただしデプロイ単位は 1 つ)。
+
 ### Task 1: AnalysisStore API 刷新 + 全 caller リネーム
-- schema migration (collect_status カラム追加)
-- `add_snapshot` / `add_sentinel` / `get_recent_ok_snapshots` / `get_recent_snapshots_for_display` 追加
+- schema migration (collect_status カラム追加、`_migrate()` に 1 エントリ)
+- **ORM model 更新**: `_TechnicalSnapshot` に `collect_status = Column(String, nullable=False, default="ok")` 追加
+- `add_snapshot` (内部で `_prune_old(symbol)` 呼出) / `add_sentinel` (status バリデーション + reason truncate + `_prune_old(symbol)` 呼出) / `get_recent_ok_snapshots` / `get_recent_snapshots_for_display` 追加
 - `upsert_snapshot` / `get_recent_snapshots` / `get_latest_snapshot` 削除
 - 全 caller 置換 (4.3 の表すべて、views の get_latest_snapshot fallback 削除含む)
 - `aggregate` 内部を `get_recent_ok_snapshots` 経由に
 - 既存テストを新 API に更新、`test_get_latest_snapshot_*` 系削除
 - 新規テスト 5.1 追加
 
-これだけで sentinel 機能は未使用 (collector はまだ書かない)。aggregate / display はカラム追加だけで挙動同じ。
+これだけで sentinel 機能は未使用 (collector はまだ書かない)。aggregate / display はカラム追加だけで挙動同じ。**この Task 単独でマージ可能**。
 
-### Task 2: technical_collector の sentinel 書き込み実装
+### Task 2 + Task 3 (同一マージ): collector sentinel 書き込み + 表示二段分離
+
+#### Task 2: technical_collector の sentinel 書き込み実装
 - `_collect_one` リファクタ (4.4)
 - outer loop の prefetch 失敗時 sentinel + 想定外 raise の保険
 - 5.2 のテスト追加
 
-この時点で sentinel が DB に蓄積され始める。`run tech` はまだ旧表示なので sentinel は ok 経路で空扱い (`get_recent_snapshots_for_display` が sentinel も返す)。
-
-### Task 3: run tech / /tech 表示の二段分離
+#### Task 3: run tech / /tech 表示の二段分離
 - `src/views.py:run_tech_view` の二段取得
 - `src/reporting/reporter.py:print_tech_summary` の表示フォーマット変更 (4.5)
 - `src/api/routes/data.py:tech()` の JSON 形状変更 (4.6)
 - 5.3 / 5.4 のテスト追加
 
-この時点で `run tech` から「いつ・どの結果」が見えるようになる。
+両方完了後に **同一 PR でマージ** することで、sentinel が書かれ始めた瞬間から `run tech` が collect_status を正しく解釈する状態を担保する。
 
 ### Task 4 (オプション、後回しでも可): 過去 2 日の Phase 2 停止調査
 - 本仕様の対象外。本変更マージ後、次の収集サイクルで sentinel が記録され始めたら、その reason から原因特定を進める
 
 ## 7. ロールバック計画
 
-各 Task はコミット単位で revert 可能:
-- Task 3 revert → 表示は旧フォーマット (sentinel カラムは残るが影響なし)
-- Task 2 revert → sentinel 書き込み停止 (DB に既存の sentinel 行は残るが aggregate は ok のみなので影響なし)
+マージ単位で revert 可能:
+- Task 2+3 revert → sentinel 書き込み停止 + 表示も旧形式 (DB に既存の sentinel 行は残るが aggregate は ok のみなので影響なし)
 - Task 1 revert → schema migration を逆向きに (`ALTER TABLE technical_snapshots DROP COLUMN collect_status` ※ SQLite 3.35+ 対応)。新カラムが残ったままでも旧コードは無視するので必須ではない
 
 ## 8. 移行時の注意
