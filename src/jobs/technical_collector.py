@@ -268,12 +268,16 @@ async def _collect_one(
     if price_data is None:
         price_data = _fetch_instrument_ohlcv(inst, config, price_store, price_provider)
 
-    # Phase 2: 鮮度チェック (古ければスキップ)
+    # Phase 2: 鮮度チェック (古ければ sentinel を書いてスキップ)
     staleness = _is_price_data_stale(price_data, max_staleness=_max_staleness_for(inst))
     if staleness is not None:
+        analysis_store.add_sentinel(
+            symbol=inst.symbol,
+            status="stale_price",
+            reason=f"latest bar {staleness} ago (max {_max_staleness_for(inst)})",
+        )
         logger.info(
-            f"[COLLECT] {inst.display_name}: stale data (latest bar {staleness} ago), "
-            f"skipping LLM analysis"
+            f"[COLLECT] {inst.display_name}: stale_price sentinel ({staleness} ago)"
         )
         return
 
