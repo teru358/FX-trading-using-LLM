@@ -36,7 +36,7 @@ class _TechnicalSnapshot(_Base):
     reasoning_summary = Column(String)
     market_regime     = Column(String)
     confidence_modifier = Column(Float)
-    collect_status    = Column(String, nullable=False, default="ok")
+    collect_status    = Column(String, nullable=False)
 
 
 class AnalysisStore:
