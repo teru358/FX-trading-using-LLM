@@ -144,16 +144,21 @@ class AnalysisStore:
         logger.debug(f"Stored {status} sentinel for {symbol}: {reason[:80]}")
         self._prune_old(symbol)
 
-    def get_recent_snapshots(
-        self, symbol: str, hours: int = 8
+    def get_recent_ok_snapshots(
+        self, symbol: str, hours: int = 8,
     ) -> list[_TechnicalSnapshot]:
-        """直近 hours 時間以内のスナップショットを新しい順で返す。"""
+        """ok status のみ、lookback 内を新しい順で返す。
+
+        取引判定 (aggregate 内部) / LLM プロンプト previous_analysis /
+        RAG context / econ 分析 / health 確認で使う。sentinel 行は除外する。
+        """
         since = db_now() - timedelta(hours=hours)
         with Session(self._engine) as session:
             stmt = (
                 select(_TechnicalSnapshot)
                 .where(_TechnicalSnapshot.symbol == symbol)
                 .where(_TechnicalSnapshot.analyzed_at >= since)
+                .where(_TechnicalSnapshot.collect_status == "ok")
                 .order_by(_TechnicalSnapshot.analyzed_at.desc())
             )
             return list(session.execute(stmt).scalars().all())
@@ -184,7 +189,7 @@ class AnalysisStore:
         import math
         from src.analysis.price_analyzer import PriceAnalysis  # local import
 
-        snapshots = self.get_recent_snapshots(symbol, hours)
+        snapshots = self.get_recent_ok_snapshots(symbol, hours)
         if not snapshots:
             return None
 

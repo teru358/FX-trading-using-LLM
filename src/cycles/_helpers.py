@@ -160,7 +160,7 @@ def _build_macro_context(config: AppConfig, analysis_store: AnalysisStore) -> st
     watch_only = config.watch_only_instruments
     macro_snapshots = []
     for inst in watch_only:
-        snaps = analysis_store.get_recent_snapshots(inst.symbol, hours=8)
+        snaps = analysis_store.get_recent_ok_snapshots(inst.symbol, hours=8)
         if snaps:
             macro_snapshots.append(snaps[0])
     return format_macro_context_for_prompt(

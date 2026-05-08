@@ -196,7 +196,7 @@ def _build_rag_contexts(
     if insight_ctx:
         refl_ctx = f"{refl_ctx}\n\n{insight_ctx}" if refl_ctx else insight_ctx
 
-    prev_snapshots = analysis_store.get_recent_snapshots(inst.symbol, hours=8)
+    prev_snapshots = analysis_store.get_recent_ok_snapshots(inst.symbol, hours=8)
     prev_ctx = format_previous_analysis_for_prompt(prev_snapshots[0] if prev_snapshots else None)
     return news_ctx, refl_ctx, prev_ctx
 
@@ -372,7 +372,7 @@ async def collect_all_technical(
     # Phase 1 の結果からマクロコンテキストを構築
     macro_snapshots = []
     for inst in watch_only:
-        snaps = analysis_store.get_recent_snapshots(inst.symbol, hours=8)
+        snaps = analysis_store.get_recent_ok_snapshots(inst.symbol, hours=8)
         if snaps:
             macro_snapshots.append(snaps[0])
     macro_ctx = format_macro_context_for_prompt(
@@ -503,7 +503,7 @@ async def collect_all_technical(
                             except Exception as e:
                                 logger.debug(f"[ECON] price reaction failed for {p.symbol}: {e}")
 
-                            snaps = analysis_store.get_recent_snapshots(p.symbol, hours=2)
+                            snaps = analysis_store.get_recent_ok_snapshots(p.symbol, hours=2)
                             if snaps:
                                 s = snaps[0]
                                 snapshot_briefs.append(SnapshotBrief(

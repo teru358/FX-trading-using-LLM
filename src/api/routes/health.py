@@ -91,7 +91,7 @@ def status() -> dict[str, Any]:
     if state.config is not None and state.analysis_store is not None:
         for inst in getattr(state.config, "tradeable_instruments", []):
             try:
-                snaps = state.analysis_store.get_recent_snapshots(inst.symbol, hours=24)
+                snaps = state.analysis_store.get_recent_ok_snapshots(inst.symbol, hours=24)
                 if snaps:
                     latest_at = snaps[0].analyzed_at
                     age_minutes = (now - latest_at).total_seconds() / 60.0

@@ -276,3 +276,31 @@ def test_add_sentinel_long_reason_truncated(store: AnalysisStore):
     assert len(r.reasoning_summary) <= 512 + len(" ... [truncated]")
     assert r.reasoning_summary.endswith(" ... [truncated]")
     assert r.reasoning_summary.startswith("x" * 512)
+
+
+def test_get_recent_ok_snapshots_excludes_sentinel(store: AnalysisStore):
+    """ok + sentinel 混在 → ok のみ返す (sentinel は除外)。"""
+    store.add_snapshot(_snapshot(bias=0.3, hours_ago=1))
+    store.add_sentinel(symbol="USDJPY=X", status="stale_price", reason="x")
+    store.add_snapshot(_snapshot(bias=0.4, hours_ago=0.5))
+    rows = store.get_recent_ok_snapshots("USDJPY=X", hours=8)
+    assert len(rows) == 2
+    assert all(r.collect_status == "ok" for r in rows)
+
+
+def test_aggregate_ignores_sentinel(store: AnalysisStore):
+    """sentinel 混在でも aggregate は ok のみで集計する。"""
+    store.add_snapshot(_snapshot(direction="long", bias=0.5, hours_ago=0))
+    store.add_sentinel(symbol="USDJPY=X", status="failed", reason="x")
+    result = store.aggregate("USDJPY=X", hours=8)
+    assert result is not None
+    assert result.direction_bias == "long"
+    assert result.bias_score > 0.4  # sentinel の bias=0 が混ざっていれば下がる
+
+
+def test_aggregate_with_only_sentinel_returns_none(store: AnalysisStore):
+    """sentinel のみ (ok 行ゼロ) → aggregate は None。"""
+    store.add_sentinel(symbol="USDJPY=X", status="stale_price", reason="x")
+    store.add_sentinel(symbol="USDJPY=X", status="failed", reason="y")
+    result = store.aggregate("USDJPY=X", hours=8)
+    assert result is None

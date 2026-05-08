@@ -270,7 +270,7 @@ class AskContextBuilder:
 
         lines = ["=== Technical Snapshots ==="]
         for inst in instruments:
-            snaps = self._analysis_store.get_recent_snapshots(
+            snaps = self._analysis_store.get_recent_ok_snapshots(
                 inst.symbol, hours=config.rag.analysis_lookback_hours,
             )
             if snaps:
