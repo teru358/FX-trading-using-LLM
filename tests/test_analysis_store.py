@@ -206,3 +206,73 @@ def test_add_snapshot_writes_ok_status_row(store: AnalysisStore):
     assert len(rows) == 1
     assert rows[0].collect_status == "ok"
     assert rows[0].bias_score == 0.2
+
+
+def test_add_sentinel_writes_stale_price_row(store: AnalysisStore):
+    """stale_price sentinel は collect_status='stale_price'、bias=conf=0、reason 保存。"""
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+    from src.data.analysis_store import _TechnicalSnapshot
+
+    store.add_sentinel(
+        symbol="USDJPY=X",
+        status="stale_price",
+        reason="latest bar 7:00:00 ago",
+    )
+    with Session(store._engine) as session:
+        rows = list(session.execute(
+            select(_TechnicalSnapshot)
+            .where(_TechnicalSnapshot.symbol == "USDJPY=X")
+        ).scalars())
+    assert len(rows) == 1
+    r = rows[0]
+    assert r.collect_status == "stale_price"
+    assert r.direction_bias == "neutral"
+    assert r.bias_score == 0.0
+    assert r.confidence == 0.0
+    assert r.stop_loss == 0.0
+    assert r.take_profit == 0.0
+    assert r.entry_zone_low == 0.0
+    assert r.entry_zone_high == 0.0
+    assert r.risk_reward_ratio == 0.0
+    assert r.market_regime == "unknown"
+    assert r.confidence_modifier == 0.0
+    assert r.reasoning_summary == "latest bar 7:00:00 ago"
+
+
+def test_add_sentinel_writes_failed_row(store: AnalysisStore):
+    """failed sentinel も同様に書ける。"""
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+    from src.data.analysis_store import _TechnicalSnapshot
+
+    store.add_sentinel(symbol="USDJPY=X", status="failed", reason="llm_error: TimeoutError")
+    with Session(store._engine) as session:
+        r = session.execute(
+            select(_TechnicalSnapshot).where(_TechnicalSnapshot.symbol == "USDJPY=X")
+        ).scalar_one()
+    assert r.collect_status == "failed"
+    assert r.reasoning_summary == "llm_error: TimeoutError"
+
+
+def test_add_sentinel_invalid_status_raises(store: AnalysisStore):
+    """status バリデーション: 許可外で ValueError。"""
+    with pytest.raises(ValueError, match="sentinel status"):
+        store.add_sentinel(symbol="USDJPY=X", status="weird", reason="x")
+
+
+def test_add_sentinel_long_reason_truncated(store: AnalysisStore):
+    """reason が 512 文字超なら truncate されて '... [truncated]' が付く。"""
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+    from src.data.analysis_store import _TechnicalSnapshot
+
+    long_reason = "x" * 1000
+    store.add_sentinel(symbol="USDJPY=X", status="failed", reason=long_reason)
+    with Session(store._engine) as session:
+        r = session.execute(
+            select(_TechnicalSnapshot).where(_TechnicalSnapshot.symbol == "USDJPY=X")
+        ).scalar_one()
+    assert len(r.reasoning_summary) <= 512 + len(" ... [truncated]")
+    assert r.reasoning_summary.endswith(" ... [truncated]")
+    assert r.reasoning_summary.startswith("x" * 512)

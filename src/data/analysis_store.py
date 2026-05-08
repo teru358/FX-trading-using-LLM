@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Column, DateTime, Float, Integer, String, select, text
@@ -90,6 +90,59 @@ class AnalysisStore:
             session.commit()
         logger.debug(f"Stored ok snapshot for {analysis.pair} (bias={analysis.bias_score:+.2f})")
         self._prune_old(analysis.pair)
+
+    _SENTINEL_ALLOWED = ("stale_price", "failed")
+    _SENTINEL_REASON_MAX_LEN = 512
+
+    def add_sentinel(
+        self,
+        symbol: str,
+        status: str,
+        reason: str,
+        analyzed_at: "datetime | None" = None,
+    ) -> None:
+        """収集失敗を sentinel 行として保存。
+
+        Args:
+            status: 'stale_price' | 'failed' のみ。それ以外は ValueError。
+            reason: 失敗理由。512 文字を超える場合は truncate して
+                    ' ... [truncated]' を付与。
+            analyzed_at: 省略時 db_now()。テスト用に注入可能。
+
+        保存後 _prune_old(symbol) を呼び 48h 超の sentinel 行も消す
+        (失敗連続で sentinel が DB を膨張させないため)。
+        """
+        if status not in self._SENTINEL_ALLOWED:
+            raise ValueError(
+                f"sentinel status must be one of {self._SENTINEL_ALLOWED}, got {status!r}"
+            )
+        if len(reason) > self._SENTINEL_REASON_MAX_LEN:
+            reason = reason[: self._SENTINEL_REASON_MAX_LEN] + " ... [truncated]"
+
+        if analyzed_at is None:
+            analyzed_at = db_now()
+
+        with Session(self._engine) as session:
+            snap = _TechnicalSnapshot(
+                symbol=symbol,
+                analyzed_at=analyzed_at,
+                bias_score=0.0,
+                confidence=0.0,
+                direction_bias="neutral",
+                stop_loss=0.0,
+                take_profit=0.0,
+                entry_zone_low=0.0,
+                entry_zone_high=0.0,
+                risk_reward_ratio=0.0,
+                reasoning_summary=reason,
+                market_regime="unknown",
+                confidence_modifier=0.0,
+                collect_status=status,
+            )
+            session.add(snap)
+            session.commit()
+        logger.debug(f"Stored {status} sentinel for {symbol}: {reason[:80]}")
+        self._prune_old(symbol)
 
     def get_recent_snapshots(
         self, symbol: str, hours: int = 8
