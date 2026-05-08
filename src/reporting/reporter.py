@@ -257,15 +257,39 @@ def print_news_summary(entries_by_category: dict[str, list[dict]], lookback_hour
     console.print()
 
 
-def print_tech_summary(
-    snapshots_by_symbol: dict[str, list],
-    display_names: dict[str, str],
-    lookback_hours: int,
-) -> None:
-    """銘柄別最新テクニカルスナップショットを表示する（保存済みデータのみ）。"""
+def _format_age(snap_at, now):
+    """analyzed_at から age を 'Xm ago' / 'Xh ago' / 'Xd ago' で返す。"""
+    delta = now - snap_at
+    sec = int(delta.total_seconds())
+    if sec < 60:
+        return f"{sec}s ago"
+    minutes = sec // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes / 60
+    if hours < 24:
+        return f"{hours:.1f}h ago"
+    days = hours / 24
+    return f"{days:.1f}d ago"
+
+
+_STATUS_GLYPH = {
+    "ok":          "[green]✓ ok[/green]",
+    "stale_price": "[yellow]⚠ stale_price[/yellow]",
+    "failed":      "[red]✗ failed[/red]",
+}
+
+
+def print_tech_summary(rows: list) -> None:
+    """銘柄別の最新 collect 行 + 最新 ok 行を二段表示する。
+
+    Args:
+        rows: (instrument, latest_collect_row | None, latest_ok_row | None) のリスト
+    """
     console.print()
     console.print(Rule(
-        f"[bold cyan]Technical Snapshots[/bold cyan]  [dim]直近 {lookback_hours}h[/dim]",
+        "[bold cyan]Technical Snapshots[/bold cyan]  "
+        "[dim](Latest collection attempt + last successful analysis)[/dim]",
         style="cyan",
     ))
 
@@ -277,54 +301,76 @@ def print_tech_summary(
         padding=(0, 1),
         expand=False,
     )
-    tbl.add_column("Pair",       width=10)
-    tbl.add_column("Analyzed",   width=22, style="dim")
-    tbl.add_column("Direction",  width=14)
-    tbl.add_column("Score",      width=7,  justify="right")
-    tbl.add_column("Conf",       width=5,  justify="right")
-    tbl.add_column("Entry Zone", width=22, justify="right")
-    tbl.add_column("SL",         width=10, justify="right")
-    tbl.add_column("TP",         width=10, justify="right")
-    tbl.add_column("RR",         width=5,  justify="right")
-    tbl.add_column("Summary",    min_width=25, style="dim")
+    tbl.add_column("Pair",     width=10)
+    tbl.add_column("Mode",     width=6)
+    tbl.add_column("Collect",  width=18)
+    tbl.add_column("Status",   width=22)
+    tbl.add_column("Last ok",  width=18)
+    tbl.add_column("Bias",     width=7,  justify="right")
+    tbl.add_column("Conf",     width=5,  justify="right")
+    tbl.add_column("Dir",      width=10)
+    tbl.add_column("Reason / Notes", min_width=30, style="dim")
 
-    any_data = False
-    for symbol, snaps in snapshots_by_symbol.items():
-        name = display_names.get(symbol, symbol)
-        if not snaps:
-            tbl.add_row(name, "[dim]データなし[/dim]", *(["-"] * 8))
+    now = db_now()
+    reasons_below = []  # 非 ok の reason を表の下に列挙
+
+    for inst, latest_collect, latest_ok in rows:
+        name = inst.display_name
+        mode = getattr(inst, "mode", "—")
+
+        if latest_collect is None and latest_ok is None:
+            tbl.add_row(name, mode, "[dim](no data)[/dim]", "—", "—", "—", "—", "—", "")
             continue
-        any_data = True
-        s = snaps[0]
-        analyzed = s.analyzed_at.strftime("%m-%d %H:%M") if s.analyzed_at else "-"
-        if s.analyzed_at and s.analyzed_at < db_now() - timedelta(hours=lookback_hours):
-            analyzed = f"[yellow]{analyzed} stale[/yellow]"
-        rr_str   = f"{s.risk_reward_ratio:.1f}" if s.risk_reward_ratio else "-"
-        entry_str = (
-            f"{s.entry_zone_low:.5f}–{s.entry_zone_high:.5f}"
-            if s.entry_zone_low and s.entry_zone_high else "-"
-        )
-        sl_str = f"{s.stop_loss:.5f}"  if s.stop_loss  else "-"
-        tp_str = f"{s.take_profit:.5f}" if s.take_profit else "-"
-        summary = (s.reasoning_summary or "")[:40]
+
+        # Collect 列
+        if latest_collect is not None:
+            collect_at = latest_collect.analyzed_at.strftime("%m-%d %H:%M")
+            collect_age = _format_age(latest_collect.analyzed_at, now)
+            collect_str = f"{collect_at} ({collect_age})"
+            status_str = _STATUS_GLYPH.get(
+                latest_collect.collect_status,
+                f"? {latest_collect.collect_status}",
+            )
+            if latest_collect.collect_status != "ok":
+                reasons_below.append(
+                    (name, latest_collect.collect_status, latest_collect.reasoning_summary or "")
+                )
+        else:
+            collect_str = "[dim](no data)[/dim]"
+            status_str = "—"
+
+        # Last ok / Bias / Conf / Dir
+        if latest_ok is not None:
+            ok_at = latest_ok.analyzed_at.strftime("%m-%d %H:%M")
+            ok_age = _format_age(latest_ok.analyzed_at, now)
+            ok_str = f"{ok_at} ({ok_age})"
+            bias_str = f"{latest_ok.bias_score:+.2f}" if latest_ok.bias_score is not None else "—"
+            conf_str = f"{latest_ok.confidence:.2f}" if latest_ok.confidence is not None else "—"
+            dir_str = latest_ok.direction_bias or "—"
+        else:
+            ok_str = "[dim](no recent ok)[/dim]"
+            bias_str = "—"
+            conf_str = "—"
+            dir_str = "—"
+
+        notes = ""
+        if latest_collect is not None and latest_collect.collect_status != "ok":
+            notes = (latest_collect.reasoning_summary or "")[:60]
+
         tbl.add_row(
-            name,
-            analyzed,
-            _ichi_text(s.direction_bias or "neutral"),
-            _score_text(s.bias_score or 0.0),
-            f"{s.confidence:.2f}" if s.confidence else "-",
-            entry_str,
-            sl_str,
-            tp_str,
-            rr_str,
-            summary,
+            name, mode, collect_str, status_str, ok_str,
+            bias_str, conf_str, dir_str, notes,
         )
 
     console.print(tbl)
-    if not any_data:
-        console.print(
-            "[dim yellow]テクニカルデータがありません。"
-            "スケジューラーによる自動収集をお待ちください。[/dim yellow]"
-        )
+
+    if reasons_below:
+        console.print()
+        console.print("[dim]Status legend: ✓ ok = analysis succeeded | "
+                      "⚠ stale_price = price data too old | "
+                      "✗ failed = error during analysis[/dim]")
+        console.print("[dim]Reasons (non-ok):[/dim]")
+        for name, status, reason in reasons_below:
+            console.print(f"  [dim]{name} ({status}): {reason}[/dim]")
     console.print()
 

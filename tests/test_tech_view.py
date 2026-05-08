@@ -48,23 +48,28 @@ def test_run_tech_view_uses_latest_collect_row_even_outside_lookback(
 
     captured = {}
 
-    def _capture(snapshots_by_symbol, display_names, lookback_hours):
-        captured["snapshots_by_symbol"] = snapshots_by_symbol
-        captured["display_names"] = display_names
-        captured["lookback_hours"] = lookback_hours
+    def _capture(rows):
+        captured["rows"] = rows
 
     monkeypatch.setattr("src.views.print_tech_summary", _capture)
 
     run_tech_view(_config(lookback_hours=8), store)
 
-    snaps = captured["snapshots_by_symbol"]["USDJPY=X"]
-    assert len(snaps) == 1
-    assert snaps[0].symbol == "USDJPY=X"
-    assert captured["display_names"]["USDJPY=X"] == "USD/JPY"
+    rows = captured["rows"]
+    assert len(rows) == 1
+    inst, latest_collect, latest_ok = rows[0]
+    assert inst.symbol == "USDJPY=X"
+    assert latest_collect is not None
+    assert latest_collect.symbol == "USDJPY=X"
+    # latest_ok will be filled in Task 3.2
+    assert latest_ok is None
 
 
-def test_print_tech_summary_marks_snapshot_outside_lookback_as_stale(monkeypatch):
-    """lookback 外の表示フォールバックは stale と分かるように表示する。"""
+def test_print_tech_summary_shows_collect_status_and_latest_ok(monkeypatch):
+    """sentinel 最新 + 古い ok → Status は sentinel、Bias 列は ok 値。"""
+    import io
+    from datetime import timedelta
+    from rich.console import Console
     from src.reporting import reporter
 
     buf = io.StringIO()
@@ -74,24 +79,74 @@ def test_print_tech_summary_marks_snapshot_outside_lookback_as_stale(monkeypatch
         Console(file=buf, force_terminal=False, width=200),
     )
 
-    snap = SimpleNamespace(
-        symbol="USDJPY=X",
-        analyzed_at=db_now() - timedelta(hours=24),
-        risk_reward_ratio=2.0,
-        entry_zone_low=149.5,
-        entry_zone_high=150.5,
-        stop_loss=149.0,
-        take_profit=152.0,
-        reasoning_summary="old but latest",
+    inst = SimpleNamespace(symbol="USDJPY=X", display_name="USD/JPY", mode="trade")
+    latest_collect = SimpleNamespace(
+        analyzed_at=db_now() - timedelta(minutes=5),
+        collect_status="stale_price",
+        reasoning_summary="latest bar 7:00:00 ago",
+    )
+    latest_ok = SimpleNamespace(
+        analyzed_at=db_now() - timedelta(hours=4),
+        collect_status="ok",
         direction_bias="long",
-        bias_score=0.3,
-        confidence=0.7,
+        bias_score=0.12,
+        confidence=0.65,
     )
 
-    reporter.print_tech_summary(
-        {"USDJPY=X": [snap]},
-        {"USDJPY=X": "USD/JPY"},
-        lookback_hours=8,
+    reporter.print_tech_summary([(inst, latest_collect, latest_ok)])
+
+    output = buf.getvalue()
+    assert "USD/JPY" in output
+    assert "stale_price" in output
+    assert "long" in output
+    assert "0.12" in output
+
+
+def test_print_tech_summary_no_data(monkeypatch):
+    """latest_collect=None, latest_ok=None → '(no data)' 表示。"""
+    import io
+    from rich.console import Console
+    from src.reporting import reporter
+
+    buf = io.StringIO()
+    monkeypatch.setattr(
+        reporter,
+        "console",
+        Console(file=buf, force_terminal=False, width=200),
     )
 
-    assert "stale" in buf.getvalue()
+    inst = SimpleNamespace(symbol="USDJPY=X", display_name="USD/JPY", mode="trade")
+    reporter.print_tech_summary([(inst, None, None)])
+
+    output = buf.getvalue()
+    assert "USD/JPY" in output
+    assert "no data" in output
+
+
+def test_print_tech_summary_only_sentinel(monkeypatch):
+    """sentinel あり、ok 無し → Status 表示、Bias 列は '—'。"""
+    import io
+    from datetime import timedelta
+    from rich.console import Console
+    from src.reporting import reporter
+
+    buf = io.StringIO()
+    monkeypatch.setattr(
+        reporter,
+        "console",
+        Console(file=buf, force_terminal=False, width=200),
+    )
+
+    inst = SimpleNamespace(symbol="USDJPY=X", display_name="USD/JPY", mode="trade")
+    latest_collect = SimpleNamespace(
+        analyzed_at=db_now() - timedelta(minutes=10),
+        collect_status="failed",
+        reasoning_summary="llm_error: TimeoutError",
+    )
+
+    reporter.print_tech_summary([(inst, latest_collect, None)])
+
+    output = buf.getvalue()
+    assert "USD/JPY" in output
+    assert "failed" in output
+    assert "no recent ok" in output
