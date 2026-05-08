@@ -55,7 +55,7 @@ def tech() -> dict[str, Any]:
     all_instruments = state.config.watch_only_instruments + state.config.tradeable_instruments
     snapshots = []
     for inst in all_instruments:
-        snaps = state.analysis_store.get_recent_snapshots(
+        snaps = state.analysis_store.get_recent_ok_snapshots(
             inst.symbol, hours=state.config.rag.analysis_lookback_hours
         )
         if snaps:

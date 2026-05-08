@@ -50,7 +50,7 @@ def run_tech_view(config: AppConfig, analysis_store: AnalysisStore) -> None:
     all_instruments = config.watch_only_instruments + config.tradeable_instruments
     snapshots_by_symbol = {}
     for inst in all_instruments:
-        snaps = analysis_store.get_recent_snapshots(
+        snaps = analysis_store.get_recent_ok_snapshots(
             inst.symbol, hours=config.rag.analysis_lookback_hours
         )
         if not snaps:
