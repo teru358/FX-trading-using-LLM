@@ -64,3 +64,99 @@ def test_collect_one_stale_writes_stale_price_sentinel(tmp_path):
     assert latest.collect_status == "stale_price"
     assert "ago" in (latest.reasoning_summary or "")
     assert store.get_latest_ok_row("USDJPY=X") is None
+
+
+def _fresh_price_data(symbol: str = "USDJPY=X"):
+    """staleness check を通過する fresh PriceData。"""
+    bar_time = db_now() - timedelta(minutes=15)
+    df = pd.DataFrame(
+        {"Open": [150.0] * 100, "High": [150.5] * 100, "Low": [149.5] * 100,
+         "Close": [150.0] * 100, "Volume": [1000] * 100},
+        index=pd.date_range(end=bar_time, periods=100, freq="1h"),
+    )
+    return SimpleNamespace(symbol=symbol, df=df, current_price=150.0)
+
+
+def test_collect_one_indicator_error_writes_failed_sentinel(tmp_path, monkeypatch):
+    """compute_indicators が raise → failed sentinel + skip。"""
+    store = AnalysisStore(tmp_path / "test.db")
+
+    def _raise(*a, **kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "src.jobs.technical_collector._compute_summary_and_score", _raise,
+    )
+
+    asyncio.run(_collect_one(
+        inst=_inst(), config=_config(), store=MagicMock(),
+        price_store=MagicMock(), analysis_store=store,
+        llm=MagicMock(), price_data=_fresh_price_data(),
+    ))
+
+    latest = store.get_latest_collect_row("USDJPY=X")
+    assert latest is not None
+    assert latest.collect_status == "failed"
+    assert "indicator_error" in (latest.reasoning_summary or "")
+    assert "boom" in (latest.reasoning_summary or "")
+
+
+def test_collect_one_rag_context_error_writes_failed_sentinel(tmp_path, monkeypatch):
+    """_build_rag_contexts が raise → failed sentinel + skip。"""
+    store = AnalysisStore(tmp_path / "test.db")
+
+    monkeypatch.setattr(
+        "src.jobs.technical_collector._compute_summary_and_score",
+        lambda *a, **kw: (MagicMock(), MagicMock(), None),
+    )
+
+    def _raise(*a, **kw):
+        raise RuntimeError("rag down")
+
+    monkeypatch.setattr(
+        "src.jobs.technical_collector._build_rag_contexts", _raise,
+    )
+
+    asyncio.run(_collect_one(
+        inst=_inst(), config=_config(), store=MagicMock(),
+        price_store=MagicMock(), analysis_store=store,
+        llm=MagicMock(), price_data=_fresh_price_data(),
+    ))
+
+    latest = store.get_latest_collect_row("USDJPY=X")
+    assert latest is not None
+    assert latest.collect_status == "failed"
+    assert "rag_context_error" in (latest.reasoning_summary or "")
+
+
+def test_collect_one_llm_error_writes_failed_sentinel(tmp_path, monkeypatch):
+    """analyze_price_action が raise → failed sentinel + skip。"""
+    store = AnalysisStore(tmp_path / "test.db")
+
+    monkeypatch.setattr(
+        "src.jobs.technical_collector._compute_summary_and_score",
+        lambda *a, **kw: (MagicMock(), MagicMock(), None),
+    )
+    monkeypatch.setattr(
+        "src.jobs.technical_collector._build_rag_contexts",
+        lambda *a, **kw: ("", "", ""),
+    )
+
+    async def _raise_async(*a, **kw):
+        raise TimeoutError("llm timeout")
+
+    monkeypatch.setattr(
+        "src.jobs.technical_collector.analyze_price_action", _raise_async,
+    )
+
+    asyncio.run(_collect_one(
+        inst=_inst(), config=_config(), store=MagicMock(),
+        price_store=MagicMock(), analysis_store=store,
+        llm=MagicMock(), price_data=_fresh_price_data(),
+    ))
+
+    latest = store.get_latest_collect_row("USDJPY=X")
+    assert latest is not None
+    assert latest.collect_status == "failed"
+    assert "llm_error" in (latest.reasoning_summary or "")
+    assert "timeout" in (latest.reasoning_summary or "").lower()

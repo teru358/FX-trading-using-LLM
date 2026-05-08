@@ -262,13 +262,16 @@ async def _collect_one(
 ) -> None:
     """1銘柄のOHLCVを取得してテクニカル分析を実行し、スナップショットを保存する。
 
+    全経路で必ず 1 行 (ok / stale_price / failed) を analysis_store に書く。
+    上位は本関数を try/except する必要は無い (内部で全例外を sentinel 化)。
+
     price_data が渡された場合は内部フェッチをスキップする (prefetch キャッシュ経由)。
     """
     # Phase 1: OHLCV 取得 (prefetch されていなければここで取得)
     if price_data is None:
         price_data = _fetch_instrument_ohlcv(inst, config, price_store, price_provider)
 
-    # Phase 2: 鮮度チェック (古ければ sentinel を書いてスキップ)
+    # Phase 2: 鮮度チェック (古ければ stale_price sentinel + skip)
     staleness = _is_price_data_stale(price_data, max_staleness=_max_staleness_for(inst))
     if staleness is not None:
         analysis_store.add_sentinel(
@@ -281,28 +284,63 @@ async def _collect_one(
         )
         return
 
-    # Phase 3: インジケータ + tech_score (MTF/単一 TF)
-    summary, tech_score, mtf_score = _compute_summary_and_score(inst, price_data, config)
+    # Phase 3: インジケータ + tech_score (失敗 → failed sentinel)
+    try:
+        summary, tech_score, mtf_score = _compute_summary_and_score(inst, price_data, config)
+    except Exception as e:
+        analysis_store.add_sentinel(
+            symbol=inst.symbol, status="failed",
+            reason=f"indicator_error: {type(e).__name__}: {e}",
+        )
+        logger.error(
+            f"[COLLECT] {inst.display_name}: failed sentinel (indicator) — {e}",
+            exc_info=True,
+        )
+        return
 
-    # Phase 4: RAG コンテキスト構築
-    news_ctx, refl_ctx, prev_ctx = _build_rag_contexts(inst, store, analysis_store, config)
-    full_macro = _combine_macro(macro_context, correlation_context)
+    # Phase 4: RAG コンテキスト構築 (失敗 → failed sentinel)
+    try:
+        news_ctx, refl_ctx, prev_ctx = _build_rag_contexts(inst, store, analysis_store, config)
+        full_macro = _combine_macro(macro_context, correlation_context)
+    except Exception as e:
+        analysis_store.add_sentinel(
+            symbol=inst.symbol, status="failed",
+            reason=f"rag_context_error: {type(e).__name__}: {e}",
+        )
+        logger.error(
+            f"[COLLECT] {inst.display_name}: failed sentinel (rag context) — {e}",
+            exc_info=True,
+        )
+        return
 
-    # Phase 5: LLM 分析 + 保存
-    price_analysis = await analyze_price_action(
-        pair_cfg=inst,
-        price_data=price_data,
-        summary=summary,
-        llm=llm,
-        temperature=config.llm.price_analysis.temperature,
-        news_context=news_ctx,
-        reflection_context=refl_ctx,
-        previous_analysis=prev_ctx,
-        macro_context=full_macro,
-        user_notes_path=config.user_notes_path,
-        tech_score=tech_score,
-        mtf_score=mtf_score,
-    )
+    # Phase 5: LLM 分析 (失敗 → failed sentinel)
+    try:
+        price_analysis = await analyze_price_action(
+            pair_cfg=inst,
+            price_data=price_data,
+            summary=summary,
+            llm=llm,
+            temperature=config.llm.price_analysis.temperature,
+            news_context=news_ctx,
+            reflection_context=refl_ctx,
+            previous_analysis=prev_ctx,
+            macro_context=full_macro,
+            user_notes_path=config.user_notes_path,
+            tech_score=tech_score,
+            mtf_score=mtf_score,
+        )
+    except Exception as e:
+        analysis_store.add_sentinel(
+            symbol=inst.symbol, status="failed",
+            reason=f"llm_error: {type(e).__name__}: {e}",
+        )
+        logger.error(
+            f"[COLLECT] {inst.display_name}: failed sentinel (llm) — {e}",
+            exc_info=True,
+        )
+        return
+
+    # Phase 6: 成功 → ok 行保存
     analysis_store.add_snapshot(price_analysis)
     logger.info(
         f"[COLLECT] {inst.display_name}: technical snapshot stored | "
