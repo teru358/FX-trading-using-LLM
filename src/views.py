@@ -46,14 +46,17 @@ def run_news_view(config: AppConfig, store: VectorStore) -> None:
 
 
 def run_tech_view(config: AppConfig, analysis_store: AnalysisStore) -> None:
-    """保存済みテクニカルスナップショットを表示する（新規取得なし）。"""
+    """保存済みテクニカルスナップショットを表示する（新規取得なし）。
+
+    全 status の最新行 (latest_collect) と ok 限定の最新行 (latest_ok) を
+    並べて表示する。lookback 非依存なので休場中も最後の収集試行が見える。
+    """
     all_instruments = config.watch_only_instruments + config.tradeable_instruments
-    # Task 3.1 transitional: build (inst, latest_collect, None) rows for new signature.
-    # Task 3.2 will add latest_ok by calling get_latest_ok_row.
     rows = []
     for inst in all_instruments:
         latest_collect = analysis_store.get_latest_collect_row(inst.symbol)
-        rows.append((inst, latest_collect, None))
+        latest_ok = analysis_store.get_latest_ok_row(inst.symbol)
+        rows.append((inst, latest_collect, latest_ok))
     print_tech_summary(rows)
 
 

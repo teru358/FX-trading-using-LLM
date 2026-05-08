@@ -61,8 +61,8 @@ def test_run_tech_view_uses_latest_collect_row_even_outside_lookback(
     assert inst.symbol == "USDJPY=X"
     assert latest_collect is not None
     assert latest_collect.symbol == "USDJPY=X"
-    # latest_ok will be filled in Task 3.2
-    assert latest_ok is None
+    assert latest_ok is not None
+    assert latest_ok.collect_status == "ok"
 
 
 def test_print_tech_summary_shows_collect_status_and_latest_ok(monkeypatch):
@@ -158,3 +158,27 @@ def test_print_tech_summary_only_sentinel(monkeypatch):
     # Glyph assertion — must appear in BOTH the status cell and the legend.
     # When _STATUS_GLYPH is empty, only the legend has it (count == 1).
     assert output.count("✗") >= 2  # failed glyph in cell + legend
+
+
+def test_run_tech_view_separates_latest_collect_and_latest_ok(
+    tmp_path, monkeypatch,
+):
+    """sentinel 最新 + 古い ok → latest_collect は sentinel、latest_ok は古い ok。"""
+    from src.views import run_tech_view
+
+    store = AnalysisStore(tmp_path / "prices.db")
+    store.add_snapshot(_snapshot(hours_ago=4))           # 古い ok
+    store.add_sentinel(symbol="USDJPY=X", status="stale_price", reason="recent fail")
+
+    captured = {}
+    monkeypatch.setattr(
+        "src.views.print_tech_summary",
+        lambda rows: captured.setdefault("rows", rows),
+    )
+    run_tech_view(_config(lookback_hours=8), store)
+
+    rows = captured["rows"]
+    assert len(rows) == 1
+    _inst, latest_collect, latest_ok = rows[0]
+    assert latest_collect.collect_status == "stale_price"
+    assert latest_ok.collect_status == "ok"
