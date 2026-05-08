@@ -44,7 +44,7 @@ def test_run_tech_view_uses_latest_trade_snapshot_when_outside_lookback(
     from src.views import run_tech_view
 
     store = AnalysisStore(tmp_path / "prices.db")
-    store.upsert_snapshot(_snapshot(hours_ago=24))
+    store.add_snapshot(_snapshot(hours_ago=24))
 
     captured = {}
 

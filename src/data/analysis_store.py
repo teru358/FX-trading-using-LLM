@@ -64,8 +64,11 @@ class AnalysisStore:
                 except Exception:
                     pass  # カラムが既に存在
 
-    def upsert_snapshot(self, analysis: "PriceAnalysis") -> None:  # type: ignore[name-defined]
-        """PriceAnalysis をスナップショットとして保存する。"""
+    def add_snapshot(self, analysis: "PriceAnalysis") -> None:  # type: ignore[name-defined]
+        """成功した分析を ok status で保存する。
+
+        保存後 _prune_old(symbol) を呼び 48h 超の古い行を消す。
+        """
         with Session(self._engine) as session:
             snap = _TechnicalSnapshot(
                 symbol=analysis.pair,
@@ -81,10 +84,11 @@ class AnalysisStore:
                 reasoning_summary=analysis.reasoning_summary,
                 market_regime=analysis.market_regime,
                 confidence_modifier=analysis.confidence_modifier,
+                collect_status="ok",
             )
             session.add(snap)
             session.commit()
-        logger.debug(f"Stored technical snapshot for {analysis.pair} (bias={analysis.bias_score:+.2f})")
+        logger.debug(f"Stored ok snapshot for {analysis.pair} (bias={analysis.bias_score:+.2f})")
         self._prune_old(analysis.pair)
 
     def get_recent_snapshots(

@@ -47,7 +47,7 @@ def _snapshot(
 
 def test_aggregate_direction_threshold_long(store: AnalysisStore):
     """bias > 0.05 → direction = 'long'"""
-    store.upsert_snapshot(_snapshot(bias=0.06))
+    store.add_snapshot(_snapshot(bias=0.06))
     result = store.aggregate("USDJPY=X", hours=8)
     assert result is not None
     assert result.direction_bias == "long"
@@ -57,8 +57,8 @@ def test_get_latest_snapshot_returns_most_recent_even_outside_lookback(
     store: AnalysisStore,
 ):
     """表示用途では lookback 外でも保存済み最新 snapshot を取得できる。"""
-    store.upsert_snapshot(_snapshot(bias=0.1, hours_ago=24))
-    store.upsert_snapshot(_snapshot(bias=0.4, hours_ago=12))
+    store.add_snapshot(_snapshot(bias=0.1, hours_ago=24))
+    store.add_snapshot(_snapshot(bias=0.4, hours_ago=12))
 
     latest = store.get_latest_snapshot("USDJPY=X")
 
@@ -68,7 +68,7 @@ def test_get_latest_snapshot_returns_most_recent_even_outside_lookback(
 
 def test_aggregate_direction_threshold_short(store: AnalysisStore):
     """bias < -0.05 → direction = 'short'"""
-    store.upsert_snapshot(_snapshot(direction="short", bias=-0.06))
+    store.add_snapshot(_snapshot(direction="short", bias=-0.06))
     result = store.aggregate("USDJPY=X", hours=8)
     assert result is not None
     assert result.direction_bias == "short"
@@ -76,7 +76,7 @@ def test_aggregate_direction_threshold_short(store: AnalysisStore):
 
 def test_aggregate_direction_threshold_neutral(store: AnalysisStore):
     """-0.05 ≤ bias ≤ 0.05 → direction = 'neutral'"""
-    store.upsert_snapshot(_snapshot(direction="neutral", bias=0.04))
+    store.add_snapshot(_snapshot(direction="neutral", bias=0.04))
     result = store.aggregate("USDJPY=X", hours=8)
     assert result is not None
     assert result.direction_bias == "neutral"
@@ -84,7 +84,7 @@ def test_aggregate_direction_threshold_neutral(store: AnalysisStore):
 
 def test_aggregate_direction_boundary_exactly_0_05(store: AnalysisStore):
     """bias == 0.05 は neutral (> 0.05 が long の条件)。"""
-    store.upsert_snapshot(_snapshot(direction="neutral", bias=0.05))
+    store.add_snapshot(_snapshot(direction="neutral", bias=0.05))
     result = store.aggregate("USDJPY=X", hours=8)
     assert result is not None
     assert result.direction_bias == "neutral"
@@ -95,8 +95,8 @@ def test_aggregate_direction_boundary_exactly_0_05(store: AnalysisStore):
 
 def test_aggregate_recent_weighted_more(store: AnalysisStore):
     """最近のスナップショットがより重く加重される。"""
-    store.upsert_snapshot(_snapshot(bias=0.8, hours_ago=0))    # 最新 → weight ≈ 1.0
-    store.upsert_snapshot(_snapshot(bias=-0.2, hours_ago=4))   # 4h前 → weight ≈ 0.2
+    store.add_snapshot(_snapshot(bias=0.8, hours_ago=0))    # 最新 → weight ≈ 1.0
+    store.add_snapshot(_snapshot(bias=-0.2, hours_ago=4))   # 4h前 → weight ≈ 0.2
     result = store.aggregate("USDJPY=X", hours=8)
     assert result is not None
     # 単純平均なら 0.3 だが、時間加重で 0.8 寄りになる
@@ -109,9 +109,9 @@ def test_aggregate_recent_weighted_more(store: AnalysisStore):
 def test_aggregate_sltp_from_direction_matched_snapshot(store: AnalysisStore):
     """集約方向と一致するスナップショットの SL/TP が採用される。"""
     # 最新は short だが、集約方向が long になるケース
-    store.upsert_snapshot(_snapshot(direction="long", bias=0.6, hours_ago=0,
+    store.add_snapshot(_snapshot(direction="long", bias=0.6, hours_ago=0,
                                    sl=148.0, tp=153.0))
-    store.upsert_snapshot(_snapshot(direction="short", bias=-0.1, hours_ago=2,
+    store.add_snapshot(_snapshot(direction="short", bias=-0.1, hours_ago=2,
                                    sl=152.0, tp=147.0))
     result = store.aggregate("USDJPY=X", hours=8)
     assert result is not None
@@ -136,13 +136,13 @@ def test_aggregate_confidence_reduced_by_inconsistency(store: AnalysisStore):
     """方向がばらつくと confidence が下がる（一致時に比べて）。"""
     # 一致ケース: 2つとも long
     store_consistent = store
-    store_consistent.upsert_snapshot(_snapshot(direction="long", bias=0.3, confidence=0.8, hours_ago=0))
-    store_consistent.upsert_snapshot(_snapshot(direction="long", bias=0.3, confidence=0.8, hours_ago=1))
+    store_consistent.add_snapshot(_snapshot(direction="long", bias=0.3, confidence=0.8, hours_ago=0))
+    store_consistent.add_snapshot(_snapshot(direction="long", bias=0.3, confidence=0.8, hours_ago=1))
     consistent = store_consistent.aggregate("USDJPY=X", hours=8)
 
     # 不一致ケース用に別シンボルで
-    store.upsert_snapshot(_snapshot(symbol="EURUSD=X", direction="long", bias=0.3, confidence=0.8, hours_ago=0))
-    store.upsert_snapshot(_snapshot(symbol="EURUSD=X", direction="short", bias=-0.3, confidence=0.8, hours_ago=1))
+    store.add_snapshot(_snapshot(symbol="EURUSD=X", direction="long", bias=0.3, confidence=0.8, hours_ago=0))
+    store.add_snapshot(_snapshot(symbol="EURUSD=X", direction="short", bias=-0.3, confidence=0.8, hours_ago=1))
     inconsistent = store.aggregate("EURUSD=X", hours=8)
 
     assert consistent is not None
@@ -188,3 +188,21 @@ def test_migration_adds_collect_status_column_with_ok_default(tmp_path):
         )).scalar_one()
     verify_engine.dispose()
     assert result == "ok"
+
+
+def test_add_snapshot_writes_ok_status_row(store: AnalysisStore):
+    """add_snapshot は collect_status='ok' で INSERT する。"""
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+    from src.data.analysis_store import _TechnicalSnapshot
+
+    store.add_snapshot(_snapshot(bias=0.2))
+
+    with Session(store._engine) as session:
+        rows = list(session.execute(
+            select(_TechnicalSnapshot)
+            .where(_TechnicalSnapshot.symbol == "USDJPY=X")
+        ).scalars())
+    assert len(rows) == 1
+    assert rows[0].collect_status == "ok"
+    assert rows[0].bias_score == 0.2

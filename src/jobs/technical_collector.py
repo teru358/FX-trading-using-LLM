@@ -299,7 +299,7 @@ async def _collect_one(
         tech_score=tech_score,
         mtf_score=mtf_score,
     )
-    analysis_store.upsert_snapshot(price_analysis)
+    analysis_store.add_snapshot(price_analysis)
     logger.info(
         f"[COLLECT] {inst.display_name}: technical snapshot stored | "
         f"bias={price_analysis.bias_score:+.2f} conf={price_analysis.confidence:.2f} "
