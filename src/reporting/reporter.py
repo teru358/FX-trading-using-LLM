@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
+from typing import TYPE_CHECKING
 
 from rich.console import Console
 from rich.panel import Panel
@@ -12,6 +13,10 @@ from rich import box
 from src.signals.signal_combiner import TradeSignal
 from src.trading.position_manager import AccountState, Order
 from src.utils.clock import db_now
+
+if TYPE_CHECKING:
+    from src.config import InstrumentConfig
+    from src.data.analysis_store import _TechnicalSnapshot
 
 _CATEGORY_LABELS = {"fx": "FX Market", "global": "Global Economy", "japan": "Japan / JPY"}
 
@@ -50,19 +55,6 @@ def _direction_text(action: str, predicted_direction: str) -> Text:
 def _score_text(score: float) -> Text:
     t = Text(f"{score:+.3f}")
     t.stylize("green" if score > 0.1 else ("red" if score < -0.1 else "yellow"))
-    return t
-
-
-def _ichi_text(signal: str) -> Text:
-    styles = {
-        "strong_bullish": "bold green",
-        "bullish": "green",
-        "neutral": "dim white",
-        "bearish": "red",
-        "strong_bearish": "bold red",
-    }
-    t = Text(signal.replace("_", " "))
-    t.stylize(styles.get(signal, "white"))
     return t
 
 
@@ -280,7 +272,9 @@ _STATUS_GLYPH = {
 }
 
 
-def print_tech_summary(rows: list) -> None:
+def print_tech_summary(
+    rows: list[tuple["InstrumentConfig", "_TechnicalSnapshot | None", "_TechnicalSnapshot | None"]],
+) -> None:
     """銘柄別の最新 collect 行 + 最新 ok 行を二段表示する。
 
     Args:

@@ -100,6 +100,11 @@ def test_print_tech_summary_shows_collect_status_and_latest_ok(monkeypatch):
     assert "stale_price" in output
     assert "long" in output
     assert "0.12" in output
+    # Glyph assertion — must appear in BOTH the status cell and the legend.
+    # When _STATUS_GLYPH is intact, count >= 2 (cell + legend).
+    # When _STATUS_GLYPH is empty, the cell falls back to "? stale_price" and
+    # the glyph appears only once (in the legend).
+    assert output.count("⚠") >= 2  # stale_price glyph in cell + legend
 
 
 def test_print_tech_summary_no_data(monkeypatch):
@@ -150,3 +155,6 @@ def test_print_tech_summary_only_sentinel(monkeypatch):
     assert "USD/JPY" in output
     assert "failed" in output
     assert "no recent ok" in output
+    # Glyph assertion — must appear in BOTH the status cell and the legend.
+    # When _STATUS_GLYPH is empty, only the legend has it (count == 1).
+    assert output.count("✗") >= 2  # failed glyph in cell + legend
