@@ -426,8 +426,14 @@ async def collect_all_technical(
                     symbol=inst.symbol, status="failed",
                     reason=f"unexpected_raise: {type(e).__name__}: {e}",
                 )
-            except Exception:
-                pass  # sentinel 書き込みも失敗 → DB 不通等、諦める
+            except Exception as sentinel_err:
+                # sentinel 書き込みも失敗 → DB 不通等。ログだけ残して諦める
+                # (exc_info=False: 上の `_collect_one` raise 側で既に full trace 出ている)
+                logger.error(
+                    f"[COLLECT] {inst.display_name}: sentinel write also failed: "
+                    f"{type(sentinel_err).__name__}: {sentinel_err}",
+                    exc_info=False,
+                )
         if i < len(watch_only) - 1:
             await asyncio.sleep(delay)
 
@@ -495,8 +501,14 @@ async def collect_all_technical(
                     symbol=inst.symbol, status="failed",
                     reason=f"unexpected_raise: {type(e).__name__}: {e}",
                 )
-            except Exception:
-                pass
+            except Exception as sentinel_err:
+                # sentinel 書き込みも失敗 → DB 不通等。ログだけ残して諦める
+                # (exc_info=False: 上の `_collect_one` raise 側で既に full trace 出ている)
+                logger.error(
+                    f"[COLLECT] {inst.display_name}: sentinel write also failed: "
+                    f"{type(sentinel_err).__name__}: {sentinel_err}",
+                    exc_info=False,
+                )
         if i < len(tradeable) - 1:
             await asyncio.sleep(delay)
 
