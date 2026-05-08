@@ -160,3 +160,88 @@ def test_collect_one_llm_error_writes_failed_sentinel(tmp_path, monkeypatch):
     assert latest.collect_status == "failed"
     assert "llm_error" in (latest.reasoning_summary or "")
     assert "timeout" in (latest.reasoning_summary or "").lower()
+
+
+def test_collect_all_prefetch_failure_writes_failed_sentinel(tmp_path, monkeypatch):
+    """outer loop の prefetch 失敗 → failed sentinel を書く。"""
+    from src.jobs.technical_collector import collect_all_technical
+
+    store = AnalysisStore(tmp_path / "test.db")
+
+    config = MagicMock()
+    config.watch_only_instruments = []
+    config.tradeable_instruments = [_inst()]
+    config.news_collection.inter_pair_delay_seconds = 0.0
+    config.economic_calendar.enabled = False
+    config.paper_provider = "twelvedata"
+
+    monkeypatch.setattr(
+        "src.jobs.technical_collector.is_market_open",
+        lambda *a, **kw: True,
+    )
+    monkeypatch.setattr(
+        "src.jobs.technical_collector.create_llm_client",
+        lambda *a, **kw: MagicMock(model_name="test"),
+    )
+
+    def _fetch_fail(*a, **kw):
+        raise ConnectionError("bridge down")
+
+    monkeypatch.setattr(
+        "src.jobs.technical_collector._fetch_instrument_ohlcv", _fetch_fail,
+    )
+
+    asyncio.run(collect_all_technical(
+        config=config, store=MagicMock(), price_store=MagicMock(),
+        analysis_store=store, force=True,
+    ))
+
+    latest = store.get_latest_collect_row("USDJPY=X")
+    assert latest is not None
+    assert latest.collect_status == "failed"
+    assert "prefetch_failed" in (latest.reasoning_summary or "")
+    assert "ConnectionError" in (latest.reasoning_summary or "")
+
+
+def test_collect_all_unexpected_raise_in_collect_one_writes_sentinel(tmp_path, monkeypatch):
+    """_collect_one が想定外で raise しても outer loop が sentinel を書く保険。"""
+    from src.jobs.technical_collector import collect_all_technical
+
+    store = AnalysisStore(tmp_path / "test.db")
+
+    config = MagicMock()
+    config.watch_only_instruments = []
+    config.tradeable_instruments = [_inst()]
+    config.news_collection.inter_pair_delay_seconds = 0.0
+    config.economic_calendar.enabled = False
+    config.paper_provider = "twelvedata"
+
+    monkeypatch.setattr(
+        "src.jobs.technical_collector.is_market_open",
+        lambda *a, **kw: True,
+    )
+    monkeypatch.setattr(
+        "src.jobs.technical_collector.create_llm_client",
+        lambda *a, **kw: MagicMock(model_name="test"),
+    )
+    monkeypatch.setattr(
+        "src.jobs.technical_collector._fetch_instrument_ohlcv",
+        lambda *a, **kw: _fresh_price_data(),
+    )
+
+    async def _raise_unexpected(*a, **kw):
+        raise SystemError("totally unexpected")
+
+    monkeypatch.setattr(
+        "src.jobs.technical_collector._collect_one", _raise_unexpected,
+    )
+
+    asyncio.run(collect_all_technical(
+        config=config, store=MagicMock(), price_store=MagicMock(),
+        analysis_store=store, force=True,
+    ))
+
+    latest = store.get_latest_collect_row("USDJPY=X")
+    assert latest is not None
+    assert latest.collect_status == "failed"
+    assert "unexpected_raise" in (latest.reasoning_summary or "")

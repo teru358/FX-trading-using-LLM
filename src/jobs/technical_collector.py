@@ -377,12 +377,14 @@ async def collect_all_technical(
     # 各 phase からは prices[symbol] を参照して重複フェッチを避ける。
     all_instruments = list(watch_only) + list(tradeable)
     prices: dict[str, "PriceData"] = {}
+    prefetch_errors: dict[str, str] = {}
     for inst in all_instruments:
         try:
             prices[inst.symbol] = _fetch_instrument_ohlcv(
                 inst, config, price_store, price_provider,
             )
         except Exception as e:
+            prefetch_errors[inst.symbol] = f"{type(e).__name__}: {e}"
             logger.warning(
                 f"[PREFETCH] {inst.display_name}: OHLCV fetch failed: {e}"
             )
@@ -396,7 +398,14 @@ async def collect_all_technical(
     for i, inst in enumerate(watch_only):
         pd_cached = prices.get(inst.symbol)
         if pd_cached is None:
-            logger.warning(f"[COLLECT] {inst.display_name}: skipped (no cached price)")
+            err = prefetch_errors.get(inst.symbol, "no cached price (unknown reason)")
+            analysis_store.add_sentinel(
+                symbol=inst.symbol, status="failed",
+                reason=f"prefetch_failed: {err}",
+            )
+            logger.warning(
+                f"[COLLECT] {inst.display_name}: failed sentinel (prefetch)"
+            )
             if i < len(watch_only) - 1:
                 await asyncio.sleep(delay)
             continue
@@ -407,7 +416,18 @@ async def collect_all_technical(
                 price_provider=price_provider, price_data=pd_cached,
             )
         except Exception as e:
-            logger.error(f"[COLLECT] {inst.display_name}: technical analysis failed: {e}", exc_info=True)
+            # _collect_one 内部で全例外捕捉済みのはず — ここに来る場合は想定外
+            logger.error(
+                f"[COLLECT] {inst.display_name}: unexpected raise from _collect_one — {e}",
+                exc_info=True,
+            )
+            try:
+                analysis_store.add_sentinel(
+                    symbol=inst.symbol, status="failed",
+                    reason=f"unexpected_raise: {type(e).__name__}: {e}",
+                )
+            except Exception:
+                pass  # sentinel 書き込みも失敗 → DB 不通等、諦める
         if i < len(watch_only) - 1:
             await asyncio.sleep(delay)
 
@@ -446,7 +466,14 @@ async def collect_all_technical(
     for i, inst in enumerate(tradeable):
         pd_cached = prices.get(inst.symbol)
         if pd_cached is None:
-            logger.warning(f"[COLLECT] {inst.display_name}: skipped (no cached price)")
+            err = prefetch_errors.get(inst.symbol, "no cached price (unknown reason)")
+            analysis_store.add_sentinel(
+                symbol=inst.symbol, status="failed",
+                reason=f"prefetch_failed: {err}",
+            )
+            logger.warning(
+                f"[COLLECT] {inst.display_name}: failed sentinel (prefetch)"
+            )
             if i < len(tradeable) - 1:
                 await asyncio.sleep(delay)
             continue
@@ -459,7 +486,17 @@ async def collect_all_technical(
                 price_provider=price_provider, price_data=pd_cached,
             )
         except Exception as e:
-            logger.error(f"[COLLECT] {inst.display_name}: technical analysis failed: {e}", exc_info=True)
+            logger.error(
+                f"[COLLECT] {inst.display_name}: unexpected raise from _collect_one — {e}",
+                exc_info=True,
+            )
+            try:
+                analysis_store.add_sentinel(
+                    symbol=inst.symbol, status="failed",
+                    reason=f"unexpected_raise: {type(e).__name__}: {e}",
+                )
+            except Exception:
+                pass
         if i < len(tradeable) - 1:
             await asyncio.sleep(delay)
 
