@@ -163,12 +163,37 @@ class AnalysisStore:
             )
             return list(session.execute(stmt).scalars().all())
 
-    def get_latest_snapshot(self, symbol: str) -> _TechnicalSnapshot | None:
-        """保存済みの最新スナップショットを1件返す (表示用途)。"""
+    def get_latest_collect_row(self, symbol: str) -> _TechnicalSnapshot | None:
+        """全 status の最新 1 行 (lookback 非依存)。
+
+        run tech / /tech 表示の「Last collect / Status / Reason」用。
+        取引判定・LLM 入力からは絶対呼ばない (lookback 非依存ゆえ古いデータ
+        汚染リスクあり)。
+
+        _prune_old(48h) で 48h より古い行は INSERT 時に消えるが、休場中で
+        INSERT が走らない期間は古い行が保持される (e.g., 金曜の最終行が
+        日曜まで残る)。
+        """
         with Session(self._engine) as session:
             stmt = (
                 select(_TechnicalSnapshot)
                 .where(_TechnicalSnapshot.symbol == symbol)
+                .order_by(_TechnicalSnapshot.analyzed_at.desc())
+                .limit(1)
+            )
+            return session.execute(stmt).scalars().first()
+
+    def get_latest_ok_row(self, symbol: str) -> _TechnicalSnapshot | None:
+        """ok status の最新 1 行 (lookback 非依存)。
+
+        run tech / /tech 表示の「Last ok / Bias / Conf / Dir」用。
+        取引判定からは絶対呼ばない (lookback 非依存)。
+        """
+        with Session(self._engine) as session:
+            stmt = (
+                select(_TechnicalSnapshot)
+                .where(_TechnicalSnapshot.symbol == symbol)
+                .where(_TechnicalSnapshot.collect_status == "ok")
                 .order_by(_TechnicalSnapshot.analyzed_at.desc())
                 .limit(1)
             )

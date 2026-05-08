@@ -48,15 +48,12 @@ def run_news_view(config: AppConfig, store: VectorStore) -> None:
 def run_tech_view(config: AppConfig, analysis_store: AnalysisStore) -> None:
     """保存済みテクニカルスナップショットを表示する（新規取得なし）。"""
     all_instruments = config.watch_only_instruments + config.tradeable_instruments
-    snapshots_by_symbol = {}
+    snapshots_by_symbol: dict[str, list] = {}
     for inst in all_instruments:
-        snaps = analysis_store.get_recent_ok_snapshots(
-            inst.symbol, hours=config.rag.analysis_lookback_hours
-        )
-        if not snaps:
-            latest = analysis_store.get_latest_snapshot(inst.symbol)
-            snaps = [latest] if latest is not None else []
-        snapshots_by_symbol[inst.symbol] = snaps
+        # Task 1: 旧 print_tech_summary 互換のため、最新 1 行 (status 不問) を list-of-one で渡す。
+        # Task 3 で print_tech_summary シグネチャを変更し、latest_collect / latest_ok を分離する。
+        latest = analysis_store.get_latest_collect_row(inst.symbol)
+        snapshots_by_symbol[inst.symbol] = [latest] if latest is not None else []
     display_names = {inst.symbol: inst.display_name for inst in all_instruments}
     print_tech_summary(snapshots_by_symbol, display_names, config.rag.analysis_lookback_hours)
 

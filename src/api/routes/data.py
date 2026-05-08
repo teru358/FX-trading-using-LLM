@@ -55,11 +55,9 @@ def tech() -> dict[str, Any]:
     all_instruments = state.config.watch_only_instruments + state.config.tradeable_instruments
     snapshots = []
     for inst in all_instruments:
-        snaps = state.analysis_store.get_recent_ok_snapshots(
-            inst.symbol, hours=state.config.rag.analysis_lookback_hours
-        )
-        if snaps:
-            s = snaps[0]
+        # Task 1: 互換のため最新 1 行 (status 不問) を返す。Task 3 で latest_collect / latest_ok 二段に変更。
+        s = state.analysis_store.get_latest_collect_row(inst.symbol)
+        if s is not None:
             snapshots.append({
                 "symbol":            s.symbol,
                 "display_name":      inst.display_name,

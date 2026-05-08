@@ -53,19 +53,6 @@ def test_aggregate_direction_threshold_long(store: AnalysisStore):
     assert result.direction_bias == "long"
 
 
-def test_get_latest_snapshot_returns_most_recent_even_outside_lookback(
-    store: AnalysisStore,
-):
-    """表示用途では lookback 外でも保存済み最新 snapshot を取得できる。"""
-    store.add_snapshot(_snapshot(bias=0.1, hours_ago=24))
-    store.add_snapshot(_snapshot(bias=0.4, hours_ago=12))
-
-    latest = store.get_latest_snapshot("USDJPY=X")
-
-    assert latest is not None
-    assert latest.bias_score == 0.4
-
-
 def test_aggregate_direction_threshold_short(store: AnalysisStore):
     """bias < -0.05 → direction = 'short'"""
     store.add_snapshot(_snapshot(direction="short", bias=-0.06))
@@ -304,3 +291,36 @@ def test_aggregate_with_only_sentinel_returns_none(store: AnalysisStore):
     store.add_sentinel(symbol="USDJPY=X", status="failed", reason="y")
     result = store.aggregate("USDJPY=X", hours=8)
     assert result is None
+
+
+def test_get_latest_collect_row_returns_newest_any_status(store: AnalysisStore):
+    """sentinel + ok + 古い ok → 最新の sentinel が返る (status 制約なし、lookback なし)。"""
+    store.add_snapshot(_snapshot(bias=0.1, hours_ago=2))
+    store.add_snapshot(_snapshot(bias=0.2, hours_ago=1))
+    store.add_sentinel(symbol="USDJPY=X", status="stale_price", reason="latest")
+    latest = store.get_latest_collect_row("USDJPY=X")
+    assert latest is not None
+    assert latest.collect_status == "stale_price"
+
+
+def test_get_latest_collect_row_returns_none_when_empty(store: AnalysisStore):
+    """データなし → None。"""
+    latest = store.get_latest_collect_row("USDJPY=X")
+    assert latest is None
+
+
+def test_get_latest_ok_row_skips_sentinel(store: AnalysisStore):
+    """最新が sentinel + 古い ok → 古い ok が返る。"""
+    store.add_snapshot(_snapshot(bias=0.3, hours_ago=2))
+    store.add_sentinel(symbol="USDJPY=X", status="failed", reason="recent")
+    latest_ok = store.get_latest_ok_row("USDJPY=X")
+    assert latest_ok is not None
+    assert latest_ok.collect_status == "ok"
+    assert latest_ok.bias_score == 0.3
+
+
+def test_get_latest_ok_row_returns_none_when_only_sentinel(store: AnalysisStore):
+    """sentinel のみ → None。"""
+    store.add_sentinel(symbol="USDJPY=X", status="failed", reason="x")
+    latest_ok = store.get_latest_ok_row("USDJPY=X")
+    assert latest_ok is None
