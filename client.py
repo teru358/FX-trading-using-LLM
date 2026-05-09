@@ -274,18 +274,140 @@ def _cmd_health() -> None:
 
 
 def _cmd_status() -> None:
+    """サブシステム健全性 (Phase 3b 新 /status): LLM CB / price provider / snapshots / MT5 bridge。"""
     data = _get("/status")
     if data is None:
         return
-    pnl = data["pnl"]
-    pnl_pct = data["pnl_pct"]
+
+    # LLM circuit breakers
+    cbs = data.get("llm_circuit_breakers") or {}
+    if cbs:
+        cb_parts = []
+        for provider, st in cbs.items():
+            s = st.get("state", "?")
+            fails = st.get("consecutive_failures", 0)
+            color = "green" if s == "closed" else "red" if s == "open" else "yellow"
+            cb_parts.append(f"[{color}]{provider}={s}[/{color}] (fails={fails})")
+        _console.print(f"\nLLM CB: {'  '.join(cb_parts)}")
+    else:
+        _console.print("\nLLM CB: [dim](no data)[/dim]")
+
+    # price_provider
+    pp = data.get("price_provider")
+    if pp:
+        _console.print(f"Price provider: [cyan]{pp}[/cyan]")
+
+    # snapshots (per tradeable instrument)
+    snaps = data.get("snapshots") or []
+    if snaps:
+        tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1))
+        tbl.add_column("ペア")
+        tbl.add_column("最新ok分析")
+        tbl.add_column("経過 (min)", justify="right")
+        for s in snaps:
+            sym = s.get("symbol", "?")
+            if s.get("error"):
+                tbl.add_row(sym, f"[red]error: {s['error'][:40]}[/red]", "-")
+                continue
+            latest = s.get("latest_at")
+            age = s.get("age_minutes")
+            if latest and age is not None:
+                latest_short = latest[:16].replace("T", " ")
+                age_color = (
+                    "green" if age < 90
+                    else "yellow" if age < 240
+                    else "red"
+                )
+                tbl.add_row(sym, latest_short, f"[{age_color}]{age:.0f}[/{age_color}]")
+            else:
+                tbl.add_row(sym, "[dim](no recent ok)[/dim]", "-")
+        _console.print(tbl)
+
+    # MT5 bridge
+    mt5b = data.get("mt5_bridge") or {}
+    if not mt5b.get("configured"):
+        _console.print("[dim]MT5 bridge: 未設定[/dim]\n")
+        return
+    if not mt5b.get("reachable"):
+        _console.print(
+            f"[red]MT5 bridge unreachable: {mt5b.get('error', 'unknown')}[/red]\n"
+        )
+        return
+    mt5_conn = mt5b.get("mt5_connected")
+    soft = mt5b.get("soft_halted")
+    hard = mt5b.get("is_hard_halted")
+    accept = mt5b.get("accepts_new_orders")
+    dry = mt5b.get("dry_run")
+    flags = [
+        f"[{'green' if mt5_conn else 'red'}]mt5={'connected' if mt5_conn else 'disconnected'}[/]",
+        f"[{'red' if soft else 'green'}]soft_halt={'yes' if soft else 'no'}[/]",
+        f"[{'red' if hard else 'green'}]hard_halt={'yes' if hard else 'no'}[/]",
+        f"[{'green' if accept else 'red'}]accepts={'yes' if accept else 'no'}[/]",
+    ]
+    if dry:
+        flags.append("[yellow]DRY_RUN[/yellow]")
+    _console.print(f"MT5 bridge: {' | '.join(flags)}\n")
+
+
+def _cmd_account() -> None:
+    """残高 + 損益 + ポジション + MT5 実残高 + halt 状態 (新 /account)。"""
+    data = _get("/account")
+    if data is None:
+        return
+
+    internal = data.get("internal") or {}
+    pnl = internal.get("pnl", 0.0)
+    pnl_pct = internal.get("pnl_pct", 0.0)
+    drawdown = internal.get("drawdown_pct", 0.0)
     pnl_color = "green" if pnl >= 0 else "red"
+    dd_color = "yellow" if drawdown > 5 else "dim"
     _console.print(
-        f"\n残高: [bold]{data['balance']:,.2f}[/bold]  "
+        f"\n残高: [bold]{internal.get('balance', 0):,.2f}[/bold]  "
         f"[{pnl_color}]({pnl:+.2f} / {pnl_pct:+.2f}%)[/{pnl_color}]"
-        f"  取引回数: {data['total_trades']}  勝率: {data['win_rate']}%"
+        f"  [{dd_color}]DD={drawdown:.2f}%[/{dd_color}]"
+        f"  取引: {internal.get('total_trades', 0)}回  "
+        f"勝率: {internal.get('win_rate', 0)}%"
     )
-    positions = data.get("open_positions", [])
+
+    # halt 状態
+    halt = data.get("halt") or {}
+    if halt.get("soft_halted"):
+        trig = "auto" if halt.get("auto_triggered") else "manual"
+        reason = halt.get("reason", "")
+        since = halt.get("since", "?")
+        _console.print(
+            f"[red]⚠ SOFT HALT ({trig})[/red] "
+            f"[dim]since {since}: {reason}[/dim]"
+        )
+
+    # MT5 実残高 / 乖離 (live mode のみ)
+    mt5 = data.get("mt5")
+    if mt5 is not None:
+        bal = mt5.get("balance")
+        eq = mt5.get("equity")
+        fm = mt5.get("free_margin")
+        margin = mt5.get("margin")
+        parts = []
+        if bal is not None:
+            parts.append(f"balance=[cyan]{bal:,.2f}[/cyan]")
+        if eq is not None:
+            parts.append(f"equity=[cyan]{eq:,.2f}[/cyan]")
+        if fm is not None:
+            parts.append(f"free_margin=[cyan]{fm:,.2f}[/cyan]")
+        if margin is not None:
+            parts.append(f"margin=[cyan]{margin:,.2f}[/cyan]")
+        if parts:
+            _console.print(f"[dim]MT5:[/dim] {'  '.join(parts)}")
+    div = data.get("divergence")
+    if div is not None:
+        diff = div.get("balance_diff", 0.0)
+        diff_pct = div.get("balance_diff_pct")
+        color = "yellow" if abs(diff) > 100 else "dim"
+        pct_str = f"{diff_pct:+.2f}%" if diff_pct is not None else "N/A"
+        _console.print(f"[{color}]乖離: {diff:+.2f} ({pct_str})[/{color}]")
+
+    # ポジション
+    positions = internal.get("open_positions") or []
     if not positions:
         _console.print("[dim]オープンポジションなし[/dim]\n")
         return
@@ -827,7 +949,8 @@ def _start_log_poller(stop_event: threading.Event, interval: float = 3.0) -> Non
 
 _HELP = """\
 [bold cyan]コマンド一覧[/bold cyan]
-  [cyan]status[/cyan]  (s)          — 残高とオープンポジションを表示
+  [cyan]status[/cyan]  (s)          — サブシステム健全性 (LLM CB / price / snapshots / MT5 bridge)
+  [cyan]account[/cyan] (acc)        — 残高 / 損益 / ポジション / MT5 実残高 / halt 状態
   [cyan]run news[/cyan]             — 最新ニュースセンチメント
   [cyan]run tech[/cyan]             — 最新テクニカルスナップショット
   [cyan]run analyze[/cyan]          — 総合分析シグナル
@@ -864,6 +987,8 @@ def _dispatch(raw: str) -> bool:
         _console.print(_HELP)
     elif cmd in ("s", "status"):
         _cmd_status()
+    elif cmd in ("acc", "account"):
+        _cmd_account()
     elif cmd == "health":
         _cmd_health()
     elif cmd == "usage":
