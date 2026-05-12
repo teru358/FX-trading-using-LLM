@@ -16,6 +16,15 @@ from src.trading.mt5_bridge_broker import Mt5BridgeBrokerAdapter
 from src.trading.position_manager import Order, PositionManager
 
 
+@pytest.fixture(autouse=True)
+def _clear_modify_404_logged():
+    """Auto-clear Mt5BridgeBrokerAdapter._modify_404_logged before/after each test
+    to prevent class-level state leakage across tests."""
+    Mt5BridgeBrokerAdapter._modify_404_logged.clear()
+    yield
+    Mt5BridgeBrokerAdapter._modify_404_logged.clear()
+
+
 def _make_signal(action: str = "buy", pair: str = "USDJPY=X") -> TradeSignal:
     return TradeSignal(
         pair=pair, action=action, predicted_direction="bullish",
@@ -490,9 +499,6 @@ def test_update_remote_sl_404_logged_once_per_ticket(caplog) -> None:
     import logging
     from unittest.mock import patch, MagicMock
     caplog.set_level(logging.WARNING, logger="src.trading.mt5_bridge_broker")
-    # 別 ticket でテストするため、class-level set をクリア
-    from src.trading.mt5_bridge_broker import Mt5BridgeBrokerAdapter
-    Mt5BridgeBrokerAdapter._modify_404_logged.clear()
 
     adapter = _make_update_sl_adapter()
     resp = MagicMock()
