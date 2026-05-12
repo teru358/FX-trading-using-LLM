@@ -172,6 +172,7 @@ def test_price_monitor_emergency_close_uses_broker(tmp_path, monkeypatch):
     cfg.price_monitor.enable_emergency_close = True
     cfg.price_monitor.emergency_close_pct = 0.001
     cfg.price_monitor.trailing_stop_enabled = False
+    cfg.trading.remote_sl_sync_enabled = False
 
     pm = MagicMock()
     pos = MagicMock()
@@ -188,6 +189,7 @@ def test_price_monitor_emergency_close_uses_broker(tmp_path, monkeypatch):
     price_provider = MagicMock()
     cp = MagicMock()
     cp.price = 100.0  # 大幅 adverse move
+    cp.source = "mt5"  # live モードでは MT5 source が必要
     price_provider.get_current_price.return_value = cp
 
     fake_broker = MagicMock()
@@ -196,15 +198,11 @@ def test_price_monitor_emergency_close_uses_broker(tmp_path, monkeypatch):
         entry_price=150.0, realized_pnl=-1000.0, close_reason="emergency_stop",
     )
 
-    # build_close_broker は inline import なので元モジュールを patch
-    monkeypatch.setattr(
-        "src.trading.live_broker.build_close_broker", lambda c: fake_broker,
-    )
     monkeypatch.setattr(
         "src.jobs.price_monitor.is_market_open", lambda: True,
     )
 
-    asyncio.run(monitor_open_positions(cfg, pm, price_provider))
+    asyncio.run(monitor_open_positions(cfg, pm, price_provider, fake_broker))
     fake_broker.close_position.assert_called_once_with(
         pos.order_id, cp.price, "emergency_stop", pm,
     )
