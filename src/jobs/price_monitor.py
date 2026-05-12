@@ -23,6 +23,7 @@ from src.utils.clock import db_now
 
 if TYPE_CHECKING:
     from src.trading.bridge_health_gate import BridgeHealthGate
+    from src.trading.broker_adapter import BrokerAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,7 @@ def _apply_trailing_stop(
     current: float,
     cfg,
     position_mgr: PositionManager,
-    broker=None,
+    broker: "BrokerAdapter | None" = None,
     remote_sync_enabled: bool = False,
 ) -> tuple[bool, bool]:
     """target_sl を計算 → remote push (flag 時) → 成功時のみ内部 SL 更新。
@@ -128,7 +129,7 @@ async def monitor_open_positions(
     config: AppConfig,
     position_mgr: PositionManager,
     price_provider: PriceProvider,
-    broker,  # NEW: BrokerAdapter
+    broker: "BrokerAdapter",
 ) -> None:
     """オープンポジションを確認し、急変動があれば通知・緊急損切りを実行する。"""
     cfg = config.price_monitor
