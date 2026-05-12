@@ -114,10 +114,12 @@ class TradingConfig:
     position_review_enabled: bool = False
     reversal_confidence_min: float = 0.70    # Layer 1: 反転シグナルの最低信頼度
     reversal_score_threshold: float = 0.25   # Layer 1: 反転シグナルの最低スコア絶対値
+    reversal_min_holding_minutes: int = 240  # Layer 1: 反転発火の最低保有時間 (分)
     max_holding_days: int = 10               # Layer 2: 最大保有日数
     timeout_min_progress_pct: float = 0.30   # Layer 2: タイムアウト判定の最低進捗率
     profit_lock_min_progress_pct: float = 0.40  # Layer 3: 利益ロック発動の最低進捗率
     profit_lock_score_floor: float = 0.15    # Layer 3: この絶対値未満で利益ロック
+    remote_sl_sync_enabled: bool = False     # Layer 4: trailing SL を MT5 server-side に同期
     # RAG方向別スコア補正
     rag_adjustment_enabled: bool = True
     rag_adjustment_max: float = 0.15
