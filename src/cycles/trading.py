@@ -522,9 +522,19 @@ async def _phase_review_open_positions(
     signals: list,
     notifier,
     price_provider: PriceProvider | None,
+    broker,
+    *,
+    timeout_only: bool = False,
 ) -> list:
-    """Phase 4a: position_review (Layer 1-3) を実行し決済済オーダーを返す。"""
-    if not config.trading.position_review_enabled:
+    """Phase 4a: position_review (Layer 1-3) を実行し決済済オーダーを返す。
+
+    timeout_only=True: halt 中などで Layer 2 のみ評価する。
+                       position_review_enabled の gate を bypass する
+                       (timeout は安全網なので常に動く)。
+    """
+    # 通常 cycle: position_review_enabled=False なら skip
+    # halt timeout (timeout_only=True): フラグに関わらず常に評価
+    if not config.trading.position_review_enabled and not timeout_only:
         return []
 
     account_for_review = position_mgr.get_account_state()
@@ -543,8 +553,10 @@ async def _phase_review_open_positions(
         open_positions=account_for_review.open_positions,
         signals_by_pair=signals_by_pair,
         current_prices=review_prices,
+        timeout_only=timeout_only,
         reversal_confidence_min=config.trading.reversal_confidence_min,
         reversal_score_threshold=config.trading.reversal_score_threshold,
+        reversal_min_holding_minutes=config.trading.reversal_min_holding_minutes,
         max_holding_days=config.trading.max_holding_days,
         timeout_min_progress_pct=config.trading.timeout_min_progress_pct,
         profit_lock_min_progress_pct=config.trading.profit_lock_min_progress_pct,
@@ -556,7 +568,7 @@ async def _phase_review_open_positions(
         price = review_prices.get(decision.pair)
         if price is None:
             continue
-        # broker 経由で close (mt5_bridge live モードでは MT5 close → 内部 close)
+        # broker は引数で受け取った値を使う (latent bug 解消)
         closed_order = broker.close_position(
             decision.order_id, price, decision.close_reason, position_mgr,
         )
@@ -909,8 +921,17 @@ async def trading_cycle(
     from src.persistence import halt_state
     if halt_state.is_halted(config.state_dir):
         logger.info(
-            "[CYCLE] soft-halted — skipping new entry analysis "
-            "(existing positions still managed)"
+            "[CYCLE] soft-halted — running Layer 2 (timeout) only, "
+            "skipping new entry analysis"
+        )
+        timeout_closed = await _phase_review_open_positions(
+            config, position_mgr, signals=[],
+            notifier=notifier, price_provider=price_provider,
+            broker=broker, timeout_only=True,
+        )
+        await _finalize_closed_orders(
+            timeout_closed, config, store, embed_fn, llm_reflect,
+            adaptive_store, session_store, log_source="[REFLECT/TIMEOUT_HALT]",
         )
         return
 
@@ -922,7 +943,7 @@ async def trading_cycle(
 
     # Phase 4a: position_review (Layer 1-3) → 決済 → 振り返り
     reviewed_closed = await _phase_review_open_positions(
-        config, position_mgr, signals, notifier, price_provider,
+        config, position_mgr, signals, notifier, price_provider, broker,
     )
     await _finalize_closed_orders(
         reviewed_closed, config, store, embed_fn, llm_reflect,

@@ -122,6 +122,7 @@ async def exit_check_cycle(
         current_prices=current_prices,
         reversal_confidence_min=config.trading.reversal_confidence_min,
         reversal_score_threshold=config.trading.reversal_score_threshold,
+        reversal_min_holding_minutes=config.trading.reversal_min_holding_minutes,
         max_holding_days=config.trading.max_holding_days,
         timeout_min_progress_pct=config.trading.timeout_min_progress_pct,
         profit_lock_min_progress_pct=config.trading.profit_lock_min_progress_pct,
