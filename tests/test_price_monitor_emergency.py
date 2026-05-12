@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch, call
 import pytest
 
 from src.utils.clock import db_now
@@ -204,3 +204,64 @@ async def test_internal_sl_not_advanced_when_remote_fails() -> None:
 
     broker.update_remote_sl.assert_called_once()
     pm.update_stop_loss.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_remote_sl_alert_dedup_per_pair_per_hour() -> None:
+    """remote_sl push 失敗の Discord alert は (pair, hour) で 1 回のみ送信される。"""
+    from src.jobs.price_monitor import monitor_open_positions, _remote_sl_alert_dedup
+
+    # module-level dict をクリア (前テストの残留排除)
+    _remote_sl_alert_dedup.clear()
+
+    cfg = _make_config(mode="live")
+    cfg.trading.remote_sl_sync_enabled = True
+    pos = _make_position(direction="buy", entry=150.0, sl=149.0, tp=160.0)
+    pm = MagicMock()
+    pm.get_account_state.return_value.open_positions = [pos]
+    pp = MagicMock()
+    pp.get_current_price.return_value = _make_current_price(151.0, "mt5")  # half stage
+    broker = MagicMock()
+    broker.update_remote_sl.return_value = False  # 毎回 remote 失敗
+
+    with patch("src.jobs.price_monitor.is_market_open", return_value=True), \
+         patch("src.jobs.price_monitor.create_notifier") as mock_create:
+        notifier = AsyncMock()
+        mock_create.return_value = notifier
+        # 3 回連続で monitor を呼ぶ (= 同じ pair, 同じ hour)
+        await monitor_open_positions(cfg, pm, pp, broker)
+        await monitor_open_positions(cfg, pm, pp, broker)
+        await monitor_open_positions(cfg, pm, pp, broker)
+
+    # broker.update_remote_sl は 3 回呼ばれる (毎 cycle trailing 計算)
+    assert broker.update_remote_sl.call_count == 3
+    # しかし trailing_sync_failed alert は 1 回のみ (dedup)
+    trailing_alerts = [
+        call for call in notifier.notify_price_alert.call_args_list
+        if call.args[0].source == "trailing_sync_failed"
+    ]
+    assert len(trailing_alerts) == 1
+
+
+@pytest.mark.asyncio
+async def test_emergency_close_skipped_when_source_not_mt5_in_live_test() -> None:
+    """live_test モードでも source!=mt5 のとき emergency_close は skip される (live と同じ挙動)。"""
+    from src.jobs.price_monitor import monitor_open_positions
+
+    cfg = _make_config(mode="live_test")
+    pos = _make_position(direction="buy", entry=150.0)
+    pm = MagicMock()
+    pm.get_account_state.return_value.open_positions = [pos]
+    pp = MagicMock()
+    pp.get_current_price.return_value = _make_current_price(142.0, "yfinance")  # 5.3% adverse
+    broker = MagicMock()
+    broker.update_remote_sl.return_value = True
+
+    with patch("src.jobs.price_monitor.is_market_open", return_value=True), \
+         patch("src.jobs.price_monitor.create_notifier") as mock_create:
+        notifier = AsyncMock()
+        mock_create.return_value = notifier
+        await monitor_open_positions(cfg, pm, pp, broker)
+
+    broker.close_position.assert_not_called()
+    notifier.notify_price_alert.assert_called()
