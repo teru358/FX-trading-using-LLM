@@ -1,12 +1,14 @@
 """position_reviewer.review_open_positions() のテスト。"""
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 
 import pytest
 
 from src.signals.signal_combiner import TradeSignal
 from src.trading.position_reviewer import review_open_positions
+from src.utils.clock import db_now
 
 
 def _make_signal(pair: str, predicted_direction: str,
@@ -47,6 +49,7 @@ def _make_signal(pair: str, predicted_direction: str,
 
 def test_layer1_reversal_closes(buy_order):
     """Layer1: BUY ポジションに bearish シグナル + confidence ≥ 0.70 → 決済判断が返る。"""
+    buy_order.opened_at = db_now() - timedelta(minutes=250)  # NEW: min_holding を超える
     signal = _make_signal("USDJPY=X", "bearish", confidence=0.80, combined_score=-0.30)
     decisions = review_open_positions(
         open_positions=[buy_order],
@@ -62,6 +65,7 @@ def test_layer1_reversal_closes(buy_order):
 
 def test_layer1_low_score_skips(buy_order):
     """Layer1: confidence ≥ 0.70 でも |score| < reversal_score_threshold → 決済しない。"""
+    buy_order.opened_at = db_now() - timedelta(minutes=250)  # NEW: min_holding 超
     signal = _make_signal("USDJPY=X", "bearish", confidence=0.80, combined_score=-0.10)
     decisions = review_open_positions(
         open_positions=[buy_order],
@@ -75,6 +79,7 @@ def test_layer1_low_score_skips(buy_order):
 
 def test_layer1_low_confidence_skips(buy_order):
     """Layer1: confidence < 0.70 → 決済判断は返らない。"""
+    buy_order.opened_at = db_now() - timedelta(minutes=250)  # NEW: min_holding 超
     signal = _make_signal("USDJPY=X", "bearish", confidence=0.60, combined_score=-0.30)
     decisions = review_open_positions(
         open_positions=[buy_order],
@@ -141,3 +146,90 @@ def test_layer3_strong_signal_skips(buy_order):
         profit_lock_score_floor=0.15,
     )
     assert len(decisions) == 0
+
+
+# --- NEW TESTS ---
+
+
+def test_layer1_reversal_blocked_by_min_holding(buy_order):
+    """holding < 240min かつ反転シグナルでも reversal decision を返さない。"""
+    buy_order.opened_at = db_now() - timedelta(minutes=60)  # 1h < 240min
+    signal = _make_signal("USDJPY=X", "bearish", confidence=0.80, combined_score=-0.30)
+    decisions = review_open_positions(
+        open_positions=[buy_order],
+        signals_by_pair={"USDJPY=X": signal},
+        current_prices={"USDJPY=X": 150.5},
+        reversal_min_holding_minutes=240,
+    )
+    assert decisions == []
+
+
+def test_layer1_reversal_fires_after_min_holding(buy_order):
+    """holding >= 240min なら反転発火。"""
+    buy_order.opened_at = db_now() - timedelta(minutes=250)
+    signal = _make_signal("USDJPY=X", "bearish", confidence=0.80, combined_score=-0.30)
+    decisions = review_open_positions(
+        open_positions=[buy_order],
+        signals_by_pair={"USDJPY=X": signal},
+        current_prices={"USDJPY=X": 150.5},
+        reversal_min_holding_minutes=240,
+    )
+    assert len(decisions) == 1
+    assert decisions[0].close_reason == "reversal"
+
+
+def test_diagnostic_log_emits_layer_reasons_when_no_action(buy_order, caplog):
+    """発火しない position に DEBUG ログが出る (min_holding 未達)。l1=min_holding_not_met。"""
+    caplog.set_level(logging.DEBUG, logger="src.trading.position_reviewer")
+    buy_order.opened_at = db_now() - timedelta(minutes=120)  # 反転だが min_holding 未達
+    signal = _make_signal("USDJPY=X", "bearish", confidence=0.80, combined_score=-0.30)
+    review_open_positions(
+        open_positions=[buy_order],
+        signals_by_pair={"USDJPY=X": signal},
+        current_prices={"USDJPY=X": 150.5},
+        reversal_min_holding_minutes=240,
+    )
+    log_text = "\n".join(r.message for r in caplog.records)
+    assert "[REVIEW] USDJPY=X eval:" in log_text
+    assert "l1=min_holding_not_met" in log_text
+
+
+def test_diagnostic_log_l1_no_signal_when_signal_absent(buy_order, caplog):
+    """signal が無い場合は l1=no_signal / l3=no_signal。"""
+    caplog.set_level(logging.DEBUG, logger="src.trading.position_reviewer")
+    review_open_positions(
+        open_positions=[buy_order],
+        signals_by_pair={},
+        current_prices={"USDJPY=X": 150.5},
+    )
+    log_text = "\n".join(r.message for r in caplog.records)
+    assert "l1=no_signal" in log_text
+    assert "l3=no_signal" in log_text
+
+
+def test_timeout_only_skips_layer1_and_3(buy_order):
+    """timeout_only=True で反転シグナルでも decision を返さない。"""
+    buy_order.opened_at = db_now() - timedelta(minutes=300)  # holding 十分
+    signal = _make_signal("USDJPY=X", "bearish", confidence=0.80, combined_score=-0.30)
+    decisions = review_open_positions(
+        open_positions=[buy_order],
+        signals_by_pair={"USDJPY=X": signal},
+        current_prices={"USDJPY=X": 150.5},
+        timeout_only=True,
+    )
+    assert decisions == []
+
+
+def test_timeout_only_runs_layer2(buy_order):
+    """timeout_only=True でも Layer 2 (timeout) は発火する。"""
+    buy_order.opened_at = db_now() - timedelta(days=11)  # > max_holding_days=10
+    decisions = review_open_positions(
+        open_positions=[buy_order],
+        signals_by_pair={},
+        current_prices={"USDJPY=X": 150.1},  # progress 5% < 30%
+        timeout_only=True,
+        max_holding_days=10,
+        timeout_min_progress_pct=0.30,
+    )
+    assert len(decisions) == 1
+    assert decisions[0].close_reason == "timeout"
