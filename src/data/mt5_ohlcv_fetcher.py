@@ -79,6 +79,7 @@ class Mt5OhlcvFetcher:
         return CurrentPrice(
             price=float(df["Close"].iloc[-1]),
             timestamp=datetime.now(),
+            source="mt5",
         )
 
     def fetch(

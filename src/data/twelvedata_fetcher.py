@@ -122,6 +122,7 @@ class TwelveDataFetcher:
             fifty_two_week_high=float(fiftytwo["high"]) if fiftytwo.get("high") else None,
             fifty_two_week_low=float(fiftytwo["low"]) if fiftytwo.get("low") else None,
             is_market_open=data.get("is_market_open"),
+            source="twelvedata",
         )
 
     def fetch_ohlcv(

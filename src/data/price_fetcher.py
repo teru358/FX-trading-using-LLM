@@ -37,6 +37,7 @@ class CurrentPrice:
     fifty_two_week_high: float | None = None
     fifty_two_week_low: float | None = None
     is_market_open: bool | None = None
+    source: str = "yfinance"
 
     def __float__(self) -> float:
         return self.price
@@ -213,11 +214,11 @@ def fetch_current_price(symbol: str) -> CurrentPrice:
     try:
         price = ticker.fast_info["last_price"]
         if price and price > 0:
-            return CurrentPrice(price=float(price), timestamp=datetime.now())
+            return CurrentPrice(price=float(price), timestamp=datetime.now(), source="yfinance")
     except Exception:
         pass
     # Fallback: use latest close from short history
     df = ticker.history(period="2d", interval="1d")
     if df.empty:
         raise ValueError(f"Cannot fetch current price for {symbol}")
-    return CurrentPrice(price=float(df["Close"].iloc[-1]), timestamp=datetime.now())
+    return CurrentPrice(price=float(df["Close"].iloc[-1]), timestamp=datetime.now(), source="yfinance")
