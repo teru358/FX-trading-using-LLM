@@ -52,7 +52,7 @@ def test_mt5_fetcher_returns_source_mt5() -> None:
     from src.data.mt5_ohlcv_fetcher import Mt5OhlcvFetcher
 
     fetcher = Mt5OhlcvFetcher.__new__(Mt5OhlcvFetcher)
-    fetcher._bridge_url = "http://test"  # type: ignore[attr-defined]
+    fetcher._url = "http://test"  # type: ignore[attr-defined]
     fetcher._headers = {}                # type: ignore[attr-defined]
     fetcher._timeout = 2.0               # type: ignore[attr-defined]
     df = pd.DataFrame({"Close": [150.5]}, index=[pd.Timestamp("2026-05-12")])
