@@ -35,6 +35,9 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
     との reconciliation に置き換える。
     """
 
+    # クラス属性: 404 を 1 回だけログするための ticket set (process 内 dedup)
+    _modify_404_logged: set[int] = set()
+
     def __init__(
         self,
         bridge_url: str,
@@ -330,6 +333,55 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             )
             return None
         return position_mgr.close_position(order_id, close_price, reason)
+
+    def update_remote_sl(self, order_id: str, new_sl: float) -> bool:
+        """MT5 server-side SL を modify endpoint で更新する。
+
+        - mt5:<ticket> プレフィックスでない (paper UUID) → no-op True 返却
+        - body は {"sl": new_sl} のみ送信 (tp キーは含めない = TP 据置の明示)
+        - 404 (capability disabled): ticket あたり WARN 1 回のみ。False 返却
+        - 5xx / 接続エラー: 毎回 WARN ログ。False 返却
+        - 200: True 返却 + INFO ログ
+        """
+        if not order_id.startswith("mt5:"):
+            return True
+        try:
+            ticket = int(order_id.removeprefix("mt5:"))
+        except ValueError:
+            logger.warning(f"[MT5_BRIDGE] update_remote_sl: invalid order_id {order_id}")
+            return False
+        try:
+            resp = httpx.post(
+                f"{self._url}/positions/{ticket}/modify",
+                timeout=self._timeout,
+                headers=self._headers(),
+                json={"sl": new_sl},
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                if ticket not in self._modify_404_logged:
+                    logger.warning(
+                        f"[MT5_BRIDGE] update_remote_sl: 404 — capability disabled "
+                        f"on bridge for ticket={ticket} (subsequent 404s suppressed)"
+                    )
+                    self._modify_404_logged.add(ticket)
+                return False
+            logger.warning(
+                f"[MT5_BRIDGE] update_remote_sl: modify failed for ticket={ticket} "
+                f"sl={new_sl}: {e}"
+            )
+            return False
+        except httpx.HTTPError as e:
+            logger.warning(
+                f"[MT5_BRIDGE] update_remote_sl: modify failed for ticket={ticket} "
+                f"sl={new_sl}: {e}"
+            )
+            return False
+        logger.info(
+            f"[TRAIL_REMOTE] ticket={ticket} sl→{new_sl}"
+        )
+        return True
 
     def safe_close(self, ticket: int, max_retries: int = 3) -> bool:
         """close 指令 → 1秒待機 → ポジション確認 → 残ってれば retry。

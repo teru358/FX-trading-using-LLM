@@ -440,3 +440,87 @@ def test_trigger_hard_halt_succeeds_when_bridge_reachable(monkeypatch, tmp_path)
     # bridge POST 成功時は finance soft halt は立たない
     s = halt_state.read(tmp_path)
     assert s.soft_halted is False
+
+
+# ── update_remote_sl (Task 4) ──
+
+def _make_update_sl_adapter(bridge_url="http://test"):
+    from src.trading.mt5_bridge_broker import Mt5BridgeBrokerAdapter
+    adapter = Mt5BridgeBrokerAdapter.__new__(Mt5BridgeBrokerAdapter)
+    adapter._url = bridge_url
+    adapter._timeout = 2.0
+    adapter._api_key = ""
+    # update_remote_sl uses _url / _timeout / _api_key / _headers() / class-level
+    # _modify_404_logged. Above 3 attrs sufficient.
+    return adapter
+
+
+def test_update_remote_sl_success_returns_true() -> None:
+    from unittest.mock import patch, MagicMock
+    adapter = _make_update_sl_adapter()
+    with patch("src.trading.mt5_bridge_broker.httpx.post") as mock_post:
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.status_code = 200
+        mock_post.return_value = mock_resp
+        ok = adapter.update_remote_sl("mt5:12345", 1.2345)
+        assert ok is True
+        mock_post.assert_called_once()
+        call_args = mock_post.call_args
+        assert "/positions/12345/modify" in call_args.args[0]
+        # Body は sl のみ送信 (tp キーは含めない = TP 据置)
+        assert call_args.kwargs["json"] == {"sl": 1.2345}
+
+
+def test_update_remote_sl_http_error_returns_false(caplog) -> None:
+    import logging
+    from unittest.mock import patch
+    caplog.set_level(logging.WARNING, logger="src.trading.mt5_bridge_broker")
+    adapter = _make_update_sl_adapter()
+    with patch("src.trading.mt5_bridge_broker.httpx.post",
+               side_effect=httpx.HTTPError("connection refused")):
+        ok = adapter.update_remote_sl("mt5:12345", 1.2345)
+        assert ok is False
+        assert any("modify failed" in r.message.lower()
+                   for r in caplog.records)
+
+
+def test_update_remote_sl_404_logged_once_per_ticket(caplog) -> None:
+    """bridge 未実装の 404 は ticket あたり WARN 1 回のみ (de-duplicate)。"""
+    import logging
+    from unittest.mock import patch, MagicMock
+    caplog.set_level(logging.WARNING, logger="src.trading.mt5_bridge_broker")
+    # 別 ticket でテストするため、class-level set をクリア
+    from src.trading.mt5_bridge_broker import Mt5BridgeBrokerAdapter
+    Mt5BridgeBrokerAdapter._modify_404_logged.clear()
+
+    adapter = _make_update_sl_adapter()
+    resp = MagicMock()
+    resp.status_code = 404
+    err = httpx.HTTPStatusError("not found", request=MagicMock(), response=resp)
+    resp.raise_for_status.side_effect = err
+    with patch("src.trading.mt5_bridge_broker.httpx.post", return_value=resp):
+        adapter.update_remote_sl("mt5:99999", 1.2345)
+        adapter.update_remote_sl("mt5:99999", 1.2350)
+        adapter.update_remote_sl("mt5:99999", 1.2360)
+    warn_404 = [r for r in caplog.records if "capability disabled" in r.message.lower()
+                                          or "404" in r.message]
+    assert len(warn_404) == 1
+
+
+def test_update_remote_sl_non_mt5_order_id_noop() -> None:
+    """paper UUID 由来の order_id は HTTP 呼ばれず True を返す。"""
+    from unittest.mock import patch
+    adapter = _make_update_sl_adapter()
+    with patch("src.trading.mt5_bridge_broker.httpx.post") as mock_post:
+        ok = adapter.update_remote_sl("paper-abc-123", 1.2345)
+        assert ok is True
+        mock_post.assert_not_called()
+
+
+def test_default_update_remote_sl_returns_true() -> None:
+    """default 実装は no-op で True を返す (paper / shadow / live OANDA)。"""
+    from src.trading.paper_broker import PaperBrokerAdapter
+    adapter = PaperBrokerAdapter.__new__(PaperBrokerAdapter)
+    ok = adapter.update_remote_sl("any-id", 1.2345)
+    assert ok is True

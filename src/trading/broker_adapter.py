@@ -47,3 +47,18 @@ class BrokerAdapter(ABC):
         必ず override する。
         """
         return position_mgr.close_position(order_id, close_price, reason)
+
+    def update_remote_sl(self, order_id: str, new_sl: float) -> bool:
+        """remote broker 側の SL を更新する (Layer 4 trailing stop 同期用)。
+
+        paper / shadow / live (OANDA-未実装) は no-op で True を返す。
+        mt5_bridge は POST /positions/{ticket}/modify を呼ぶ。
+
+        Args:
+            order_id: 内部 order_id (mt5:<ticket> または paper UUID)
+            new_sl: 新しい SL 値
+
+        Returns:
+            成功 True / 失敗 False。失敗時は呼出側で WARN ログ + 次 cycle 再送 (idempotent)。
+        """
+        return True
