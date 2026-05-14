@@ -194,8 +194,9 @@ Discord Webhook。`notifier.enabled: true` で有効化。
 KEY="your_api_secret_key"
 HOST="http://localhost:8811"
 
-curl -H "X-API-Key: $KEY" $HOST/health
+# /status は旧 /health を統合 (プロセス + halt + サブシステム健全性)
 curl -H "X-API-Key: $KEY" $HOST/status
+curl -H "X-API-Key: $KEY" $HOST/account
 curl -H "X-API-Key: $KEY" $HOST/schedule
 curl -H "X-API-Key: $KEY" $HOST/news
 curl -H "X-API-Key: $KEY" $HOST/tech
@@ -204,6 +205,8 @@ curl -X POST -H "X-API-Key: $KEY" "$HOST/close/USDJPY%3DX"
 curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   -d '{"message":"ドル円の見通しは？"}' $HOST/ask
 ```
+
+> 注: MT5 bridge プロセス側の `/health` (`mt5_bridge/server.py`) は別 endpoint。`bridge_health_gate` 等から継続利用される。
 
 ## ディレクトリ構成
 

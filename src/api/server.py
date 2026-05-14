@@ -6,8 +6,8 @@
 このファイル自身は **ルーティング登録 + 起動エントリー** のみを担当する。
 個々のエンドポイント実装は ``src/api/routes/`` 配下に分割されている:
 
-- ``routes.health``  — /health (軽量), /status (システム健全性), /logs, /usage, /schedule
-- ``routes.account`` — /account (残高 + ポジション一覧、Phase 3b で /status から分離)
+- ``routes.health``  — /status (プロセス + halt + サブシステム健全性 統合), /logs, /usage, /schedule
+- ``routes.account`` — /account (残高 + ポジション一覧、halt は /status へ集約)
 - ``routes.admin``   — /admin/halt, /admin/resume (MT5 bridge へのプロキシ)
 - ``routes.data``    — /news, /tech, /analyze, /forecast, /feeds
 - ``routes.trading`` — /run/trade, /close/{pair}

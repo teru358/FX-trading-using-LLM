@@ -258,26 +258,44 @@ def _post(
 
 # ── コマンド実装 ─────────────────────────────────────────────────
 
-def _cmd_health() -> None:
-    data = _get("/health")
-    if data is None:
-        return
-    started = data.get("started_at", "N/A")
-    jobs = data.get("scheduler", {}).get("jobs_count", "N/A")
-    next_run = data.get("scheduler", {}).get("next_run", "N/A")
-    _console.print(
-        f"\n[green]● online[/green]  host: [cyan]{_conn.profile.name}[/cyan] "
-        f"({_conn.profile.url})"
-    )
-    _console.print(f"  起動: [cyan]{started}[/cyan]")
-    _console.print(f"  スケジューラ: {jobs} ジョブ  次回実行: [cyan]{next_run}[/cyan]\n")
-
-
 def _cmd_status() -> None:
-    """サブシステム健全性 (Phase 3b 新 /status): LLM CB / price provider / snapshots / MT5 bridge。"""
+    """運用状態レポート: プロセス + halt + サブシステム健全性の統合応答を表示。"""
     data = _get("/status")
     if data is None:
         return
+
+    # プロセス基本情報 (旧 /health から統合)
+    mode = data.get("mode") or "-"
+    live_broker = data.get("live_broker") or "null"
+    started = data.get("started_at", "N/A")
+    uptime_s = data.get("uptime_seconds")
+    uptime_str = "N/A"
+    if uptime_s is not None:
+        hours = int(uptime_s // 3600)
+        mins = int((uptime_s % 3600) // 60)
+        uptime_str = f"{hours}h {mins}m"
+    sched = data.get("scheduler") or {}
+    jobs = sched.get("jobs_count", "N/A")
+    next_run = sched.get("next_run", "N/A")
+    _console.print(
+        f"\n[green]● online[/green]  host: [cyan]{_conn.profile.name}[/cyan] "
+        f"({_conn.profile.url})  "
+        f"mode=[cyan]{mode}[/cyan]  live_broker=[cyan]{live_broker}[/cyan]  "
+        f"uptime=[cyan]{uptime_str}[/cyan]"
+    )
+    _console.print(f"  起動: [cyan]{started}[/cyan]")
+    _console.print(f"  スケジューラ: {jobs} ジョブ  次回実行: [cyan]{next_run}[/cyan]")
+
+    # halt 状態 (finance 側 halt.json)
+    halt = data.get("halt") or {}
+    if halt.get("soft_halted"):
+        trig = "auto" if halt.get("auto_triggered") else "manual"
+        reason = halt.get("reason", "")
+        since = halt.get("since", "?")
+        _console.print(
+            f"[red]⚠ SOFT HALT ({trig})[/red] "
+            f"[dim]since {since}: {reason}[/dim]"
+        )
 
     # LLM circuit breakers
     cbs = data.get("llm_circuit_breakers") or {}
@@ -288,9 +306,9 @@ def _cmd_status() -> None:
             fails = st.get("consecutive_failures", 0)
             color = "green" if s == "closed" else "red" if s == "open" else "yellow"
             cb_parts.append(f"[{color}]{provider}={s}[/{color}] (fails={fails})")
-        _console.print(f"\nLLM CB: {'  '.join(cb_parts)}")
+        _console.print(f"LLM CB: {'  '.join(cb_parts)}")
     else:
-        _console.print("\nLLM CB: [dim](no data)[/dim]")
+        _console.print("LLM CB: [dim](no data)[/dim]")
 
     # price_provider
     pp = data.get("price_provider")
@@ -350,7 +368,7 @@ def _cmd_status() -> None:
 
 
 def _cmd_account() -> None:
-    """残高 + 損益 + ポジション + MT5 実残高 + halt 状態 (新 /account)。"""
+    """残高 + 損益 + ポジション + MT5 実残高 (halt は ?status で確認)。"""
     data = _get("/account")
     if data is None:
         return
@@ -368,17 +386,6 @@ def _cmd_account() -> None:
         f"  取引: {internal.get('total_trades', 0)}回  "
         f"勝率: {internal.get('win_rate', 0)}%"
     )
-
-    # halt 状態
-    halt = data.get("halt") or {}
-    if halt.get("soft_halted"):
-        trig = "auto" if halt.get("auto_triggered") else "manual"
-        reason = halt.get("reason", "")
-        since = halt.get("since", "?")
-        _console.print(
-            f"[red]⚠ SOFT HALT ({trig})[/red] "
-            f"[dim]since {since}: {reason}[/dim]"
-        )
 
     # MT5 実残高 / 乖離 (live mode のみ)
     mt5 = data.get("mt5")
@@ -870,8 +877,8 @@ def _cmd_use(name: str) -> None:
     _console.print(
         f"[green]接続先切替: [cyan]{name}[/cyan] ({_conn.profile.url})[/green]"
     )
-    # 疎通確認
-    data = _get("/health")
+    # 疎通確認 (/status は bridge 不通でも 200 を返す)
+    data = _get("/status")
     if data is not None:
         _console.print(f"[dim]  デーモン起動: {data.get('started_at', 'N/A')}[/dim]")
 
@@ -949,8 +956,8 @@ def _start_log_poller(stop_event: threading.Event, interval: float = 3.0) -> Non
 
 _HELP = """\
 [bold cyan]コマンド一覧[/bold cyan]
-  [cyan]status[/cyan]  (s)          — サブシステム健全性 (LLM CB / price / snapshots / MT5 bridge)
-  [cyan]account[/cyan] (acc)        — 残高 / 損益 / ポジション / MT5 実残高 / halt 状態
+  [cyan]status[/cyan]  (s)          — 運用状態 (プロセス / halt / LLM CB / price / snapshots / MT5 bridge)
+  [cyan]account[/cyan] (acc)        — 残高 / 損益 / ポジション / MT5 実残高
   [cyan]run news[/cyan]             — 最新ニュースセンチメント
   [cyan]run tech[/cyan]             — 最新テクニカルスナップショット
   [cyan]run analyze[/cyan]          — 総合分析シグナル
@@ -960,7 +967,6 @@ _HELP = """\
   [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
   [cyan]logs[/cyan] (N)             — activity.log の末尾N行（デフォルト50）
   [cyan]feeds[/cyan]                — RSSフィード疎通確認
-  [cyan]health[/cyan]               — プロセス死活確認
   [cyan]usage[/cyan]                — LLM使用量 / CB状態 / usage_limit集計
   [cyan]schedule[/cyan]             — スケジュール (取引/予測/ニュース/技術/exit_check)
   [cyan]hosts[/cyan]                — ホストプロファイル一覧
@@ -989,8 +995,6 @@ def _dispatch(raw: str) -> bool:
         _cmd_status()
     elif cmd in ("acc", "account"):
         _cmd_account()
-    elif cmd == "health":
-        _cmd_health()
     elif cmd == "usage":
         _cmd_usage()
     elif cmd == "schedule":
@@ -1088,8 +1092,8 @@ def main() -> None:
         style="cyan",
     ))
 
-    # 接続確認
-    data = _get("/health")
+    # 接続確認 (/status は bridge 不通でも 200 を返す)
+    data = _get("/status")
     if data is None:
         sys.exit(1)
     started = data.get("started_at", "N/A")

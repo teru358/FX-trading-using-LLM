@@ -1,10 +1,9 @@
-"""Phase 3b で再編した /health, /status, /account の最小動作テスト。
+"""/status, /account の最小動作テスト (/health は /status へ統合済で削除)。
 
-フル統合は手動 (Task 17) で検証する。ここでは:
-- /health が軽量フィールドのみを返す
-- /status がシステム健全性キーを含む
-- /account が残高・ポジション形式を返す
-- 旧 /status のフォーマットは /account に移動済
+フル統合は手動で検証する。ここでは:
+- /health は GET 404 (削除済の固定確認)
+- /status がプロセス + halt + サブシステム健全性を一括で返す
+- /account が残高・ポジション形式を返す (halt は含まない)
 """
 from __future__ import annotations
 
@@ -67,47 +66,74 @@ def _client_get(path: str, **kw):
     return client.get(path, headers=headers, **kw)
 
 
-def test_health_lightweight(_state_setup):
-    """/health は軽量化され、サブシステム状態は含まない。"""
+def test_health_endpoint_removed(_state_setup):
+    """/health は /status に統合・削除済。GET は 404 を返す。"""
     resp = _client_get("/health")
-    assert resp.status_code == 200
-    data = resp.json()
-    assert "status" in data
-    assert "mode" in data
-    assert "live_broker" in data
-    assert "uptime_seconds" in data
-    assert "scheduler" in data
-    # 旧フィールドが残っていない (Phase 3b で /status に移動)
-    assert "llm_circuit_breakers" not in data
-    assert "snapshots" not in data
+    assert resp.status_code == 404
 
 
-def test_status_returns_subsystem_health(_state_setup):
-    """/status はシステム健全性キーを含む (新定義)。"""
+def test_status_returns_merged_payload(_state_setup):
+    """/status は旧 /health フィールド + halt + サブシステム健全性をまとめて返す。"""
     resp = _client_get("/status")
     assert resp.status_code == 200
     data = resp.json()
+    # プロセス基本情報 (旧 /health から統合)
+    assert data["status"] == "ok"
+    assert "mode" in data
+    assert "live_broker" in data
+    assert "started_at" in data
+    assert "uptime_seconds" in data
+    assert "now" in data
+    assert "scheduler" in data
+    # halt セクション (/account から移動)
+    assert "halt" in data
+    # サブシステム健全性
     assert "llm_circuit_breakers" in data
     assert "price_provider" in data
     assert "snapshots" in data
     assert "mt5_bridge" in data
     # MT5 bridge が未設定 → configured: False
     assert data["mt5_bridge"]["configured"] is False
-    # 旧フィールドは含まない (/account に移動)
+    # /account 専用フィールドは含まない
     assert "balance" not in data
     assert "open_positions" not in data
+    assert "internal" not in data
+
+
+def test_status_returns_200_when_bridge_unreachable(_state_setup, monkeypatch):
+    """bridge 不通でも /status は 200 を返し mt5_bridge.reachable=False で固定される。
+
+    起動時の接続確認・use コマンドが /status を叩いても失敗しない設計を担保する。
+    """
+    _state_setup.mode = "live"
+    _state_setup.providers.mt5 = MagicMock(
+        bridge_url="http://x:8812", api_key="",
+    )
+
+    def _raise(*a, **kw):
+        import httpx as _httpx
+        raise _httpx.ConnectError("bridge down")
+
+    monkeypatch.setattr("httpx.get", _raise)
+
+    resp = _client_get("/status")
+    assert resp.status_code == 200
+    mt5b = resp.json()["mt5_bridge"]
+    assert mt5b["configured"] is True
+    assert mt5b["reachable"] is False
+    assert "error" in mt5b
 
 
 def test_account_returns_internal_section(_state_setup):
-    """/account は internal / mt5 / divergence の 3 セクションを返す (Task 10)。
+    """/account は internal / mt5 / divergence の 3 セクションを返す。
 
-    paper mode では mt5 / divergence は null。
+    paper mode では mt5 / divergence は null。halt は /status へ集約済。
     """
     resp = _client_get("/account")
     assert resp.status_code == 200
     data = resp.json()
-    # Top-level shape: exactly 4 keys
-    assert set(data.keys()) == {"internal", "mt5", "divergence", "halt"}
+    # Top-level shape: exactly 3 keys (halt は /status へ移動)
+    assert set(data.keys()) == {"internal", "mt5", "divergence"}
 
     internal = data["internal"]
     # internal 必須フィールド
@@ -230,11 +256,20 @@ def test_account_mt5_null_when_bridge_returns_invalid_json(_state_setup, monkeyp
     assert data["divergence"] is None
 
 
-def test_account_includes_halt_section_when_not_halted(_state_setup, tmp_path):
+def test_account_does_not_include_halt_section(_state_setup, tmp_path):
+    """/account 応答に halt セクションは含まれない (/status へ集約済)。"""
+    _state_setup.state_dir = tmp_path
+    resp = _client_get("/account")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "halt" not in data
+
+
+def test_status_includes_halt_section_when_not_halted(_state_setup, tmp_path):
     """halt 状態でなくても halt セクションは常に dict として返る (null ではない)。"""
     _state_setup.state_dir = tmp_path  # halt.json 不在 → default 値
 
-    resp = _client_get("/account")
+    resp = _client_get("/status")
     assert resp.status_code == 200
     data = resp.json()
     assert "halt" in data
@@ -246,32 +281,31 @@ def test_account_includes_halt_section_when_not_halted(_state_setup, tmp_path):
     assert halt["triggered_by"] == ""
 
 
-def test_account_halt_section_when_auto_halted(_state_setup, tmp_path):
+def test_status_halt_section_when_auto_halted(_state_setup, tmp_path):
     """auto halt 中は halt セクションに soft_halted=true + 詳細が入る。"""
     from src.persistence import halt_state
 
     _state_setup.state_dir = tmp_path
-    halt_state.trigger_auto(tmp_path, "5 consecutive /health failures", "heartbeat")
+    halt_state.trigger_auto(tmp_path, "balance divergence >5% for 30min", "balance_diff")
 
-    resp = _client_get("/account")
+    resp = _client_get("/status")
     assert resp.status_code == 200
-    data = resp.json()
-    halt = data["halt"]
+    halt = resp.json()["halt"]
     assert halt["soft_halted"] is True
     assert halt["auto_triggered"] is True
-    assert halt["triggered_by"] == "heartbeat"
-    assert halt["reason"] == "5 consecutive /health failures"
+    assert halt["triggered_by"] == "balance_diff"
+    assert halt["reason"] == "balance divergence >5% for 30min"
     assert halt["since"]
 
 
-def test_account_halt_section_has_derived_fields_when_halted(_state_setup, tmp_path):
+def test_status_halt_derived_fields_when_halted(_state_setup, tmp_path):
     """halt 中に blocks_new_orders=True、allows_position_management=True が導出される。"""
     from src.persistence import halt_state
 
     _state_setup.state_dir = tmp_path
     halt_state.trigger_manual(tmp_path, reason="test")
 
-    resp = _client_get("/account")
+    resp = _client_get("/status")
     assert resp.status_code == 200
     halt = resp.json()["halt"]
     assert halt["soft_halted"] is True
@@ -279,11 +313,11 @@ def test_account_halt_section_has_derived_fields_when_halted(_state_setup, tmp_p
     assert halt["allows_position_management"] is True
 
 
-def test_account_halt_section_derived_fields_when_not_halted(_state_setup, tmp_path):
+def test_status_halt_derived_fields_when_not_halted(_state_setup, tmp_path):
     """halt 解除中も blocks_new_orders=False で形を一定に保つ。"""
     _state_setup.state_dir = tmp_path  # halt.json 不在
 
-    resp = _client_get("/account")
+    resp = _client_get("/status")
     halt = resp.json()["halt"]
     assert halt["soft_halted"] is False
     assert halt["blocks_new_orders"] is False

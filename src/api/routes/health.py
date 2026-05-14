@@ -1,12 +1,21 @@
-"""ヘルスチェック / システム状態系のエンドポイント (Phase 3b 整理後)。
+"""ヘルスチェック / システム状態系のエンドポイント。
 
-GET /health     — 軽量 liveness check (death + uptime + scheduler のみ)
-GET /status     — システム健全性 (LLM CB / price_provider / snapshots / MT5 bridge)
+GET /status     — 運用状態レポート (プロセス + halt + サブシステム健全性)
 GET /logs       — activity.log の末尾 N 行
 GET /usage      — LLM 使用量
 GET /schedule   — スケジュール情報
 
-旧 /status (残高 + ポジション) は /account に移動 (src/api/routes/account.py)。
+役割の境界:
+- /status は「Bot が今、新規発注を受け付ける状態か」を 1 ヶ所で確認するための応答。
+  プロセス基本情報 (mode/uptime/scheduler) と halt と全サブシステム健全性をまとめる。
+- /account は残高・ポジション (取引固有情報) のみ。halt は /status へ集約。
+
+注意:
+- `halt` は finance 側 (halt.json) の権威的な状態。
+- `mt5_bridge.soft_halted` / `is_hard_halted` / `accepts_new_orders` は bridge プロセス
+  側の状態で finance halt とは別物。
+- 旧 /health (軽量 liveness) は本 endpoint に統合され削除された。MT5 bridge プロセス
+  側の /health (mt5_bridge/server.py) は別 endpoint で継続使用される。
 """
 from __future__ import annotations
 
@@ -22,11 +31,14 @@ from src.utils.clock import db_now
 router = APIRouter()
 
 
-@router.get("/health", dependencies=[Depends(verify_api_key)])
-def health() -> dict[str, Any]:
-    """軽量 liveness check。死活 + 取引モード + scheduler 概況のみ。
+@router.get("/status", dependencies=[Depends(verify_api_key)])
+def status() -> dict[str, Any]:
+    """運用状態レポート (プロセス + halt + サブシステム健全性の統合応答)。
 
-    依存サブシステム状態は /status に分離 (Phase 3b 整理)。
+    旧 /health のフィールド (status/mode/live_broker/started_at/uptime/scheduler) と、
+    finance 側 halt (halt.json)、LLM CB、price_provider、snapshots、MT5 bridge 状態
+    を 1 ヶ所にまとめる。bridge 不通でも本 endpoint は 200 を返す (`mt5_bridge.reachable`
+    で判定)。
     """
     import schedule as sched_mod
 
@@ -41,28 +53,31 @@ def health() -> dict[str, Any]:
     mode = state.config.mode if state.config else None
     live_broker = state.config.live_broker if state.config else None
 
-    return {
-        "status":         "ok",
-        "mode":           mode,
-        "live_broker":    live_broker,
-        "started_at":     state.started_at.isoformat() if state.started_at else None,
-        "uptime_seconds": uptime_seconds,
-        "now":            now.isoformat(),
-        "scheduler": {
-            "jobs_count": len(jobs),
-            "next_run":   next_run.isoformat() if next_run else None,
-        },
-    }
-
-
-@router.get("/status", dependencies=[Depends(verify_api_key)])
-def status() -> dict[str, Any]:
-    """システム健全性レポート (LLM CB / price_provider / snapshots / MT5 bridge)。
-
-    Phase 3b で残高・ポジション (旧 /status) を /account に分離、ここではサブシステム
-    の健全性のみを返すように再定義。
-    """
-    now = db_now()
+    # finance 側 halt 状態 (halt.json — paper モードでは default)
+    halt_section: dict[str, Any]
+    if state.config is not None:
+        from src.persistence import halt_state
+        halt = halt_state.read(state.config.state_dir)
+        halt_section = {
+            "soft_halted":                halt.soft_halted,
+            "auto_triggered":             halt.auto_triggered,
+            "reason":                     halt.reason,
+            "since":                      halt.since,
+            "triggered_by":               halt.triggered_by,
+            # 導出: 「halt = 全停止」ではなく「新規発注停止、既存ポジション管理は継続」
+            "blocks_new_orders":          halt.soft_halted,
+            "allows_position_management": True,
+        }
+    else:
+        halt_section = {
+            "soft_halted":                False,
+            "auto_triggered":             False,
+            "reason":                     "",
+            "since":                      None,
+            "triggered_by":               "",
+            "blocks_new_orders":          False,
+            "allows_position_management": True,
+        }
 
     # LLM サーキットブレーカー状態
     cb_states: dict[str, dict[str, Any]] = {}
@@ -110,6 +125,17 @@ def status() -> dict[str, Any]:
                 snapshots_status.append({"symbol": inst.symbol, "error": str(e)})
 
     return {
+        "status":               "ok",
+        "mode":                 mode,
+        "live_broker":          live_broker,
+        "started_at":           state.started_at.isoformat() if state.started_at else None,
+        "uptime_seconds":       uptime_seconds,
+        "now":                  now.isoformat(),
+        "scheduler": {
+            "jobs_count": len(jobs),
+            "next_run":   next_run.isoformat() if next_run else None,
+        },
+        "halt":                 halt_section,
         "llm_circuit_breakers": cb_states,
         "price_provider":       price_provider_status,
         "snapshots":            snapshots_status,
@@ -188,8 +214,9 @@ def logs(lines: int = 100) -> dict[str, Any]:
 def usage() -> dict[str, Any]:
     """LLM プロバイダ別の使用量 / サーキットブレーカー詳細。
 
-    /health でも一部返すが、こちらはエラー履歴や usage_limit ヒット数など
-    より詳しい情報を返す。クライアント (`usage` コマンド) から参照する。
+    /status でも CB の state / consecutive_failures は返るが、こちらはエラー履歴や
+    usage_limit ヒット数などより詳しい情報を返す。クライアント (`usage` コマンド)
+    から参照する。
 
     claude_in_use=False のときは Claude 系プロバイダが設定されておらず
     usage_limit 追跡対象がないことを示す。クライアント側で非表示・警告切替。

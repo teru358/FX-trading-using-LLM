@@ -102,8 +102,8 @@ config/
 
 | メソッド | パス | 内容 |
 |---|---|---|
-| `GET` | `/health` | 死活確認 |
-| `GET` | `/status` | 残高・ポジション |
+| `GET` | `/status` | 運用状態 (プロセス + halt + サブシステム健全性) |
+| `GET` | `/account` | 残高・ポジション・MT5 実残高・乖離 |
 | `GET` | `/schedule` | スケジュール情報 |
 | `GET` | `/news` | ニュースセンチメント |
 | `GET` | `/tech` | テクニカルスナップショット |
@@ -111,6 +111,8 @@ config/
 | `POST` | `/close/{pair}` | ポジション決済 |
 | `POST` | `/run/trade` | 取引判定実行 |
 | `POST` | `/ask` | セマンティック検索で質問回答 |
+
+> `/health` は `/status` に統合され廃止。MT5 bridge プロセス側の `/health` (mt5_bridge) は別 endpoint で継続使用。
 
 ## 詳細ドキュメント
 

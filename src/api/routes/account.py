@@ -1,9 +1,12 @@
 """残高 + ポジション情報 + MT5 実残高 + 乖離を返す /account endpoint。
 
-Phase 3c (balance.json sync): internal (台帳) + mt5 (実残高) + divergence の 3 セクション。
+internal (台帳) + mt5 (実残高) + divergence の 3 セクション構成:
 - internal: PositionManager + balance.json 由来 (常に値あり)
 - mt5: live/live_test モードかつ bridge `/account` 取得成功時のみ非 null
 - divergence: 上記 2 つが揃ったときのみ非 null
+
+halt 状態は本 endpoint からは返さない。`/status` の `halt` セクションで確認する
+(/status 統合に伴い /account からは除去)。
 """
 from __future__ import annotations
 
@@ -109,24 +112,8 @@ def account() -> dict[str, Any]:
             except (httpx.HTTPError, ValueError):
                 pass  # 失敗時は mt5/divergence を null のまま
 
-    # halt 状態を読み込み (paper モードでは halt.json 不在 → default 値)
-    from src.persistence import halt_state
-    halt = halt_state.read(state.config.state_dir)
-    halt_section = {
-        "soft_halted":                halt.soft_halted,
-        "auto_triggered":             halt.auto_triggered,
-        "reason":                     halt.reason,
-        "since":                      halt.since,
-        "triggered_by":               halt.triggered_by,
-        # 導出フィールド: 永続化せず API 応答時に計算する。
-        # 「halt = 全停止」ではなく「新規発注停止、既存ポジション管理は継続」の明示。
-        "blocks_new_orders":          halt.soft_halted,
-        "allows_position_management": True,
-    }
-
     return {
         "internal":   internal,
         "mt5":        mt5_data,
         "divergence": divergence,
-        "halt":       halt_section,
     }
