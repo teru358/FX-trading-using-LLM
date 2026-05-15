@@ -25,6 +25,9 @@ logger = logging.getLogger(__name__)
 _PARTIAL_THRESHOLD_LOW = 0.01      # 1%: 端数 / 通常 partial の境界
 _PARTIAL_THRESHOLD_HIGH = 0.30     # 30%: 通常 / 異常 の境界
 
+# reconciliation skip 連続回数の警告閾値 (default: 6 回 = exit_check 毎時で約 1 時間)。
+_RECONCILIATION_STALE_THRESHOLD: int = 6
+
 
 class Mt5BridgeBrokerAdapter(BrokerAdapter):
     """mt5_bridge (Windows main PC) 経由で MT5 に発注するアダプター。
@@ -501,8 +504,36 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         """
         mt5_positions = self._fetch_mt5_positions()
         if mt5_positions is None:
-            logger.warning("[MT5_BRIDGE] reconciliation skipped — bridge unreachable")
+            # 永続カウンタを +1。broker インスタンスが exit_check_cycle 毎に
+            # 再生成されるため、state_dir 配下の JSON に保存する必要がある。
+            from src.persistence import reconciliation_state
+            new_state = reconciliation_state.increment_skip(self._state_dir)
+            logger.warning(
+                f"[MT5_BRIDGE] reconciliation skipped — bridge unreachable "
+                f"(consecutive={new_state.skipped_consecutive})"
+            )
+            if (
+                new_state.skipped_consecutive >= _RECONCILIATION_STALE_THRESHOLD
+                and not new_state.stale_warned
+            ):
+                logger.warning(
+                    f"[MT5_BRIDGE] reconciliation stale: "
+                    f"{new_state.skipped_consecutive} consecutive skips. "
+                    f"shadow observer state may have diverged from MT5. "
+                    f"verify bridge connectivity."
+                )
+                reconciliation_state.mark_stale_warned(self._state_dir)
             return []
+
+        # 到達 = bridge 応答あり → カウンタ + 警告フラグをリセット
+        from src.persistence import reconciliation_state
+        prev_state = reconciliation_state.read(self._state_dir)
+        if prev_state.skipped_consecutive > 0:
+            logger.info(
+                f"[MT5_BRIDGE] reconciliation recovered after "
+                f"{prev_state.skipped_consecutive} consecutive skips"
+            )
+            reconciliation_state.mark_recovered(self._state_dir)
 
         # MT5 side: bot magic / 他 magic で分離
         bot_mt5 = {

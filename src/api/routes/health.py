@@ -144,13 +144,26 @@ def status() -> dict[str, Any]:
 
 
 def _get_mt5_bridge_status() -> dict[str, Any]:
-    """bridge /health + /admin/status をプロキシして MT5 ブリッジ状態を返す (Phase 3b)。
+    """bridge /health + /admin/status をプロキシして MT5 ブリッジ状態を返す。
 
     タイムアウトは 2 秒、失敗時は reachable: false で error 内容を返す。
+    finance 側 reconciliation_state.json の skip 連続回数も同梱する
+    (bridge 不通時こそ確認したい指標なので、失敗 return にも必ず含める)。
     """
     cfg = state.config.providers.mt5 if state.config else None
     if cfg is None or not cfg.bridge_url:
         return {"configured": False}
+
+    # 永続カウンタ読み出し (broker インスタンス非依存)
+    skip_consecutive: int | None = None
+    if state.config is not None:
+        try:
+            from src.persistence import reconciliation_state
+            skip_consecutive = reconciliation_state.read(
+                state.config.state_dir,
+            ).skipped_consecutive
+        except Exception:  # noqa: BLE001
+            skip_consecutive = None
 
     try:
         import httpx
@@ -164,10 +177,12 @@ def _get_mt5_bridge_status() -> dict[str, Any]:
             f"{url}/admin/status", timeout=2.0, headers=admin_headers,
         )
     except Exception as e:  # noqa: BLE001
+        # 不通時こそ skip 連続回数を見せる
         return {
-            "configured": True,
-            "reachable":  False,
-            "error":      f"{type(e).__name__}: {e}",
+            "configured":                          True,
+            "reachable":                           False,
+            "error":                               f"{type(e).__name__}: {e}",
+            "reconciliation_skipped_consecutive":  skip_consecutive,
         }
 
     health_ok = h.is_success
@@ -175,13 +190,14 @@ def _get_mt5_bridge_status() -> dict[str, Any]:
     admin_body = admin.json() if admin.is_success else {}
 
     return {
-        "configured":         True,
-        "reachable":          health_ok,
-        "mt5_connected":      health_body.get("mt5_connected", False),
-        "dry_run":            admin_body.get("dry_run"),
-        "soft_halted":        admin_body.get("soft_halted"),
-        "is_hard_halted":     admin_body.get("is_hard_halted"),
-        "accepts_new_orders": admin_body.get("accepts_new_orders"),
+        "configured":                          True,
+        "reachable":                           health_ok,
+        "mt5_connected":                       health_body.get("mt5_connected", False),
+        "dry_run":                             admin_body.get("dry_run"),
+        "soft_halted":                         admin_body.get("soft_halted"),
+        "is_hard_halted":                      admin_body.get("is_hard_halted"),
+        "accepts_new_orders":                  admin_body.get("accepts_new_orders"),
+        "reconciliation_skipped_consecutive":  skip_consecutive,
     }
 
 

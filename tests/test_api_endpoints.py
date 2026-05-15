@@ -886,3 +886,84 @@ def test_tech_endpoint_returns_null_when_no_data(
     s = body["snapshots"][0]
     assert s["latest_collect"] is None
     assert s["latest_ok"] is None
+
+
+def test_status_includes_reconciliation_skipped_on_success(_state_setup, tmp_path, monkeypatch):
+    """bridge 応答成功時の /status に reconciliation_skipped_consecutive が含まれる。"""
+    from src.persistence import reconciliation_state
+
+    _state_setup.mode = "live"
+    _state_setup.state_dir = tmp_path
+    _state_setup.providers.mt5 = MagicMock(
+        bridge_url="http://x:8812", api_key="",
+    )
+
+    # 永続カウンタに値を仕込む
+    reconciliation_state.increment_skip(tmp_path)
+    reconciliation_state.increment_skip(tmp_path)
+    reconciliation_state.increment_skip(tmp_path)
+
+    class _OK:
+        is_success = True
+        def json(self): return {"mt5_connected": True}
+
+    monkeypatch.setattr("httpx.get", lambda *a, **kw: _OK())
+
+    resp = _client_get("/status")
+    assert resp.status_code == 200
+    mt5b = resp.json()["mt5_bridge"]
+    assert mt5b["reconciliation_skipped_consecutive"] == 3
+
+
+def test_status_includes_reconciliation_skipped_on_bridge_failure(_state_setup, tmp_path, monkeypatch):
+    """bridge 不通時の /status 早期 return にも reconciliation_skipped_consecutive が含まれる。
+
+    bridge 不通こそが診断したい状況なので、失敗 return でも必ず見える必要がある。
+    """
+    from src.persistence import reconciliation_state
+
+    _state_setup.mode = "live"
+    _state_setup.state_dir = tmp_path
+    _state_setup.providers.mt5 = MagicMock(
+        bridge_url="http://x:8812", api_key="",
+    )
+
+    # 永続カウンタに値を仕込む
+    for _ in range(7):
+        reconciliation_state.increment_skip(tmp_path)
+
+    def _raise(*a, **kw):
+        import httpx as _httpx
+        raise _httpx.ConnectError("bridge down")
+
+    monkeypatch.setattr("httpx.get", _raise)
+
+    resp = _client_get("/status")
+    assert resp.status_code == 200
+    mt5b = resp.json()["mt5_bridge"]
+    # 早期 return path
+    assert mt5b["configured"] is True
+    assert mt5b["reachable"] is False
+    assert "error" in mt5b
+    # 不通時にも skip 連続回数が見えること (本タスクの本丸)
+    assert mt5b["reconciliation_skipped_consecutive"] == 7
+
+
+def test_status_reconciliation_field_zero_when_counter_unused(_state_setup, tmp_path, monkeypatch):
+    """reconciliation.json 不在時は 0 を返す (null ではない)。"""
+    _state_setup.mode = "live"
+    _state_setup.state_dir = tmp_path
+    _state_setup.providers.mt5 = MagicMock(
+        bridge_url="http://x:8812", api_key="",
+    )
+
+    class _OK:
+        is_success = True
+        def json(self): return {"mt5_connected": True}
+
+    monkeypatch.setattr("httpx.get", lambda *a, **kw: _OK())
+
+    resp = _client_get("/status")
+    assert resp.status_code == 200
+    mt5b = resp.json()["mt5_bridge"]
+    assert mt5b["reconciliation_skipped_consecutive"] == 0
