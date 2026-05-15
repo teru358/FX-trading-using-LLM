@@ -14,6 +14,7 @@ from src.cycles._helpers import _get_price, _summarize_pair
 from src.data.analysis_store import AnalysisStore
 from src.data.price_provider import PriceProvider
 from src.notifications.notifier import OrderClosedEvent, create_notifier
+from src.persistence import halt_state
 from src.persistence.state_store import StateStore
 from src.rag.vector_store import VectorStore
 from src.trading.live_broker import create_broker
@@ -69,10 +70,24 @@ async def exit_check_cycle(
     notifier = create_notifier(config.notifier.enabled)
 
     # Phase 1: SL/TP 確認
+    # current_prices は既存 signature を維持 (dict[str, float])。
+    # current_price_sources は CurrentPrice.source ("mt5" / "twelvedata" /
+    # "yfinance") を引き継ぎ、Phase 4a の reviewer close ガード (Guard 1)
+    # で使う。
     current_prices: dict[str, float] = {}
+    current_price_sources: dict[str, str] = {}
     for pos in account.open_positions:
         try:
-            current_prices[pos.pair] = _get_price(pos.pair, price_provider)
+            if price_provider is not None:
+                cp = price_provider.get_current_price(pos.pair)
+                current_prices[pos.pair] = cp.price
+                current_price_sources[pos.pair] = cp.source
+            else:
+                # price_provider 未指定時は _get_price のフォールバック挙動を保持。
+                # source は不明だが live mode で None 経由は通常無いので
+                # 保守的に "unknown" として扱う。
+                current_prices[pos.pair] = _get_price(pos.pair, price_provider)
+                current_price_sources[pos.pair] = "unknown"
         except Exception as e:
             logger.warning(f"[EXIT] Could not fetch price for {pos.pair}: {e}")
 
@@ -129,10 +144,42 @@ async def exit_check_cycle(
         profit_lock_score_floor=config.trading.profit_lock_score_floor,
     )
 
+    # close 実行ガード:
+    #   Guard 1: live mode で MT5 価格が取れていない pair の close を skip
+    #            (TwelveData/yfinance fallback 価格で能動 close 判定すると
+    #             MT5 実勢と乖離する。Phase 3c 安全策)
+    #   Guard 2: soft halt 中は timeout 以外の close を skip
+    #            (最大保有期間超過 = timeout は halt と無関係に実行)
+    #
+    # reviewer の評価 (review_open_positions) と SL/TP reconciliation
+    # (broker.check_and_close_positions) は継続することに注意。close 実行
+    # フェーズだけを抑制する。
+    halted = halt_state.is_halted(config.state_dir)
+
     for decision in decisions:
         price = current_prices.get(decision.pair)
         if price is None:
             continue
+
+        # Guard 1: live mode で MT5 価格が取れていない
+        if config.mode == "live":
+            source = current_price_sources.get(decision.pair, "unknown")
+            if source != "mt5":
+                logger.warning(
+                    f"[EXIT] {decision.pair}: skip close "
+                    f"({decision.close_reason}) — price source={source!r}, "
+                    f"not mt5 (bridge unreachable?)"
+                )
+                continue
+
+        # Guard 2: soft halt 中の能動 close (timeout は除外)
+        if halted and decision.close_reason != "timeout":
+            logger.info(
+                f"[EXIT] {decision.pair}: skip close "
+                f"({decision.close_reason}) — finance halted"
+            )
+            continue
+
         # broker 経由で close (mt5_bridge live モードでは MT5 close → 内部 close、
         # paper モードでは内部 close のみ)。これにより MT5 側に残ポジが残って次
         # サイクル reconciliation で hard halt するのを防ぐ。
