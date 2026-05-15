@@ -148,9 +148,24 @@ class NotifierAdapter(ABC):
         elif event.close_reason == "emergency_stop":
             emoji = "⚠️"
             reason_label = "緊急損切り"
-        else:
+        elif event.close_reason == "profit_lock":
+            emoji = "🔐"
+            reason_label = "利益確定 (L3 profit_lock)"
+        elif event.close_reason == "reversal":
+            emoji = "🔁"
+            reason_label = "反転シグナル (L1 reversal)"
+        elif event.close_reason == "timeout":
+            emoji = "⏰"
+            reason_label = "保有期間超過 (L2 timeout)"
+        elif event.close_reason == "server_sl_tp":
+            emoji = "🔄"
+            reason_label = "MT5サーバー側決済 (reconciliation検知)"
+        elif event.close_reason == "manual":
             emoji = "🔒"
             reason_label = "手動決済"
+        else:
+            emoji = "❓"
+            reason_label = f"その他 ({event.close_reason})"
 
         pnl_sign = "+" if event.realized_pnl >= 0 else ""
         tag = _source_tag(event.source)
