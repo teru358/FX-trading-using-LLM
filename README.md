@@ -1,100 +1,131 @@
-# FX Paper Trading System
+# FX Trading Bot (LLM + RAG)
 
-ニュース RAG × LLM を組み合わせた FX スウィングトレード自動売買システム（ペーパートレード）。
+ニュース RAG × LLM × ルールベース指標を統合した FX スウィングトレード自動売買システム。ペーパー / シャドウ / 実弾の 3 モードを切替可能。実弾モードでは MT5 ブリッジ経由で外部ブローカーへ発注。
 
 ## 概要
 
 | 項目 | 内容 |
 |---|---|
-| 取引モード | ペーパートレード / OANDA本取引（スタブ） |
-| 取引スタイル | スウィング（3〜10日） |
-| 価格データ | yfinance / Twelve Data（リアルタイムFX） |
+| 取引モード | `paper` (シミュレーション) / `live_test` (paper primary + MT5 shadow record) / `live` (MT5 経由本取引) |
+| ライブブローカー | MT5 ターミナル (mt5_bridge 経由) |
+| 取引スタイル | スウィング (3〜10 日想定) |
+| 価格データ | MT5 ティック (live) / Twelve Data (リアルタイム) / yfinance (フォールバック) |
 | ニュース | RSS / Feedly API |
-| 分析エンジン | Ollama / Gemini / OpenAI / Claude（分析種別ごとに個別設定可） |
+| 分析エンジン | Claude / OpenAI / Gemini / Ollama (役割ごと個別設定可) |
 | RAG | ChromaDB + nomic-embed-text |
 | 言語 | Python 3.12 / uv |
-| テスト | 298テスト（pytest） |
-
-デフォルト構成では外部APIキー不要。Ollama のみですべてローカル動作します。
+| テスト | pytest |
 
 ## アーキテクチャ
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  ニュース収集 (15分間隔)                                   │
-│  RSS/Feedly → LLMセンチメント分析 → ChromaDB蓄積           │
-├─────────────────────────────────────────────────────────┤
-│  テクニカル分析 (毎時:00)                                  │
-│  OHLCV → 指標計算 → ルールベーススコア → スナップショット保存  │
-│  watch銘柄×trade銘柄の相関分析(ローリング20本)も付加         │
-├─────────────────────────────────────────────────────────┤
-│  予測サイクル (2時間間隔・LLMなし)                           │
-│  蓄積スナップショットからシグナル合成 → 精度検証 → RAG蓄積    │
-├─────────────────────────────────────────────────────────┤
-│  取引判定 (1日6回)                                        │
-│  SL/TP確認 → 振り返り → シグナル統合 → ポジション再評価      │
-│  → ATRベースSL/TP算出 → ポートフォリオガード → 注文執行      │
-├─────────────────────────────────────────────────────────┤
-│  価格監視 (10分間隔)                                       │
-│  急変動通知 → 緊急損切り → トレーリングストップ               │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  ニュース収集 (30 分間隔・LLM)                                │
+│  RSS/Feedly → カテゴリ別バッチ分析 → ChromaDB                 │
+├─────────────────────────────────────────────────────────────┤
+│  テクニカル分析 (毎時 :00・LLM)                                │
+│  OHLCV → 指標 → ルールベーススコア → スナップショット蓄積       │
+├─────────────────────────────────────────────────────────────┤
+│  予測サイクル (2 時間間隔・LLM なし)                           │
+│  スナップショット集約 → シグナル合成 → 精度検証 → RAG          │
+├─────────────────────────────────────────────────────────────┤
+│  取引判定 (1 日 N 回・schedule.run_times で指定)               │
+│  bridge gate → SL/TP 確認 → 振り返り → シグナル統合           │
+│  → ATR ベース SL/TP → ポートフォリオガード → broker 発注        │
+├─────────────────────────────────────────────────────────────┤
+│  exit_check (毎時 :00・LLM なし)                              │
+│  SL/TP 確認 + reconciliation + Layer 1-3 再評価 (オプション)   │
+├─────────────────────────────────────────────────────────────┤
+│  価格監視 (10 分間隔)                                         │
+│  急変動通知 → 緊急損切り (任意) → Layer 4 トレーリング        │
+└─────────────────────────────────────────────────────────────┘
 ```
+
+### 関連プロセス
+
+| プロセス | 役割 |
+|---|---|
+| `mt5_bridge/` (Windows 側) | MT5 ターミナルと HTTP 通信する別プロセス。`/health` `/positions` `/admin/halt` `/admin/resume` 等を提供 |
+| `discord_bot/` (任意) | `?status` `?account` `?close` `?halt` `?resume` 等の運用コマンドを Discord 経由で提供 |
 
 ## セットアップ
 
 ### 前提
 
-- Python 3.12+、[uv](https://docs.astral.sh/uv/)、[Ollama](https://ollama.com/)
+Python 3.12+、[uv](https://docs.astral.sh/uv/)、Discord Webhook (任意)、MT5 ターミナル + bridge (live モード時)
 
 ### インストール
 
 ```bash
-ollama pull llama3.1:8b
-ollama pull nomic-embed-text
 uv sync
-
-# オンラインLLM/REST API/通知を使う場合
-cp .env.example .env
+cp .env.example .env             # API キー・Webhook URL 等
+cp config/settings.yaml.example config/settings.yaml
+cp config/instruments.yaml.example config/instruments.yaml
+cp config/news_sources.yaml.example config/news_sources.yaml
+cp config/hosts.yaml.example config/hosts.yaml
 ```
+
+LLM プロバイダによって追加セットアップ:
+- Claude / OpenAI / Gemini: API キーを `.env` に
+- Ollama: `ollama pull llama3.1:8b && ollama pull nomic-embed-text`
 
 ### 実行
 
 ```bash
-uv run python main.py                   # 通常起動
-uv run python main.py --daemon          # デーモンモード（REST APIのみ）
+uv run python main.py                   # 通常起動 (フォアグラウンド)
+uv run python main.py --daemon          # REST API のみ (スケジューラ無効)
 uv run python main.py --skip-news       # 起動時ニュース取得スキップ
 uv run python main.py --skip-tech       # 起動時テクニカル収集スキップ
 ```
 
-## 設定ファイル
+## 運用モード
 
-運用パラメータとデータ定義を分離した3ファイル構成:
+| mode | primary trading | MT5 連携 | 用途 |
+|---|---|---|---|
+| `paper` | 内部 PositionManager (TwelveData/yfinance 価格) | なし | シミュレーション・初期検証 |
+| `live_test` | 内部 PositionManager (TwelveData) | shadow observer のみ (記録専用) | 本番前のドライラン |
+| `live` | MT5 経由実発注 | full integration | 実弾運用 |
+
+`config/settings.yaml` の `mode`、`paper_provider`、`live_broker` の組み合わせで決定。
+
+## 設定ファイル
 
 ```
 config/
-  settings.yaml          — 運用パラメータ (LLM/trading/schedule/通知等)
-  instruments.yaml       — 銘柄定義 + price_provider設定
-  news_sources.yaml      — キーワード + RSSフィード + Feedly設定
+  settings.yaml          — 運用パラメータ (mode/LLM/trading/schedule/通知)
+  instruments.yaml       — 銘柄定義 + asset_type / pip_value
+  news_sources.yaml      — キーワード + RSS フィード + Feedly
+  hosts.yaml             — REST API クライアントの接続先プロファイル
+  providers/mt5.yaml     — MT5 bridge URL / API key / 認証
+  providers/twelvedata.yaml — TwelveData API key / 日次上限
+  user_notes.md          — LLM プロンプトに注入する自由記述メモ
 ```
 
-各ファイルの `.example` をコピーして利用開始できます。
+各ファイルは `.example` をコピーして利用。
 
-## CLIコマンド
+## CLI コマンド (`uv run python client.py` から対話)
 
 | コマンド | 略記 | 内容 |
 |---|---|---|
-| `status` | `s` | 残高・オープンポジション表示 |
+| `status` | `s` | 運用状態 (プロセス + halt + サブシステム健全性) |
+| `account` | `acc` | 残高 / 損益 / ポジション / MT5 実残高 / 乖離 |
 | `run news` | `run n` | ニュース収集を即時実行 |
 | `run tech` | `run t` | テクニカル分析を即時実行 |
-| `run analyze` | `run a` | 総合分析を表示 |
+| `run analyze` | `run a` | 総合シグナル表示 |
 | `run trade` | `run tr` | 取引判定を即時実行 |
-| `run forecast` | `run f` | 予測データ表示 |
-| `ask <質問>` | | 全データソース横断のセマンティック検索で回答 |
-| `compare [pair]` | | LLMモデル比較分析 |
-| `audit` (days) | | 過去トレードの統計診断レポート生成 (デフォルト 30 日) |
-| `audit review` (days) | | audit + LLM 改善候補の対話選別 |
+| `run forecast [pair]` | `run f` | 予測データ表示 |
+| `ask <質問>` | | セマンティック検索で回答 |
 | `close <pair>` | | ポジション手動決済 |
-| `help` | `h` | コマンド一覧 |
+| `halt soft\|hard <reason>` | | 取引停止 (soft = 新規停止 / hard = bridge 全 close) |
+| `resume` | | soft halt 解除 |
+| `logs [N]` | | activity.log 末尾 N 行 |
+| `usage` | | LLM 使用量 / CB 状態 |
+| `schedule` | | スケジュール一覧 |
+| `feeds` | | RSS フィード疎通確認 |
+| `tech` | | キャッシュ済みテクニカルスナップショット |
+| `hosts` / `use <name>` | | 接続先ホスト切替 |
+| `audit [days]` | | 過去トレードの統計診断レポート生成 |
+| `audit review [days]` | | audit + LLM 改善候補の対話選別 |
 
 ## REST API
 
@@ -104,15 +135,54 @@ config/
 |---|---|---|
 | `GET` | `/status` | 運用状態 (プロセス + halt + サブシステム健全性) |
 | `GET` | `/account` | 残高・ポジション・MT5 実残高・乖離 |
+| `GET` | `/logs` | activity.log 末尾 |
+| `GET` | `/usage` | LLM プロバイダ別使用量 / CB 状態 |
 | `GET` | `/schedule` | スケジュール情報 |
 | `GET` | `/news` | ニュースセンチメント |
-| `GET` | `/tech` | テクニカルスナップショット |
+| `GET` | `/tech` | テクニカルスナップショット (latest_collect + latest_ok) |
 | `GET` | `/analyze` | 総合シグナル |
-| `POST` | `/close/{pair}` | ポジション決済 |
-| `POST` | `/run/trade` | 取引判定実行 |
-| `POST` | `/ask` | セマンティック検索で質問回答 |
+| `GET` | `/forecast/{pair}` | 予測サイクルデータ |
+| `GET` | `/feeds` | RSS フィード疎通確認 |
+| `POST` | `/close/{pair}` | ポジション手動決済 |
+| `POST` | `/run/trade` | 取引判定ループ即時実行 |
+| `POST` | `/ask` | セマンティック検索質問 |
+| `POST` | `/admin/halt` | soft / hard halt 発動 (mt5_bridge プロキシ) |
+| `POST` | `/admin/resume` | soft halt 解除 (bridge accept 状態確認込み) |
 
-> `/health` は `/status` に統合され廃止。MT5 bridge プロセス側の `/health` (mt5_bridge) は別 endpoint で継続使用。
+## 主要な安全機構
+
+### auto halt (自動停止)
+
+下記いずれかで auto soft halt 発動 (新規発注停止、既存ポジション管理は継続):
+
+- bridge `/health` 連続失敗 (1 min retry 含む 2 回)
+- 注文連続 REJECT (閾値超過)
+- balance divergence の閾値超過 (一定時間継続)
+- balance.json 破損
+- collect_status sentinel 連続失敗
+
+### exit_check reviewer ガード
+
+`live` モードで Layer 1-3 reviewer による能動 close を行う際、以下を満たさないと close をスキップ:
+- price source が `"mt5"` (フォールバック価格で close 判定しない)
+- soft halt 中は `timeout` 以外の close を skip
+
+### shadow reconciliation stale 監視
+
+`Mt5BridgeBrokerAdapter` の reconciliation skip 連続回数を `state_dir/reconciliation.json` に永続化。
+閾値到達で警告ログ、`/status` の `mt5_bridge.reconciliation_skipped_consecutive` で監視可能。
+
+### close 通知ラベル
+
+close_reason ごとに明示的なラベル (Discord 通知):
+- `take_profit` → ✅ TP 到達
+- `stop_loss` → 🛑 SL 到達
+- `emergency_stop` → ⚠️ 緊急損切り
+- `profit_lock` → 🔐 利益確定 (L3 profit_lock)
+- `reversal` → 🔁 反転シグナル (L1 reversal)
+- `timeout` → ⏰ 保有期間超過 (L2 timeout)
+- `server_sl_tp` → 🔄 MT5 サーバー側決済 (reconciliation 検知)
+- `manual` → 🔒 手動決済
 
 ## 詳細ドキュメント
 
@@ -122,18 +192,15 @@ config/
 
 ## 注意事項
 
-- **本システムはペーパートレード専用**です。実際の資金取引には使用しないでください。
-- yfinance の価格データには最大15分の遅延があります。
-- 土日（市場休場）は取引判定を自動スキップします（遷移/ハートビートログのみ出力）。
-- RAG の効果はデータ蓄積とともに向上します。運用開始直後は振り返りコンテキストがない状態で動作します。
-
----
+- 土日 (FX 市場休場) は取引判定・価格監視を自動スキップ (ハートビートのみ)
+- yfinance の価格データには最大 15 分の遅延あり (live モードでは MT5 ティックを使用)
+- RAG の効果はデータ蓄積とともに向上。運用開始直後は振り返りコンテキストがない状態で動作
 
 ## 免責事項
 
 本ソフトウェアは教育・研究目的で提供されるものであり、投資助言・売買推奨を目的としたものではありません。
 
-- 本システムの利用によって生じた**いかなる損害・損失**（金銭的損失を含む）についても、開発者は一切の責任を負いません。
-- LLM・テクニカル指標による分析結果は将来の相場を保証するものではなく、**投資判断はすべて自己責任**で行ってください。
-- 本システムを `mode: "live"` で実際の資金取引に使用することは**非推奨**です。使用する場合は自己の判断と責任においてのみ行ってください。
-- 価格データ・ニュースデータの正確性・完全性・適時性について、開発者は保証しません。
+- 本システムの利用によって生じた**いかなる損害・損失**（金銭的損失を含む）についても、開発者は一切の責任を負いません
+- LLM・テクニカル指標による分析結果は将来の相場を保証するものではなく、**投資判断はすべて自己責任**で行ってください
+- `mode: live` での実弾運用は、価格データ・ニュースデータ・MT5 ブリッジ・LLM サービスのいずれかの不調により予期せぬ損失を生じる可能性があります
+- 価格データ・ニュースデータの正確性・完全性・適時性について、開発者は保証しません
