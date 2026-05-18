@@ -39,6 +39,26 @@ def _to_utc(dt: datetime) -> datetime:
     return dt.astimezone(timezone.utc)    # naive → astimezone() がローカル TZ から UTC に
 
 
+def _bridge_times_to_local_naive(times, local_tz) -> "pd.DatetimeIndex":
+    """ブリッジ /ohlcv が返す UTC バー時刻を DB 規約の naive ローカル時刻へ変換する。
+
+    DB 規約 (src/utils/clock.py 参照) は naive machine-local。ブリッジは UTC で
+    バー時刻を返すため、``utc=True`` で確定的に UTC として解釈し、ローカル TZ へ
+    変換してから tz を剥がす。``tz_convert(None)`` (= naive UTC) を直に使うと
+    JST 環境で db_now() との比較が 9 時間ズレ、鮮度チェックが新鮮なバーまで
+    stale_price 扱いする不具合になる。
+
+    Args:
+        times: ブリッジ応答のバー時刻 (ISO 文字列等の iterable)。
+        local_tz: 変換先のローカルタイムゾーン (例: ``ZoneInfo("Asia/Tokyo")``)。
+    """
+    return (
+        pd.to_datetime(list(times), utc=True)
+        .tz_convert(local_tz)
+        .tz_localize(None)
+    )
+
+
 def _parse_period_days(period: str) -> int:
     if period.endswith("d"):
         return int(period[:-1])
@@ -189,7 +209,11 @@ class Mt5OhlcvFetcher:
             "Low":   b["low"],  "Close": b["close"],
             "Volume": b["volume"],
         } for b in bars])
-        df["_time"] = pd.to_datetime(df["_time"]).dt.tz_convert(None)
+        # ブリッジは UTC でバー時刻を返す。DB 規約 (naive machine-local) に
+        # 合わせるためローカル TZ へ変換してから tz を剥がす (naive UTC のまま
+        # 保存すると db_now() との比較が JST 環境で 9 時間ズレる)。
+        local_tz = datetime.now().astimezone().tzinfo
+        df["_time"] = _bridge_times_to_local_naive(df["_time"], local_tz)
         df = df.set_index("_time")
         df.index.name = None
         return df

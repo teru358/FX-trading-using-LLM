@@ -122,6 +122,44 @@ def test_fetch_current_price_zero_bars_raises(monkeypatch):
         fetcher.fetch_current_price("USDJPY=X")
 
 
+def test_bridge_times_to_local_naive_converts_utc_to_local():
+    """ブリッジ /ohlcv の UTC バー時刻を DB 規約の naive ローカル時刻へ変換する。
+
+    DB 規約 (src/utils/clock.py) は naive machine-local。ブリッジは UTC で
+    バー時刻を返すため、ローカル TZ へ変換後に tz を剥がす必要がある。
+    local_tz を引数で受けるのでマシンの TZ に依存せず JST 固定で検証できる。
+    """
+    from zoneinfo import ZoneInfo
+
+    from src.data.mt5_ohlcv_fetcher import _bridge_times_to_local_naive
+
+    jst = ZoneInfo("Asia/Tokyo")
+    times = ["2026-05-18T02:00:00+00:00", "2026-05-18T03:00:00+00:00"]
+
+    result = _bridge_times_to_local_naive(times, jst)
+
+    # UTC 02:00 / 03:00 → JST (+9h) 11:00 / 12:00、naive (tzinfo なし)
+    assert list(result) == [
+        datetime(2026, 5, 18, 11, 0, 0),
+        datetime(2026, 5, 18, 12, 0, 0),
+    ]
+    assert result[0].tzinfo is None
+
+
+def test_bridge_times_to_local_naive_crosses_date_boundary():
+    """+9h 変換が日付境界を跨ぐケース (UTC 夜 → JST 翌朝)。"""
+    from zoneinfo import ZoneInfo
+
+    from src.data.mt5_ohlcv_fetcher import _bridge_times_to_local_naive
+
+    jst = ZoneInfo("Asia/Tokyo")
+    # UTC 2026-05-17 20:00 → JST 2026-05-18 05:00
+    result = _bridge_times_to_local_naive(["2026-05-17T20:00:00+00:00"], jst)
+
+    assert list(result) == [datetime(2026, 5, 18, 5, 0, 0)]
+    assert result[0].tzinfo is None
+
+
 def test_skip_yf_suffix_in_request(monkeypatch):
     """yfinance 形式 USDJPY=X が MT5 形式 USDJPY で送信されることを確認。"""
     fetcher = Mt5OhlcvFetcher(bridge_url="http://x:8812", request_timeout=5.0)
