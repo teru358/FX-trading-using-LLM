@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from src.signals.signal_combiner import TradeSignal
-from src.trading.broker_adapter import BrokerAdapter
+from src.trading.broker_adapter import BrokerAdapter, ExecutionResult
 from src.trading.paper_trader import check_and_close_positions, execute_signal
 from src.trading.position_manager import Order, PositionManager
 
@@ -30,7 +30,7 @@ class PaperBrokerAdapter(BrokerAdapter):
         signal: TradeSignal,
         position_mgr: PositionManager,
         macro_context: str = "",
-    ) -> Order | None:
+    ) -> ExecutionResult:
         return execute_signal(
             signal, position_mgr, macro_context=macro_context,
             max_positions_per_pair=self._max_per_pair,

@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from src.trading.broker_adapter import ExecutionResult
 from src.trading.position_manager import Order
 from src.trading.shadow_broker import ShadowBrokerAdapter
 
@@ -26,8 +27,10 @@ def _mk_order(pair: str = "USDJPY=X", entry: float = 159.0,
 def test_execute_signal_returns_primary_result(tmp_path: Path):
     primary = MagicMock()
     observer = MagicMock()
-    primary.execute_signal.return_value = _mk_order(entry=159.0, oid="primary-1")
-    observer.execute_signal.return_value = _mk_order(entry=159.5, oid="mt5:42")
+    primary.execute_signal.return_value = ExecutionResult.executed(
+        _mk_order(entry=159.0, oid="primary-1"))
+    observer.execute_signal.return_value = ExecutionResult.executed(
+        _mk_order(entry=159.5, oid="mt5:42"))
 
     adapter = ShadowBrokerAdapter(
         primary=primary, observer=observer,
@@ -39,7 +42,8 @@ def test_execute_signal_returns_primary_result(tmp_path: Path):
 
     result = adapter.execute_signal(sig, primary_pm)
 
-    assert result.order_id == "primary-1"   # primary が常に canonical
+    assert result.is_executed
+    assert result.order.order_id == "primary-1"   # primary が常に canonical
     primary.execute_signal.assert_called_once()
     observer.execute_signal.assert_called_once()
 
@@ -54,7 +58,7 @@ def test_execute_signal_returns_primary_result(tmp_path: Path):
 def test_observer_failure_does_not_break_primary(tmp_path: Path, caplog):
     primary = MagicMock()
     observer = MagicMock()
-    primary.execute_signal.return_value = _mk_order()
+    primary.execute_signal.return_value = ExecutionResult.executed(_mk_order())
     observer.execute_signal.side_effect = RuntimeError("bridge down")
 
     adapter = ShadowBrokerAdapter(
@@ -66,15 +70,17 @@ def test_observer_failure_does_not_break_primary(tmp_path: Path, caplog):
     with caplog.at_level("WARNING"):
         result = adapter.execute_signal(sig, MagicMock())
 
-    assert result is not None    # primary は成功
+    assert result.is_executed    # primary は成功
     assert any("observer" in r.message.lower() for r in caplog.records)
 
 
-def test_observer_returns_none_logs_event(tmp_path: Path):
+def test_observer_skip_logs_event_with_null_order(tmp_path: Path):
     primary = MagicMock()
     observer = MagicMock()
-    primary.execute_signal.return_value = _mk_order()
-    observer.execute_signal.return_value = None    # 例: portfolio gate でブロック
+    primary.execute_signal.return_value = ExecutionResult.executed(_mk_order())
+    # observer が発注せず skip した場合 (order is None)
+    observer.execute_signal.return_value = ExecutionResult.skipped(
+        "portfolio gate でブロック")
 
     adapter = ShadowBrokerAdapter(
         primary=primary, observer=observer,

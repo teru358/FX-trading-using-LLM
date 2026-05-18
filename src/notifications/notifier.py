@@ -39,7 +39,7 @@ class OrderClosedEvent:
 
 @dataclass
 class SignalSkippedEvent:
-    """シグナルが出たがスキップ/保留された場合（hold含む）。"""
+    """シグナルが出たが発注に至らなかった場合（hold / skip / 拒否 / 失敗）。"""
     pair: str
     action: str           # "buy" | "sell" | "hold"
     confidence: float
@@ -47,6 +47,9 @@ class SignalSkippedEvent:
     detail_reason: str = ""           # ニュース/テクニカル内訳
     predicted_direction: str = ""     # hold時の方向予測
     source: str = ""                  # "trading" | "forecast" | "monitor" など
+    # ExecutionResult の分類 (buy/sell 時の通知文面を決める。hold では無視)。
+    outcome: str = "skipped"          # "skipped" | "halted" | "rejected" | "failed"
+    skip_reason: str = ""             # 発注に至らなかった実際の理由
 
 
 @dataclass
@@ -81,6 +84,17 @@ def _source_tag(source: str) -> str:
         return ""
     label = _SOURCE_LABELS.get(source, source)
     return f"[{label}]"
+
+
+# skip 通知の見出し (ExecutionResult.outcome 別)。
+# ``skipped`` のみ運用上「無害・想定内」。``halted`` / ``rejected`` / ``failed``
+# は要注意であることが文面で分かるようにする (発注拒否を無害表示しないため)。
+_SKIP_HEADLINES = {
+    "skipped":  "スキップ",
+    "halted":   "halt 中のため発注見送り",
+    "rejected": "🚫 発注拒否",
+    "failed":   "❌ 発注失敗",
+}
 
 
 class NotifierAdapter(ABC):
@@ -201,10 +215,13 @@ class NotifierAdapter(ABC):
             )
         else:
             direction_emoji = "📈" if event.action == "buy" else "📉"
+            headline = _SKIP_HEADLINES.get(event.outcome, "発注見送り")
             msg = (
-                f"{direction_emoji} 【シグナル】{tag}{event.pair} — 既存ポジションのためスキップ\n"
+                f"{direction_emoji} 【シグナル】{tag}{event.pair} — {headline}\n"
                 f"方向: {event.action.upper()}  確信度: {event.confidence:.0%}"
             )
+            if event.skip_reason:
+                msg += f"\n理由: {event.skip_reason}"
         if event.detail_reason:
             msg += f"\n─────────────\n{event.detail_reason}"
         else:

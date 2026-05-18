@@ -4,6 +4,7 @@ import logging
 
 from src.signals.scale_in import PreExecResult, evaluate_pre_execution_checks
 from src.signals.signal_combiner import TradeSignal
+from src.trading.broker_adapter import ExecutionResult
 from src.trading.position_manager import Order, PositionManager
 
 logger = logging.getLogger(__name__)
@@ -20,9 +21,9 @@ def execute_signal(
     scale_in_score_margin: float = 0.05,
     drawdown_kill_switch_enabled: bool = False,
     drawdown_kill_switch_max_pct: float = 0.10,
-) -> Order | None:
+) -> ExecutionResult:
     if signal.action == "hold":
-        return None
+        return ExecutionResult.skipped("hold (発注対象外)")
 
     result = evaluate_pre_execution_checks(
         signal, position_mgr,
@@ -35,7 +36,7 @@ def execute_signal(
     )
     if result.status == "skip":
         logger.info(f"[SKIP] {signal.pair}: {result.reason}")
-        return None
+        return ExecutionResult.skipped(result.reason)
 
     is_scale_in = (result.status == "scale_in")
     direction = "buy" if signal.action == "buy" else "sell"
@@ -65,7 +66,7 @@ def execute_signal(
             f"[ORDER] {signal.pair} {direction.upper()} executed | "
             f"reason: {signal.signal_reason}"
         )
-    return order
+    return ExecutionResult.executed(order)
 
 
 def check_and_close_positions(

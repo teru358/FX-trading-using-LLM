@@ -15,7 +15,7 @@ import httpx
 
 from src.signals.scale_in import PreExecResult, evaluate_pre_execution_checks
 from src.signals.signal_combiner import TradeSignal
-from src.trading.broker_adapter import BrokerAdapter
+from src.trading.broker_adapter import BrokerAdapter, ExecutionResult
 from src.trading.position_manager import Order, PositionManager
 from src.trading.symbol_mapping import to_mt5_symbol
 
@@ -92,9 +92,9 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
     def execute_signal(
         self, signal: TradeSignal, position_mgr: PositionManager,
         macro_context: str = "",
-    ) -> Order | None:
+    ) -> ExecutionResult:
         if signal.action == "hold":
-            return None
+            return ExecutionResult.skipped("hold (発注対象外)")
 
         # finance 側 halt 状態を確認。bridge が halted 中の場合 (heartbeat / order
         # 経路で auto halt 発動済 or 手動 halt 中)、ここで早期 return して bridge
@@ -104,7 +104,7 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             logger.info(
                 f"[MT5_BRIDGE] {signal.pair} skipped — soft-halted (finance state)"
             )
-            return None
+            return ExecutionResult.halted("finance soft-halt 中のため発注見送り")
 
         direction = "buy" if signal.action == "buy" else "sell"
 
@@ -121,7 +121,7 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         )
         if result.status == "skip":
             logger.info(f"[MT5_BRIDGE] [SKIP] {signal.pair}: {result.reason}")
-            return None
+            return ExecutionResult.skipped(result.reason)
 
         is_scale_in = result.status == "scale_in"
 
@@ -144,10 +144,10 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
         except httpx.HTTPError as e:
             logger.error(f"[MT5_BRIDGE] bridge order failed: {e}")
             # bridge 不通検出は BridgeHealthGate が担う。ここでは単に発注失敗。
-            return None
+            return ExecutionResult.failed(f"bridge 通信失敗: {e}")
         except Exception as e:  # noqa: BLE001
             logger.error(f"[MT5_BRIDGE] unexpected error: {e}", exc_info=True)
-            return None
+            return ExecutionResult.failed(f"予期せぬエラー: {type(e).__name__}: {e}")
 
         # ── HTTP status 分岐 ──
         if resp.status_code == 422:
@@ -159,7 +159,8 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
                 f"[MT5_BRIDGE] {signal.pair} insufficient margin: {err}"
             )
             self._notify_margin_insufficient(signal, err)
-            return None    # 証拠金不足は bridge 健全 → カウンタ非増加
+            # 証拠金不足は bridge 健全 → カウンタ非増加。発注は拒否された。
+            return ExecutionResult.rejected(f"証拠金不足 (insufficient margin): {err}")
         if resp.status_code == 423:
             logger.info(f"[MT5_BRIDGE] {signal.pair} skipped — bridge soft-halted")
             # bridge が直接 halt されたケースの最小同期: finance halt にもミラー。
@@ -190,22 +191,27 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
                     logger.warning(
                         f"[MT5_BRIDGE] notify bridge-423 mirror failed: {e}"
                     )
-            return None    # soft halt は意図的 → カウンタ非増加
+            # soft halt は意図的 → カウンタ非増加
+            return ExecutionResult.halted("bridge が 423 (soft-halted) を返却")
         if resp.status_code == 409:
             logger.warning(f"[MT5_BRIDGE] {signal.pair} order rejected: {resp.text}")
             self._record_bridge_reject()
-            return None
+            return ExecutionResult.rejected(f"発注拒否 (broker): {resp.text[:200]}")
         if resp.status_code in (503, 504):
             logger.error(
                 f"[MT5_BRIDGE] {signal.pair} bridge unavailable: {resp.status_code}"
             )
             # bridge 不通検出は BridgeHealthGate が担う。ここでは単に発注失敗。
-            return None
+            return ExecutionResult.failed(
+                f"bridge 一時利用不可 (HTTP {resp.status_code})"
+            )
         if resp.status_code != 200:
             logger.error(
                 f"[MT5_BRIDGE] unexpected response {resp.status_code}: {resp.text}"
             )
-            return None
+            return ExecutionResult.failed(
+                f"bridge 異常応答 (HTTP {resp.status_code}): {resp.text[:200]}"
+            )
 
         data = resp.json()
         actual_lots = float(data["volume_lots"])
@@ -251,7 +257,7 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
                 f"[ORDER] [mt5_bridge] {signal.pair} {direction.upper()} ticket={ticket} | "
                 f"fill={data['fill_price']} dry_run={data.get('dry_run')}"
             )
-        return order
+        return ExecutionResult.executed(order)
 
     def _notify_partial_fill(
         self, order: Order, requested_lots: float, actual_lots: float,

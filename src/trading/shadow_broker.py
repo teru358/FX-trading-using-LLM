@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from src.signals.signal_combiner import TradeSignal
-from src.trading.broker_adapter import BrokerAdapter
+from src.trading.broker_adapter import BrokerAdapter, ExecutionResult
 from src.trading.position_manager import Order, PositionManager
 
 logger = logging.getLogger(__name__)
@@ -60,19 +60,21 @@ class ShadowBrokerAdapter(BrokerAdapter):
         signal: TradeSignal,
         position_mgr: PositionManager,
         macro_context: str = "",
-    ) -> Order | None:
-        primary_order = self._primary.execute_signal(
+    ) -> ExecutionResult:
+        primary_result = self._primary.execute_signal(
             signal, position_mgr, macro_context,
         )
 
-        observer_order: Order | None = None
+        observer_result: ExecutionResult | None = None
         try:
-            observer_order = self._observer.execute_signal(
+            observer_result = self._observer.execute_signal(
                 signal, self._obs_pm, macro_context,
             )
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[SHADOW] observer execute_signal failed: {e}")
 
+        primary_order = primary_result.order
+        observer_order = observer_result.order if observer_result is not None else None
         diff: float | None = None
         if primary_order is not None and observer_order is not None:
             diff = observer_order.entry_price - primary_order.entry_price
@@ -86,7 +88,8 @@ class ShadowBrokerAdapter(BrokerAdapter):
             "observer": _serialize_order(observer_order),
             "price_diff": diff,
         })
-        return primary_order
+        # canonical は primary。observer は best-effort 記録のみ。
+        return primary_result
 
     def check_and_close_positions(
         self,

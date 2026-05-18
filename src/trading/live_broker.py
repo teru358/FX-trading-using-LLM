@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING, Literal
 from src.persistence import balance_snapshot
 from src.persistence.balance_snapshot import OBSERVER_DEFAULT, BalanceSnapshot
 from src.signals.signal_combiner import TradeSignal
-from src.trading.broker_adapter import BrokerAdapter
+from src.trading.broker_adapter import BrokerAdapter, ExecutionResult
 from src.trading.position_manager import Order, PositionManager
 
 if TYPE_CHECKING:
@@ -85,7 +85,7 @@ class LiveBrokerAdapter(BrokerAdapter):
         signal: TradeSignal,
         position_mgr: PositionManager,
         macro_context: str = "",
-    ) -> Order | None:
+    ) -> ExecutionResult:
         """OANDA Market Order を発注する。
 
         実装手順:

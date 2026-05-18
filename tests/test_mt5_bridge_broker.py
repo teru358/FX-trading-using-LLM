@@ -49,11 +49,11 @@ def _make_pm(open_positions=None, closed_trades=None,
     return pm
 
 
-def test_execute_signal_hold_returns_none(tmp_path):
+def test_execute_signal_hold_skipped(tmp_path):
     adapter = Mt5BridgeBrokerAdapter(bridge_url="http://example:8812", state_dir=tmp_path)
     sig = _make_signal(action="hold")
     pm = _make_pm()
-    assert adapter.execute_signal(sig, pm) is None
+    assert adapter.execute_signal(sig, pm).outcome == "skipped"
     pm.open_position.assert_not_called()
 
 
@@ -90,9 +90,10 @@ def test_execute_signal_posts_order_and_records(monkeypatch, tmp_path):
         state_dir=tmp_path,
     )
     sig = _make_signal(action="buy")
-    order = adapter.execute_signal(sig, pm)
+    result = adapter.execute_signal(sig, pm)
 
-    assert order is not None
+    assert result.is_executed
+    order = result.order
     assert order.order_id.startswith("mt5:")
     assert order.pair == "USDJPY=X"             # 内部正規形が保たれる
     assert order.direction == "buy"
@@ -146,20 +147,20 @@ def test_execute_signal_handles_bridge_error_gracefully(monkeypatch, caplog, tmp
     adapter = Mt5BridgeBrokerAdapter(bridge_url="http://example:8812", state_dir=tmp_path)
     sig = _make_signal(action="buy")
     with caplog.at_level("ERROR"):
-        order = adapter.execute_signal(sig, pm)
-    assert order is None
+        result = adapter.execute_signal(sig, pm)
+    assert result.outcome == "failed"
     assert any("bridge" in r.message.lower() for r in caplog.records)
     pm.open_position.assert_not_called()
 
 
-def test_existing_position_returns_none(tmp_path):
+def test_existing_position_skipped(tmp_path):
     """scale-in disabled (default) で既存ポジがある場合はスキップする。"""
     adapter = Mt5BridgeBrokerAdapter(bridge_url="http://example:8812", state_dir=tmp_path)
     pm = _make_pm()
     existing = Order.new("USDJPY=X", "buy", 159, 158, 160, 1000)
     pm.get_open_positions_by_pair.return_value = [existing]
     sig = _make_signal()
-    assert adapter.execute_signal(sig, pm) is None
+    assert adapter.execute_signal(sig, pm).outcome == "skipped"
 
 
 # ── Phase 3b: HTTP status routing ──
@@ -177,9 +178,9 @@ def test_execute_signal_handles_422_margin_insufficient(monkeypatch, caplog, tmp
     pm = _make_pm()
     adapter = Mt5BridgeBrokerAdapter(bridge_url="http://x:8812", state_dir=tmp_path)
     with caplog.at_level("WARNING"):
-        order = adapter.execute_signal(_make_signal(action="buy"), pm)
+        result = adapter.execute_signal(_make_signal(action="buy"), pm)
 
-    assert order is None
+    assert result.outcome == "rejected"
     assert any("margin" in r.message.lower() for r in caplog.records)
 
 
@@ -194,9 +195,9 @@ def test_execute_signal_handles_423_soft_halt(monkeypatch, caplog, tmp_path):
     pm = _make_pm()
     adapter = Mt5BridgeBrokerAdapter(bridge_url="http://x:8812", state_dir=tmp_path)
     with caplog.at_level("INFO"):
-        order = adapter.execute_signal(_make_signal(action="buy"), pm)
+        result = adapter.execute_signal(_make_signal(action="buy"), pm)
 
-    assert order is None
+    assert result.outcome == "halted"
     assert any("halted" in r.message.lower() for r in caplog.records)
 
 
@@ -211,8 +212,8 @@ def test_execute_signal_handles_409_order_rejected(monkeypatch, caplog, tmp_path
     pm = _make_pm()
     adapter = Mt5BridgeBrokerAdapter(bridge_url="http://x:8812", state_dir=tmp_path)
     with caplog.at_level("WARNING"):
-        order = adapter.execute_signal(_make_signal(action="buy"), pm)
-    assert order is None
+        result = adapter.execute_signal(_make_signal(action="buy"), pm)
+    assert result.outcome == "rejected"
     assert any("reject" in r.message.lower() for r in caplog.records)
 
 
@@ -241,9 +242,10 @@ def test_execute_signal_partial_fill_modifies_position_size(monkeypatch, tmp_pat
     )
     sig = _make_signal(action="buy")    # signal.position_size = 1000.0
 
-    order = adapter.execute_signal(sig, pm)
+    result = adapter.execute_signal(sig, pm)
 
-    assert order is not None
+    assert result.is_executed
+    order = result.order
     # 1000 * (0.0075 / 0.01) = 750
     assert order.position_size == pytest.approx(750.0, rel=0.01)
 
@@ -276,7 +278,7 @@ def test_execute_signal_skips_when_finance_halted(tmp_path):
 
     result = adapter.execute_signal(signal, pm_stub)
 
-    assert result is None
+    assert result.outcome == "halted"
     # bridge が呼ばれていないことを確認 (open_position も実行されていない)
     pm_stub.open_position.assert_not_called()
 
@@ -296,8 +298,8 @@ def test_execute_signal_proceeds_when_not_halted(tmp_path, monkeypatch):
 
     result = adapter.execute_signal(signal, _make_pm())
 
-    # halt チェック通過 → PreExec で skip 判定 → None を返す
-    assert result is None
+    # halt チェック通過 → PreExec で skip 判定
+    assert result.outcome == "skipped"
 
 
 def test_auto_soft_halt_updates_finance_state_when_bridge_post_fails(
@@ -336,9 +338,9 @@ def test_execute_signal_mirrors_423_to_finance_halt(monkeypatch, tmp_path):
     pm = _make_pm()
     adapter = Mt5BridgeBrokerAdapter(bridge_url="http://x:8812", state_dir=tmp_path)
 
-    order = adapter.execute_signal(_make_signal(action="buy"), pm)
+    result = adapter.execute_signal(_make_signal(action="buy"), pm)
 
-    assert order is None
+    assert result.outcome == "halted"
     s = halt_state.read(tmp_path)
     assert s.soft_halted is True
     assert s.triggered_by == "bridge_423"
@@ -381,13 +383,13 @@ def test_execute_signal_mirrors_423_fires_notifier_on_first_observation(
     )
 
     # 1 回目: 423 観測 → halt.json mirror + Discord 1 通
-    order1 = adapter.execute_signal(_make_signal(action="buy"), pm)
-    assert order1 is None
+    result1 = adapter.execute_signal(_make_signal(action="buy"), pm)
+    assert result1.outcome == "halted"
     assert notifier.send_embed.call_count == 1
 
     # 2 回目: 既に halted なので冒頭 is_halted で早期 return → Discord は増えない
-    order2 = adapter.execute_signal(_make_signal(action="buy"), pm)
-    assert order2 is None
+    result2 = adapter.execute_signal(_make_signal(action="buy"), pm)
+    assert result2.outcome == "halted"
     assert notifier.send_embed.call_count == 1
 
 

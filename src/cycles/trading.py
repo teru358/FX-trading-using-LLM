@@ -668,8 +668,8 @@ async def _execute_one_signal(
         sig.action = "hold"
         sig.signal_reason = "ATR SL/TP calculation failed"
 
-    order = broker.execute_signal(sig, position_mgr, macro_context=macro_ctx)
-    if not order:
+    result = broker.execute_signal(sig, position_mgr, macro_context=macro_ctx)
+    if not result.is_executed:
         if config.notifier.notify_on_signal_skipped:
             await notifier.notify_signal_skipped(SignalSkippedEvent(
                 pair=sig.pair,
@@ -678,8 +678,11 @@ async def _execute_one_signal(
                 signal_reason=sig.signal_reason,
                 detail_reason=sig.detail_reason,
                 source="trading",
+                outcome=result.outcome,
+                skip_reason=result.reason,
             ))
         return None
+    order = result.order
 
     if config.notifier.notify_on_order_open:
         await notifier.notify_order_opened(OrderOpenedEvent(

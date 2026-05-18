@@ -73,8 +73,9 @@ def _common_kwargs(scale_in: bool = False) -> dict:
 
 def test_execute_signal_creates_order_when_no_existing_position(mgr):
     signal = _signal("buy")
-    order = execute_signal(signal, mgr, **_common_kwargs())
-    assert order is not None
+    result = execute_signal(signal, mgr, **_common_kwargs())
+    assert result.is_executed
+    order = result.order
     assert order.pair == "USDJPY=X"
     assert order.direction == "buy"
     assert order.open_confidence == 0.75
@@ -86,8 +87,9 @@ def test_execute_signal_skips_when_existing_pos_and_scale_in_disabled(mgr):
                   open_confidence=0.65, open_score=0.40)
     mgr.open_position(o)
     signal = _signal("buy", conf=0.85, combined_score=0.60)
-    order = execute_signal(signal, mgr, **_common_kwargs(scale_in=False))
-    assert order is None
+    result = execute_signal(signal, mgr, **_common_kwargs(scale_in=False))
+    assert result.outcome == "skipped"
+    assert result.order is None
 
 
 def test_execute_signal_creates_scale_in_order_when_allowed(mgr):
@@ -95,9 +97,9 @@ def test_execute_signal_creates_scale_in_order_when_allowed(mgr):
                   open_confidence=0.65, open_score=0.40)
     mgr.open_position(o)
     signal = _signal("buy", conf=0.78, combined_score=0.60)
-    order = execute_signal(signal, mgr, **_common_kwargs(scale_in=True))
-    assert order is not None
-    assert order.open_confidence == 0.78
+    result = execute_signal(signal, mgr, **_common_kwargs(scale_in=True))
+    assert result.is_executed
+    assert result.order.open_confidence == 0.78
 
 
 def test_execute_signal_skips_when_scale_in_rejected(mgr):
@@ -105,8 +107,8 @@ def test_execute_signal_skips_when_scale_in_rejected(mgr):
                   open_confidence=0.65, open_score=0.40)
     mgr.open_position(o)
     signal = _signal("buy", conf=0.68, combined_score=0.42)
-    order = execute_signal(signal, mgr, **_common_kwargs(scale_in=True))
-    assert order is None
+    result = execute_signal(signal, mgr, **_common_kwargs(scale_in=True))
+    assert result.outcome == "skipped"
 
 
 def test_execute_signal_skips_when_max_per_pair_reached(mgr):
@@ -114,11 +116,12 @@ def test_execute_signal_skips_when_max_per_pair_reached(mgr):
         mgr.open_position(Order.new("USDJPY=X", "buy", 160.0, 159.5, 161.0, 1000.0,
                                     open_confidence=0.70, open_score=0.50))
     signal = _signal("buy", conf=0.85, combined_score=0.65)
-    order = execute_signal(signal, mgr, **_common_kwargs(scale_in=True))
-    assert order is None
+    result = execute_signal(signal, mgr, **_common_kwargs(scale_in=True))
+    assert result.outcome == "skipped"
 
 
-def test_execute_signal_returns_none_for_hold(mgr):
+def test_execute_signal_skipped_for_hold(mgr):
     signal = _signal("hold")
-    order = execute_signal(signal, mgr, **_common_kwargs())
-    assert order is None
+    result = execute_signal(signal, mgr, **_common_kwargs())
+    assert result.outcome == "skipped"
+    assert result.order is None

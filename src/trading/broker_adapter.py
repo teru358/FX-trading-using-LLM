@@ -1,9 +1,56 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from typing import Literal
 
 from src.signals.signal_combiner import TradeSignal
 from src.trading.position_manager import Order, PositionManager
+
+ExecutionOutcome = Literal["executed", "skipped", "halted", "rejected", "failed"]
+
+
+@dataclass(frozen=True)
+class ExecutionResult:
+    """``execute_signal`` の結果。``outcome`` で成否と理由分類を表す。
+
+    - ``executed``: 発注成功 (``order`` に約定 ``Order``)
+    - ``skipped`` : 意図した抑制 (既存ポジション / scale-in 無効 / リスク制限 / hold)
+    - ``halted``  : halt 状態のため発注見送り
+    - ``rejected``: 発注したが broker/MT5 に拒否された (invalid stops/comment, 証拠金不足)
+    - ``failed``  : 技術的失敗 (bridge 不通 / HTTP error / 例外)
+
+    ``skipped`` のみ運用上「無害・想定内」。``halted`` / ``rejected`` / ``failed``
+    は要注意であり、通知でもそれが分かる文面にする (バグ2 の再発防止)。
+    """
+
+    outcome: ExecutionOutcome
+    order: Order | None = None
+    reason: str = ""
+
+    @property
+    def is_executed(self) -> bool:
+        return self.outcome == "executed"
+
+    @classmethod
+    def executed(cls, order: Order) -> "ExecutionResult":
+        return cls("executed", order=order)
+
+    @classmethod
+    def skipped(cls, reason: str) -> "ExecutionResult":
+        return cls("skipped", reason=reason)
+
+    @classmethod
+    def halted(cls, reason: str) -> "ExecutionResult":
+        return cls("halted", reason=reason)
+
+    @classmethod
+    def rejected(cls, reason: str) -> "ExecutionResult":
+        return cls("rejected", reason=reason)
+
+    @classmethod
+    def failed(cls, reason: str) -> "ExecutionResult":
+        return cls("failed", reason=reason)
 
 
 class BrokerAdapter(ABC):
@@ -15,8 +62,12 @@ class BrokerAdapter(ABC):
         signal: TradeSignal,
         position_mgr: PositionManager,
         macro_context: str = "",
-    ) -> Order | None:
-        """シグナルに基づき注文を発注する。ポジション済みの場合は None を返す。"""
+    ) -> ExecutionResult:
+        """シグナルに基づき注文を発注し、結果を ``ExecutionResult`` で返す。
+
+        成功時は ``outcome="executed"`` + ``order``。発注に至らない/失敗した場合は
+        ``skipped`` / ``halted`` / ``rejected`` / ``failed`` のいずれかと理由を返す。
+        """
         ...
 
     @abstractmethod
