@@ -346,9 +346,14 @@ def _cmd_status() -> None:
     if not mt5b.get("configured"):
         _console.print("[dim]MT5 bridge: 未設定[/dim]\n")
         return
+    # reconciliation skip 連続回数 (bridge 到達可否に関わらず /status に含まれる。
+    # 不通時こそ確認したい指標なので unreachable 経路でも表示する)
+    recon = mt5b.get("reconciliation_skipped_consecutive")
     if not mt5b.get("reachable"):
+        recon_str = f"  [yellow]reconcile skip×{recon}[/yellow]" if recon else ""
         _console.print(
-            f"[red]MT5 bridge unreachable: {mt5b.get('error', 'unknown')}[/red]\n"
+            f"[red]MT5 bridge unreachable: {mt5b.get('error', 'unknown')}[/red]"
+            f"{recon_str}\n"
         )
         return
     mt5_conn = mt5b.get("mt5_connected")
@@ -364,6 +369,8 @@ def _cmd_status() -> None:
     ]
     if dry:
         flags.append("[yellow]DRY_RUN[/yellow]")
+    if recon:
+        flags.append(f"[yellow]reconcile skip×{recon}[/yellow]")
     _console.print(f"MT5 bridge: {' | '.join(flags)}\n")
 
 
@@ -471,6 +478,12 @@ def _cmd_news() -> None:
 
 
 def _cmd_tech() -> None:
+    """銘柄別の最新テクニカルスナップショット。
+
+    /tech は銘柄ごとに ``latest_collect`` (全 status の最新収集行) と
+    ``latest_ok`` (最新の成功分析行) を入れ子で返す。表は ``latest_ok`` を
+    表示し、``latest_ok`` が無い銘柄は ``latest_collect`` の status を出す。
+    """
     data = _get("/tech")
     if data is None:
         return
@@ -482,15 +495,23 @@ def _cmd_tech() -> None:
     tbl.add_column("信頼度", justify="right")
     tbl.add_column("分析日時")
     for s in snaps:
-        bias = s.get("direction_bias", "—") or "—"
-        score = s.get("bias_score")
+        name = s.get("display_name") or s.get("symbol") or "—"
+        ok = s.get("latest_ok")
+        if not ok:
+            # latest_ok が無い銘柄: 最新収集行の status をヒント表示
+            collect = s.get("latest_collect") or {}
+            status = collect.get("collect_status") or "no data"
+            tbl.add_row(name, f"[dim]{status}[/dim]", "—", "—", "—")
+            continue
+        bias = ok.get("direction_bias") or "—"
+        score = ok.get("bias_score")
         score_str = f"{score:+.3f}" if score is not None else "—"
         score_color = "green" if (score or 0) > 0 else ("red" if (score or 0) < 0 else "white")
-        conf = s.get("confidence")
+        conf = ok.get("confidence")
         conf_str = f"{conf:.2f}" if conf is not None else "—"
-        analyzed = (s.get("analyzed_at") or "—")[:16]
+        analyzed = (ok.get("analyzed_at") or "—")[:16].replace("T", " ")
         tbl.add_row(
-            s.get("display_name", s.get("symbol", "—")),
+            name,
             bias.upper(),
             f"[{score_color}]{score_str}[/{score_color}]",
             conf_str,
@@ -563,18 +584,31 @@ def _cmd_forecast(pair_filter: str | None = None) -> None:
 
 
 def _cmd_run_trade() -> None:
+    """取引判定ループを実行。
+
+    /run/trade のレスポンスは 2 形態:
+      - ``status="completed"``: 同期完了。balance / total_trades /
+        open_positions_count を表示。
+      - ``status="accepted"``: 通知 ON かつ soft_timeout 超過。バックグラウンド
+        継続中 → notice を表示して終了 (完了は Discord 通知)。
+    """
     _console.print("[cyan]取引判定ループを実行中... (完了まで待機)[/cyan]")
     data = _post("/run/trade")
     if data is None:
         return
+    if data.get("status") == "accepted":
+        _console.print(
+            f"\n[yellow]{data.get('message') or '取引サイクルを実行中です。'}[/yellow]\n"
+        )
+        return
     elapsed = data.get("elapsed_seconds", "—")
-    pnl = data.get("pnl", 0)
-    pnl_color = "green" if pnl >= 0 else "red"
+    balance = data.get("balance")
+    balance_str = f"{balance:,.2f}" if isinstance(balance, (int, float)) else "—"
     _console.print(
         f"\n[green]完了[/green] ({elapsed}s)  "
-        f"残高: [bold]{data.get('balance', '—'):,.2f}[/bold]  "
-        f"[{pnl_color}]PnL: {pnl:+.2f}[/{pnl_color}]"
-        f"  ポジション: {len(data.get('open_positions', []))}件\n"
+        f"残高: [bold]{balance_str}[/bold]  "
+        f"取引数: {data.get('total_trades', '—')}  "
+        f"ポジション: {data.get('open_positions_count', 0)}件\n"
     )
 
 
