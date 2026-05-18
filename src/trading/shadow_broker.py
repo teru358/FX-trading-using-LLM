@@ -66,11 +66,13 @@ class ShadowBrokerAdapter(BrokerAdapter):
         )
 
         observer_result: ExecutionResult | None = None
+        observer_error: str | None = None
         try:
             observer_result = self._observer.execute_signal(
                 signal, self._obs_pm, macro_context,
             )
         except Exception as e:  # noqa: BLE001
+            observer_error = f"{type(e).__name__}: {e}"
             logger.warning(f"[SHADOW] observer execute_signal failed: {e}")
 
         primary_order = primary_result.order
@@ -79,13 +81,25 @@ class ShadowBrokerAdapter(BrokerAdapter):
         if primary_order is not None and observer_order is not None:
             diff = observer_order.entry_price - primary_order.entry_price
 
+        # primary/observer の outcome・reason も残す: live_test では observer
+        # (MT5) が rejected/failed でも Discord は primary 成功を通知するため、
+        # observer 側の失敗理由は本 JSONL でしか追えない。
         self._append({
             "ts": datetime.now(tz=timezone.utc).isoformat(),
             "event": "execute",
             "signal_pair": signal.pair,
             "signal_action": signal.action,
             "primary": _serialize_order(primary_order),
+            "primary_outcome": primary_result.outcome,
+            "primary_reason": primary_result.reason,
             "observer": _serialize_order(observer_order),
+            "observer_outcome": (
+                observer_result.outcome if observer_result is not None else None
+            ),
+            "observer_reason": (
+                observer_result.reason if observer_result is not None else ""
+            ),
+            "observer_error": observer_error,
             "price_diff": diff,
         })
         # canonical は primary。observer は best-effort 記録のみ。

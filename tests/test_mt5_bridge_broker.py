@@ -217,6 +217,30 @@ def test_execute_signal_handles_409_order_rejected(monkeypatch, caplog, tmp_path
     assert any("reject" in r.message.lower() for r in caplog.records)
 
 
+def test_execute_signal_500_invalid_comment_returns_failed(monkeypatch, caplog, tmp_path):
+    """HTTP 500 (bridge 異常応答 — 例: invalid comment) は failed に分類される。
+
+    MT5 が拒否した注文でも bridge が 5xx で返す現状では rejected ではなく
+    failed になる (分類は HTTP ステータス準拠)。bridge が invalid order で
+    4xx を返すよう直れば rejected に変わる (インシデント3) — それまでの
+    client 挙動を pin する回帰テスト。
+    """
+    class _Resp:
+        is_success = False
+        status_code = 500
+        text = "order_send returned None: (-2, 'Invalid \"comment\" argument')"
+
+    monkeypatch.setattr(httpx, "post", lambda *a, **kw: _Resp())
+    pm = _make_pm()
+    adapter = Mt5BridgeBrokerAdapter(bridge_url="http://x:8812", state_dir=tmp_path)
+    with caplog.at_level("ERROR"):
+        result = adapter.execute_signal(_make_signal(action="buy"), pm)
+
+    assert result.outcome == "failed"
+    assert "500" in result.reason
+    assert "comment" in result.reason.lower()
+
+
 def test_execute_signal_partial_fill_modifies_position_size(monkeypatch, tmp_path):
     """部分約定: actual lots に応じて Order.position_size を修正。"""
     class _Resp:

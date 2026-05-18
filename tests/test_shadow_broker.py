@@ -72,6 +72,10 @@ def test_observer_failure_does_not_break_primary(tmp_path: Path, caplog):
 
     assert result.is_executed    # primary は成功
     assert any("observer" in r.message.lower() for r in caplog.records)
+    # observer 例外も JSONL に残す (観測性)
+    rec = json.loads((tmp_path / "shadow.jsonl").read_text().strip())
+    assert rec["observer"] is None
+    assert "bridge down" in rec["observer_error"]
 
 
 def test_observer_skip_logs_event_with_null_order(tmp_path: Path):
@@ -94,6 +98,32 @@ def test_observer_skip_logs_event_with_null_order(tmp_path: Path):
     assert rec["primary"] is not None
     assert rec["observer"] is None
     assert rec["price_diff"] is None
+    # outcome / reason も JSONL に残す (観測性)
+    assert rec["primary_outcome"] == "executed"
+    assert rec["observer_outcome"] == "skipped"
+    assert "portfolio gate" in rec["observer_reason"]
+
+
+def test_observer_rejection_reason_logged(tmp_path: Path):
+    """live_test 想定: paper primary 成功 + MT5 observer 拒否 → observer の
+    outcome/reason が shadow JSONL に残る (Discord は primary 成功を通知するため、
+    observer 拒否はログでしか追えない)。"""
+    primary = MagicMock()
+    observer = MagicMock()
+    primary.execute_signal.return_value = ExecutionResult.executed(_mk_order())
+    observer.execute_signal.return_value = ExecutionResult.rejected(
+        "発注拒否 (broker): retcode=10016 Invalid stops")
+
+    adapter = ShadowBrokerAdapter(
+        primary=primary, observer=observer,
+        observer_position_mgr=MagicMock(),
+        comparison_log_path=tmp_path / "shadow.jsonl",
+    )
+    adapter.execute_signal(MagicMock(pair="EURUSD=X", action="sell"), MagicMock())
+
+    rec = json.loads((tmp_path / "shadow.jsonl").read_text().strip())
+    assert rec["observer_outcome"] == "rejected"
+    assert "retcode=10016" in rec["observer_reason"]
 
 
 def test_check_and_close_logs_when_either_side_closes(tmp_path: Path):

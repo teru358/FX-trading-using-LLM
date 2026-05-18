@@ -17,11 +17,17 @@ class ExecutionResult:
     - ``executed``: 発注成功 (``order`` に約定 ``Order``)
     - ``skipped`` : 意図した抑制 (既存ポジション / scale-in 無効 / リスク制限 / hold)
     - ``halted``  : halt 状態のため発注見送り
-    - ``rejected``: 発注したが broker/MT5 に拒否された (invalid stops/comment, 証拠金不足)
-    - ``failed``  : 技術的失敗 (bridge 不通 / HTTP error / 例外)
+    - ``rejected``: bridge が拒否ステータス (HTTP 409 / 422) を返した
+                    — invalid stops, 証拠金不足など
+    - ``failed``  : 技術的失敗 (bridge 不通 / HTTP 5xx / 例外)
 
     ``skipped`` のみ運用上「無害・想定内」。``halted`` / ``rejected`` / ``failed``
     は要注意であり、通知でもそれが分かる文面にする (バグ2 の再発防止)。
+
+    分類は bridge が返す HTTP ステータスに従う。MT5 が拒否した注文でも bridge が
+    5xx で返す場合 (例: invalid comment を HTTP 500 で返す現状) は ``failed`` に
+    落ちる。bridge が invalid order で一貫して 4xx を返すよう直せば自動的に
+    ``rejected`` へ分類される (インシデント3 の対応範囲)。
     """
 
     outcome: ExecutionOutcome
