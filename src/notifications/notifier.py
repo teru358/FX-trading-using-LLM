@@ -130,6 +130,52 @@ _SKIP_HEADLINES = {
 }
 
 
+def _format_signal_block(o: SignalOutcome) -> str:
+    """1シグナルの結果ブロックを整形する。"""
+    if o.status == "executed":
+        emoji = "📈" if o.action == "buy" else "📉"
+        label = f"{o.action.upper()} EXECUTED"
+        if o.order is not None and getattr(o.order, "is_scale_in", False):
+            label += " (scale-in)"
+    elif o.status == "hold":
+        emoji, label = "⏸", "HOLD"
+    elif o.status == "rejected":
+        emoji, label = "🚫", f"{o.action.upper()} REJECTED"
+    elif o.status == "failed":
+        emoji, label = "❌", f"{o.action.upper()} FAILED"
+    else:  # skipped / halted
+        emoji = "⏭"
+        label = f"{o.action.upper()} SKIPPED" if o.action in ("buy", "sell") else "SKIPPED"
+
+    lines = [f"{emoji} {o.pair} {label}"]
+
+    score_line = f"score {o.combined_score:+.3f} | conf {o.confidence:.0%}"
+    if o.status == "executed" and o.order is not None:
+        entry, sl, tp = o.order.entry_price, o.order.stop_loss, o.order.take_profit
+        sl_dist = abs(entry - sl)
+        rr = abs(tp - entry) / sl_dist if sl_dist > 0 else 0.0
+        score_line += f" | RR {rr:.2f}"
+    lines.append(score_line)
+
+    if o.status == "executed" and o.order is not None:
+        lines.append(
+            f"entry {o.order.entry_price:.5f} | "
+            f"SL {o.order.stop_loss:.5f} | TP {o.order.take_profit:.5f}"
+        )
+
+    drivers = f"drivers: News {o.news_score:+.2f} / Tech {o.tech_score:+.2f}"
+    if o.tv_recommendation:
+        drivers += f" / TV {o.tv_recommendation}"
+    lines.append(drivers)
+
+    if o.reason:
+        lines.append(f"reason: {o.reason}")
+    if o.rag_note:
+        lines.append(f"RAG: {o.rag_note}")
+
+    return "\n".join(lines)
+
+
 class NotifierAdapter(ABC):
     @abstractmethod
     async def send(self, message: str) -> None:
