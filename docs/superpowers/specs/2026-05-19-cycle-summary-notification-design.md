@@ -61,7 +61,7 @@ Phase 4b が各シグナルを処理する際、Discord 通知を即時発火せ
 
 ## データ構造
 
-### `PairAnalysisOutcome` (新規)
+### `PairAnalysisOutcome` / `PairAnalysisError` (新規)
 
 `_process_pair` の戻り値。tuple ではなく dataclass にして将来のフィールド追加に耐える。
 定義場所: [src/cycles/trading.py](../../../src/cycles/trading.py)。
@@ -72,10 +72,22 @@ class PairAnalysisOutcome:
     signal: TradeSignal
     macro_ctx: str
     tech_fallback: bool = False  # 蓄積スナップショットがなく即時 Ollama 分析へ fallback した
+
+
+@dataclass
+class PairAnalysisError:
+    pair: str          # 失敗したペアの symbol
+    error: Exception   # 元の例外
 ```
 
-`_process_pair` がエラー時に返す `Exception` は従来どおり (`asyncio.gather(return_exceptions=True)`
-が捕捉する)。
+現行コードでは `_process_pair` が例外を捕捉して bare `Exception` を返しており、
+`_phase_analyze_pairs` 側 (`errors = [r for r in results if isinstance(r, Exception)]`) は
+**どのペアが失敗したか復元できない**。本設計は失敗ペアを `data_health` に出すため、
+`_process_pair` はエラー時に bare `Exception` ではなく `PairAnalysisError(pair, error)` を返す。
+`bounded(pair_cfg)` は `_process_pair` から例外がエスケープした場合も
+`PairAnalysisError(pair_cfg.symbol, e)` へ包んで返す (防御的多層化)。
+これにより `asyncio.gather` の結果は `PairAnalysisOutcome` か `PairAnalysisError` のみになり、
+失敗ペアの symbol を常に特定できる。
 
 ### `SignalOutcome` (新規)
 
@@ -95,8 +107,17 @@ class SignalOutcome:
     news_score: float            # signal.news.sentiment_score — drivers 行
     tech_score: float            # signal.price.bias_score — drivers 行
     tv_recommendation: str = ""  # signal.tv_recommendation — drivers 行 ("" なら非表示)
+    rag_note: str = ""           # RAG 補正が action/score を変えたときの注記 ("" なら非表示)
     order: "Order | None" = None # status=="executed" のとき約定 Order (executed_orders 集計に使用)
 ```
+
+`rag_note` の理由 — `_adjust_signal_with_rag` は `combined_score` と `action` のみを書き換え、
+`signal_reason` / `detail_reason` は書き換えない。そのため集約サマリーで score / BUY・HOLD は
+RAG 補正後なのに `reason` が補正前のまま、という表示ズレが起きうる。集約通知は「最終判断」を
+見せる UI なので、RAG 補正が action または score を変えた場合は補正内容を `rag_note` に持たせ、
+ブロックに明示する。`_adjust_signal_with_rag` は戻り値を `None` から `str` (補正注記。
+補正なしなら `""`) へ変更し、`_phase_execute_signals` がペアごとに受け取って `SignalOutcome`
+へ渡す。注記の例: `"RAG: score -0.023→+0.115, hold→buy"`。
 
 `Order` 型は notifier→trading の実行時依存を避けるため `TYPE_CHECKING` 経由でインポートする
 (整形時の属性アクセス `order.entry_price` 等は実行時インポート不要)。
@@ -195,6 +216,10 @@ per-signal の `halted` (極めて稀。halt サイクルは Phase 4b 前に sho
 `drivers:` 行は `tv_recommendation` が空文字なら `TV` 部分を省略する
 (`drivers: News +0.12 / Tech +0.37`)。
 
+`rag_note` が非空のブロックは `reason:` 行の下に `RAG: <note>` 行を追加し、RAG 補正で
+action / score が変わったことを明示する (`reason` 自体は補正前理由のまま残し、補正内容は
+`RAG:` 行で示す)。
+
 ### Data 行 (問題時のみ)
 
 `CycleSummaryEvent.data_health` が非空のとき、結果行の直下に1行挿入する:
@@ -263,24 +288,47 @@ Discord の `content` 上限は 2000 文字。2ペアで約450文字、5ペア�
 MT5 拒否や bridge 異常を `skipped` (無害表示) に誤分類しないことが本設計の安全要件であり、
 テスト名にもこの規律を明示する (例: `test_mt5_rejection_classified_rejected_not_skipped`)。
 
+### 例外: ATR SL/TP 算出失敗ルート
+
+`_execute_one_signal` は ATR SL/TP 算出に失敗すると、broker 呼び出し前に `sig.action = "hold"` /
+`sig.signal_reason = "ATR SL/TP calculation failed"` へ書き換える。その後 broker は hold を
+`ExecutionResult.skipped("hold (発注対象外)")` として返すため、`status` を `ExecutionResult.outcome`
+からそのまま採ると `status="skipped"` / `reason="hold (発注対象外)"` となり、**真の原因
+(ATR 失敗) が見えなくなる**。
+
+そこで `_execute_one_signal` は次の特例で `SignalOutcome` を構築する:
+
+- 関数入口で元の `sig.action` をローカル変数へ退避する (ATR 書き換え前の buy/sell)。
+- ATR SL/TP 失敗で hold 化した場合、broker 戻り値の reason を使わず
+  `SignalOutcome(status="skipped", action=元の buy/sell, reason="ATR SL/TP calculation failed")`
+  を構築する。
+- 一般則: `_execute_one_signal` 自身が発注前に action を書き換えた経路では、broker 戻り値の
+  reason ではなく書き換え理由を `SignalOutcome.reason` に採用する。
+
+これにより、ATR 失敗はサマリー上 `⏭ USDJPY=X BUY SKIPPED — reason: ATR SL/TP calculation failed`
+として正しい原因とともに表示される。
+
 ## データフロー / 変更箇所
 
 | 関数 / ファイル | 変更内容 |
 |---|---|
-| `_process_pair` | 戻り値を `(signal, macro_ctx)` から `PairAnalysisOutcome` に変更。`analysis_store.aggregate` が None (即時 Ollama fallback) のとき `tech_fallback=True` |
+| `_process_pair` | 成功時の戻り値を `(signal, macro_ctx)` から `PairAnalysisOutcome` に変更。`analysis_store.aggregate` が None (即時 Ollama fallback) のとき `tech_fallback=True`。エラー時は bare `Exception` ではなく `PairAnalysisError(pair, error)` を返す |
 | `_process_pair` | `combine_signals` 後に `signal.tv_recommendation` を設定 |
-| `_phase_analyze_pairs` | `PairAnalysisOutcome` を unpack。戻り値に `data_health: list[str]` を追加 (分析失敗ペア → `"{pair} 分析失敗"`、fallback ペア → `"{pair} スナップショット未取得(即時分析fallback)"`) |
-| `_execute_one_signal` | 戻り値を `Order \| None` から `SignalOutcome` に変更。`notify_order_opened` / `notify_signal_skipped` の即時呼び出しを `if not notify_on_cycle_summary:` ゲート内へ移動 |
-| `_phase_execute_signals` | 戻り値を `(executed_orders, outcomes: list[SignalOutcome])` に変更。hold 分岐も `SignalOutcome(status="hold")` を積む。`outcome.order` があれば `executed_orders` に追加 |
+| `bounded` (`_phase_analyze_pairs` 内) | `_process_pair` から例外がエスケープした場合 `PairAnalysisError(pair_cfg.symbol, e)` へ包んで返す |
+| `_phase_analyze_pairs` | 結果を `PairAnalysisOutcome` / `PairAnalysisError` に分類。戻り値に `data_health: list[str]` を追加 (`PairAnalysisError.pair` → `"{pair} 分析失敗"`、`tech_fallback` ペア → `"{pair} スナップショット未取得(即時分析fallback)"`) |
+| `_adjust_signal_with_rag` | 戻り値を `None` から `str` (補正注記。補正なしなら `""`) に変更。`action` または `combined_score` を変えたとき注記文字列を返す |
+| `_execute_one_signal` | 戻り値を `Order \| None` から `SignalOutcome` に変更。入口で元の `sig.action` を退避。ATR SL/TP 失敗で hold 化した経路は `SignalOutcome(status="skipped", action=元の buy/sell, reason="ATR SL/TP calculation failed")` を構築 (broker 戻り値の reason を使わない)。`notify_order_opened` / `notify_signal_skipped` の即時呼び出しを `if not notify_on_cycle_summary:` ゲート内へ移動 |
+| `_phase_execute_signals` | 戻り値を `(executed_orders, outcomes: list[SignalOutcome])` に変更。hold 分岐も `SignalOutcome(status="hold")` を積む。`_adjust_signal_with_rag` の注記を受け取り `SignalOutcome.rag_note` へ渡す。`outcome.order` があれば `executed_orders` に追加 |
 | `trading_cycle` | Phase 4b 後に `if notify_on_cycle_summary:` で `notify_cycle_summary(CycleSummaryEvent(...))` を1回呼ぶ。halt 分岐の early-return 前にも `halted=True` の `CycleSummaryEvent` を1回送る |
 | `notifier.py` | `SignalOutcome` / `CycleSummaryEvent` / `NotifierAdapter.notify_cycle_summary()` を追加 |
 | `signal_combiner.py` | `TradeSignal` に `tv_recommendation: str = ""` を追加 |
 | `config/schema.py` | `NotifierConfig` に `notify_on_cycle_summary: bool = True` を追加 |
+| `config/settings.yaml.example` | `notifier` セクションに `notify_on_cycle_summary: true` をコメント付きで追加 (実 config `config/settings.yaml` はキー省略時に既定 `True` で動くため任意追記) |
 
 ## エラー処理 / エッジケース
 
-- **ペア分析エラー** — `_process_pair` が `Exception` を返したペアは `signals` から除外され、
-  `data_health` に `"{pair} 分析失敗"` を積む。Data 行に表示。
+- **ペア分析エラー** — `_process_pair` が `PairAnalysisError(pair, error)` を返したペアは
+  `signals` から除外され、`data_health` に `"{pair} 分析失敗"` を積む。Data 行に表示。
 - **tech fallback** — 蓄積スナップショットがなく即時分析へ落ちたペアは `data_health` に
   `"{pair} スナップショット未取得(即時分析fallback)"` を積む。Data 行に表示。
 - **halt サイクル** — Phase 4b に到達せず early-return。`halted=True` の `CycleSummaryEvent`
@@ -308,15 +356,28 @@ MT5 拒否や bridge 異常を `skipped` (無害表示) に誤分類しないこ
 - Data 行: `data_health` 非空で `⚠ Data:` 行が出る / 空なら出ない
 - scale-in: `order.is_scale_in=True` でラベルに `(scale-in)`
 - TV 省略: `tv_recommendation=""` で `drivers:` 行から `TV` 部分が消える
+- RAG 注記: `rag_note` 非空で `reason:` の下に `RAG:` 行が出る / 空なら出ない
 - 分類規律: `test_mt5_rejection_classified_rejected_not_skipped` —
   MT5 拒否相当の `SignalOutcome(status="rejected")` が拒否ブロックに出て skipped 扱いされない
+
+### 取引サイクルロジックのテスト (既存 cycle テストへ追加 / 新規)
+
+- `PairAnalysisError`: 分析失敗ペアが `PairAnalysisError(pair, error)` で返り、`_phase_analyze_pairs`
+  の `data_health` に正しい pair 名で `"{pair} 分析失敗"` が積まれる
+- ATR SL/TP 失敗: `_execute_one_signal` が ATR 失敗時に
+  `SignalOutcome(status="skipped", reason="ATR SL/TP calculation failed")` を返し、
+  reason が `"hold (発注対象外)"` に上書きされない
+- RAG 注記: `_adjust_signal_with_rag` が action/score を変えたとき注記文字列を返し、
+  変えないとき `""` を返す。注記が `SignalOutcome.rag_note` に伝播する
+- `notify_on_cycle_summary=False` フォールバック時に旧 `notify_order_opened` /
+  `notify_signal_skipped` が発火し、`True` 時には発火しないこと
 
 ### 既存テストの更新
 
 - `_execute_one_signal` の戻り値が `SignalOutcome` になることに追従
 - `_phase_execute_signals` の戻り値が `(executed_orders, outcomes)` になることに追従
-- `_process_pair` / `_phase_analyze_pairs` が `PairAnalysisOutcome` を扱うことに追従
-- `notify_on_cycle_summary=False` フォールバック時に旧通知が発火することのテスト
+- `_process_pair` / `_phase_analyze_pairs` が `PairAnalysisOutcome` / `PairAnalysisError`
+  を扱うことに追従
 
 ## 将来拡張 (本スコープ外)
 
