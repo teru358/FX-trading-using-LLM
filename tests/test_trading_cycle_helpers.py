@@ -279,6 +279,40 @@ async def test_adjust_signal_with_rag_embed_error_is_swallowed():
     assert sig.action == "buy"
 
 
+@pytest.mark.asyncio
+async def test_adjust_signal_with_rag_returns_note_when_adjusted(monkeypatch):
+    """action/score を変えたら補正注記を返す。"""
+    from src.signals.rag_adjustment import RagAdjustmentConfig
+    from src.trading_cycle import _adjust_signal_with_rag
+
+    monkeypatch.setattr("src.cycles.trading.compute_rag_adjustment", lambda **k: 0.20)
+    sig = _make_signal(score=0.30, action="buy")
+    cfg = RagAdjustmentConfig(enabled=True)
+
+    note = await _adjust_signal_with_rag(
+        sig, cfg, _FakeStoreWithDirectional(_FakeDirectional()), _fake_embed, deadband=0.15,
+    )
+    assert note != ""
+    assert "→" in note
+    assert sig.combined_score == pytest.approx(0.50)
+
+
+@pytest.mark.asyncio
+async def test_adjust_signal_with_rag_returns_empty_when_no_change(monkeypatch):
+    """補正が 0 のときは空文字を返す。"""
+    from src.signals.rag_adjustment import RagAdjustmentConfig
+    from src.trading_cycle import _adjust_signal_with_rag
+
+    monkeypatch.setattr("src.cycles.trading.compute_rag_adjustment", lambda **k: 0.0)
+    sig = _make_signal(score=0.30, action="buy")
+    cfg = RagAdjustmentConfig(enabled=True)
+
+    note = await _adjust_signal_with_rag(
+        sig, cfg, _FakeStoreWithDirectional(_FakeDirectional()), _fake_embed, deadband=0.15,
+    )
+    assert note == ""
+
+
 # ── _phase_close_sl_tp ────────────────────────────────────────
 
 

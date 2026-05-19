@@ -642,10 +642,13 @@ async def _adjust_signal_with_rag(
     store: VectorStore,
     embed_fn_adj,
     deadband: float,
-) -> None:
-    """方向別 RAG の過去成績をもとにシグナルスコアを補正し、必要なら action も再判定する。"""
+) -> str:
+    """方向別 RAG の過去成績をもとにシグナルスコアを補正し、必要なら action も再判定する。
+
+    戻り値: action または score を変えた場合は補正注記文字列、変えない場合は ""。
+    """
     if not (rag_cfg.enabled and sig.action != "hold"):
-        return
+        return ""
     try:
         query_embedding = await embed_fn_adj(sig.detail_reason)
         same_dir = "bullish" if sig.combined_score > 0 else "bearish"
@@ -666,13 +669,17 @@ async def _adjust_signal_with_rag(
         )
     except Exception as e:
         logger.warning(f"[RAG ADJ] {sig.pair}: failed — {e}")
-        return
+        return ""
 
     adjusted_score = sig.combined_score + adjustment
     if adjusted_score == sig.combined_score:
-        return
+        return ""
 
-    logger.info(f"[RAG ADJ] {sig.pair}: combined={sig.combined_score:+.3f} → adjusted={adjusted_score:+.3f}")
+    old_score = sig.combined_score
+    old_action = sig.action
+    logger.info(
+        f"[RAG ADJ] {sig.pair}: combined={old_score:+.3f} → adjusted={adjusted_score:+.3f}"
+    )
     if adjusted_score > deadband:
         sig.action = "buy"
     elif adjusted_score < -deadband:
@@ -680,6 +687,11 @@ async def _adjust_signal_with_rag(
     else:
         sig.action = "hold"
     sig.combined_score = round(adjusted_score, 4)
+
+    note = f"score {old_score:+.3f}→{sig.combined_score:+.3f}"
+    if sig.action != old_action:
+        note += f", {old_action}→{sig.action}"
+    return note
 
 
 async def _execute_one_signal(
