@@ -126,3 +126,82 @@ def test_format_signal_block_scale_in_label():
     order = Order.new("USDJPY=X", "buy", 159.0, 158.0, 161.0, 1000.0, is_scale_in=True)
     block = _format_signal_block(_executed_outcome(order=order))
     assert "(scale-in)" in block
+
+
+from src.notifications.notifier import (  # noqa: E402
+    NotifierAdapter,
+    _format_cycle_summary,
+)
+
+
+class _CapturingNotifier(NotifierAdapter):
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    async def send(self, message: str) -> None:
+        self.messages.append(message)
+
+
+def test_format_cycle_summary_header_and_counts():
+    event = CycleSummaryEvent(
+        cycle_time=datetime(2026, 5, 19, 17, 30),
+        outcomes=[_executed_outcome(), _hold_outcome()],
+    )
+    msg = _format_cycle_summary(event)
+    assert msg.startswith("🟢 取引サイクル 17:30 JST")
+    assert "結果: 1発注 / 1HOLD / 0拒否 / 0失敗" in msg
+    assert "📈 USDJPY=X BUY EXECUTED" in msg
+    assert "⏸ EURUSD=X HOLD" in msg
+
+
+def test_format_cycle_summary_warning_emoji_on_rejection():
+    o_rej = _hold_outcome(action="sell", status="rejected", reason="retcode=10016")
+    event = CycleSummaryEvent(cycle_time=datetime(2026, 5, 19, 17, 30), outcomes=[o_rej])
+    msg = _format_cycle_summary(event)
+    assert msg.startswith("⚠️")
+    assert "0発注 / 0HOLD / 1拒否 / 0失敗" in msg
+
+
+def test_format_cycle_summary_skip_count_only_when_positive():
+    no_skip = CycleSummaryEvent(
+        cycle_time=datetime(2026, 5, 19, 17, 30), outcomes=[_hold_outcome()])
+    assert "スキップ" not in _format_cycle_summary(no_skip)
+    o_skip = _hold_outcome(action="buy", status="skipped", reason="既存ポジションあり")
+    with_skip = CycleSummaryEvent(
+        cycle_time=datetime(2026, 5, 19, 17, 30), outcomes=[o_skip])
+    assert "1スキップ" in _format_cycle_summary(with_skip)
+
+
+def test_format_cycle_summary_data_health_line():
+    event = CycleSummaryEvent(
+        cycle_time=datetime(2026, 5, 19, 17, 30), outcomes=[_hold_outcome()],
+        data_health=["EURUSD=X 分析失敗"],
+    )
+    msg = _format_cycle_summary(event)
+    assert "⚠ Data: EURUSD=X 分析失敗" in msg
+    assert msg.startswith("⚠️")
+
+
+def test_format_cycle_summary_no_data_line_when_healthy():
+    event = CycleSummaryEvent(
+        cycle_time=datetime(2026, 5, 19, 17, 30), outcomes=[_hold_outcome()])
+    assert "Data:" not in _format_cycle_summary(event)
+
+
+def test_format_cycle_summary_halt():
+    event = CycleSummaryEvent(
+        cycle_time=datetime(2026, 5, 19, 17, 30), outcomes=[], halted=True)
+    msg = _format_cycle_summary(event)
+    assert msg.startswith("🛑 取引サイクル 17:30 JST")
+    assert "halt 中" in msg
+    assert "新規発注分析をスキップ" in msg
+
+
+@pytest.mark.asyncio
+async def test_notify_cycle_summary_calls_send():
+    notifier = _CapturingNotifier()
+    event = CycleSummaryEvent(
+        cycle_time=datetime(2026, 5, 19, 17, 30), outcomes=[_hold_outcome()])
+    await notifier.notify_cycle_summary(event)
+    assert len(notifier.messages) == 1
+    assert "取引サイクル 17:30 JST" in notifier.messages[0]

@@ -176,6 +176,43 @@ def _format_signal_block(o: SignalOutcome) -> str:
     return "\n".join(lines)
 
 
+def _format_cycle_summary(event: CycleSummaryEvent) -> str:
+    """1取引サイクルの集約サマリーのメッセージ文字列を組み立てる。"""
+    hhmm = event.cycle_time.strftime("%H:%M")
+
+    if event.halted:
+        return (
+            f"🛑 取引サイクル {hhmm} JST\n"
+            "halt 中 — 新規発注分析をスキップ\n"
+            "既存ポジション管理 (timeout 判定) のみ継続"
+        )
+
+    n_exec = sum(1 for o in event.outcomes if o.status == "executed")
+    n_hold = sum(1 for o in event.outcomes if o.status == "hold")
+    n_rej = sum(1 for o in event.outcomes if o.status == "rejected")
+    n_fail = sum(1 for o in event.outcomes if o.status == "failed")
+    n_skip = sum(1 for o in event.outcomes if o.status in ("skipped", "halted"))
+
+    has_problem = n_rej > 0 or n_fail > 0 or bool(event.data_health)
+    header_emoji = "⚠️" if has_problem else "🟢"
+
+    counts = f"{n_exec}発注 / {n_hold}HOLD / {n_rej}拒否 / {n_fail}失敗"
+    if n_skip > 0:
+        counts += f" / {n_skip}スキップ"
+
+    lines = [f"{header_emoji} 取引サイクル {hhmm} JST", f"結果: {counts}"]
+    if event.data_health:
+        lines.append("⚠ Data: " + " / ".join(event.data_health))
+    for o in event.outcomes:
+        lines.append("")
+        lines.append(_format_signal_block(o))
+
+    msg = "\n".join(lines)
+    if len(msg) > 1900:  # Discord content 上限 2000 字に対する安全マージン
+        msg = msg[:1900] + "\n…(以下省略)"
+    return msg
+
+
 class NotifierAdapter(ABC):
     @abstractmethod
     async def send(self, message: str) -> None:
@@ -306,6 +343,10 @@ class NotifierAdapter(ABC):
         else:
             msg += f"\n根拠: {event.signal_reason}"
         await self.send(msg)
+
+    async def notify_cycle_summary(self, event: CycleSummaryEvent) -> None:
+        """取引サイクルの集約サマリーを送信する。"""
+        await self.send(_format_cycle_summary(event))
 
 
 # ── No-op 実装（通知無効時のデフォルト） ───────────────────
