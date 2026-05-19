@@ -295,6 +295,7 @@ notification:
   notify_on_order_close: true      # 決済時に通知（SL/TP到達・緊急損切り含む）
   notify_on_signal_skipped: true   # スキップ（既存ポジション）/ 保留（hold）時に通知（判断理由付き）
   notify_on_price_alert: true      # 価格急変動（損失方向）を検知した場合
+  notify_on_cycle_summary: true    # 取引サイクル結果を1通に集約して通知 (false で旧 per-event 通知)
 
 # 経済指標カレンダー（TradingView非公式API経由）
 economic_calendar:

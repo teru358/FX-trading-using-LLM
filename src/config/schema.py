@@ -330,6 +330,7 @@ class NotifierConfig:
     notify_on_order_close: bool = True
     notify_on_signal_skipped: bool = True
     notify_on_price_alert: bool = True    # 価格急変動通知
+    notify_on_cycle_summary: bool = True  # 取引サイクル結果を1通に集約 (false で旧 per-event 通知)
 
 
 @dataclass

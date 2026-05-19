@@ -3,7 +3,13 @@ from __future__ import annotations
 import logging
 import os
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datetime import datetime
+
+    from src.trading.position_manager import Order
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +71,33 @@ class PriceAlertEvent:
     unrealized_pnl: float
     position_size: float
     source: str = ""          # "trading" | "forecast" | "monitor" など
+
+
+@dataclass
+class SignalOutcome:
+    """1シグナルの発注判断結果。集約サマリー整形専用の純粋なデータ構造。"""
+    pair: str
+    action: str                  # "buy" | "sell" | "hold"
+    status: str                  # executed/hold/skipped/halted/rejected/failed
+    confidence: float
+    combined_score: float
+    reason: str                  # executed/hold→signal_reason / それ以外→ExecutionResult.reason
+    detail_reason: str           # ニュース/テクニカル詳細内訳
+    news_score: float            # signal.news.sentiment_score — drivers 行
+    tech_score: float            # signal.price.bias_score — drivers 行
+    tv_recommendation: str = ""  # signal.tv_recommendation — drivers 行 ("" なら非表示)
+    rag_note: str = ""           # RAG 補正が action/score を変えたときの注記 ("" なら非表示)
+    order: Order | None = None   # status=="executed" のとき約定 Order
+
+
+@dataclass
+class CycleSummaryEvent:
+    """notify_cycle_summary に渡す、1取引サイクルの集約結果。"""
+    cycle_time: datetime
+    outcomes: list[SignalOutcome]
+    halted: bool = False
+    data_health: list[str] = field(default_factory=list)  # 問題文字列。空なら Data 行なし
+    source: str = "trading"
 
 
 # ── 抽象基底クラス ─────────────────────────────────────────
