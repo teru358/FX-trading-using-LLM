@@ -8,6 +8,15 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
+def _runtime_mock(c):
+    """_build_trading_runtime の戻り値 (broker, adaptive, notifier, llm_price, llm_reflect)。"""
+    return (
+        MagicMock(), MagicMock(),
+        MagicMock(notify_cycle_summary=AsyncMock()),
+        MagicMock(model_name="m"), MagicMock(model_name="r"),
+    )
+
+
 @pytest.mark.asyncio
 async def test_trading_cycle_skips_phase_analyze_when_halted(tmp_path, monkeypatch):
     """halt 中は Phase 3 (_phase_analyze_pairs) 以降が呼ばれない。
@@ -43,15 +52,12 @@ async def test_trading_cycle_skips_phase_analyze_when_halted(tmp_path, monkeypat
     monkeypatch.setattr(
         "src.cycles.trading._phase_review_open_positions", review_open_mock,
     )
-    execute_mock = AsyncMock(return_value=[])
+    execute_mock = AsyncMock(return_value=([], []))
     monkeypatch.setattr(
         "src.cycles.trading._phase_execute_signals", execute_mock,
     )
     # _build_trading_runtime / market_open / make_embed_fn / print_run_summary は副次
-    monkeypatch.setattr(
-        "src.cycles.trading._build_trading_runtime",
-        lambda c: (MagicMock(), MagicMock(), MagicMock(), MagicMock(model_name="m"), MagicMock(model_name="r")),
-    )
+    monkeypatch.setattr("src.cycles.trading._build_trading_runtime", _runtime_mock)
     monkeypatch.setattr("src.cycles.trading.is_market_open", lambda *a, **k: True)
     monkeypatch.setattr("src.cycles.trading.local_now", lambda c: datetime(2026, 5, 7, 12, 0))
     monkeypatch.setattr("src.cycles.trading.make_embed_fn", lambda c: lambda x: [])
@@ -105,12 +111,9 @@ async def test_trading_cycle_runs_phase_analyze_when_not_halted(tmp_path, monkey
     )
     monkeypatch.setattr(
         "src.cycles.trading._phase_execute_signals",
-        AsyncMock(return_value=[]),
+        AsyncMock(return_value=([], [])),
     )
-    monkeypatch.setattr(
-        "src.cycles.trading._build_trading_runtime",
-        lambda c: (MagicMock(), MagicMock(), MagicMock(), MagicMock(model_name="m"), MagicMock(model_name="r")),
-    )
+    monkeypatch.setattr("src.cycles.trading._build_trading_runtime", _runtime_mock)
     monkeypatch.setattr("src.cycles.trading.is_market_open", lambda *a, **k: True)
     monkeypatch.setattr("src.cycles.trading.local_now", lambda c: datetime(2026, 5, 7, 12, 0))
     monkeypatch.setattr("src.cycles.trading.make_embed_fn", lambda c: lambda x: [])
@@ -147,10 +150,7 @@ async def test_halt_runs_timeout_only_review(tmp_path, monkeypatch):
     review_open_mock = AsyncMock(return_value=[])
     monkeypatch.setattr("src.cycles.trading._phase_review_open_positions",
                         review_open_mock)
-    monkeypatch.setattr("src.cycles.trading._build_trading_runtime",
-                        lambda c: (MagicMock(), MagicMock(), MagicMock(),
-                                   MagicMock(model_name="m"),
-                                   MagicMock(model_name="r")))
+    monkeypatch.setattr("src.cycles.trading._build_trading_runtime", _runtime_mock)
     monkeypatch.setattr("src.cycles.trading.is_market_open", lambda *a, **k: True)
     monkeypatch.setattr("src.cycles.trading.local_now",
                         lambda c: datetime(2026, 5, 12, 12, 0))
@@ -205,10 +205,7 @@ async def test_halt_timeout_runs_even_when_review_disabled(tmp_path, monkeypatch
                         AsyncMock(return_value=None))
     monkeypatch.setattr("src.cycles.trading._review_hold_decisions",
                         AsyncMock(return_value=None))
-    monkeypatch.setattr("src.cycles.trading._build_trading_runtime",
-                        lambda c: (MagicMock(), MagicMock(), MagicMock(),
-                                   MagicMock(model_name="m"),
-                                   MagicMock(model_name="r")))
+    monkeypatch.setattr("src.cycles.trading._build_trading_runtime", _runtime_mock)
     monkeypatch.setattr("src.cycles.trading.is_market_open", lambda *a, **k: True)
     monkeypatch.setattr("src.cycles.trading.local_now",
                         lambda c: datetime(2026, 5, 12, 12, 0))

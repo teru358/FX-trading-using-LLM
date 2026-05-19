@@ -32,8 +32,10 @@ from src.data.price_store import PriceStore
 from src.llm.client import LLMClient
 from src.llm.factory import create_llm_client
 from src.notifications.notifier import (
+    CycleSummaryEvent,
     OrderClosedEvent,
     OrderOpenedEvent,
+    SignalOutcome,
     SignalSkippedEvent,
     create_notifier,
 )
@@ -707,8 +709,10 @@ async def _execute_one_signal(
     adaptive_store: AdaptiveParamsStore,
     embed_fn_adj,
     price_provider: PriceProvider | None,
-):
-    """1シグナルの発注処理 (ATR SL/TP → broker → session → RAG 記録) を実行する。"""
+) -> SignalOutcome:
+    """1シグナルの発注処理を実行し、結果を SignalOutcome で返す。"""
+    original_action = sig.action  # ATR 降格判定用に退避
+
     sltp_result = _apply_atr_sltp_to_signal(
         sig, config, position_mgr, price_store, adaptive_store,
         price_provider=price_provider,
@@ -722,9 +726,56 @@ async def _execute_one_signal(
         sig.action = "hold"
         sig.signal_reason = "ATR SL/TP calculation failed"
 
+    # ATR 降格: 元 buy/sell が ATR 処理 (SL/TP失敗 or R:R不足) で hold 化された
+    atr_demoted = original_action in ("buy", "sell") and sig.action == "hold"
+
     result = broker.execute_signal(sig, position_mgr, macro_context=macro_ctx)
-    if not result.is_executed:
-        if config.notifier.notify_on_signal_skipped:
+
+    if atr_demoted:
+        status = "skipped"
+        block_action = original_action
+        reason = sig.signal_reason  # ATR レイヤが設定した具体的理由
+    elif result.is_executed:
+        status = result.outcome
+        block_action = sig.action
+        reason = sig.signal_reason
+    else:
+        status = result.outcome
+        block_action = sig.action
+        reason = result.reason
+
+    outcome = SignalOutcome(
+        pair=sig.pair,
+        action=block_action,
+        status=status,
+        confidence=sig.confidence,
+        combined_score=sig.combined_score,
+        reason=reason,
+        detail_reason=sig.detail_reason,
+        news_score=sig.news.sentiment_score,
+        tech_score=sig.price.bias_score,
+        tv_recommendation=sig.tv_recommendation,
+        order=result.order,
+    )
+
+    # notify_on_cycle_summary=False のときは旧 per-event 通知へフォールバック
+    if not config.notifier.notify_on_cycle_summary:
+        if result.is_executed:
+            if config.notifier.notify_on_order_open:
+                await notifier.notify_order_opened(OrderOpenedEvent(
+                    pair=sig.pair,
+                    direction=sig.action,
+                    entry_price=sig.entry_price,
+                    stop_loss=sig.stop_loss,
+                    take_profit=sig.take_profit,
+                    position_size=sig.position_size,
+                    confidence=sig.confidence,
+                    signal_reason=sig.signal_reason,
+                    detail_reason=sig.detail_reason,
+                    source="trading",
+                    is_scale_in=result.order.is_scale_in,
+                ))
+        elif config.notifier.notify_on_signal_skipped:
             await notifier.notify_signal_skipped(SignalSkippedEvent(
                 pair=sig.pair,
                 action=sig.action,
@@ -735,23 +786,11 @@ async def _execute_one_signal(
                 outcome=result.outcome,
                 skip_reason=result.reason,
             ))
-        return None
-    order = result.order
 
-    if config.notifier.notify_on_order_open:
-        await notifier.notify_order_opened(OrderOpenedEvent(
-            pair=sig.pair,
-            direction=sig.action,
-            entry_price=sig.entry_price,
-            stop_loss=sig.stop_loss,
-            take_profit=sig.take_profit,
-            position_size=sig.position_size,
-            confidence=sig.confidence,
-            signal_reason=sig.signal_reason,
-            detail_reason=sig.detail_reason,
-            source="trading",
-            is_scale_in=order.is_scale_in,
-        ))
+    if not result.is_executed:
+        return outcome
+
+    order = result.order
 
     if session_store:
         direction = "bullish" if order.direction == "buy" else "bearish"
@@ -792,7 +831,7 @@ async def _execute_one_signal(
             key_resistance=sltp_result.key_resistance if sltp_result else None,
         )
         await record_trade_entry(store, embed_fn_adj, order, sig)
-    return order
+    return outcome
 
 
 async def _phase_execute_signals(
@@ -809,7 +848,7 @@ async def _phase_execute_signals(
     adaptive_store: AdaptiveParamsStore,
     embed_fn_adj,
     price_provider: PriceProvider | None,
-) -> list:
+) -> tuple[list, list]:
     """Phase 4b: シグナルに RAG 補正を適用し、新規発注 or HOLD 保存を実行する。"""
     rag_cfg = RagAdjustmentConfig(
         enabled=config.trading.rag_adjustment_enabled,
@@ -824,21 +863,39 @@ async def _phase_execute_signals(
     )
     deadband = config.trading.signal_deadband
 
-    executed_orders = []
+    executed_orders: list = []
+    outcomes: list[SignalOutcome] = []
     for sig in signals:
-        await _adjust_signal_with_rag(sig, rag_cfg, store, embed_fn_adj, deadband)
+        rag_note = await _adjust_signal_with_rag(sig, rag_cfg, store, embed_fn_adj, deadband)
 
         if sig.action != "hold":
-            order = await _execute_one_signal(
+            outcome = await _execute_one_signal(
                 sig, macro_ctxs.get(sig.pair, ""),
                 config, position_mgr, broker, notifier, store, price_store,
                 session_store, adaptive_store, embed_fn_adj,
                 price_provider=price_provider,
             )
-            if order:
-                executed_orders.append(order)
+            outcome.rag_note = rag_note
+            outcomes.append(outcome)
+            if outcome.order is not None:
+                executed_orders.append(outcome.order)
         else:
-            if config.notifier.notify_on_signal_skipped:
+            outcome = SignalOutcome(
+                pair=sig.pair,
+                action="hold",
+                status="hold",
+                confidence=sig.confidence,
+                combined_score=sig.combined_score,
+                reason=sig.signal_reason,
+                detail_reason=sig.detail_reason,
+                news_score=sig.news.sentiment_score,
+                tech_score=sig.price.bias_score,
+                tv_recommendation=sig.tv_recommendation,
+                rag_note=rag_note,
+            )
+            outcomes.append(outcome)
+            if (not config.notifier.notify_on_cycle_summary
+                    and config.notifier.notify_on_signal_skipped):
                 await notifier.notify_signal_skipped(SignalSkippedEvent(
                     pair=sig.pair,
                     action="hold",
@@ -849,7 +906,7 @@ async def _phase_execute_signals(
                     source="trading",
                 ))
             hold_store.save_hold(sig.pair, sig)
-    return executed_orders
+    return executed_orders, outcomes
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -990,6 +1047,10 @@ async def trading_cycle(
             timeout_closed, config, store, embed_fn, llm_reflect,
             adaptive_store, session_store, log_source="[REFLECT/TIMEOUT_HALT]",
         )
+        if config.notifier.notify_on_cycle_summary:
+            await notifier.notify_cycle_summary(CycleSummaryEvent(
+                cycle_time=run_start, outcomes=[], halted=True,
+            ))
         return
 
     # Phase 3: 並列ペア分析 (data_health は後続タスクで notify_cycle_summary に渡す)
@@ -1008,10 +1069,16 @@ async def trading_cycle(
     )
 
     # Phase 4b: 新規シグナル発注
-    executed_orders = await _phase_execute_signals(
+    executed_orders, outcomes = await _phase_execute_signals(
         signals, macro_ctxs, config, position_mgr, broker, notifier, store, price_store,
         hold_store, session_store, adaptive_store, embed_fn, price_provider,
     )
+
+    # Phase 4b 後: 集約サマリーを1通送信
+    if config.notifier.notify_on_cycle_summary:
+        await notifier.notify_cycle_summary(CycleSummaryEvent(
+            cycle_time=run_start, outcomes=outcomes, data_health=data_health,
+        ))
 
     # Phase 5: レポート
     all_closed = closed_this_run + reviewed_closed
