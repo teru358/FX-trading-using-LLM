@@ -35,7 +35,7 @@ async def test_trading_cycle_skips_phase_analyze_when_halted(tmp_path, monkeypat
         review_hold_mock,
     )
     # Phase 3 系: 呼ばれてはいけない
-    analyze_mock = AsyncMock(return_value=([], {}))
+    analyze_mock = AsyncMock(return_value=([], {}, []))
     monkeypatch.setattr(
         "src.cycles.trading._phase_analyze_pairs", analyze_mock,
     )
@@ -95,7 +95,7 @@ async def test_trading_cycle_runs_phase_analyze_when_not_halted(tmp_path, monkey
         "src.cycles.trading._review_hold_decisions",
         AsyncMock(return_value=None),
     )
-    analyze_mock = AsyncMock(return_value=([], {}))
+    analyze_mock = AsyncMock(return_value=([], {}, []))
     monkeypatch.setattr(
         "src.cycles.trading._phase_analyze_pairs", analyze_mock,
     )

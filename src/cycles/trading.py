@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from src.analysis.price_analyzer import analyze_price_action, load_user_notes
@@ -56,9 +57,25 @@ from src.trading.position_reviewer import review_open_positions
 from src.utils.clock import db_now, local_now
 
 if TYPE_CHECKING:
+    from src.signals.signal_combiner import TradeSignal
     from src.trading.bridge_health_gate import BridgeHealthGate
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PairAnalysisOutcome:
+    """_process_pair の成功戻り値。"""
+    signal: "TradeSignal"
+    macro_ctx: str
+    tech_fallback: bool = False  # 蓄積スナップショットがなく即時 Ollama 分析へ fallback した
+
+
+@dataclass
+class PairAnalysisError:
+    """_process_pair の失敗戻り値。失敗ペアの symbol を保持する。"""
+    pair: str
+    error: Exception
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -100,6 +117,7 @@ async def _process_pair(
             pair_cfg.symbol,
             hours=config.rag.analysis_lookback_hours,
         )
+        tech_fallback = price is None
         if price is None:
             logger.warning(
                 f"{pair_cfg.display_name}: no stored snapshots, "
@@ -176,10 +194,13 @@ async def _process_pair(
             accuracy_provider=accuracy_provider,
             accuracy_config=config.trading.forecast_accuracy_feedback,
         )
-        return signal, macro_ctx
+        signal.tv_recommendation = tv_summary.recommendation if tv_summary else ""
+        return PairAnalysisOutcome(
+            signal=signal, macro_ctx=macro_ctx, tech_fallback=tech_fallback,
+        )
     except Exception as e:
         logger.error(f"Failed to process {pair_cfg.display_name}: {e}", exc_info=True)
-        return e
+        return PairAnalysisError(pair=pair_cfg.symbol, error=e)
 
 
 def _apply_atr_sltp_to_signal(
@@ -490,30 +511,51 @@ async def _phase_analyze_pairs(
     llm_price: LLMClient,
     price_provider: PriceProvider | None,
     forecast_store=None,
-) -> tuple[list, dict[str, str]]:
+) -> tuple[list, dict[str, str], list[str]]:
     """Phase 3: 全ペアを並列分析してシグナル + macro_ctx を生成する。"""
     semaphore = asyncio.Semaphore(config.llm.provider_config.max_concurrent)
 
     async def bounded(pair_cfg):
         async with semaphore:
-            return await _process_pair(
-                pair_cfg, config, position_mgr, store, price_store, analysis_store, llm_price,
-                price_provider=price_provider,
-                forecast_store=forecast_store,
-            )
+            try:
+                return await _process_pair(
+                    pair_cfg, config, position_mgr, store, price_store, analysis_store,
+                    llm_price,
+                    price_provider=price_provider,
+                    forecast_store=forecast_store,
+                )
+            except Exception as e:  # noqa: BLE001 — _process_pair 捕捉漏れの防御網
+                logger.error(
+                    f"[ANALYZE] {pair_cfg.symbol} unexpected: {e}", exc_info=True,
+                )
+                return PairAnalysisError(pair=pair_cfg.symbol, error=e)
 
     results = await asyncio.gather(
         *[bounded(p) for p in config.tradeable_instruments],
         return_exceptions=True,
     )
 
-    signals_with_macro = [r for r in results if not isinstance(r, Exception)]
-    errors             = [r for r in results if isinstance(r, Exception)]
-    signals    = [s for s, _ in signals_with_macro]
-    macro_ctxs = {s.pair: m for s, m in signals_with_macro}
-    if errors:
-        logger.warning(f"{len(errors)} pair(s) failed during analysis.")
-    return signals, macro_ctxs
+    outcomes: list[PairAnalysisOutcome] = []
+    data_health: list[str] = []
+    for r in results:
+        if isinstance(r, PairAnalysisOutcome):
+            outcomes.append(r)
+            if r.tech_fallback:
+                data_health.append(
+                    f"{r.signal.pair} スナップショット未取得(即時分析fallback)"
+                )
+        elif isinstance(r, PairAnalysisError):
+            data_health.append(f"{r.pair} 分析失敗")
+            logger.warning(f"[ANALYZE] {r.pair} failed: {r.error}")
+        elif isinstance(r, Exception):
+            data_health.append("ペア分析で想定外エラー")
+            logger.error(f"[ANALYZE] unexpected gather exception: {r}")
+
+    signals = [o.signal for o in outcomes]
+    macro_ctxs = {o.signal.pair: o.macro_ctx for o in outcomes}
+    if data_health:
+        logger.warning(f"{len(data_health)} pair-analysis issue(s).")
+    return signals, macro_ctxs, data_health
 
 
 async def _phase_review_open_positions(
@@ -939,7 +981,7 @@ async def trading_cycle(
         return
 
     # Phase 3: 並列ペア分析
-    signals, macro_ctxs = await _phase_analyze_pairs(
+    signals, macro_ctxs, data_health = await _phase_analyze_pairs(
         config, position_mgr, store, price_store, analysis_store, llm_price, price_provider,
         forecast_store=forecast_store,
     )
