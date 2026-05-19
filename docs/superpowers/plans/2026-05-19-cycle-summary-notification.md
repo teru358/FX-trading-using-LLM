@@ -23,7 +23,7 @@
 | `src/config/schema.py` | `NotifierConfig.notify_on_cycle_summary` | Modify |
 | `config/settings.yaml` / `config/settings.yaml.example` | `notify_on_cycle_summary` キー | Modify |
 | `src/cycles/trading.py` | `PairAnalysisOutcome` / `PairAnalysisError` / 各 Phase 関数の戻り値変更 / 集約通知呼び出し | Modify |
-| `tests/test_signal_combiner.py` | `tv_recommendation` の回帰テスト | Create |
+| `tests/test_signal_combiner.py` | `tv_recommendation` の回帰テストを追記 (既存 `combine_signals` テストファイル) | Modify |
 | `tests/test_cycle_summary.py` | dataclass / config / 整形関数 / `notify_cycle_summary` のテスト | Create |
 | `tests/test_trading_cycle_summary.py` | 分析 Phase / 実行 Phase / halt サマリーの配線テスト | Create |
 | `tests/test_trading_cycle_helpers.py` | `_adjust_signal_with_rag` 戻り値テストを追加 | Modify |
@@ -37,7 +37,9 @@
 
 **Files:**
 - Modify: `src/signals/signal_combiner.py` (`TradeSignal` dataclass, 21-35行付近)
-- Test: `tests/test_signal_combiner.py` (新規)
+- Modify: `tests/test_signal_combiner.py` (既存ファイル — `combine_signals` のテストが既にある。末尾へ追記し、既存テストは保持する)
+
+> 実装時の訂正: 当初この計画は `tests/test_signal_combiner.py` を新規ファイルと誤記していた。実際は既存ファイル。下記テストは**末尾へ追記**し、`import` に `from datetime import datetime` と `TradeSignal` を加える。既存の `combine_signals` テストを削除しないこと。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
