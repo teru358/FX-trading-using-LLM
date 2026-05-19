@@ -224,3 +224,25 @@ async def test_halt_cycle_sends_halt_summary(tmp_path, monkeypatch):
     notifier.notify_cycle_summary.assert_awaited_once()
     event = notifier.notify_cycle_summary.call_args.args[0]
     assert event.halted is True
+
+
+@pytest.mark.asyncio
+async def test_execute_one_signal_atr_demoted_fallback_uses_original_action(monkeypatch):
+    """ATR降格 + notify_on_cycle_summary=False の旧通知で action が元の buy/sell のまま。"""
+    from src.cycles.trading import _execute_one_signal
+    from src.trading.broker_adapter import ExecutionResult
+
+    monkeypatch.setattr("src.cycles.trading._apply_atr_sltp_to_signal", lambda *a, **k: None)
+    sig = _exec_signal(action="buy")
+    broker = MagicMock()
+    broker.execute_signal.return_value = ExecutionResult.skipped("hold (発注対象外)")
+    notifier = MagicMock()
+    notifier.notify_signal_skipped = AsyncMock()
+
+    await _execute_one_signal(
+        sig, "", _exec_config(notify_on_cycle_summary=False), MagicMock(), broker,
+        notifier, MagicMock(), MagicMock(), None, MagicMock(), AsyncMock(), MagicMock(),
+    )
+    notifier.notify_signal_skipped.assert_awaited_once()
+    event = notifier.notify_signal_skipped.call_args.args[0]
+    assert event.action == "buy"

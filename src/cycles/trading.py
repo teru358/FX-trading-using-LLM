@@ -710,7 +710,11 @@ async def _execute_one_signal(
     embed_fn_adj,
     price_provider: PriceProvider | None,
 ) -> SignalOutcome:
-    """1シグナルの発注処理を実行し、結果を SignalOutcome で返す。"""
+    """1シグナルの発注処理 (ATR SL/TP 適用 → broker 発注 → session/RAG 記録) を実行する。
+
+    結果を SignalOutcome で返す。notify_on_cycle_summary=False のときのみ旧 per-event
+    通知 (notify_order_opened / notify_signal_skipped) をフォールバックとして発火する。
+    """
     original_action = sig.action  # ATR 降格判定用に退避
 
     sltp_result = _apply_atr_sltp_to_signal(
@@ -773,12 +777,12 @@ async def _execute_one_signal(
                     signal_reason=sig.signal_reason,
                     detail_reason=sig.detail_reason,
                     source="trading",
-                    is_scale_in=result.order.is_scale_in,
+                    is_scale_in=result.order.is_scale_in if result.order else False,
                 ))
         elif config.notifier.notify_on_signal_skipped:
             await notifier.notify_signal_skipped(SignalSkippedEvent(
                 pair=sig.pair,
-                action=sig.action,
+                action=block_action,
                 confidence=sig.confidence,
                 signal_reason=sig.signal_reason,
                 detail_reason=sig.detail_reason,
