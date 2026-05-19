@@ -97,7 +97,7 @@ async def _process_pair(
 
     テクニカル分析は収集ジョブで蓄積済みのスナップショットを集約して使用する。
     スナップショットが存在しない場合 (初回起動直後など) は Ollama 即時分析にフォールバック。
-    戻り値: (TradeSignal, macro_ctx_str)
+    戻り値: PairAnalysisOutcome (成功) / PairAnalysisError (失敗)
     """
     from src.analysis.news_aggregator import aggregate_news_sentiment
     from src.signals.signal_combiner import combine_signals
@@ -542,7 +542,7 @@ async def _phase_analyze_pairs(
             outcomes.append(r)
             if r.tech_fallback:
                 data_health.append(
-                    f"{r.signal.pair} スナップショット未取得(即時分析fallback)"
+                    f"{r.signal.pair} スナップショット未取得(即時分析 fallback)"
                 )
         elif isinstance(r, PairAnalysisError):
             data_health.append(f"{r.pair} 分析失敗")
@@ -980,7 +980,7 @@ async def trading_cycle(
         )
         return
 
-    # Phase 3: 並列ペア分析
+    # Phase 3: 並列ペア分析 (data_health は後続タスクで notify_cycle_summary に渡す)
     signals, macro_ctxs, data_health = await _phase_analyze_pairs(
         config, position_mgr, store, price_store, analysis_store, llm_price, price_provider,
         forecast_store=forecast_store,
