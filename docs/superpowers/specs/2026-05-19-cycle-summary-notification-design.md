@@ -288,24 +288,29 @@ Discord の `content` 上限は 2000 文字。2ペアで約450文字、5ペア�
 MT5 拒否や bridge 異常を `skipped` (無害表示) に誤分類しないことが本設計の安全要件であり、
 テスト名にもこの規律を明示する (例: `test_mt5_rejection_classified_rejected_not_skipped`)。
 
-### 例外: ATR SL/TP 算出失敗ルート
+### 例外: ATR レイヤが buy/sell を hold へ降格したルート
 
-`_execute_one_signal` は ATR SL/TP 算出に失敗すると、broker 呼び出し前に `sig.action = "hold"` /
-`sig.signal_reason = "ATR SL/TP calculation failed"` へ書き換える。その後 broker は hold を
-`ExecutionResult.skipped("hold (発注対象外)")` として返すため、`status` を `ExecutionResult.outcome`
-からそのまま採ると `status="skipped"` / `reason="hold (発注対象外)"` となり、**真の原因
-(ATR 失敗) が見えなくなる**。
+ATR SL/TP 処理には buy/sell を hold へ降格する経路が2つある:
+
+- `_apply_atr_sltp_to_signal` の R:R 不足判定 — `sig.action="hold"` /
+  `sig.signal_reason="ATR R:R too low (...)"` へ書き換える。
+- `_execute_one_signal` の SL/TP 算出失敗判定 (`sltp_result is None`) — `sig.action="hold"` /
+  `sig.signal_reason="ATR SL/TP calculation failed"` へ書き換える。
+
+いずれも書き換え後に broker は hold を `ExecutionResult.skipped("hold (発注対象外)")` として
+返すため、`status` を `ExecutionResult.outcome` からそのまま採ると
+`status="skipped"` / `reason="hold (発注対象外)"` となり、**真の原因 (ATR 降格) が見えなくなる**。
 
 そこで `_execute_one_signal` は次の特例で `SignalOutcome` を構築する:
 
-- 関数入口で元の `sig.action` をローカル変数へ退避する (ATR 書き換え前の buy/sell)。
-- ATR SL/TP 失敗で hold 化した場合、broker 戻り値の reason を使わず
-  `SignalOutcome(status="skipped", action=元の buy/sell, reason="ATR SL/TP calculation failed")`
-  を構築する。
-- 一般則: `_execute_one_signal` 自身が発注前に action を書き換えた経路では、broker 戻り値の
-  reason ではなく書き換え理由を `SignalOutcome.reason` に採用する。
+- 関数入口で元の `sig.action` をローカル変数へ退避する。
+- ATR 適用後に「元 action が buy/sell かつ現 action が hold」なら ATR 降格とみなし、
+  broker 戻り値の reason を使わず
+  `SignalOutcome(status="skipped", action=元の buy/sell, reason=sig.signal_reason)` を構築する
+  (`sig.signal_reason` は ATR レイヤが設定した具体的理由 — 上記2経路のいずれか)。
 
-これにより、ATR 失敗はサマリー上 `⏭ USDJPY=X BUY SKIPPED — reason: ATR SL/TP calculation failed`
+これにより、ATR 降格はサマリー上
+`⏭ USDJPY=X BUY SKIPPED — reason: ATR SL/TP calculation failed` (または `ATR R:R too low ...`)
 として正しい原因とともに表示される。
 
 ## データフロー / 変更箇所
@@ -317,7 +322,7 @@ MT5 拒否や bridge 異常を `skipped` (無害表示) に誤分類しないこ
 | `bounded` (`_phase_analyze_pairs` 内) | `_process_pair` から例外がエスケープした場合 `PairAnalysisError(pair_cfg.symbol, e)` へ包んで返す |
 | `_phase_analyze_pairs` | 結果を `PairAnalysisOutcome` / `PairAnalysisError` に分類。戻り値に `data_health: list[str]` を追加 (`PairAnalysisError.pair` → `"{pair} 分析失敗"`、`tech_fallback` ペア → `"{pair} スナップショット未取得(即時分析fallback)"`) |
 | `_adjust_signal_with_rag` | 戻り値を `None` から `str` (補正注記。補正なしなら `""`) に変更。`action` または `combined_score` を変えたとき注記文字列を返す |
-| `_execute_one_signal` | 戻り値を `Order \| None` から `SignalOutcome` に変更。入口で元の `sig.action` を退避。ATR SL/TP 失敗で hold 化した経路は `SignalOutcome(status="skipped", action=元の buy/sell, reason="ATR SL/TP calculation failed")` を構築 (broker 戻り値の reason を使わない)。`notify_order_opened` / `notify_signal_skipped` の即時呼び出しを `if not notify_on_cycle_summary:` ゲート内へ移動 |
+| `_execute_one_signal` | 戻り値を `Order \| None` から `SignalOutcome` に変更。入口で元の `sig.action` を退避。ATR 降格 (元 buy/sell → 現 hold) の経路は `SignalOutcome(status="skipped", action=元の buy/sell, reason=sig.signal_reason)` を構築 (broker 戻り値の reason を使わない)。`notify_order_opened` / `notify_signal_skipped` の即時呼び出しを `if not notify_on_cycle_summary:` ゲート内へ移動 |
 | `_phase_execute_signals` | 戻り値を `(executed_orders, outcomes: list[SignalOutcome])` に変更。hold 分岐も `SignalOutcome(status="hold")` を積む。`_adjust_signal_with_rag` の注記を受け取り `SignalOutcome.rag_note` へ渡す。`outcome.order` があれば `executed_orders` に追加 |
 | `trading_cycle` | Phase 4b 後に `if notify_on_cycle_summary:` で `notify_cycle_summary(CycleSummaryEvent(...))` を1回呼ぶ。halt 分岐の early-return 前にも `halted=True` の `CycleSummaryEvent` を1回送る |
 | `notifier.py` | `SignalOutcome` / `CycleSummaryEvent` / `NotifierAdapter.notify_cycle_summary()` を追加 |
