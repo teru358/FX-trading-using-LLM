@@ -33,6 +33,7 @@ class TradeSignal:
     news: NewsSentiment
     price: PriceAnalysis
     generated_at: datetime
+    tv_recommendation: str = ""  # TradingView コンセンサス推奨 (例 "BUY"/"STRONG_SELL")。未取得時 ""
 
 
 def combine_signals(
