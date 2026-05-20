@@ -163,10 +163,11 @@ def _format_signal_block(o: SignalOutcome) -> str:
             f"SL {o.order.stop_loss:.5f} | TP {o.order.take_profit:.5f}"
         )
 
-    drivers = f"drivers: News {o.news_score:+.2f} / Tech {o.tech_score:+.2f}"
-    if o.tv_recommendation:
-        drivers += f" / TV {o.tv_recommendation}"
-    lines.append(drivers)
+    if o.status in ("executed", "hold"):
+        drivers = f"drivers: News {o.news_score:+.2f} / Tech {o.tech_score:+.2f}"
+        if o.tv_recommendation:
+            drivers += f" / TV {o.tv_recommendation}"
+        lines.append(drivers)
 
     if o.reason:
         lines.append(f"reason: {o.reason}")

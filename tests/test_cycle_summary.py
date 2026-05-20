@@ -88,6 +88,7 @@ def test_format_signal_block_rejected_shows_reason_not_existing_position():
     assert "🚫 EURUSD=X SELL REJECTED" in block
     assert "retcode=10016" in block
     assert "既存ポジション" not in block
+    assert "drivers:" not in block   # rejected はコンパクト表示
 
 
 def test_format_signal_block_failed():
@@ -104,6 +105,22 @@ def test_format_signal_block_skipped_atr_reason():
                       reason="ATR SL/TP calculation failed"))
     assert "⏭ USDJPY=X BUY SKIPPED" in block
     assert "reason: ATR SL/TP calculation failed" in block
+
+
+def test_format_signal_block_failed_omits_drivers():
+    """failed ブロックは drivers 行を出さない (spec準拠)。"""
+    block = _format_signal_block(
+        _hold_outcome(pair="USDJPY=X", action="buy", status="failed",
+                      reason="bridge unreachable"))
+    assert "drivers:" not in block
+
+
+def test_format_signal_block_skipped_omits_drivers():
+    """skipped ブロックは drivers 行を出さない (spec準拠)。"""
+    block = _format_signal_block(
+        _hold_outcome(pair="USDJPY=X", action="buy", status="skipped",
+                      reason="既存ポジションあり"))
+    assert "drivers:" not in block
 
 
 def test_format_signal_block_omits_tv_when_empty():
