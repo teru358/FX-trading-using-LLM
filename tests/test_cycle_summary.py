@@ -65,6 +65,11 @@ def test_format_signal_block_executed_has_all_lines():
     assert "score +0.320 | conf 75% | RR 2.00" in block
     assert "entry 159.00400" in block
     assert "SL 158.21600" in block
+    # USDJPY=X buy: pip_size=0.01
+    # pips_sl = (158.216 - 159.004) / 0.01 = -78.8
+    # pips_tp = (160.580 - 159.004) / 0.01 = +157.6
+    assert "SL 158.21600 (-78.8 pips)" in block
+    assert "TP 160.58000 (+157.6 pips)" in block
     assert "drivers: News +0.12 / Tech +0.37 / TV BUY" in block
     assert "reason: rates higher" in block
 
@@ -222,3 +227,40 @@ async def test_notify_cycle_summary_calls_send():
     await notifier.notify_cycle_summary(event)
     assert len(notifier.messages) == 1
     assert "取引サイクル 17:30 JST" in notifier.messages[0]
+
+
+# ── pips 表示 (SL/TP 概算距離) ────────────────────────────
+
+
+from src.notifications.notifier import _pip_size_for  # noqa: E402
+
+
+def test_pip_size_for_jpy_and_non_jpy():
+    """JPY を含むペアは 0.01 pip、それ以外は 0.0001 pip。"""
+    assert _pip_size_for("USDJPY=X") == 0.01
+    assert _pip_size_for("EURJPY=X") == 0.01
+    assert _pip_size_for("EURUSD=X") == 0.0001
+    assert _pip_size_for("GBPUSD=X") == 0.0001
+
+
+def test_format_signal_block_executed_pips_for_non_jpy_pair():
+    """EURUSD=X など非 JPY ペアは pip_size=0.0001 で計算される。"""
+    order = Order.new("EURUSD=X", "buy", 1.0850, 1.0820, 1.0910, 1000.0)
+    outcome = _executed_outcome(pair="EURUSD=X", order=order)
+    block = _format_signal_block(outcome)
+    # pips_sl = (1.0820 - 1.0850) / 0.0001 = -30.0
+    # pips_tp = (1.0910 - 1.0850) / 0.0001 = +60.0
+    assert "(-30.0 pips)" in block
+    assert "(+60.0 pips)" in block
+
+
+def test_format_signal_block_executed_pips_sell_sign_flip():
+    """sell では SL>entry / TP<entry でも SL 側は負、TP 側は正の pips。"""
+    order = Order.new("USDJPY=X", "sell", 159.004, 159.804, 157.404, 1000.0)
+    outcome = _executed_outcome(pair="USDJPY=X", action="sell", order=order)
+    block = _format_signal_block(outcome)
+    # multiplier = -1 (sell)
+    # pips_sl = (159.804 - 159.004) / 0.01 * -1 = -80.0
+    # pips_tp = (157.404 - 159.004) / 0.01 * -1 = +160.0
+    assert "(-80.0 pips)" in block
+    assert "(+160.0 pips)" in block

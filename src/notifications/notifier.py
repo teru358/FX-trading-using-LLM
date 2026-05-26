@@ -130,6 +130,15 @@ _SKIP_HEADLINES = {
 }
 
 
+def _pip_size_for(pair: str) -> float:
+    """ペア名から pip サイズを返す。
+
+    JPY を quote 側に含むペア (USDJPY=X / EURJPY=X など) は 0.01、
+    それ以外 (EURUSD=X / GBPUSD=X など) は 0.0001。FX 業界標準。
+    """
+    return 0.01 if "JPY" in pair.upper() else 0.0001
+
+
 def _format_signal_block(o: SignalOutcome) -> str:
     """1シグナルの結果ブロックを整形する。"""
     if o.status == "executed":
@@ -158,9 +167,17 @@ def _format_signal_block(o: SignalOutcome) -> str:
     lines.append(score_line)
 
     if o.status == "executed" and o.order is not None:
+        entry = o.order.entry_price
+        sl = o.order.stop_loss
+        tp = o.order.take_profit
+        mult = 1 if o.order.direction == "buy" else -1
+        pip = _pip_size_for(o.pair)
+        pips_sl = (sl - entry) / pip * mult
+        pips_tp = (tp - entry) / pip * mult
         lines.append(
-            f"entry {o.order.entry_price:.5f} | "
-            f"SL {o.order.stop_loss:.5f} | TP {o.order.take_profit:.5f}"
+            f"entry {entry:.5f} | "
+            f"SL {sl:.5f} ({pips_sl:+.1f} pips) | "
+            f"TP {tp:.5f} ({pips_tp:+.1f} pips)"
         )
 
     if o.status in ("executed", "hold"):
