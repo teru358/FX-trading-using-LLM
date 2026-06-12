@@ -23,6 +23,7 @@ def fake_httpx_response():
         resp = MagicMock(spec=httpx.Response)
         resp.json = MagicMock(return_value=json_payload)
         resp.raise_for_status = MagicMock()
+        resp.is_error = False  # 正常系: エラー本文ログ分岐に入らない
         return resp
 
     return _build
@@ -64,6 +65,56 @@ async def test_llamacpp_client_chat_completion(fake_httpx_response):
     assert body["model"] == "llama3.1-8b"
     assert body["temperature"] == 0.2
     assert body["messages"] == [{"role": "user", "content": "hi"}]
+
+
+@pytest.mark.asyncio
+async def test_llamacpp_client_folds_system_into_user(fake_httpx_response):
+    """Gemma 対策: 先頭 system を最初の user に畳み込んで POST する。"""
+    resp = fake_httpx_response({
+        "choices": [{"message": {"content": "ok"}}],
+    })
+    async_ctx, mock_client = _mock_async_client(resp)
+
+    with patch("httpx.AsyncClient", return_value=async_ctx):
+        cli = LlamaCppClient(base_url="http://x/v1", model="gemma3-4b")
+        await cli.chat([
+            {"role": "system", "content": "SYS"},
+            {"role": "user", "content": "hi"},
+        ])
+
+    body = mock_client.post.call_args.kwargs["json"]
+    # system ロールは送らない (Gemma テンプレートが 400 を返すため)
+    assert all(m["role"] != "system" for m in body["messages"])
+    assert body["messages"] == [{"role": "user", "content": "SYS\n\nhi"}]
+
+
+def test_fold_system_into_user_no_system_is_noop():
+    """system が無ければそのまま返す。"""
+    msgs = [{"role": "user", "content": "hi"}]
+    assert LlamaCppClient._fold_system_into_user(msgs) == msgs
+
+
+def test_fold_system_into_user_with_trailing_turns():
+    """リトライで assistant/user が追加された会話でも system のみ畳み込む。"""
+    folded = LlamaCppClient._fold_system_into_user([
+        {"role": "system", "content": "SYS"},
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+    ])
+    assert folded == [
+        {"role": "user", "content": "SYS\n\nu1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+    ]
+
+
+def test_fold_system_into_user_system_only():
+    """user が無く system だけの場合は user に変換する。"""
+    folded = LlamaCppClient._fold_system_into_user([
+        {"role": "system", "content": "SYS"},
+    ])
+    assert folded == [{"role": "user", "content": "SYS"}]
 
 
 @pytest.mark.asyncio

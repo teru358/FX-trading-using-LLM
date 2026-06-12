@@ -57,10 +57,41 @@ class LlamaCppClient(LLMClient):
     def provider_name(self) -> str:
         return "llamacpp"
 
+    @staticmethod
+    def _fold_system_into_user(messages: list[dict]) -> list[dict]:
+        """先頭の system メッセージを最初の user メッセージへ畳み込む。
+
+        Gemma 系 (gemma-2 / gemma-3) の GGUF 内蔵チャットテンプレートは
+        system ロールを ``raise_exception('System role not supported')`` で
+        拒否し、llama-server はこれを HTTP 400 として返す。
+        OpenAI 互換の他モデルでも system→user 結合は無害なため、
+        llama.cpp 経路では一律に畳み込んで互換性を確保する。
+        """
+        if not messages or messages[0].get("role") != "system":
+            return messages
+
+        system_content = messages[0].get("content", "")
+        rest = messages[1:]
+        folded: list[dict] = []
+        merged = False
+        for msg in rest:
+            if not merged and msg.get("role") == "user":
+                folded.append({
+                    "role": "user",
+                    "content": f"{system_content}\n\n{msg.get('content', '')}",
+                })
+                merged = True
+            else:
+                folded.append(msg)
+        if not merged:
+            # user メッセージが無い場合は system を user として先頭に置く
+            folded.insert(0, {"role": "user", "content": system_content})
+        return folded
+
     async def _do_chat(self, messages: list[dict], temperature: float = 0.1) -> str:
         payload = {
             "model": self._model,
-            "messages": messages,
+            "messages": self._fold_system_into_user(messages),
             "temperature": temperature,
             "stream": False,
         }
@@ -82,6 +113,13 @@ class LlamaCppClient(LLMClient):
                     resp = await client.post(
                         f"{self._base_url}/chat/completions", json=payload,
                     )
+                    if resp.is_error:
+                        # llama-server はテンプレート/ctx 超過等の原因を本文に入れる。
+                        # raise_for_status は本文を捨てるため、先にログへ残す。
+                        logger.warning(
+                            f"[LLM] llamacpp({self._model}): "
+                            f"HTTP {resp.status_code} body: {resp.text[:500]!r}"
+                        )
                     resp.raise_for_status()
 
         content = resp.json()["choices"][0]["message"]["content"]
