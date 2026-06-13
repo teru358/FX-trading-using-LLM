@@ -44,8 +44,8 @@
 
 | サイクル | 起動 | LLM | 主な処理 |
 |---|---|---|---|
-| 価格監視 | `price_monitor.interval_minutes` | なし | 急変動通知 / Layer 4 トレーリング / emergency_close |
-| exit_check | 毎時 :00 | なし | SL/TP 確認 / reconciliation / Layer 1-3 再評価 (オプション) |
+| 価格監視 | `price_monitor.interval_minutes` | なし | MFE/R更新 / Profit Protection / remote SL sync / 急変動通知 / emergency_close |
+| exit_check | 毎時 :00 | なし | SL/TP 確認 / reconciliation / Reversal Guard / Time Stop 再評価 (オプション) |
 | ニュース収集 | `news_collection.interval_minutes` | あり | RSS/Feedly 取得 + センチメント分析 |
 | RAG クリーンアップ | 1 日 1 回 | なし | 古い記事の削除 |
 | テクニカル分析 | 毎時 :00 | あり | OHLCV + 指標 + LLM スコアリング |
@@ -107,7 +107,7 @@ LLM 不使用。蓄積済テクニカルスナップショットからシグナ�
    - テクニカル × `price_weight` + ニュース × `news_weight`
    - 方向対立時のスケーリングペナルティ
    - RAG 方向別スコア補正 (bullish/bearish コレクションから類似パターン検索)
-7. **Phase 4a**: ポジション再評価 (Layer 1-3、`position_review_enabled` で有効化)
+7. **Phase 4a**: ポジション再評価 (Reversal Guard / Time Stop、`position_review_enabled` で有効化)
 8. **Phase 4b**: ポートフォリオガード → ATR ベース SL/TP 算出 → 注文執行 → 通知
 
 ## exit_check サイクル
@@ -116,33 +116,36 @@ LLM 不使用。蓄積済テクニカルスナップショットからシグナ�
 
 1. **SL/TP 確認**: `broker.check_and_close_positions` 経由
 2. **Reconciliation** (mt5_bridge モード時): MT5 側ポジションと内部状態を照合し、不整合 (完全 close / 部分 close / orphan) を処理
-3. **Layer 1-3 再評価** (`position_review_enabled=true` 時のみ): キャッシュ集約から reversal / timeout / profit_lock 判定
+3. **既存ポジション再評価** (`position_review_enabled=true` 時のみ): Reversal Guard のpending SL target記録 / Time Stop close判定
 
 reviewer の close 実行には [reviewer ガードと監視機構](#reviewer-ガードと監視機構) のチェックが入る。
 
 ## 価格監視ループ
 
-`price_monitor.interval_minutes` 間隔。Layer 4 トレーリングストップと急変動アラートを担当。
+`price_monitor.interval_minutes` 間隔。MFE/R更新、Profit Protection、remote SL sync、急変動アラートを担当。
 
 - **急変動通知**: 損失率が `alert_threshold_pct` 超で初回通知、以降 `alert_step_pct` 刻みで再通知
 - **emergency_close** (任意): `emergency_close_pct` 損失到達で自動 close。`enable_emergency_close: true` で発動。live モードでは price source が MT5 でないと skip
-- **Layer 4 トレーリング** (`trailing_stop_enabled: true` 時): TP 進捗に応じて SL を段階的に引き上げ
-  - `trailing_stop_breakeven_pct` × 0.5 到達 → SL = entry と元 SL の中間
-  - `trailing_stop_breakeven_pct` 到達 → SL = entry (breakeven)
-  - `trailing_stop_activation_pct` 到達 → 動的追従 (current - 元 SL 距離 × `trailing_stop_distance_ratio`)
-- **remote_sl_sync** (任意, `remote_sl_sync_enabled: true` 時): trailing で更新した SL を MT5 server-side にも反映
+- **Profit Protection** (`profit_protection_enabled: true` 時): MFE/R と giveback をもとに SL を段階的に引き上げ
+  - `protect_half_r` 到達 → SL = entry と元 SL の中間
+  - `protect_breakeven_r` 到達 → SL = entry (breakeven)
+  - `protect_lock_r` 到達 → SL = +0.3R 相当の利益確保位置
+- **pending protection target**: Reversal Guard が記録した保護SLを適用
+- **remote_sl_sync** (任意, `remote_sl_sync_enabled: true` 時): SL 更新を MT5 server-side にも反映し、成功後に内部SLを更新
+- **Legacy trailing** (`trailing_stop_enabled: true` 時): 旧TP進捗ベースのtrailing helperも互換目的で残存
 
 ## ポジション管理 (5 層)
 
 | レイヤー | トリガー | 判定 | 結果 |
 |---|---|---|---|
-| **Portfolio** | 発注前 | 通貨グループ別ポジション集中・全体上限 | 発注スキップ |
-| **Layer 1** | exit_check :00 / 取引判定 | シグナル反転 + 信頼度 ≥ `reversal_confidence_min` + 最小保有時間 ≥ `reversal_min_holding_minutes` | 早期決済 |
-| **Layer 2** | exit_check :00 / 取引判定 | 保有日数超過 + TP 進捗不足 | タイムアウト決済 |
-| **Layer 3** | exit_check :00 / 取引判定 | 含み益進捗 ≥ `profit_lock_min_progress_pct` + シグナル絶対値 ≤ `profit_lock_score_floor` | 利益ロック |
-| **Layer 4** | 価格監視 | TP 距離の breakeven / activation pct 到達 | トレーリングストップ |
+| **Layer 0: Portfolio Guard** | 発注前 | 通貨グループ別ポジション集中・同一ペア上限 | 発注スキップ |
+| **Layer 1: Server SL/TP** | MT5 server-side | SL/TP 到達 | MT5が決済、financeはreconciliationで検知 |
+| **Layer 2: Reversal Guard** | exit_check :00 / 取引判定 | 反転シグナル + 信頼度 + 最小保有時間 | 原則closeせずpending protection SLを記録 |
+| **Layer 3: Time Stop** | exit_check :00 / 取引判定 | 最大保有時間 / no-progress MFE不足 | timeout close |
+| **Layer 4: Profit Protection** | 価格監視 | MFE/R到達・giveback | SL引き上げ / remote SL sync |
+| **Layer 5: Emergency Guard** | 価格監視 | 損失方向の急変 | emergency close / degraded alert |
 
-Layer 1-3 は `position_review_enabled` で一括有効/無効を切り替え。Layer 4 は `trailing_stop_enabled` で独立制御。
+Reversal Guard / Time Stop は `position_review_enabled` で有効化する。Profit Protection は `profit_protection_enabled`、legacy trailing は `trailing_stop_enabled`、remote SL同期は `remote_sl_sync_enabled` で制御する。旧 `Layer 1-3` / `profit_lock` ラベルは過去ログ・互換close_reasonとして残る場合がある。
 
 ### ポートフォリオガード
 
@@ -449,14 +452,14 @@ bridge 不通時は `reachable: false, error: ..., reconciliation_skipped_consec
 
 ### exit_check reviewer ガード
 
-`live` モードで Layer 1-3 reviewer による close 実行時、以下の条件で skip:
+`live` モードで reviewer による active close 実行時、以下の条件で skip:
 
 1. **price source != "mt5"** → 警告ログ + close skip
    - フォールバック価格 (TwelveData / yfinance) で能動 close 判定すると MT5 実勢と乖離するため
 2. **soft halt 中 + close_reason != "timeout"** → INFO ログ + close skip
    - 最大保有期間超過 (timeout) は halt と無関係なので例外的に許容
 
-reviewer の **signal 評価と SL/TP reconciliation は継続**する (close 実行フェーズだけを抑制)。
+reviewer の **signal 評価、pending protection target記録、SL/TP reconciliation は継続**する (close 実行フェーズだけを抑制)。
 
 ### close 通知ラベル明示化
 
@@ -562,7 +565,7 @@ MarketStateTracker が市場の開閉状態を管理:
 | `[TRADE]` | 注文実行・決済 |
 | `[REFLECT]` | 振り返り結果 |
 | `[FORECAST]` | 予測サイクル |
-| `[REVIEW]` | ポジション再評価 (Layer 1-3) 判定詳細 |
+| `[REVIEW]` | ポジション再評価 (Reversal Guard / Time Stop) 判定詳細 |
 | `[EXIT]` | exit_check サイクルの close 実行 |
 | `[MONITOR]` | 価格監視・急変動・トレーリング |
 | `[CB/*]` | サーキットブレーカー状態遷移 |
@@ -574,4 +577,4 @@ MarketStateTracker が市場の開閉状態を管理:
 | `[MT5_BRIDGE]` | MT5 bridge 通信 |
 | `[HALT]` | halt.json 操作 |
 | `[ADMIN]` | manual halt/resume |
-| `[TRAIL_REMOTE]` | Layer 4 remote_sl_sync |
+| `[TRAIL_REMOTE]` | remote_sl_sync |

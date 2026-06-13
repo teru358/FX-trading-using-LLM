@@ -354,6 +354,60 @@ class Mt5Client:
             )
         return float(margin)
 
+    def modify_position_dry_run(
+        self, ticket: int, *, sl: float | None = None, tp: float | None = None,
+    ) -> dict:
+        """SL/TP modify をシミュレートする。MT5 には送らない。"""
+        return {
+            "ticket": ticket,
+            "symbol": "DRYRUN",
+            "sl": sl,
+            "tp": tp,
+            "retcode": None,
+            "comment": "DRY_RUN: position modify not sent",
+            "dry_run": True,
+        }
+
+    def modify_position_live(
+        self, ticket: int, *, sl: float | None = None, tp: float | None = None,
+    ) -> dict:
+        """MT5 の既存ポジション SL/TP を変更する。
+
+        片方だけ指定された場合、未指定側は現在ポジションの値を保持する。
+        """
+        positions = self._mt5.positions_get(ticket=ticket)
+        if not positions:
+            raise RuntimeError(f"position {ticket} not found")
+        p = positions[0]
+        next_sl = float(p.sl) if sl is None else float(sl)
+        next_tp = float(p.tp) if tp is None else float(tp)
+        request = {
+            "action": self._mt5.TRADE_ACTION_SLTP,
+            "position": ticket,
+            "symbol": p.symbol,
+            "sl": next_sl,
+            "tp": next_tp,
+        }
+        result = self._mt5.order_send(request)
+        if result is None:
+            raise RuntimeError(f"modify_position {ticket} failed: order_send returned None: {self._mt5.last_error()}")
+        retcode = int(result.retcode)
+        done = getattr(self._mt5, "TRADE_RETCODE_DONE", 10009)
+        if retcode != done:
+            raise RuntimeError(
+                f"modify_position {ticket} failed: retcode={retcode} "
+                f"comment={getattr(result, 'comment', '')}"
+            )
+        return {
+            "ticket": ticket,
+            "symbol": p.symbol,
+            "sl": next_sl,
+            "tp": next_tp,
+            "retcode": retcode,
+            "comment": str(getattr(result, "comment", "")),
+            "dry_run": False,
+        }
+
     def close_position_live(self, ticket: int) -> dict:
         """MT5 のポジションをクローズ。symbol/volume/type は positions_get から取得。"""
         from datetime import datetime, timezone

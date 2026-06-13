@@ -138,6 +138,12 @@ async def exit_check_cycle(
         reversal_confidence_min=config.trading.reversal_confidence_min,
         reversal_score_threshold=config.trading.reversal_score_threshold,
         reversal_min_holding_minutes=config.trading.reversal_min_holding_minutes,
+        reversal_close_enabled=config.trading.reversal_close_enabled,
+        reversal_raise_sl_to_breakeven=config.trading.reversal_raise_sl_to_breakeven,
+        time_stop_enabled=config.trading.time_stop_enabled,
+        max_holding_hours=config.trading.max_holding_hours,
+        no_progress_hours=config.trading.no_progress_hours,
+        no_progress_min_mfe_r=config.trading.no_progress_min_mfe_r,
         max_holding_days=config.trading.max_holding_days,
         timeout_min_progress_pct=config.trading.timeout_min_progress_pct,
         profit_lock_min_progress_pct=config.trading.profit_lock_min_progress_pct,
@@ -157,6 +163,17 @@ async def exit_check_cycle(
     halted = halt_state.is_halted(config.state_dir)
 
     for decision in decisions:
+        if decision.action == "raise_sl":
+            if decision.target_sl is not None:
+                position_mgr.set_pending_protection_target(
+                    decision.order_id, decision.target_sl, decision.close_reason,
+                )
+                logger.info(
+                    f"[EXIT] {decision.pair}: pending protection SL "
+                    f"{decision.target_sl:.5f} ({decision.close_reason}) — {decision.detail}"
+                )
+            continue
+
         price = current_prices.get(decision.pair)
         if price is None:
             continue

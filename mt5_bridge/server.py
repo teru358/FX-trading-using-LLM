@@ -24,6 +24,8 @@ from ohlcv_models import OhlcvBar, OhlcvResponse
 from order_models import (
     ClosedDealResponse,
     ClosePositionResponse,
+    ModifyPositionRequest,
+    ModifyPositionResponse,
     OrderRequest,
     OrderResponse,
 )
@@ -409,6 +411,27 @@ def place_order(req: OrderRequest):
         f"order rejected: retcode={last_result['retcode']} "
         f"comment={last_result.get('comment_response', '')}",
     )
+
+
+@app.post("/positions/{ticket}/modify", response_model=ModifyPositionResponse,
+          dependencies=[Depends(require_api_key)])
+def modify_position(ticket: int, req: ModifyPositionRequest):
+    if req.sl is None and req.tp is None:
+        raise HTTPException(400, "sl or tp must be provided")
+    if _client is None or not _client.is_connected:
+        raise HTTPException(503, "MT5 not connected")
+    if _runtime is None:
+        raise HTTPException(503, "runtime not initialized")
+
+    # SL/TP modify は既存ポジションのリスク低減用途なので soft halt 中も許可する。
+    try:
+        if _runtime.dry_run:
+            result = _client.modify_position_dry_run(ticket, sl=req.sl, tp=req.tp)
+        else:
+            result = _client.modify_position_live(ticket, sl=req.sl, tp=req.tp)
+        return ModifyPositionResponse(**result)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
 
 
 @app.post("/positions/{ticket}/close", response_model=ClosePositionResponse,

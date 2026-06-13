@@ -45,3 +45,18 @@ class ClosedDealResponse(BaseModel):
     commission: float = 0.0
     closed_at: str                          # ISO 8601
     reason: str = ""
+
+
+class ModifyPositionRequest(BaseModel):
+    sl: float | None = None
+    tp: float | None = None
+
+
+class ModifyPositionResponse(BaseModel):
+    ticket: int
+    symbol: str
+    sl: float | None
+    tp: float | None
+    retcode: int | None = None
+    comment: str = ""
+    dry_run: bool = False

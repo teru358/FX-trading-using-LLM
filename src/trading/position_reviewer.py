@@ -20,11 +20,17 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class ReviewDecision:
-    """ポジション再評価の決済判断。"""
+    """ポジション再評価の判断。
+
+    action="close" のときだけ broker close を実行する。
+    action="raise_sl" は pending protection target として保存する。
+    """
     order_id: str
     pair: str
-    close_reason: str  # "reversal" | "timeout" | "profit_lock"
+    close_reason: str  # "reversal" | "timeout" | "profit_lock" | "reversal_guard"
     detail: str
+    action: str = "close"  # "close" | "raise_sl"
+    target_sl: float | None = None
 
 
 def _classify_layer1(
@@ -95,6 +101,12 @@ def review_open_positions(
     reversal_confidence_min: float = 0.70,
     reversal_score_threshold: float = 0.25,
     reversal_min_holding_minutes: int = 240,
+    reversal_close_enabled: bool = True,
+    reversal_raise_sl_to_breakeven: bool = True,
+    time_stop_enabled: bool = False,
+    max_holding_hours: int = 12,
+    no_progress_hours: int = 4,
+    no_progress_min_mfe_r: float = 0.2,
     max_holding_days: int = 10,
     timeout_min_progress_pct: float = 0.30,
     profit_lock_min_progress_pct: float = 0.40,
@@ -139,25 +151,89 @@ def review_open_positions(
                 and signal.confidence >= reversal_confidence_min
                 and abs(signal.combined_score) >= reversal_score_threshold
             ):
-                logger.info(
-                    f"[REVIEW] {pos.pair}: Layer 1 reversal — "
-                    f"{pos.direction} vs {signal.predicted_direction} "
-                    f"(score={signal.combined_score:+.3f} conf={signal.confidence:.2f} "
-                    f"holding={holding_minutes:.0f}min)"
-                )
-                decisions.append(ReviewDecision(
-                    order_id=pos.order_id,
-                    pair=pos.pair,
-                    close_reason="reversal",
-                    detail=(
-                        f"Signal reversed: {pos.direction} position vs "
-                        f"{signal.predicted_direction} signal "
-                        f"(score={signal.combined_score:+.3f} conf={signal.confidence:.2f})"
-                    ),
-                ))
-                fired = True
+                in_profit = progress > 0
+                if not reversal_close_enabled and in_profit and reversal_raise_sl_to_breakeven:
+                    logger.info(
+                        f"[REVIEW] {pos.pair}: Reversal Guard — "
+                        f"raise SL to breakeven (score={signal.combined_score:+.3f} "
+                        f"conf={signal.confidence:.2f})"
+                    )
+                    decisions.append(ReviewDecision(
+                        order_id=pos.order_id,
+                        pair=pos.pair,
+                        close_reason="reversal_guard",
+                        detail=(
+                            f"Reversal guard: {pos.direction} position vs "
+                            f"{signal.predicted_direction} signal; raise SL to breakeven"
+                        ),
+                        action="raise_sl",
+                        target_sl=round(pos.entry_price, 5),
+                    ))
+                    fired = True
+                elif reversal_close_enabled:
+                    logger.info(
+                        f"[REVIEW] {pos.pair}: Layer 1 reversal — "
+                        f"{pos.direction} vs {signal.predicted_direction} "
+                        f"(score={signal.combined_score:+.3f} conf={signal.confidence:.2f} "
+                        f"holding={holding_minutes:.0f}min)"
+                    )
+                    decisions.append(ReviewDecision(
+                        order_id=pos.order_id,
+                        pair=pos.pair,
+                        close_reason="reversal",
+                        detail=(
+                            f"Signal reversed: {pos.direction} position vs "
+                            f"{signal.predicted_direction} signal "
+                            f"(score={signal.combined_score:+.3f} conf={signal.confidence:.2f})"
+                        ),
+                    ))
+                    fired = True
+                else:
+                    logger.info(
+                        f"[REVIEW] {pos.pair}: Reversal Guard observed but no close "
+                        f"(in_profit={in_profit})"
+                    )
 
-        # Layer 2: タイムアウト決済 (timeout_only モードでも評価)
+        # Layer 2/3: Time Stop (timeout_only モードでも評価)
+        if not fired and time_stop_enabled and holding_hours >= max_holding_hours:
+            logger.info(
+                f"[REVIEW] {pos.pair}: Time Stop max holding — "
+                f"{holding_hours:.1f}h >= {max_holding_hours}h"
+            )
+            decisions.append(ReviewDecision(
+                order_id=pos.order_id,
+                pair=pos.pair,
+                close_reason="timeout",
+                detail=(
+                    f"Held {holding_hours:.1f}h >= max {max_holding_hours}h "
+                    f"(mfe_r={pos.max_favorable_r:.2f})"
+                ),
+            ))
+            fired = True
+
+        if (
+            not fired
+            and time_stop_enabled
+            and holding_hours >= no_progress_hours
+            and pos.max_favorable_r < no_progress_min_mfe_r
+        ):
+            logger.info(
+                f"[REVIEW] {pos.pair}: Time Stop no progress — "
+                f"holding={holding_hours:.1f}h mfe_r={pos.max_favorable_r:.2f} "
+                f"< {no_progress_min_mfe_r:.2f}"
+            )
+            decisions.append(ReviewDecision(
+                order_id=pos.order_id,
+                pair=pos.pair,
+                close_reason="timeout",
+                detail=(
+                    f"Held {holding_hours:.1f}h with mfe_r={pos.max_favorable_r:.2f} "
+                    f"< {no_progress_min_mfe_r:.2f} after {no_progress_hours}h"
+                ),
+            ))
+            fired = True
+
+        # Legacy Layer 2: 日数ベース timeout fallback
         if not fired and holding_days >= max_holding_days and progress_pct < timeout_min_progress_pct:
             logger.info(
                 f"[REVIEW] {pos.pair}: Layer 2 timeout — "

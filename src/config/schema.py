@@ -120,6 +120,23 @@ class TradingConfig:
     profit_lock_min_progress_pct: float = 0.40  # Layer 3: 利益ロック発動の最低進捗率
     profit_lock_score_floor: float = 0.15    # Layer 3: この絶対値未満で利益ロック
     remote_sl_sync_enabled: bool = False     # Layer 4: trailing SL を MT5 server-side に同期
+    # ポジション管理 v2 (2026-06-13 layer rework)
+    reversal_guard_enabled: bool = True
+    reversal_close_enabled: bool = False
+    reversal_consecutive_required: int = 2
+    reversal_raise_sl_to_breakeven: bool = True
+    time_stop_enabled: bool = True
+    max_holding_hours: int = 12
+    no_progress_hours: int = 4
+    no_progress_min_mfe_r: float = 0.2
+    stale_signal_hours: int = 8
+    session_end_flatten_enabled: bool = False
+    profit_protection_enabled: bool = True
+    protect_half_r: float = 0.3
+    protect_breakeven_r: float = 0.5
+    protect_lock_r: float = 1.0
+    giveback_close_r: float = 0.4
+    giveback_close_min_mfe_r: float = 0.8
     # RAG方向別スコア補正
     rag_adjustment_enabled: bool = True
     rag_adjustment_max: float = 0.15

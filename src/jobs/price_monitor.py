@@ -19,6 +19,11 @@ from src.notifications.notifier import OrderClosedEvent, PriceAlertEvent, create
 from src.persistence.state_store import StateStore
 from src.trading.market_hours import is_market_open
 from src.trading.position_manager import PositionManager
+from src.trading.position_protection import (
+    compute_mfe_update,
+    compute_profit_protection_action,
+    more_protective_sl,
+)
 from src.utils.clock import db_now
 
 if TYPE_CHECKING:
@@ -117,6 +122,77 @@ def _apply_trailing_stop(
     return updated, False
 
 
+def _is_explicitly_enabled(value) -> bool:
+    """Return True only for real bool True; avoids MagicMock defaults in tests."""
+    return value is True
+
+
+def _apply_sl_target(
+    pos,
+    target_sl: float | None,
+    stage: str,
+    position_mgr: PositionManager,
+    broker: "BrokerAdapter | None",
+    remote_sync_enabled: bool,
+) -> tuple[bool, bool]:
+    """Apply a precomputed SL target with remote-first semantics."""
+    if target_sl is None:
+        return False, False
+    if pos.direction == "buy" and target_sl <= pos.stop_loss:
+        return False, False
+    if pos.direction == "sell" and target_sl >= pos.stop_loss:
+        return False, False
+    if remote_sync_enabled and broker is not None:
+        if not broker.update_remote_sl(pos.order_id, target_sl):
+            return False, True
+    updated = position_mgr.update_stop_loss(pos.order_id, target_sl, stage=stage)
+    return updated, False
+
+
+def _apply_profit_protection(
+    pos,
+    current: float,
+    cfg,
+    position_mgr: PositionManager,
+    broker: "BrokerAdapter | None",
+    remote_sync_enabled: bool,
+) -> tuple[bool, bool]:
+    """Update MFE state and apply R/giveback based SL protection."""
+    state = compute_mfe_update(pos, current)
+    position_mgr.update_protection_state(
+        pos.order_id,
+        max_favorable_price=state.max_favorable_price,
+        max_favorable_r=state.max_favorable_r,
+    )
+
+    action = compute_profit_protection_action(pos, current, cfg)
+    action_target = action.target_sl if action.action == "raise_sl" else None
+    pending_target = getattr(pos, "pending_protection_sl", None)
+    target_sl = more_protective_sl(pos, action_target, pending_target)
+    if target_sl is None:
+        return False, False
+
+    stage = action.stage if target_sl == action_target else "pending"
+    updated, remote_failed = _apply_sl_target(
+        pos, target_sl, stage, position_mgr, broker, remote_sync_enabled,
+    )
+    if updated:
+        if pending_target is not None:
+            position_mgr.clear_pending_protection_target(pos.order_id)
+        position_mgr.update_protection_state(
+            pos.order_id,
+            max_favorable_price=state.max_favorable_price,
+            max_favorable_r=state.max_favorable_r,
+            last_protection_stage=stage,
+        )
+        logger.info(
+            f"[POSITION] {pos.pair} r={state.current_r:+.2f} "
+            f"mfe_r={state.max_favorable_r:+.2f} giveback_r={state.giveback_r:.2f} "
+            f"stage={stage} sl={target_sl:.5f} remote={'ok' if not remote_failed else 'failed'}"
+        )
+    return updated, remote_failed
+
+
 def _adverse_move_pct(direction: str, entry: float, current: float) -> float:
     """損失方向への移動率を返す（正値 = 損失方向、負値 = 利益方向）。"""
     if direction == "buy":
@@ -152,31 +228,39 @@ async def monitor_open_positions(
             current = current_cp.price
             mt5_authoritative = current_cp.source == "mt5"
 
-            # ── トレーリングストップ ──────────────────────────────
+            # ── トレーリングストップ / Profit Protection ─────────────
+            remote_failed = False
             if cfg.trailing_stop_enabled:
                 _, remote_failed = _apply_trailing_stop(
                     pos, current, cfg, position_mgr,
                     broker=broker,
                     remote_sync_enabled=remote_sync_enabled,
                 )
-                if remote_failed:
-                    # rate-limited alert: (pair, hour) で 1 回のみ
-                    key = (pos.pair, _hour_key())
-                    if key not in _remote_sl_alert_dedup:
-                        _remote_sl_alert_dedup[key] = True
-                        if config.notifier.notify_on_price_alert:
-                            await notifier.notify_price_alert(PriceAlertEvent(
-                                pair=pos.pair,
-                                direction=pos.direction,
-                                entry_price=pos.entry_price,
-                                current_price=current,
-                                adverse_move_pct=0.0,
-                                stop_loss=pos.stop_loss,
-                                distance_to_sl_pct=0.0,
-                                unrealized_pnl=0.0,
-                                position_size=pos.position_size,
-                                source="trailing_sync_failed",
-                            ))
+            if _is_explicitly_enabled(getattr(config.trading, "profit_protection_enabled", False)):
+                _, profit_remote_failed = _apply_profit_protection(
+                    pos, current, config.trading, position_mgr,
+                    broker=broker,
+                    remote_sync_enabled=remote_sync_enabled,
+                )
+                remote_failed = remote_failed or profit_remote_failed
+            if remote_failed:
+                # rate-limited alert: (pair, hour) で 1 回のみ
+                key = (pos.pair, _hour_key())
+                if key not in _remote_sl_alert_dedup:
+                    _remote_sl_alert_dedup[key] = True
+                    if config.notifier.notify_on_price_alert:
+                        await notifier.notify_price_alert(PriceAlertEvent(
+                            pair=pos.pair,
+                            direction=pos.direction,
+                            entry_price=pos.entry_price,
+                            current_price=current,
+                            adverse_move_pct=0.0,
+                            stop_loss=pos.stop_loss,
+                            distance_to_sl_pct=0.0,
+                            unrealized_pnl=0.0,
+                            position_size=pos.position_size,
+                            source="trailing_sync_failed",
+                        ))
 
             adverse_pct = _adverse_move_pct(pos.direction, pos.entry_price, current)
 

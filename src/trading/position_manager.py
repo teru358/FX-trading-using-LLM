@@ -34,6 +34,15 @@ class Order:
     open_confidence: Optional[float] = None  # エントリー時の signal.confidence (scale-in 判定用)
     open_score: Optional[float] = None       # エントリー時の signal.combined_score (scale-in 判定用)
     is_scale_in: bool = False                # スケールイン注文フラグ
+    max_favorable_price: Optional[float] = None
+    max_favorable_r: float = 0.0
+    initial_risk_price_distance: float = 0.0
+    last_protection_stage: str = "none"
+    pending_protection_sl: Optional[float] = None
+    pending_protection_reason: str = ""
+    pending_protection_updated_at: Optional[datetime] = None
+    last_reversal_guard_at: Optional[datetime] = None
+    reversal_guard_count: int = 0
 
     @staticmethod
     def new(
@@ -58,6 +67,7 @@ class Order:
             take_profit=take_profit,
             position_size=position_size,
             initial_stop_loss=stop_loss,
+            initial_risk_price_distance=abs(entry_price - stop_loss),
             signal_reason=signal_reason,
             macro_context_at_entry=macro_context_at_entry,
             open_confidence=open_confidence,
@@ -69,6 +79,14 @@ class Order:
         d = asdict(self)
         d["opened_at"] = self.opened_at.isoformat()
         d["closed_at"] = self.closed_at.isoformat() if self.closed_at else None
+        d["pending_protection_updated_at"] = (
+            self.pending_protection_updated_at.isoformat()
+            if self.pending_protection_updated_at else None
+        )
+        d["last_reversal_guard_at"] = (
+            self.last_reversal_guard_at.isoformat()
+            if self.last_reversal_guard_at else None
+        )
         return d
 
     @staticmethod
@@ -77,6 +95,14 @@ class Order:
         d["opened_at"] = datetime.fromisoformat(d["opened_at"])
         if d.get("closed_at"):
             d["closed_at"] = datetime.fromisoformat(d["closed_at"])
+        if d.get("pending_protection_updated_at"):
+            d["pending_protection_updated_at"] = datetime.fromisoformat(
+                d["pending_protection_updated_at"]
+            )
+        if d.get("last_reversal_guard_at"):
+            d["last_reversal_guard_at"] = datetime.fromisoformat(
+                d["last_reversal_guard_at"]
+            )
         d.setdefault("macro_context_at_entry", "")
         # 既存データ (initial_stop_loss 追加以前) のフォールバック。
         # 既にトレーリングで SL が更新されたポジションでは真の元SLは失われており、
@@ -86,6 +112,17 @@ class Order:
         d.setdefault("open_confidence", None)
         d.setdefault("open_score", None)
         d.setdefault("is_scale_in", False)
+        d.setdefault("max_favorable_price", None)
+        d.setdefault("max_favorable_r", 0.0)
+        risk = abs(float(d["entry_price"]) - float(d.get("initial_stop_loss", d["stop_loss"])))
+        if not d.get("initial_risk_price_distance"):
+            d["initial_risk_price_distance"] = risk
+        d.setdefault("last_protection_stage", "none")
+        d.setdefault("pending_protection_sl", None)
+        d.setdefault("pending_protection_reason", "")
+        d.setdefault("pending_protection_updated_at", None)
+        d.setdefault("last_reversal_guard_at", None)
+        d.setdefault("reversal_guard_count", 0)
         return Order(**d)
 
 
@@ -238,6 +275,55 @@ class PositionManager:
                         f"[TRAIL] {pos.pair} {pos.direction.upper()} SL updated: "
                         f"{old_sl:.5f} → {new_stop_loss:.5f}{stage_suffix}"
                     )
+                    return True
+        return False
+
+    def update_protection_state(
+        self,
+        order_id: str,
+        *,
+        max_favorable_price: float | None,
+        max_favorable_r: float,
+        last_protection_stage: Optional[str] = None,
+    ) -> bool:
+        """MFE/R と保護ステージを更新する。"""
+        with self._store.transaction():
+            self._reload_from_disk()
+            for pos in self._open:
+                if pos.order_id == order_id:
+                    pos.max_favorable_price = max_favorable_price
+                    pos.max_favorable_r = max_favorable_r
+                    if last_protection_stage is not None:
+                        pos.last_protection_stage = last_protection_stage
+                    self._save()
+                    return True
+        return False
+
+    def set_pending_protection_target(
+        self, order_id: str, target_sl: float, reason: str,
+    ) -> bool:
+        """次回 monitor で適用する保護SL targetを保存する。"""
+        with self._store.transaction():
+            self._reload_from_disk()
+            for pos in self._open:
+                if pos.order_id == order_id:
+                    pos.pending_protection_sl = target_sl
+                    pos.pending_protection_reason = reason
+                    pos.pending_protection_updated_at = db_now()
+                    self._save()
+                    return True
+        return False
+
+    def clear_pending_protection_target(self, order_id: str) -> bool:
+        """保存済み保護SL targetをクリアする。"""
+        with self._store.transaction():
+            self._reload_from_disk()
+            for pos in self._open:
+                if pos.order_id == order_id:
+                    pos.pending_protection_sl = None
+                    pos.pending_protection_reason = ""
+                    pos.pending_protection_updated_at = None
+                    self._save()
                     return True
         return False
 
