@@ -46,7 +46,56 @@ def test_reconcile_full_close_when_missing_from_mt5(monkeypatch, tmp_path):
         open_pos, {"USDJPY=X": 158.0, "EURUSD=X": 1.07}, pm,
     )
     assert len(result) == 1
-    pm.close_position.assert_called_once_with("mt5:111", 158.0, "server_sl_tp")
+    pm.close_position.assert_called_once_with(
+        "mt5:111", 158.0, "server_sl_tp_estimated",
+    )
+
+
+def test_reconcile_full_close_uses_closed_deal_result_not_current_price(
+    monkeypatch, tmp_path,
+):
+    """server-side close: 現在価格ではなく MT5 の実決済 deal で内部 close する。"""
+    adapter = Mt5BridgeBrokerAdapter(
+        bridge_url="http://x:8812", lot_size_units=100_000, magic_number=12345,
+        state_dir=tmp_path,
+    )
+    open_pos = [_mt5_order(111)]
+
+    def _get(url, *a, **kw):
+        if url.endswith("/positions"):
+            return _mock_resp([])
+        if url.endswith("/positions/111/closed-deal"):
+            return _mock_resp({
+                "ticket": 111,
+                "close_price": 158.50,
+                "profit": -500.0,
+                "swap": 0.0,
+                "commission": 0.0,
+                "closed_at": "2026-06-13T08:30:00+00:00",
+                "reason": "sl",
+            })
+        if url.endswith("/account"):
+            return _mock_resp({"balance": 49_500.0})
+        raise AssertionError(url)
+
+    monkeypatch.setattr("httpx.get", _get)
+    pm = MagicMock()
+    closed_order = _mt5_order(111)
+    pm.close_position_with_result.return_value = closed_order
+
+    result = adapter.check_and_close_positions(
+        open_pos,
+        {"USDJPY=X": 160.533},  # 同期時点価格は利益方向だが、実決済は損失
+        pm,
+    )
+
+    assert result == [closed_order]
+    pm.close_position_with_result.assert_called_once()
+    kwargs = pm.close_position_with_result.call_args.kwargs
+    assert kwargs["order_id"] == "mt5:111"
+    assert kwargs["close_price"] == 158.50
+    assert kwargs["realized_pnl"] == -500.0
+    assert kwargs["reason"] == "server_sl_tp"
 
 
 def test_reconcile_skips_paper_orders(monkeypatch, tmp_path):

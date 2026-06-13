@@ -67,6 +67,17 @@ class Position:
     time: str          # ISO 8601
 
 
+@dataclass
+class ClosedDeal:
+    ticket: int
+    close_price: float
+    profit: float
+    swap: float
+    commission: float
+    closed_at: str
+    reason: str
+
+
 class Mt5Client:
     """MT5 ターミナルへの接続を保持し、read-only 照会だけを提供する。"""
 
@@ -219,6 +230,60 @@ class Mt5Client:
                 magic=p.magic, comment=p.comment, time=ts,
             ))
         return result
+
+    def get_closed_deal(self, ticket: int) -> ClosedDeal | None:
+        """指定 position/order ticket に紐づく close deal 実績を返す。
+
+        server-side SL/TP で position が消えた後の reconciliation で、検知時点の
+        current price ではなく MT5 の実決済価格・実現損益を使うための参照。
+        """
+        from datetime import datetime, timezone
+
+        try:
+            deals = self._mt5.history_deals_get(position=ticket)
+        except TypeError:
+            deals = None
+        if not deals:
+            return None
+
+        entry_out = {
+            getattr(self._mt5, "DEAL_ENTRY_OUT", 1),
+            getattr(self._mt5, "DEAL_ENTRY_OUT_BY", 3),
+        }
+        close_deals = [
+            d for d in deals
+            if getattr(d, "entry", None) in entry_out
+        ]
+        if not close_deals:
+            return None
+
+        total_volume = sum(abs(float(getattr(d, "volume", 0.0))) for d in close_deals)
+        if total_volume > 0:
+            close_price = sum(
+                float(getattr(d, "price", 0.0))
+                * abs(float(getattr(d, "volume", 0.0)))
+                for d in close_deals
+            ) / total_volume
+        else:
+            close_price = float(getattr(close_deals[-1], "price", 0.0))
+
+        profit = sum(float(getattr(d, "profit", 0.0)) for d in close_deals)
+        swap = sum(float(getattr(d, "swap", 0.0)) for d in close_deals)
+        commission = sum(float(getattr(d, "commission", 0.0)) for d in close_deals)
+        closed_ts = max(int(getattr(d, "time", 0)) for d in close_deals)
+        reason = str(getattr(close_deals[-1], "reason", ""))
+
+        return ClosedDeal(
+            ticket=ticket,
+            close_price=close_price,
+            profit=profit,
+            swap=swap,
+            commission=commission,
+            closed_at=datetime.fromtimestamp(
+                closed_ts, tz=timezone.utc,
+            ).isoformat(),
+            reason=reason,
+        )
 
     def get_symbols(self) -> list[str]:
         symbols = self._mt5.symbols_get()

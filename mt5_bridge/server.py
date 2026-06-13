@@ -21,7 +21,12 @@ from admin_models import AdminStatus, HaltRequest
 from config import BridgeSettings, load_settings
 from mt5_client import Mt5Client
 from ohlcv_models import OhlcvBar, OhlcvResponse
-from order_models import ClosePositionResponse, OrderRequest, OrderResponse
+from order_models import (
+    ClosedDealResponse,
+    ClosePositionResponse,
+    OrderRequest,
+    OrderResponse,
+)
 from runtime_state import RuntimeState
 
 # ── ログ設定: stdout (色付き) + ローテーション付きファイル (色なし) ──
@@ -242,6 +247,17 @@ def positions():
     if _client is None or not _client.is_connected:
         raise HTTPException(503, "MT5 not connected")
     return [asdict(p) for p in _client.get_positions()]
+
+
+@app.get("/positions/{ticket}/closed-deal", response_model=ClosedDealResponse,
+         dependencies=[Depends(require_api_key)])
+def closed_deal(ticket: int):
+    if _client is None or not _client.is_connected:
+        raise HTTPException(503, "MT5 not connected")
+    deal = _client.get_closed_deal(ticket)
+    if deal is None:
+        raise HTTPException(404, f"closed deal not found for ticket={ticket}")
+    return ClosedDealResponse(**asdict(deal))
 
 
 @app.get("/symbols", dependencies=[Depends(require_api_key)])

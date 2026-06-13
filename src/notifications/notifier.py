@@ -308,6 +308,9 @@ class NotifierAdapter(ABC):
         elif event.close_reason == "server_sl_tp":
             emoji = "🔄"
             reason_label = "MT5サーバー側決済 (reconciliation検知)"
+        elif event.close_reason == "server_sl_tp_estimated":
+            emoji = "🔄"
+            reason_label = "MT5サーバー側決済 (reconciliation検知・損益推定)"
         elif event.close_reason == "manual":
             emoji = "🔒"
             reason_label = "手動決済"

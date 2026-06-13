@@ -309,6 +309,40 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
             logger.warning(f"[MT5_BRIDGE] /positions fetch failed: {e}")
             return None
 
+    def _fetch_closed_deal(self, ticket: int) -> dict | None:
+        """server-side close 済み ticket の MT5 実決済 deal を取得する。"""
+        try:
+            resp = httpx.get(
+                f"{self._url}/positions/{ticket}/closed-deal",
+                timeout=self._timeout, headers=self._headers(),
+            )
+            if getattr(resp, "status_code", None) == 404:
+                return None
+            resp.raise_for_status()
+            data = resp.json()
+            if not isinstance(data, dict):
+                return None
+            return data
+        except httpx.HTTPError as e:
+            logger.warning(
+                f"[MT5_BRIDGE] closed deal fetch failed: ticket={ticket}: {e}"
+            )
+            return None
+
+    def _sync_account_balance(self, position_mgr: PositionManager) -> None:
+        """bridge /account の MT5 残高で PositionManager/balance.json を再同期する。"""
+        try:
+            resp = httpx.get(
+                f"{self._url}/account",
+                timeout=self._timeout, headers=self._headers(),
+            )
+            resp.raise_for_status()
+            balance = float(resp.json()["balance"])
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as e:
+            logger.warning(f"[MT5_BRIDGE] /account sync after reconcile failed: {e}")
+            return
+        position_mgr.set_balance(balance)
+
     def close_position(
         self,
         order_id: str,
@@ -587,14 +621,44 @@ class Mt5BridgeBrokerAdapter(BrokerAdapter):
 
             # ── パターン 1: 完全 close 検出 ──
             if ticket not in bot_mt5:
+                deal = self._fetch_closed_deal(ticket)
+                if deal is not None:
+                    close_price = float(deal["close_price"])
+                    realized_pnl = (
+                        float(deal.get("profit", 0.0))
+                        + float(deal.get("swap", 0.0))
+                        + float(deal.get("commission", 0.0))
+                    )
+                    closed_at = None
+                    if deal.get("closed_at"):
+                        from datetime import datetime
+                        closed_at = datetime.fromisoformat(deal["closed_at"])
+                    logger.info(
+                        f"[RECONCILE] full close: {pos.pair} ticket={ticket} "
+                        f"@ {close_price} pnl={realized_pnl:+.2f} "
+                        f"(server-side close deal)"
+                    )
+                    closed_order = position_mgr.close_position_with_result(
+                        order_id=pos.order_id,
+                        close_price=close_price,
+                        reason="server_sl_tp",
+                        realized_pnl=realized_pnl,
+                        closed_at=closed_at,
+                    )
+                    self._sync_account_balance(position_mgr)
+                    if closed_order:
+                        closed.append(closed_order)
+                    continue
+
                 close_price = current_prices.get(pos.pair, pos.entry_price)
                 logger.info(
                     f"[RECONCILE] full close: {pos.pair} ticket={ticket} "
-                    f"@ {close_price} (server-side close detected)"
+                    f"@ {close_price} (server-side close detected, estimated)"
                 )
                 closed_order = position_mgr.close_position(
-                    pos.order_id, close_price, "server_sl_tp",
+                    pos.order_id, close_price, "server_sl_tp_estimated",
                 )
+                self._sync_account_balance(position_mgr)
                 if closed_order:
                     closed.append(closed_order)
                 continue

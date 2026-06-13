@@ -51,6 +51,26 @@ def test_close_position_loss(tmp_state_store, buy_order):
     assert account.balance == pytest.approx(90_000.0)
 
 
+def test_close_position_with_result_uses_realized_pnl_not_price_delta(
+    tmp_state_store, buy_order,
+):
+    """MT5 server-side close は推定 price delta ではなく実現損益を記録できる。"""
+    pm = PositionManager(tmp_state_store, context="Test")
+    pm.open_position(buy_order)
+
+    closed = pm.close_position_with_result(
+        order_id=buy_order.order_id,
+        close_price=151.0,      # price delta だけなら +10,000
+        reason="server_sl_tp",
+        realized_pnl=-500.0,    # MT5 deal の実損益を優先
+    )
+
+    assert closed is not None
+    assert closed.close_price == pytest.approx(151.0)
+    assert closed.realized_pnl == pytest.approx(-500.0)
+    assert pm.get_account_state().balance == pytest.approx(99_500.0)
+
+
 def test_close_nonexistent_position(tmp_state_store):
     """存在しない order_id を close しようとすると None が返る。"""
     pm = PositionManager(tmp_state_store, context="Test")

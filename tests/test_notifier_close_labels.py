@@ -47,6 +47,7 @@ def _make_event(close_reason: str) -> OrderClosedEvent:
         ("reversal",       "反転シグナル (L1 reversal)"),
         ("timeout",        "保有期間超過 (L2 timeout)"),
         ("server_sl_tp",   "MT5サーバー側決済 (reconciliation検知)"),
+        ("server_sl_tp_estimated", "MT5サーバー側決済 (reconciliation検知・損益推定)"),
         ("manual",         "手動決済"),
     ],
 )

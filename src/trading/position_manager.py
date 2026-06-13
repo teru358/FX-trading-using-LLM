@@ -353,3 +353,57 @@ class PositionManager:
                     return pos
         logger.warning(f"close_position: order_id {order_id} not found in open positions")
         return None
+
+    def close_position_with_result(
+        self,
+        order_id: str,
+        close_price: float,
+        reason: str,
+        realized_pnl: float,
+        *,
+        update_balance: bool = True,
+        closed_at=None,
+    ) -> Optional[Order]:
+        """実現損益が外部ブローカーで確定済みのポジションを close する。
+
+        MT5 server-side SL/TP の reconciliation では、検知時点の current price
+        ではなく MT5 deal 履歴の profit を真実として記録する。
+        """
+        from src.persistence import balance_snapshot
+
+        with self._store.transaction():
+            self._reload_from_disk()
+            for i, pos in enumerate(self._open):
+                if pos.order_id == order_id:
+                    pos.status = "closed"
+                    pos.closed_at = closed_at or db_now()
+                    pos.close_price = close_price
+                    pos.close_reason = reason
+                    pos.realized_pnl = realized_pnl
+                    if update_balance:
+                        self._balance = float(
+                            (
+                                Decimal(str(self._balance))
+                                + Decimal(str(realized_pnl))
+                            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                        )
+                    self._open.pop(i)
+                    self._closed.append(pos)
+                    self._store.append_trade(pos.to_dict())
+                    self._save()
+                    if update_balance:
+                        new_snap = balance_snapshot.mutate(
+                            self._store.state_dir,
+                            lambda snap: balance_snapshot.update_peak(
+                                snap, self._balance,
+                            ),
+                        )
+                        self._peak_balance = new_snap.peak_balance
+                    logger.info(
+                        f"[TRADE] Closed {pos.direction.upper()} {pos.pair} "
+                        f"@ {close_price:.5f} [{reason}] PnL={realized_pnl:+.2f} | "
+                        f"balance=${self._balance:.2f}"
+                    )
+                    return pos
+        logger.warning(f"close_position: order_id {order_id} not found in open positions")
+        return None

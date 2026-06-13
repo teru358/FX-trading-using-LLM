@@ -35,3 +35,13 @@ class ClosePositionResponse(BaseModel):
     time: str                               # ISO 8601
     dry_run: bool
     note: str = ""                          # DRY_RUN モード時の補足説明
+
+
+class ClosedDealResponse(BaseModel):
+    ticket: int
+    close_price: float
+    profit: float
+    swap: float = 0.0
+    commission: float = 0.0
+    closed_at: str                          # ISO 8601
+    reason: str = ""
