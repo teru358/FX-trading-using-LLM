@@ -43,85 +43,6 @@ def _hour_key() -> str:
     return db_now().strftime("%Y%m%d%H")
 
 
-def _compute_trailing_target_sl(
-    pos, current: float, cfg
-) -> tuple[float | None, str | None]:
-    """target_sl と stage 名を計算する pure 関数。発火条件未達なら (None, None)。
-
-    side effect なし — テスト容易性 + state mutation 前に値確定。
-    進捗率に応じて 3 ステージ:
-    - `breakeven_pct / 2` 以上: SL = entry と 元SL の中間 (half)
-    - `breakeven_pct` 以上:     SL = entry (breakeven)
-    - `activation_pct` 以上:    SL = current − 元SL距離 × distance_ratio (follow)
-    """
-    if not pos.take_profit:
-        return None, None
-    tp_distance = abs(pos.take_profit - pos.entry_price)
-    if tp_distance == 0:
-        return None, None
-    if pos.direction == "buy":
-        progress = current - pos.entry_price
-    else:
-        progress = pos.entry_price - current
-    progress_pct = progress / tp_distance
-    if progress_pct <= 0:
-        return None, None
-
-    breakeven_pct = cfg.trailing_stop_breakeven_pct
-    half_pct = breakeven_pct / 2.0
-    activation_pct = cfg.trailing_stop_activation_pct
-
-    initial_sl = pos.initial_stop_loss if pos.initial_stop_loss != 0.0 else pos.stop_loss
-    original_sl_distance = abs(pos.entry_price - initial_sl)
-    if original_sl_distance == 0:
-        return None, None
-
-    if progress_pct >= activation_pct:
-        trail_distance = original_sl_distance * cfg.trailing_stop_distance_ratio
-        new_sl = current - trail_distance if pos.direction == "buy" else current + trail_distance
-        return round(new_sl, 5), "follow"
-    if progress_pct >= breakeven_pct:
-        return round(pos.entry_price, 5), "breakeven"
-    if progress_pct >= half_pct:
-        midpoint = (pos.entry_price + initial_sl) / 2.0
-        return round(midpoint, 5), "half"
-    return None, None
-
-
-def _apply_trailing_stop(
-    pos,
-    current: float,
-    cfg,
-    position_mgr: PositionManager,
-    broker: "BrokerAdapter | None" = None,
-    remote_sync_enabled: bool = False,
-) -> tuple[bool, bool]:
-    """target_sl を計算 → remote push (flag 時) → 成功時のみ内部 SL 更新。
-
-    Returns:
-        (sl_updated, remote_push_failed)
-        - sl_updated:         内部 SL が実際に更新された場合 True
-        - remote_push_failed: remote sync 有効かつ push 失敗時 True (monitor で alert に使う)
-
-    backward compat: broker=None / remote_sync_enabled=False で呼ぶと、
-                     既存テストの挙動と同じ。remote push は試みず internal-only。
-    """
-    target_sl, stage = _compute_trailing_target_sl(pos, current, cfg)
-    if target_sl is None:
-        return False, False
-    # 利益方向 guard
-    if pos.direction == "buy" and target_sl <= pos.stop_loss:
-        return False, False
-    if pos.direction == "sell" and target_sl >= pos.stop_loss:
-        return False, False
-    # remote sync 有効時: bridge push 成功時のみ内部を進める
-    if remote_sync_enabled and broker is not None:
-        if not broker.update_remote_sl(pos.order_id, target_sl):
-            return False, True
-    updated = position_mgr.update_stop_loss(pos.order_id, target_sl, stage=stage)
-    return updated, False
-
-
 def _is_explicitly_enabled(value) -> bool:
     """Return True only for real bool True; avoids MagicMock defaults in tests."""
     return value is True
@@ -228,21 +149,14 @@ async def monitor_open_positions(
             current = current_cp.price
             mt5_authoritative = current_cp.source == "mt5"
 
-            # ── トレーリングストップ / Profit Protection ─────────────
+            # ── Profit Protection ─────────────────────────────────────
             remote_failed = False
-            if cfg.trailing_stop_enabled:
-                _, remote_failed = _apply_trailing_stop(
-                    pos, current, cfg, position_mgr,
-                    broker=broker,
-                    remote_sync_enabled=remote_sync_enabled,
-                )
             if _is_explicitly_enabled(getattr(config.trading, "profit_protection_enabled", False)):
-                _, profit_remote_failed = _apply_profit_protection(
+                _, remote_failed = _apply_profit_protection(
                     pos, current, config.trading, position_mgr,
                     broker=broker,
                     remote_sync_enabled=remote_sync_enabled,
                 )
-                remote_failed = remote_failed or profit_remote_failed
             if remote_failed:
                 # rate-limited alert: (pair, hour) で 1 回のみ
                 key = (pos.pair, _hour_key())
@@ -259,7 +173,7 @@ async def monitor_open_positions(
                             distance_to_sl_pct=0.0,
                             unrealized_pnl=0.0,
                             position_size=pos.position_size,
-                            source="trailing_sync_failed",
+                            source="protection_sync_failed",
                         ))
 
             adverse_pct = _adverse_move_pct(pos.direction, pos.entry_price, current)

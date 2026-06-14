@@ -115,10 +115,6 @@ class TradingConfig:
     reversal_confidence_min: float = 0.70    # Layer 1: 反転シグナルの最低信頼度
     reversal_score_threshold: float = 0.25   # Layer 1: 反転シグナルの最低スコア絶対値
     reversal_min_holding_minutes: int = 240  # Layer 1: 反転発火の最低保有時間 (分)
-    max_holding_days: int = 10               # Layer 2: 最大保有日数
-    timeout_min_progress_pct: float = 0.30   # Layer 2: タイムアウト判定の最低進捗率
-    profit_lock_min_progress_pct: float = 0.40  # Layer 3: 利益ロック発動の最低進捗率
-    profit_lock_score_floor: float = 0.15    # Layer 3: この絶対値未満で利益ロック
     remote_sl_sync_enabled: bool = False     # Layer 4: trailing SL を MT5 server-side に同期
     # ポジション管理 v2 (2026-06-13 layer rework)
     reversal_guard_enabled: bool = True
@@ -324,11 +320,6 @@ class PriceMonitorConfig:
     alert_step_pct: float = 0.002         # 追加 0.2% ごとに再通知（スパム防止）
     emergency_close_pct: float = 0.008    # 0.8% 損失で緊急損切り（0 = 無効）
     enable_emergency_close: bool = False  # 緊急損切り機能の有効/無効
-    # トレーリングストップ
-    trailing_stop_enabled: bool = False
-    trailing_stop_breakeven_pct: float = 0.20   # TP距離のこの割合でSL=entry。半分(pct/2)でSL=中間
-    trailing_stop_activation_pct: float = 0.40  # TP距離のこの割合以降は動的追従（current - 元SL距離×ratio）
-    trailing_stop_distance_ratio: float = 1.0   # 動的追従時のSL距離倍率(元SL距離×この値)
 
 
 @dataclass

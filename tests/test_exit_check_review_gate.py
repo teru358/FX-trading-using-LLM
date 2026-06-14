@@ -47,10 +47,6 @@ def _config(tmp_path):
     cfg.trading.reversal_confidence_min = 0.7
     cfg.trading.reversal_score_threshold = 0.25
     cfg.trading.reversal_min_holding_minutes = 240
-    cfg.trading.max_holding_days = 14
-    cfg.trading.timeout_min_progress_pct = 0.2
-    cfg.trading.profit_lock_min_progress_pct = 0.3
-    cfg.trading.profit_lock_score_floor = 0.15
     cfg.notifier.enabled = False
     cfg.notifier.notify_on_order_close = False
 

@@ -88,66 +88,6 @@ def test_layer1_low_confidence_skips(buy_order):
         reversal_confidence_min=0.70,
     )
     assert len(decisions) == 0
-
-
-def test_layer2_timeout_closes(buy_order):
-    """Layer2: max_holding_days 超過 + TP進捗 < 30% → timeout 決済判断が返る。"""
-    # opened_at を 4日前に設定
-    buy_order.opened_at = datetime.now() - timedelta(days=4)
-    # 現在価格 = entry + 0.1（TP=152.0 まで 2.0 のうち 0.1 = 5% 進捗）
-    decisions = review_open_positions(
-        open_positions=[buy_order],
-        signals_by_pair={},
-        current_prices={"USDJPY=X": 150.1},
-        max_holding_days=3,
-        timeout_min_progress_pct=0.30,
-    )
-    assert len(decisions) == 1
-    assert decisions[0].close_reason == "timeout"
-
-
-def test_layer2_sufficient_progress_skips(buy_order):
-    """Layer2: TP進捗 ≥ 30% → タイムアウトでも決済しない。"""
-    buy_order.opened_at = datetime.now() - timedelta(days=4)
-    # entry=150.0, TP=152.0: distance=2.0, 進捗 0.8/2.0 = 40%
-    decisions = review_open_positions(
-        open_positions=[buy_order],
-        signals_by_pair={},
-        current_prices={"USDJPY=X": 150.8},
-        max_holding_days=3,
-        timeout_min_progress_pct=0.30,
-    )
-    assert len(decisions) == 0
-
-
-def test_layer3_profit_lock_closes(buy_order):
-    """Layer3: TP進捗 ≥ 40% + |signal score| < 0.15 → profit_lock 決済判断が返る。"""
-    # entry=150.0, TP=152.0: distance=2.0, 進捗 1.0/2.0 = 50%
-    signal = _make_signal("USDJPY=X", "bullish", confidence=0.6, combined_score=0.05)
-    decisions = review_open_positions(
-        open_positions=[buy_order],
-        signals_by_pair={"USDJPY=X": signal},
-        current_prices={"USDJPY=X": 151.0},
-        profit_lock_min_progress_pct=0.40,
-        profit_lock_score_floor=0.15,
-    )
-    assert len(decisions) == 1
-    assert decisions[0].close_reason == "profit_lock"
-
-
-def test_layer3_strong_signal_skips(buy_order):
-    """Layer3: |signal score| ≥ 0.15 → 利益ロックはしない。"""
-    signal = _make_signal("USDJPY=X", "bullish", confidence=0.8, combined_score=0.30)
-    decisions = review_open_positions(
-        open_positions=[buy_order],
-        signals_by_pair={"USDJPY=X": signal},
-        current_prices={"USDJPY=X": 151.0},
-        profit_lock_min_progress_pct=0.40,
-        profit_lock_score_floor=0.15,
-    )
-    assert len(decisions) == 0
-
-
 # --- NEW TESTS ---
 
 
@@ -204,7 +144,7 @@ def test_diagnostic_log_l1_no_signal_when_signal_absent(buy_order, caplog):
     )
     log_text = "\n".join(r.message for r in caplog.records)
     assert "l1=no_signal" in log_text
-    assert "l3=no_signal" in log_text
+    assert "time_stop=disabled" in log_text
 
 
 def test_timeout_only_skips_layer1_and_3(buy_order):
@@ -218,18 +158,3 @@ def test_timeout_only_skips_layer1_and_3(buy_order):
         timeout_only=True,
     )
     assert decisions == []
-
-
-def test_timeout_only_runs_layer2(buy_order):
-    """timeout_only=True でも Layer 2 (timeout) は発火する。"""
-    buy_order.opened_at = db_now() - timedelta(days=11)  # > max_holding_days=10
-    decisions = review_open_positions(
-        open_positions=[buy_order],
-        signals_by_pair={},
-        current_prices={"USDJPY=X": 150.1},  # progress 5% < 30%
-        timeout_only=True,
-        max_holding_days=10,
-        timeout_min_progress_pct=0.30,
-    )
-    assert len(decisions) == 1
-    assert decisions[0].close_reason == "timeout"

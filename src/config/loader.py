@@ -476,15 +476,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             f"got {trading.news_weight + trading.price_weight}"
         )
 
-    if price_monitor.trailing_stop_enabled:
-        if not (0.0 < price_monitor.trailing_stop_breakeven_pct < price_monitor.trailing_stop_activation_pct):
-            raise ValueError(
-                "trailing_stop_breakeven_pct must satisfy "
-                "0 < breakeven_pct < activation_pct "
-                f"(breakeven={price_monitor.trailing_stop_breakeven_pct}, "
-                f"activation={price_monitor.trailing_stop_activation_pct})"
-            )
-
     # rag.embedding_base_url: 空欄なら起動阻止 (provider 別 default を提示)
     if rag.embedding_provider in LLM_PROVIDERS_REQUIRING_BASE_URL and not rag.embedding_base_url:
         hint = _EMBEDDING_BASE_URL_HINTS.get(rag.embedding_provider, "")

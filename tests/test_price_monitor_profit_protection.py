@@ -13,7 +13,6 @@ def _make_config(mode="live"):
     cfg = MagicMock()
     cfg.mode = mode
     cfg.price_monitor.enabled = True
-    cfg.price_monitor.trailing_stop_enabled = False
     cfg.price_monitor.enable_emergency_close = False
     cfg.price_monitor.emergency_close_pct = 0.05
     cfg.price_monitor.alert_threshold_pct = 0.02
@@ -161,3 +160,34 @@ async def test_monitor_applies_and_clears_pending_protection_target(tmp_state_st
     assert updated.pending_protection_sl is None
     assert updated.pending_protection_reason == ""
     assert updated.pending_protection_updated_at is None
+
+
+@pytest.mark.asyncio
+async def test_monitor_profit_protection_remote_failure_alert_dedup(tmp_state_store) -> None:
+    from src.jobs.price_monitor import monitor_open_positions, _remote_sl_alert_dedup
+
+    _remote_sl_alert_dedup.clear()
+    cfg = _make_config(mode="live")
+    cfg.trading.remote_sl_sync_enabled = True
+    cfg.notifier.notify_on_price_alert = True
+    order = Order.new("USDJPY=X", "buy", 160.0, 159.0, 162.0, 1000.0)
+    pm = _manager_with_order(tmp_state_store, order)
+    pp = MagicMock()
+    pp.get_current_price.return_value = _current_price(160.5)
+    broker = MagicMock()
+    broker.update_remote_sl.return_value = False
+
+    with patch("src.jobs.price_monitor.is_market_open", return_value=True), \
+         patch("src.jobs.price_monitor.create_notifier") as mock_create:
+        notifier = AsyncMock()
+        mock_create.return_value = notifier
+        await monitor_open_positions(cfg, pm, pp, broker)
+        await monitor_open_positions(cfg, pm, pp, broker)
+        await monitor_open_positions(cfg, pm, pp, broker)
+
+    assert broker.update_remote_sl.call_count == 3
+    alerts = [
+        call for call in notifier.notify_price_alert.call_args_list
+        if call.args[0].source == "protection_sync_failed"
+    ]
+    assert len(alerts) == 1

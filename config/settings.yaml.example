@@ -112,10 +112,25 @@ trading:
   position_review_enabled: false        # Phase 3c OFF (Phase 4 で再評価)
   reversal_confidence_min: 0.70         # Layer 1: 反転シグナルの最低信頼度
   reversal_score_threshold: 0.25        # Layer 1: 反転スコアの絶対値閾値
-  max_holding_days: 10                  # Layer 2: 最大保有日数
-  timeout_min_progress_pct: 0.30        # Layer 2: この進捗率未満でタイムアウト決済
-  profit_lock_min_progress_pct: 0.40    # Layer 3: TP方向への進捗率がこれ以上で利益ロック候補
-  profit_lock_score_floor: 0.15         # Layer 3: シグナルスコア絶対値がこれ未満で利益ロック
+  # Position management v2
+  reversal_min_holding_minutes: 240
+  reversal_guard_enabled: true
+  reversal_close_enabled: false
+  reversal_consecutive_required: 2
+  reversal_raise_sl_to_breakeven: true
+  time_stop_enabled: true
+  max_holding_hours: 12
+  no_progress_hours: 4
+  no_progress_min_mfe_r: 0.2
+  stale_signal_hours: 8
+  session_end_flatten_enabled: false
+  profit_protection_enabled: true
+  protect_half_r: 0.3
+  protect_breakeven_r: 0.5
+  protect_lock_r: 1.0
+  giveback_close_r: 0.4
+  giveback_close_min_mfe_r: 0.8
+  remote_sl_sync_enabled: false
   # RAG方向別スコア補正
   rag_adjustment_enabled: true
   rag_adjustment_max: 0.15
@@ -176,10 +191,6 @@ price_monitor:
   emergency_close_pct: 0.008       # 損失 0.8% で緊急損切り（0 = 無効）
   enable_emergency_close: false    # 緊急損切りを有効にするか（false = 通知のみ）
   # トレーリングストップ（段階型・利益保護）
-  trailing_stop_enabled: false
-  trailing_stop_breakeven_pct: 0.20    # TP距離の20%到達でSL=entry。10%(=半分)でSL=entryと元SLの中間
-  trailing_stop_activation_pct: 0.40   # TP距離の40%到達で動的追従(current - 元SL距離×ratio)
-  trailing_stop_distance_ratio: 1.0    # 動的追従時のSL距離倍率（1.0 = 元SLと同じ幅）
 
 schedule:
   run_times:

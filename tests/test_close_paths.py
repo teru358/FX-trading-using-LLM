@@ -171,7 +171,6 @@ def test_price_monitor_emergency_close_uses_broker(tmp_path, monkeypatch):
     cfg.price_monitor.alert_step_pct = 0.005
     cfg.price_monitor.enable_emergency_close = True
     cfg.price_monitor.emergency_close_pct = 0.001
-    cfg.price_monitor.trailing_stop_enabled = False
     cfg.trading.remote_sl_sync_enabled = False
 
     pm = MagicMock()

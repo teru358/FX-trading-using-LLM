@@ -607,10 +607,6 @@ async def _phase_review_open_positions(
         max_holding_hours=config.trading.max_holding_hours,
         no_progress_hours=config.trading.no_progress_hours,
         no_progress_min_mfe_r=config.trading.no_progress_min_mfe_r,
-        max_holding_days=config.trading.max_holding_days,
-        timeout_min_progress_pct=config.trading.timeout_min_progress_pct,
-        profit_lock_min_progress_pct=config.trading.profit_lock_min_progress_pct,
-        profit_lock_score_floor=config.trading.profit_lock_score_floor,
     )
 
     reviewed_closed = []

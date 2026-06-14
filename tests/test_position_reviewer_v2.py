@@ -55,7 +55,6 @@ def test_time_stop_no_progress_skips_when_mfe_r_sufficient(buy_order) -> None:
         max_holding_hours=12,
         no_progress_hours=4,
         no_progress_min_mfe_r=0.2,
-        max_holding_days=10,
     )
 
     assert decisions == []

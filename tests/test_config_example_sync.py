@@ -106,3 +106,31 @@ def test_load_config_from_examples(tmp_path):
     assert config.news_collection is not None
     assert config.rag is not None
     assert config.schedule is not None
+
+
+def test_settings_do_not_carry_removed_position_management_keys() -> None:
+    import yaml
+    from pathlib import Path
+
+    files = [
+        Path("config/settings.yaml"),
+        Path("config/settings.yaml.example"),
+        Path("docs/deploy-stick-pc/settings.yaml"),
+    ]
+    removed = {
+        "initial_balance",
+        "trading_mode",
+        "max_holding_days",
+        "timeout_min_progress_pct",
+        "profit_lock_min_progress_pct",
+        "profit_lock_score_floor",
+        "legacy_profit_lock_enabled",
+        "trailing_stop_enabled",
+        "trailing_stop_breakeven_pct",
+        "trailing_stop_activation_pct",
+        "trailing_stop_distance_ratio",
+    }
+    for path in files:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        trading = data.get("trading", {}) or {}
+        assert not (removed & set(trading)), f"{path} still has removed keys: {removed & set(trading)}"

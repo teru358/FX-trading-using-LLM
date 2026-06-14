@@ -132,7 +132,6 @@ reviewer の close 実行には [reviewer ガードと監視機構](#reviewer-�
   - `protect_lock_r` 到達 → SL = +0.3R 相当の利益確保位置
 - **pending protection target**: Reversal Guard が記録した保護SLを適用
 - **remote_sl_sync** (任意, `remote_sl_sync_enabled: true` 時): SL 更新を MT5 server-side にも反映し、成功後に内部SLを更新
-- **Legacy trailing** (`trailing_stop_enabled: true` 時): 旧TP進捗ベースのtrailing helperも互換目的で残存
 
 ## ポジション管理 (5 層)
 
@@ -145,7 +144,7 @@ reviewer の close 実行には [reviewer ガードと監視機構](#reviewer-�
 | **Layer 4: Profit Protection** | 価格監視 | MFE/R到達・giveback | SL引き上げ / remote SL sync |
 | **Layer 5: Emergency Guard** | 価格監視 | 損失方向の急変 | emergency close / degraded alert |
 
-Reversal Guard / Time Stop は `position_review_enabled` で有効化する。Profit Protection は `profit_protection_enabled`、legacy trailing は `trailing_stop_enabled`、remote SL同期は `remote_sl_sync_enabled` で制御する。旧 `Layer 1-3` / `profit_lock` ラベルは過去ログ・互換close_reasonとして残る場合がある。
+Reversal Guard / Time Stop は `position_review_enabled` で有効化する。Profit Protection は `profit_protection_enabled`、remote SL同期は `remote_sl_sync_enabled` で制御する。旧TP進捗trailing、日数timeout fallback、profit_lock closeは削除済み。
 
 ### ポートフォリオガード
 

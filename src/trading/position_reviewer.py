@@ -1,8 +1,7 @@
-"""ポジション再評価ロジック（Phase 4a）。
+"""ポジション再評価ロジック。
 
-Layer 1: シグナル反転決済 — 新シグナルがポジションと逆方向 + 高信頼度 + 最低保有時間達成
-Layer 2: タイムアウト決済 — 保有期間超過 + TP方向への進捗不足
-Layer 3: 利益ロック決済 — 含み益あり + シグナル減衰
+Reversal Guard: 反転シグナルを即時決済の主経路にせず、原則リスク圧縮へ回す。
+Time Stop: 日数/TP進捗ではなく、保有時間とMFE進捗で撤退判断する。
 """
 
 from __future__ import annotations
@@ -12,8 +11,8 @@ from dataclasses import dataclass
 from typing import Optional
 
 from src.signals.signal_combiner import TradeSignal
-from src.utils.clock import db_now
 from src.trading.position_manager import Order
+from src.utils.clock import db_now
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +26,7 @@ class ReviewDecision:
     """
     order_id: str
     pair: str
-    close_reason: str  # "reversal" | "timeout" | "profit_lock" | "reversal_guard"
+    close_reason: str  # "reversal" | "timeout" | "reversal_guard"
     detail: str
     action: str = "close"  # "close" | "raise_sl"
     target_sl: float | None = None
@@ -61,35 +60,24 @@ def _classify_layer1(
     return "would_fire"
 
 
-def _classify_layer2(
-    holding_days: float,
-    progress_pct: float,
-    max_holding_days: int,
-    timeout_min_progress_pct: float,
+def _classify_time_stop(
+    *,
+    time_stop_enabled: bool,
+    holding_hours: float,
+    max_holding_hours: int,
+    max_favorable_r: float,
+    no_progress_hours: int,
+    no_progress_min_mfe_r: float,
 ) -> str:
-    if holding_days < max_holding_days:
-        return "holding_below_max"
-    if progress_pct >= timeout_min_progress_pct:
-        return "progress_above_min"
-    return "would_fire"
-
-
-def _classify_layer3(
-    signal: Optional[TradeSignal],
-    progress_pct: float,
-    profit_lock_min_progress_pct: float,
-    profit_lock_score_floor: float,
-    timeout_only: bool,
-) -> str:
-    if timeout_only:
-        return "skipped_timeout_only"
-    if signal is None:
-        return "no_signal"
-    if progress_pct < profit_lock_min_progress_pct:
-        return "below_progress"
-    if abs(signal.combined_score) >= profit_lock_score_floor:
-        return "signal_still_strong"
-    return "would_fire"
+    if not time_stop_enabled:
+        return "disabled"
+    if holding_hours >= max_holding_hours:
+        return "max_holding_would_fire"
+    if holding_hours >= no_progress_hours and max_favorable_r < no_progress_min_mfe_r:
+        return "no_progress_would_fire"
+    if holding_hours < no_progress_hours:
+        return "holding_below_no_progress"
+    return "mfe_progress_ok"
 
 
 def review_open_positions(
@@ -107,15 +95,10 @@ def review_open_positions(
     max_holding_hours: int = 12,
     no_progress_hours: int = 4,
     no_progress_min_mfe_r: float = 0.2,
-    max_holding_days: int = 10,
-    timeout_min_progress_pct: float = 0.30,
-    profit_lock_min_progress_pct: float = 0.40,
-    profit_lock_score_floor: float = 0.15,
 ) -> list[ReviewDecision]:
-    """オープンポジションを再評価し、早期決済すべきものを返す。
+    """オープンポジションを再評価し、closeまたはrisk compression判断を返す。
 
-    timeout_only=True: halt 中などで signal 不要時に Layer 2 のみ評価する。
-                       position_review_enabled gate を bypass する想定 (timeout は安全網)。
+    timeout_only=True: halt 中などで signal 不要時に Time Stop のみ評価する。
     """
     decisions: list[ReviewDecision] = []
 
@@ -125,21 +108,17 @@ def review_open_positions(
         if price is None:
             continue
 
-        # TP方向への進捗率
-        tp_distance = abs(pos.take_profit - pos.entry_price)
         if pos.direction == "buy":
             progress = price - pos.entry_price
         else:
             progress = pos.entry_price - price
-        progress_pct = progress / tp_distance if tp_distance > 0 else 0.0
 
         holding_hours = (db_now() - pos.opened_at).total_seconds() / 3600
         holding_minutes = holding_hours * 60
-        holding_days = holding_hours / 24
 
         fired = False
 
-        # Layer 1: シグナル反転決済 (timeout_only モードでは skip)
+        # Reversal Guard: defaultは即時closeではなく、利益中のSL引き上げ。
         if not timeout_only and signal is not None:
             is_reversal = (
                 (pos.direction == "buy" and signal.predicted_direction == "bearish")
@@ -172,7 +151,7 @@ def review_open_positions(
                     fired = True
                 elif reversal_close_enabled:
                     logger.info(
-                        f"[REVIEW] {pos.pair}: Layer 1 reversal — "
+                        f"[REVIEW] {pos.pair}: reversal close — "
                         f"{pos.direction} vs {signal.predicted_direction} "
                         f"(score={signal.combined_score:+.3f} conf={signal.confidence:.2f} "
                         f"holding={holding_minutes:.0f}min)"
@@ -194,7 +173,7 @@ def review_open_positions(
                         f"(in_profit={in_profit})"
                     )
 
-        # Layer 2/3: Time Stop (timeout_only モードでも評価)
+        # Time Stop: day/TP-progress fallbackは廃止。時間とMFEだけを見る。
         if not fired and time_stop_enabled and holding_hours >= max_holding_hours:
             logger.info(
                 f"[REVIEW] {pos.pair}: Time Stop max holding — "
@@ -233,48 +212,6 @@ def review_open_positions(
             ))
             fired = True
 
-        # Legacy Layer 2: 日数ベース timeout fallback
-        if not fired and holding_days >= max_holding_days and progress_pct < timeout_min_progress_pct:
-            logger.info(
-                f"[REVIEW] {pos.pair}: Layer 2 timeout — "
-                f"{holding_days:.1f} days, progress {progress_pct:.1%}"
-            )
-            decisions.append(ReviewDecision(
-                order_id=pos.order_id,
-                pair=pos.pair,
-                close_reason="timeout",
-                detail=(
-                    f"Held {holding_days:.1f} days with {progress_pct:.1%} "
-                    f"progress toward TP (min: {timeout_min_progress_pct:.0%})"
-                ),
-            ))
-            fired = True
-
-        # Layer 3: 利益ロック決済 (timeout_only モードでは skip)
-        if (
-            not fired
-            and not timeout_only
-            and signal is not None
-            and progress_pct >= profit_lock_min_progress_pct
-            and abs(signal.combined_score) < profit_lock_score_floor
-        ):
-            logger.info(
-                f"[REVIEW] {pos.pair}: Layer 3 profit lock — "
-                f"progress {progress_pct:.1%}, score={signal.combined_score:+.3f}"
-            )
-            decisions.append(ReviewDecision(
-                order_id=pos.order_id,
-                pair=pos.pair,
-                close_reason="profit_lock",
-                detail=(
-                    f"Locking profit at {progress_pct:.1%} progress | "
-                    f"signal weakened to {signal.combined_score:+.3f} "
-                    f"(floor: +/-{profit_lock_score_floor})"
-                ),
-            ))
-            fired = True
-
-        # 診断ログ (発火しなかった position のみ)
         if not fired:
             score_str = f"{signal.combined_score:+.3f}" if signal else "N/A"
             conf_str = f"{signal.confidence:.2f}" if signal else "N/A"
@@ -283,18 +220,18 @@ def review_open_positions(
                 reversal_min_holding_minutes, reversal_confidence_min,
                 reversal_score_threshold, timeout_only,
             )
-            l2 = _classify_layer2(
-                holding_days, progress_pct,
-                max_holding_days, timeout_min_progress_pct,
-            )
-            l3 = _classify_layer3(
-                signal, progress_pct,
-                profit_lock_min_progress_pct, profit_lock_score_floor, timeout_only,
+            time_stop = _classify_time_stop(
+                time_stop_enabled=time_stop_enabled,
+                holding_hours=holding_hours,
+                max_holding_hours=max_holding_hours,
+                max_favorable_r=pos.max_favorable_r,
+                no_progress_hours=no_progress_hours,
+                no_progress_min_mfe_r=no_progress_min_mfe_r,
             )
             logger.debug(
-                f"[REVIEW] {pos.pair} eval: progress={progress_pct:.1%} "
-                f"holding_h={holding_hours:.1f} score={score_str} conf={conf_str} "
-                f"l1={l1} l2={l2} l3={l3}"
+                f"[REVIEW] {pos.pair} eval: holding_h={holding_hours:.1f} "
+                f"mfe_r={pos.max_favorable_r:.2f} score={score_str} conf={conf_str} "
+                f"l1={l1} time_stop={time_stop}"
             )
 
     return decisions
