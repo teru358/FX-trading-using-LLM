@@ -38,6 +38,8 @@ from src.notifications.notifier import (
     SignalOutcome,
     SignalSkippedEvent,
     create_notifier,
+    format_decision_line,
+    format_health_line,
 )
 from src.persistence.adaptive_params_store import AdaptiveParamsStore
 from src.persistence.state_store import StateStore
@@ -882,7 +884,11 @@ async def _phase_execute_signals(
 
     executed_orders: list = []
     outcomes: list[SignalOutcome] = []
+    health_rows: list[tuple[SignalOutcome, str]] = []  # (outcome, pre_action) — 案4 集計用
     for sig in signals:
+        # RAG 補正前の判定を退避 (案1: 最終判定ログで pre→final を並べるため)
+        pre_action = sig.action
+        pre_score = sig.combined_score
         rag_note = await _adjust_signal_with_rag(sig, rag_cfg, store, embed_fn_adj, deadband)
 
         if sig.action != "hold":
@@ -894,6 +900,8 @@ async def _phase_execute_signals(
             )
             outcome.rag_note = rag_note
             outcomes.append(outcome)
+            logger.info(format_decision_line(outcome, pre_action, pre_score))
+            health_rows.append((outcome, pre_action))
             if outcome.order is not None:
                 executed_orders.append(outcome.order)
         else:
@@ -911,6 +919,8 @@ async def _phase_execute_signals(
                 rag_note=rag_note,
             )
             outcomes.append(outcome)
+            logger.info(format_decision_line(outcome, pre_action, pre_score))
+            health_rows.append((outcome, pre_action))
             if (not config.notifier.notify_on_cycle_summary
                     and config.notifier.notify_on_signal_skipped):
                 await notifier.notify_signal_skipped(SignalSkippedEvent(
@@ -923,6 +933,11 @@ async def _phase_execute_signals(
                     source="trading",
                 ))
             hold_store.save_hold(sig.pair, sig)
+
+    # 案4: trade 全銘柄の判定ヘルスを集計表示 (なぜ発注されないかを毎サイクル可視化)
+    for outcome, pre_action in health_rows:
+        logger.info(format_health_line(outcome, pre_action))
+
     return executed_orders, outcomes
 
 

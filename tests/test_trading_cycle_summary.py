@@ -47,6 +47,157 @@ async def test_phase_analyze_pairs_collects_data_health(monkeypatch):
     assert any("USDJPY=X" in d and "fallback" in d for d in data_health)
 
 
+def test_format_decision_line_rag_demotes_sell_to_hold():
+    """SELL が RAG 補正で HOLD に降格したケースを1行で表現する (案1)。"""
+    from src.notifications.notifier import SignalOutcome, format_decision_line
+
+    o = SignalOutcome(
+        pair="EURUSD=X", action="hold", status="hold",
+        confidence=0.77, combined_score=-0.127,
+        reason="score in deadband (-0.127, db=0.150)",
+        detail_reason="d", news_score=-0.24, tech_score=-0.23,
+        rag_note="score -0.231→-0.127, sell→hold",
+    )
+    line = format_decision_line(o, pre_action="sell", pre_score=-0.231)
+    assert "[DECISION]" in line
+    assert "EUR/USD" in line or "EURUSD=X" in line
+    # pre 判定 → RAG → final 判定 が読み取れる
+    assert "SELL" in line and "-0.231" in line
+    assert "RAG" in line
+    assert "HOLD" in line and "-0.127" in line
+    # 降格理由と confidence
+    assert "deadband" in line
+    assert "0.77" in line
+
+
+def test_format_decision_line_executed_no_rag_change():
+    """RAG 補正で action が変わらず発注されたケース (rag_note 空 or score のみ)。"""
+    from src.notifications.notifier import SignalOutcome, format_decision_line
+
+    o = SignalOutcome(
+        pair="USDJPY=X", action="buy", status="executed",
+        confidence=0.86, combined_score=0.18,
+        reason="score=+0.180 conf=0.86",
+        detail_reason="d", news_score=0.06, tech_score=0.45,
+        rag_note="score +0.283→+0.180",
+    )
+    line = format_decision_line(o, pre_action="buy", pre_score=0.283)
+    assert "[DECISION]" in line
+    assert "BUY" in line
+    assert "EXECUTED" in line
+    assert "0.283" in line and "0.180" in line
+
+
+def test_format_decision_line_no_rag_adjustment():
+    """RAG 補正なし (rag_note 空) のときは RAG セグメントを出さない。"""
+    from src.notifications.notifier import SignalOutcome, format_decision_line
+
+    o = SignalOutcome(
+        pair="USDJPY=X", action="buy", status="executed",
+        confidence=0.86, combined_score=0.283,
+        reason="score=+0.283 conf=0.86",
+        detail_reason="d", news_score=0.06, tech_score=0.45,
+        rag_note="",
+    )
+    line = format_decision_line(o, pre_action="buy", pre_score=0.283)
+    assert "RAG" not in line
+    assert "BUY" in line and "EXECUTED" in line
+
+
+def test_classify_hold_reasons_rag_demote():
+    """RAG 補正がなければ BUY/SELL だったが HOLD 化 → rag_demote フラグ (案4の核心)。"""
+    from src.notifications.notifier import SignalOutcome, classify_hold_reasons
+
+    o = SignalOutcome(
+        pair="EURUSD=X", action="hold", status="hold",
+        confidence=0.77, combined_score=-0.127,
+        reason="score in deadband (-0.127, db=0.150)",
+        detail_reason="d", news_score=-0.24, tech_score=-0.23,
+        rag_note="score -0.231→-0.127, sell→hold",
+    )
+    flags = classify_hold_reasons(o, pre_action="sell")
+    assert "rag_demote" in flags
+
+
+def test_classify_hold_reasons_confidence_and_conflict():
+    from src.notifications.notifier import SignalOutcome, classify_hold_reasons
+
+    o = SignalOutcome(
+        pair="EURUSD=X", action="hold", status="hold",
+        confidence=0.51, combined_score=0.18,
+        reason="confidence too low (0.51 < 0.6) [NEWS/PRICE conflict]",
+        detail_reason="d", news_score=0.62, tech_score=0.07,
+        rag_note="",
+    )
+    flags = classify_hold_reasons(o, pre_action="hold")
+    assert "confidence_low" in flags
+    assert "tv_conflict" in flags or "news_price_conflict" in flags
+    assert "rag_demote" not in flags  # pre も hold なので降格ではない
+
+
+def test_classify_hold_reasons_accuracy_gate():
+    from src.notifications.notifier import SignalOutcome, classify_hold_reasons
+
+    o = SignalOutcome(
+        pair="EURUSD=X", action="hold", status="hold",
+        confidence=0.59, combined_score=-0.067,
+        reason="forecast accuracy below hard_threshold",
+        detail_reason="d", news_score=-0.01, tech_score=-0.08,
+        rag_note="",
+    )
+    flags = classify_hold_reasons(o, pre_action="hold")
+    assert "accuracy_gate" in flags
+
+
+def test_classify_hold_reasons_deadband_no_rag():
+    from src.notifications.notifier import SignalOutcome, classify_hold_reasons
+
+    o = SignalOutcome(
+        pair="EURUSD=X", action="hold", status="hold",
+        confidence=0.61, combined_score=-0.115,
+        reason="score in deadband (-0.115, db=0.180)",
+        detail_reason="d", news_score=-0.29, tech_score=-0.07,
+        rag_note="",
+    )
+    flags = classify_hold_reasons(o, pre_action="hold")
+    assert "deadband" in flags
+    assert "rag_demote" not in flags
+
+
+def test_format_health_line_executed_is_concise():
+    """発注された銘柄は EXECUTED とだけ示す (HOLD要因は出さない)。"""
+    from src.notifications.notifier import SignalOutcome, format_health_line
+
+    o = SignalOutcome(
+        pair="USDJPY=X", action="buy", status="executed",
+        confidence=0.86, combined_score=0.18,
+        reason="score=+0.180 conf=0.86",
+        detail_reason="d", news_score=0.06, tech_score=0.45,
+        rag_note="score +0.283→+0.180",
+    )
+    line = format_health_line(o, pre_action="buy")
+    assert "[HEALTH]" in line
+    assert "USDJPY=X" in line
+    assert "EXECUTED" in line
+
+
+def test_format_health_line_hold_lists_flags():
+    from src.notifications.notifier import SignalOutcome, format_health_line
+
+    o = SignalOutcome(
+        pair="EURUSD=X", action="hold", status="hold",
+        confidence=0.77, combined_score=-0.127,
+        reason="score in deadband (-0.127, db=0.150)",
+        detail_reason="d", news_score=-0.24, tech_score=-0.23,
+        rag_note="score -0.231→-0.127, sell→hold",
+    )
+    line = format_health_line(o, pre_action="sell")
+    assert "[HEALTH]" in line
+    assert "EURUSD=X" in line
+    assert "rag_demote" in line
+    assert "HOLD" in line
+
+
 def _exec_signal(action: str = "buy") -> MagicMock:
     """_execute_one_signal / _phase_execute_signals 用の signal モック。"""
     s = MagicMock()

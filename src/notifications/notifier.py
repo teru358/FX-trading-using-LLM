@@ -194,6 +194,95 @@ def _format_signal_block(o: SignalOutcome) -> str:
     return "\n".join(lines)
 
 
+_DECISION_STATUS_LABEL = {
+    "executed": "EXECUTED",
+    "hold": "HOLD",
+    "rejected": "REJECTED",
+    "failed": "FAILED",
+    "skipped": "SKIPPED",
+    "halted": "HALTED",
+}
+
+
+def format_decision_line(
+    outcome: SignalOutcome, pre_action: str, pre_score: float
+) -> str:
+    """1シグナルの pre判定 → RAG補正 → final判定 を1行に集約する (案1: 最終判定ログ明確化)。
+
+    `[SIGNAL] SELL` だけ目立って実際は HOLD になった、という追跡困難を解消するため、
+    RAG 補正前の action/score と最終 disposition を1行で並べる。挙動は変えない (ログのみ)。
+
+    例:
+      [DECISION] EURUSD=X: SELL(-0.231) → RAG → HOLD(-0.127) HOLD | deadband... | conf=0.77
+      [DECISION] USDJPY=X: BUY(+0.283) → RAG → BUY(+0.180) EXECUTED | ... | conf=0.86
+    """
+    status_label = _DECISION_STATUS_LABEL.get(outcome.status, outcome.status.upper())
+    pre = f"{pre_action.upper()}({pre_score:+.3f})"
+    final = f"{outcome.action.upper()}({outcome.combined_score:+.3f})"
+
+    arrow = " → RAG → " if outcome.rag_note else " → "
+    line = f"[DECISION] {outcome.pair}: {pre}{arrow}{final} {status_label}"
+
+    if outcome.reason:
+        line += f" | {outcome.reason}"
+    line += f" | conf={outcome.confidence:.2f}"
+    return line
+
+
+def classify_hold_reasons(outcome: SignalOutcome, pre_action: str) -> list[str]:
+    """HOLD になった要因を分類フラグの list で返す (案4: 判定ヘルス可視化)。
+
+    reason 文字列 (signal_combiner 由来) と rag_note から、なぜ発注されなかったかを
+    機械可読なフラグに落とす。新規の判定ロジックは持たず、既存出力の分類のみ。
+
+    フラグ:
+      rag_demote          — RAG 補正がなければ buy/sell だったが hold 化
+      confidence_low      — confidence threshold 未達
+      deadband            — score が deadband 内
+      accuracy_gate       — forecast accuracy による forced HOLD
+      news_price_conflict — ニュースとテクニカルの方向対立
+    """
+    flags: list[str] = []
+    reason = (outcome.reason or "").lower()
+
+    # rag_demote: 補正前は方向ありだが最終 hold (RAG が deadband に押し戻した)
+    if (
+        pre_action in ("buy", "sell")
+        and outcome.action == "hold"
+        and "→hold" in (outcome.rag_note or "").replace(" ", "")
+    ):
+        flags.append("rag_demote")
+
+    if "confidence too low" in reason:
+        flags.append("confidence_low")
+    if "deadband" in reason:
+        flags.append("deadband")
+    if "accuracy" in reason:
+        flags.append("accuracy_gate")
+    if "conflict" in reason:
+        flags.append("news_price_conflict")
+
+    return flags
+
+
+def format_health_line(outcome: SignalOutcome, pre_action: str) -> str:
+    """trade 銘柄1つの判定ヘルスを1行で示す (案4)。
+
+    発注された銘柄は EXECUTED とだけ、HOLD/skip された銘柄は要因フラグを列挙する。
+    「なぜ発注されないか」を毎サイクル銘柄ごとに判断できるようにするための観測ログ。
+    """
+    if outcome.status == "executed":
+        return f"[HEALTH] {outcome.pair}: {outcome.action.upper()} EXECUTED"
+
+    status_label = _DECISION_STATUS_LABEL.get(outcome.status, outcome.status.upper())
+    flags = classify_hold_reasons(outcome, pre_action)
+    flags_str = ", ".join(flags) if flags else "—"
+    return (
+        f"[HEALTH] {outcome.pair}: {status_label} "
+        f"[{flags_str}] score={outcome.combined_score:+.3f} conf={outcome.confidence:.2f}"
+    )
+
+
 def _format_cycle_summary(event: CycleSummaryEvent) -> str:
     """1取引サイクルの集約サマリーのメッセージ文字列を組み立てる。"""
     hhmm = event.cycle_time.strftime("%H:%M")
