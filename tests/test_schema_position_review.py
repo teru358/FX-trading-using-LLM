@@ -29,9 +29,13 @@ def test_position_management_v2_defaults() -> None:
     assert cfg.reversal_consecutive_required == 2
     assert cfg.reversal_raise_sl_to_breakeven is True
     assert cfg.time_stop_enabled is True
-    assert cfg.max_holding_hours == 12
-    assert cfg.no_progress_hours == 4
-    assert cfg.no_progress_min_mfe_r == 0.2
+    assert cfg.no_progress_enabled is True
+    assert cfg.no_progress_watch_hours == 6
+    assert cfg.no_progress_exit_hours == 12
+    assert cfg.no_progress_min_mfe_r == 0.1
+    assert cfg.no_progress_requires_signal_weakness is True
+    assert cfg.stale_position_review_hours == 24
+    assert cfg.timeout_cooldown_hours == 4
     assert cfg.stale_signal_hours == 8
     assert cfg.session_end_flatten_enabled is False
     assert cfg.profit_protection_enabled is True

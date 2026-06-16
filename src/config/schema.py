@@ -122,9 +122,13 @@ class TradingConfig:
     reversal_consecutive_required: int = 2
     reversal_raise_sl_to_breakeven: bool = True
     time_stop_enabled: bool = True
-    max_holding_hours: int = 12
-    no_progress_hours: int = 4
-    no_progress_min_mfe_r: float = 0.2
+    no_progress_enabled: bool = True
+    no_progress_watch_hours: int = 6
+    no_progress_exit_hours: int = 12
+    no_progress_min_mfe_r: float = 0.1
+    no_progress_requires_signal_weakness: bool = True
+    stale_position_review_hours: int = 24
+    timeout_cooldown_hours: int = 4
     stale_signal_hours: int = 8
     session_end_flatten_enabled: bool = False
     profit_protection_enabled: bool = True

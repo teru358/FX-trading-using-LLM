@@ -46,6 +46,8 @@ def _make_event(close_reason: str) -> OrderClosedEvent:
         ("profit_lock",    "利益確定 (L3 profit_lock)"),
         ("reversal",       "反転シグナル (L1 reversal)"),
         ("timeout",        "保有期間超過 (L2 timeout)"),
+        ("timeout_no_progress", "進捗不足による撤退 (L2 timeout)"),
+        ("timeout_stale_position", "長時間保有レビューによる撤退 (L2 timeout)"),
         ("server_sl_tp",   "MT5サーバー側決済 (reconciliation検知)"),
         ("server_sl_tp_estimated", "MT5サーバー側決済 (reconciliation検知・損益推定)"),
         ("manual",         "手動決済"),

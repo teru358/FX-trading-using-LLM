@@ -394,6 +394,12 @@ class NotifierAdapter(ABC):
         elif event.close_reason == "timeout":
             emoji = "⏰"
             reason_label = "保有期間超過 (L2 timeout)"
+        elif event.close_reason == "timeout_no_progress":
+            emoji = "⏳"
+            reason_label = "進捗不足による撤退 (L2 timeout)"
+        elif event.close_reason == "timeout_stale_position":
+            emoji = "⏰"
+            reason_label = "長時間保有レビューによる撤退 (L2 timeout)"
         elif event.close_reason == "server_sl_tp":
             emoji = "🔄"
             reason_label = "MT5サーバー側決済 (reconciliation検知)"

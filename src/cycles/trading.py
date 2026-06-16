@@ -57,7 +57,7 @@ from src.trading.entry_context_builder import build_entry_context
 from src.trading.live_broker import create_broker
 from src.trading.market_hours import is_market_open
 from src.trading.position_manager import PositionManager
-from src.trading.position_reviewer import review_open_positions
+from src.trading.position_reviewer import is_timeout_close_reason, review_open_positions
 from src.utils.clock import db_now, local_now
 
 if TYPE_CHECKING:
@@ -606,9 +606,12 @@ async def _phase_review_open_positions(
         reversal_close_enabled=config.trading.reversal_close_enabled,
         reversal_raise_sl_to_breakeven=config.trading.reversal_raise_sl_to_breakeven,
         time_stop_enabled=config.trading.time_stop_enabled,
-        max_holding_hours=config.trading.max_holding_hours,
-        no_progress_hours=config.trading.no_progress_hours,
+        no_progress_enabled=config.trading.no_progress_enabled,
+        no_progress_watch_hours=config.trading.no_progress_watch_hours,
+        no_progress_exit_hours=config.trading.no_progress_exit_hours,
         no_progress_min_mfe_r=config.trading.no_progress_min_mfe_r,
+        no_progress_requires_signal_weakness=config.trading.no_progress_requires_signal_weakness,
+        stale_position_review_hours=config.trading.stale_position_review_hours,
     )
 
     reviewed_closed = []
@@ -853,6 +856,31 @@ async def _execute_one_signal(
     return outcome
 
 
+def _timeout_cooldown_reason(sig, position_mgr: PositionManager, cooldown_hours) -> str:
+    """Return skip reason when the pair was closed by L2 timeout within cooldown."""
+    if not isinstance(cooldown_hours, (int, float)) or cooldown_hours <= 0:
+        return ""
+    try:
+        closed_trades = position_mgr.get_account_state().closed_trades
+    except Exception:
+        return ""
+    now = db_now()
+    for closed in reversed(closed_trades):
+        if closed.pair != sig.pair:
+            continue
+        if not is_timeout_close_reason(closed.close_reason or ""):
+            continue
+        if closed.closed_at is None:
+            continue
+        age_h = (now - closed.closed_at).total_seconds() / 3600
+        if age_h < cooldown_hours:
+            return (
+                f"timeout cooldown active ({age_h:.1f}h < {cooldown_hours:g}h) "
+                f"after {closed.close_reason}"
+            )
+    return ""
+
+
 async def _phase_execute_signals(
     signals: list,
     macro_ctxs: dict[str, str],
@@ -892,6 +920,26 @@ async def _phase_execute_signals(
         rag_note = await _adjust_signal_with_rag(sig, rag_cfg, store, embed_fn_adj, deadband)
 
         if sig.action != "hold":
+            cooldown_reason = _timeout_cooldown_reason(
+                sig, position_mgr, getattr(config.trading, "timeout_cooldown_hours", 0),
+            )
+            if cooldown_reason:
+                outcomes.append(SignalOutcome(
+                    pair=sig.pair,
+                    action=sig.action,
+                    status="skipped",
+                    confidence=sig.confidence,
+                    combined_score=sig.combined_score,
+                    reason=cooldown_reason,
+                    detail_reason=sig.detail_reason,
+                    news_score=sig.news.sentiment_score,
+                    tech_score=sig.price.bias_score,
+                    tv_recommendation=sig.tv_recommendation,
+                    rag_note=rag_note,
+                ))
+                logger.info(f"[SIGNAL] {sig.pair}: skipped — {cooldown_reason}")
+                continue
+
             outcome = await _execute_one_signal(
                 sig, macro_ctxs.get(sig.pair, ""),
                 config, position_mgr, broker, notifier, store, price_store,

@@ -119,9 +119,13 @@ trading:
   reversal_consecutive_required: 2
   reversal_raise_sl_to_breakeven: true
   time_stop_enabled: true
-  max_holding_hours: 12
-  no_progress_hours: 4
-  no_progress_min_mfe_r: 0.2
+  no_progress_enabled: true
+  no_progress_watch_hours: 6
+  no_progress_exit_hours: 12
+  no_progress_min_mfe_r: 0.1
+  no_progress_requires_signal_weakness: true
+  stale_position_review_hours: 24
+  timeout_cooldown_hours: 4
   stale_signal_hours: 8
   session_end_flatten_enabled: false
   profit_protection_enabled: true

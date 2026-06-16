@@ -20,12 +20,12 @@ from src.rag.vector_store import VectorStore
 from src.trading.live_broker import create_broker
 from src.trading.market_hours import is_market_open
 from src.trading.position_manager import PositionManager
-from src.trading.position_reviewer import review_open_positions
+from src.trading.position_reviewer import is_timeout_close_reason, review_open_positions
 from src.utils.clock import local_now
 
 logger = logging.getLogger(__name__)
 
-_LAYER_LABEL = {"reversal": "L1", "timeout": "L2", "profit_lock": "L3"}
+_LAYER_LABEL = {"reversal": "L1", "timeout": "L2", "timeout_no_progress": "L2", "timeout_stale_position": "L2", "profit_lock": "L3"}
 
 
 async def exit_check_cycle(
@@ -141,17 +141,20 @@ async def exit_check_cycle(
         reversal_close_enabled=config.trading.reversal_close_enabled,
         reversal_raise_sl_to_breakeven=config.trading.reversal_raise_sl_to_breakeven,
         time_stop_enabled=config.trading.time_stop_enabled,
-        max_holding_hours=config.trading.max_holding_hours,
-        no_progress_hours=config.trading.no_progress_hours,
+        no_progress_enabled=config.trading.no_progress_enabled,
+        no_progress_watch_hours=config.trading.no_progress_watch_hours,
+        no_progress_exit_hours=config.trading.no_progress_exit_hours,
         no_progress_min_mfe_r=config.trading.no_progress_min_mfe_r,
+        no_progress_requires_signal_weakness=config.trading.no_progress_requires_signal_weakness,
+        stale_position_review_hours=config.trading.stale_position_review_hours,
     )
 
     # close 実行ガード:
     #   Guard 1: live mode で MT5 価格が取れていない pair の close を skip
     #            (TwelveData/yfinance fallback 価格で能動 close 判定すると
     #             MT5 実勢と乖離する。Phase 3c 安全策)
-    #   Guard 2: soft halt 中は timeout 以外の close を skip
-    #            (最大保有期間超過 = timeout は halt と無関係に実行)
+    #   Guard 2: soft halt 中は timeout family 以外の close を skip
+    #            (L2 timeout family は halt と無関係に実行)
     #
     # reviewer の評価 (review_open_positions) と SL/TP reconciliation
     # (broker.check_and_close_positions) は継続することに注意。close 実行
@@ -186,7 +189,7 @@ async def exit_check_cycle(
                 continue
 
         # Guard 2: soft halt 中の能動 close (timeout は除外)
-        if halted and decision.close_reason != "timeout":
+        if halted and not is_timeout_close_reason(decision.close_reason):
             logger.info(
                 f"[EXIT] {decision.pair}: skip close "
                 f"({decision.close_reason}) — finance halted"
