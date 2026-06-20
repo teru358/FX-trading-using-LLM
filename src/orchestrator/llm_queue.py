@@ -4,8 +4,8 @@
 優先度付きキューに enqueue し、単一 worker スレッドが逐次取り出して実行する。
 worker=1 固定 (§4.2 sequential-by-design)。将来並列化は worker 数増で対応。
 
-優先度: planning > technical > news (§5.1.1)。starvation 防止 (stale 昇格 /
-max planning per window) は後続 plan で追加する。
+優先度: planning > execution > technical > news (§5.1.1)。starvation 防止
+(stale 昇格 / max planning per window) は後続 plan で追加する。
 """
 from __future__ import annotations
 
@@ -55,6 +55,15 @@ class LlmDispatcher:
         self._seq_lock = threading.Lock()
         self._worker: threading.Thread | None = None
         self._stop = threading.Event()
+        # start()/stop() のライフサイクル状態 (_worker / _generation) を保護する。
+        # これが無いと 2 つの start() が同時に _worker is None を読み worker を
+        # 二重起動でき、worker=1 不変条件 (§4.2) が破れる。
+        self._lifecycle_lock = threading.Lock()
+        # worker 世代カウンタ。stop() がタイムアウトして worker が fn() 実行中の
+        # まま生き残り、その後 start() が _stop を clear すると、旧 worker が
+        # ループに復帰して新セッションのキューを食う "ghost worker" race が起きる。
+        # 各 worker は起動時の世代を保持し、自分の世代が現役でなくなれば抜ける。
+        self._generation = 0
 
     def enqueue(self, job: LlmJob) -> None:
         """job を優先度キューに積む。`queue.join()` 用の未完了カウントが増える。"""
@@ -67,27 +76,39 @@ class LlmDispatcher:
         self._q.put(_PrioritizedJob(priority=priority, seq=seq, job=job))
 
     def start(self) -> None:
-        if self._worker is not None:
-            return
-        self._stop.clear()
-        self._worker = threading.Thread(
-            target=self._run, name="llm-dispatcher", daemon=True
-        )
-        self._worker.start()
+        # check-and-set を lock で原子化し worker 二重起動を防ぐ (worker=1 不変条件)。
+        with self._lifecycle_lock:
+            if self._worker is not None and self._worker.is_alive():
+                return
+            self._stop.clear()
+            self._generation += 1
+            my_generation = self._generation
+            self._worker = threading.Thread(
+                target=self._run, args=(my_generation,),
+                name="llm-dispatcher", daemon=True,
+            )
+            self._worker.start()
 
-    def _run(self) -> None:
-        while not self._stop.is_set():
+    def _run(self, generation: int) -> None:
+        # _stop に加え「自分の世代が現役か」も終了条件にする。stop() タイムアウト後に
+        # 生き残った旧 worker は、新 start() が世代を進めた時点でループを抜ける。
+        while not self._stop.is_set() and self._generation == generation:
             try:
                 item: _PrioritizedJob = self._q.get(timeout=0.1)
             except queue.Empty:
                 continue
             try:
+                # get 後に世代を再確認する。get(timeout=0.1) でブロック中に stop() が
+                # 走ると、超過 worker が 1 件だけ取り出してしまえる。現役でなければ
+                # fn() を実行せず抜ける (停止済みセッションのキューは破棄してよい)。
+                if self._stop.is_set() or self._generation != generation:
+                    break
                 item.job.fn()
             except Exception:
                 logger.exception(f"[LLM-QUEUE] job {item.job.label!r} raised")
             finally:
-                # get 1 回につき task_done 1 回 (例外でも必ず)。これが無いと
-                # join() が永久ブロックする。実行中は unfinished_tasks>0 なので
+                # get 1 回につき task_done 1 回 (例外でも・break でも必ず)。これが
+                # 無いと join() が永久ブロックする。実行中は unfinished_tasks>0 なので
                 # wait_idle は戻らない (= race のない idle 判定)。
                 self._q.task_done()
 
@@ -109,7 +130,13 @@ class LlmDispatcher:
         return done.wait(timeout=timeout)
 
     def stop(self) -> None:
-        self._stop.set()
-        if self._worker is not None:
-            self._worker.join(timeout=2.0)
+        with self._lifecycle_lock:
+            self._stop.set()
+            # 世代を進めることで、join がタイムアウトして fn() 実行中のまま
+            # 生き残った worker も、ループ復帰時に self._generation != generation を
+            # 検知して必ず抜ける (後続 start() が _stop を clear しても食い逃げしない)。
+            self._generation += 1
+            worker = self._worker
             self._worker = None
+        if worker is not None:
+            worker.join(timeout=2.0)
