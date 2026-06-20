@@ -14,6 +14,7 @@ from typing import Any
 from sqlalchemy import (
     JSON, Column, DateTime, Float, Integer, String, UniqueConstraint, select,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from src.data.price_store import _Base, _get_engine
@@ -293,8 +294,6 @@ class OrchestratorStore:
         plan_id UNIQUE 違反 (= 既発注) なら False を返し、呼び出し側は
         発注を中止する。成功すれば True。
         """
-        from sqlalchemy.exc import IntegrityError
-
         now = db_now()
         with Session(self._engine) as session:
             intent = _OrderIntent(
@@ -315,12 +314,21 @@ class OrchestratorStore:
             try:
                 session.commit()
                 return True
-            except IntegrityError:
+            except IntegrityError as exc:
                 session.rollback()
-                logger.info(
-                    f"order_intent INSERT rejected: plan_id {plan_id} already exists"
-                )
-                return False
+                # plan_id UNIQUE 違反のみ「既発注」として False を返す。
+                # それ以外の IntegrityError (NOT NULL 等のバグ) は握り潰さず再送出し、
+                # 「既発注」と誤判定して取引を黙って飛ばす silent failure を防ぐ。
+                orig = str(getattr(exc, "orig", exc))
+                if (
+                    "uq_order_intents_plan_id" in orig
+                    or "order_intents.plan_id" in orig
+                ):
+                    logger.info(
+                        f"order_intent INSERT rejected: plan_id {plan_id} already exists"
+                    )
+                    return False
+                raise
 
     def get_order_intent(self, plan_id: int) -> _OrderIntent | None:
         with Session(self._engine) as session:

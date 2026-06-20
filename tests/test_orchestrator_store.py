@@ -180,3 +180,25 @@ def test_get_stale_pending_intents_detects_lease_expired(store: OrchestratorStor
     assert 21 in stale_plan_ids
     assert 22 not in stale_plan_ids
     assert 23 not in stale_plan_ids
+
+
+def test_update_plan_status_rejects_unknown_status(store: OrchestratorStore) -> None:
+    snap_id = store.create_snapshot(
+        pair="USDJPY=X", as_of_time=datetime(2026, 6, 20, 12, 0, 0),
+    )
+    plan_id = store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=snap_id, horizon="swing", direction="long",
+        entry_conditions_json=[], action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 6, 27, 12, 0, 0), created_by_run_id=1,
+    )
+    with pytest.raises(ValueError):
+        store.update_plan_status(plan_id, "bogus_status")
+
+
+def test_record_order_result_rejects_unknown_status(store: OrchestratorStore) -> None:
+    store.try_insert_order_intent(
+        plan_id=51, pair="USDJPY=X", intended_action="buy",
+        owner_run_id=1, lease_until=datetime(2026, 6, 20, 12, 2, 0),
+    )
+    with pytest.raises(ValueError):
+        store.record_order_result(plan_id=51, status="bogus_status")
