@@ -32,8 +32,13 @@ class QuoteSnapshot:
     observed_at: datetime
 
 
-class ContextBuilder:
-    """decision_snapshot を作り §7 標準 context を組む層 (決定的)。"""
+class DecisionContextBuilder:
+    """decision_snapshot を作り §7 標準 context を組む層 (決定的)。
+
+    名前について: 「decision の入力 context を組む」役割を明示する。views.py の
+    AskContextBuilder (RAG 用) や trading の entry_context_builder (別概念) との
+    混同を避けるため Decision 接頭辞を付ける (用途接頭辞の既存命名規則に倣う)。
+    """
 
     def __init__(
         self,

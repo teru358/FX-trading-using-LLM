@@ -17,7 +17,7 @@ from typing import Callable
 
 from src.config.schema import OrchestratorConfig
 from src.data.orchestrator_store import OrchestratorStore
-from src.orchestrator.context_builder import ContextBuilder, QuoteSnapshot
+from src.orchestrator.context_builder import DecisionContextBuilder, QuoteSnapshot
 from src.utils.clock import db_now
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ class OrchestratorRuntime:
         *,
         config: OrchestratorConfig,
         orch_store: OrchestratorStore,
-        context_builder: ContextBuilder,
+        context_builder: DecisionContextBuilder,
         pairs: list[str],
         quote_provider: QuoteProvider,
     ) -> None:

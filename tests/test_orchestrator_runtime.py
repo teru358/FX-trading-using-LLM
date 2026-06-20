@@ -9,7 +9,7 @@ import pytest
 from src.config.schema import OrchestratorConfig
 from src.data.analysis_store import AnalysisStore
 from src.data.orchestrator_store import OrchestratorStore
-from src.orchestrator.context_builder import ContextBuilder, QuoteSnapshot
+from src.orchestrator.context_builder import DecisionContextBuilder, QuoteSnapshot
 from src.orchestrator.runtime import OrchestratorRuntime
 
 
@@ -17,7 +17,7 @@ from src.orchestrator.runtime import OrchestratorRuntime
 def runtime(tmp_path: Path) -> OrchestratorRuntime:
     db = tmp_path / "orch.db"
     orch = OrchestratorStore(db)
-    builder = ContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
+    builder = DecisionContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
 
     def quote_provider(pair: str) -> QuoteSnapshot:
         return QuoteSnapshot(
@@ -134,7 +134,7 @@ def test_start_spawns_threads_when_enabled_and_stop_joins(tmp_path: Path) -> Non
     """enabled=true なら start() で 2 スレッドが立ち、stop() で停止・join される。"""
     db = tmp_path / "orch.db"
     orch = OrchestratorStore(db)
-    builder = ContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
+    builder = DecisionContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
 
     def quote_provider(pair: str) -> QuoteSnapshot:
         return QuoteSnapshot(
@@ -174,7 +174,7 @@ def test_run_planning_cycle_quote_failure_marks_failed_and_continues(tmp_path: P
     """
     db = tmp_path / "orch.db"
     orch = OrchestratorStore(db)
-    builder = ContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
+    builder = DecisionContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
 
     def flaky_quote_provider(pair: str) -> QuoteSnapshot:
         if pair == "USDJPY=X":

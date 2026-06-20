@@ -1,4 +1,4 @@
-"""ContextBuilder (spec §7 / §8.7) のテスト。"""
+"""DecisionContextBuilder (spec §7 / §8.7) のテスト。"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -9,20 +9,20 @@ import pytest
 from src.config.schema import OrchestratorConfig
 from src.data.analysis_store import AnalysisStore
 from src.data.orchestrator_store import OrchestratorStore
-from src.orchestrator.context_builder import ContextBuilder, QuoteSnapshot
+from src.orchestrator.context_builder import DecisionContextBuilder, QuoteSnapshot
 
 
 @pytest.fixture
-def builder(tmp_path: Path) -> ContextBuilder:
+def builder(tmp_path: Path) -> DecisionContextBuilder:
     db = tmp_path / "orch.db"
-    return ContextBuilder(
+    return DecisionContextBuilder(
         orch_store=OrchestratorStore(db),
         analysis_store=AnalysisStore(db),
         config=OrchestratorConfig(),
     )
 
 
-def test_build_materializes_snapshot_and_returns_context(builder: ContextBuilder) -> None:
+def test_build_materializes_snapshot_and_returns_context(builder: DecisionContextBuilder) -> None:
     quote = QuoteSnapshot(
         bid=150.0, ask=150.02, mid=150.01, spread=0.02,
         source="mt5", observed_at=datetime(2026, 6, 20, 12, 0, 0),
@@ -47,7 +47,7 @@ def test_build_materializes_snapshot_and_returns_context(builder: ContextBuilder
     assert ctx["news"]["sentiment_score"] is None
 
 
-def test_build_reads_fresh_technical_from_store(builder: ContextBuilder, bullish_price) -> None:
+def test_build_reads_fresh_technical_from_store(builder: DecisionContextBuilder, bullish_price) -> None:
     """直近 (max_stale 内) の ok snapshot は status=ok で取り込む。"""
     # bullish_price.analyzed_at は conftest で datetime.now() (≒ 直近) なので fresh。
     builder._analysis.add_snapshot(bullish_price)
@@ -62,12 +62,12 @@ def test_build_reads_fresh_technical_from_store(builder: ContextBuilder, bullish
 
 
 def test_build_falls_to_stale_when_latest_ok_is_too_old(
-    builder: ContextBuilder, bullish_price
+    builder: DecisionContextBuilder, bullish_price
 ) -> None:
     """max_stale を超えた古い ok snapshot は status=stale に倒す (古いデータで判断しない)。
 
     これは設計思想の中核: get_latest_ok_row のような lookback 非依存読みを
-    decision context に使うと古いデータ汚染が起きる。ContextBuilder は
+    decision context に使うと古いデータ汚染が起きる。DecisionContextBuilder は
     max_stale 窓で stale 判定し、古ければ stale に倒す。
     """
     from datetime import timedelta
@@ -87,7 +87,7 @@ def test_build_falls_to_stale_when_latest_ok_is_too_old(
 
 
 def test_build_treats_row_older_than_lookback_as_missing(
-    builder: ContextBuilder, bullish_price
+    builder: DecisionContextBuilder, bullish_price
 ) -> None:
     """lookback 窓 (24h) より古い行は窓外 → missing (stale ではない)。
 
@@ -107,7 +107,7 @@ def test_build_treats_row_older_than_lookback_as_missing(
 
 
 def test_build_strips_internal_ref_from_returned_technical(
-    builder: ContextBuilder, bullish_price
+    builder: DecisionContextBuilder, bullish_price
 ) -> None:
     """内部キー _ref は返り値 technical ブロックから除去される (DB 内部 ID を露出しない)。
 
@@ -125,7 +125,7 @@ def test_build_strips_internal_ref_from_returned_technical(
     assert "snapshot_id" in snap.technical_ref
 
 
-def test_build_maps_neutral_direction(builder: ContextBuilder, bearish_price) -> None:
+def test_build_maps_neutral_direction(builder: DecisionContextBuilder, bearish_price) -> None:
     """direction_bias が long/short 以外なら direction=neutral にマップされる。
 
     bearish_price を neutral に書き換えて neutral 分岐を踏ませる。"""

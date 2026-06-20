@@ -301,7 +301,7 @@ class OrchestratorStore:
         """run に decision_snapshot を後付けで紐付ける (§8.1 trace graph)。
 
         start_run は snapshot 作成前に呼ぶ (失敗時も failed run を残すため)。
-        ContextBuilder.build で snapshot を materialize した後に本メソッドで
+        DecisionContextBuilder.build で snapshot を materialize した後に本メソッドで
         agent_runs.snapshot_id を埋め、agent_run → decision_snapshot のトレースを繋ぐ。
         """
         with Session(self._engine) as session:
