@@ -21,9 +21,15 @@ class MaterialLandingDetector:
         *,
         get_latest_technical: Callable[[str], Any],
         material_bias_delta_min: float,
+        get_news_impact: Callable[[str], float] | None = None,
+        material_news_impact_min: float = 0.5,
+        in_event_window: Callable[[str], bool] | None = None,
     ) -> None:
         self._get_tech = get_latest_technical
         self._bias_delta_min = material_bias_delta_min
+        self._get_news_impact = get_news_impact
+        self._news_impact_min = material_news_impact_min
+        self._in_event_window = in_event_window
         self._seen: dict[str, _Seen] = {}
 
     def technical_material(self, pair: str) -> bool:
@@ -41,6 +47,24 @@ class MaterialLandingDetector:
             if abs(snap.bias_score - prev.bias_score) >= self._bias_delta_min:
                 return True
         return False
+
+    def news_material(self, pair: str) -> bool:
+        if self._get_news_impact is None:
+            return False
+        return self._get_news_impact(pair) >= self._news_impact_min
+
+    def event_window_material(self, pair: str) -> bool:
+        if self._in_event_window is None:
+            return False
+        return bool(self._in_event_window(pair))
+
+    def is_material(self, pair: str) -> bool:
+        """いずれかの経路で material なら True。"""
+        return (
+            self.technical_material(pair)
+            or self.news_material(pair)
+            or self.event_window_material(pair)
+        )
 
     def commit_seen(self, pair: str) -> None:
         """planning を起こした後、現在状態を「前回参照」として記録する。"""
