@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Callable, Any
 
 
@@ -24,6 +25,9 @@ class MaterialLandingDetector:
         get_news_impact: Callable[[str], float] | None = None,
         material_news_impact_min: float = 0.5,
         in_event_window: Callable[[str], bool] | None = None,
+        debounce_window_seconds: int = 180,
+        min_planning_interval_seconds: int = 1800,
+        pairs: list[str] | None = None,
     ) -> None:
         self._get_tech = get_latest_technical
         self._bias_delta_min = material_bias_delta_min
@@ -31,6 +35,11 @@ class MaterialLandingDetector:
         self._news_impact_min = material_news_impact_min
         self._in_event_window = in_event_window
         self._seen: dict[str, _Seen] = {}
+        self._debounce_window = debounce_window_seconds
+        self._floor = min_planning_interval_seconds
+        self._pairs = list(pairs or [])
+        self._material_since: dict[str, datetime] = {}
+        self._last_planned: dict[str, datetime] = {}
 
     def technical_material(self, pair: str) -> bool:
         snap = self._get_tech(pair)
@@ -76,3 +85,30 @@ class MaterialLandingDetector:
             bias_score=getattr(snap, "bias_score", None),
             status=getattr(snap, "status", None),
         )
+
+    def pairs_to_plan(self, now: datetime) -> list[str]:
+        out: list[str] = []
+        for pair in self._pairs:
+            fire = False
+            # material 経路（debounce 付き）
+            if self.is_material(pair):
+                started = self._material_since.get(pair)
+                if started is None:
+                    self._material_since[pair] = now  # 窓開始
+                elif (now - started).total_seconds() >= self._debounce_window:
+                    fire = True
+            else:
+                self._material_since.pop(pair, None)  # material 解消で窓リセット
+            # periodic floor
+            last = self._last_planned.get(pair)
+            if last is not None and (now - last).total_seconds() >= self._floor:
+                fire = True
+            if fire:
+                out.append(pair)
+        return out
+
+    def mark_planned(self, pair: str, now: datetime) -> None:
+        """planning を起動したら呼ぶ。debounce 窓を閉じ floor 起点を更新。"""
+        self._last_planned[pair] = now
+        self._material_since.pop(pair, None)
+        self.commit_seen(pair)

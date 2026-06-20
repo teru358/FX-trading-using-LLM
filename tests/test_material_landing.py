@@ -66,3 +66,40 @@ def test_in_high_importance_event_window_is_material():
         in_event_window=lambda pair: True,
     )
     assert det.event_window_material("USDJPY=X") is True
+
+from datetime import datetime, timezone, timedelta
+
+def _t(s):  # 秒オフセットのヘルパ
+    return datetime(2026, 6, 20, 0, 0, 0, tzinfo=timezone.utc) + timedelta(seconds=s)
+
+def test_debounce_coalesces_rapid_landings():
+    snaps = {"USDJPY=X": _FakeTechSnap("long", 0.3)}
+    det = MaterialLandingDetector(
+        get_latest_technical=lambda pair: snaps.get(pair),
+        material_bias_delta_min=0.20,
+        debounce_window_seconds=180,
+        min_planning_interval_seconds=1800,
+        pairs=["USDJPY=X"],
+    )
+    # t=0: material（初観測）→ debounce 窓開始、まだ起動しない
+    assert det.pairs_to_plan(_t(0)) == []
+    # t=60: 窓内 → まだ
+    assert det.pairs_to_plan(_t(60)) == []
+    # t=200: 窓（180s）を抜けた → 起動
+    assert det.pairs_to_plan(_t(200)) == ["USDJPY=X"]
+
+def test_periodic_floor_fires_without_material():
+    snaps = {"EURUSD=X": _FakeTechSnap("long", 0.3)}
+    det = MaterialLandingDetector(
+        get_latest_technical=lambda pair: snaps.get(pair),
+        material_bias_delta_min=0.20,
+        debounce_window_seconds=180,
+        min_planning_interval_seconds=1800,
+        pairs=["EURUSD=X"],
+    )
+    det.pairs_to_plan(_t(0)); det.mark_planned("EURUSD=X", _t(0))
+    # material 無し・floor 未超過 → 起動しない
+    snaps["EURUSD=X"] = _FakeTechSnap("long", 0.3)  # 変化なし
+    assert det.pairs_to_plan(_t(900)) == []
+    # floor（1800s）超過 → 起動
+    assert det.pairs_to_plan(_t(1801)) == ["EURUSD=X"]
