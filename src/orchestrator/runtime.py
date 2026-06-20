@@ -13,12 +13,15 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import datetime
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from src.config.schema import OrchestratorConfig
 from src.data.orchestrator_store import OrchestratorStore
 from src.orchestrator.context_builder import DecisionContextBuilder, QuoteSnapshot
 from src.utils.clock import db_now
+
+if TYPE_CHECKING:
+    from src.orchestrator.material_landing import MaterialLandingDetector
 
 logger = logging.getLogger(__name__)
 
@@ -36,12 +39,14 @@ class OrchestratorRuntime:
         context_builder: DecisionContextBuilder,
         pairs: list[str],
         quote_provider: QuoteProvider,
+        detector: "MaterialLandingDetector | None" = None,
     ) -> None:
         self._config = config
         self._orch = orch_store
         self._ctx = context_builder
         self._pairs = pairs
         self._quote_provider = quote_provider
+        self._detector = detector
         self._stop = threading.Event()
         self._planning_thread: threading.Thread | None = None
         self._watch_thread: threading.Thread | None = None
@@ -55,7 +60,11 @@ class OrchestratorRuntime:
         PlannerAgent による trade_plan 作成は later plan で差し込む。
         """
         now = now or db_now()
-        for pair in self._pairs:
+        if self._detector is not None:
+            target_pairs = self._detector.pairs_to_plan(now)
+        else:
+            target_pairs = self._pairs  # 後方互換: detector 未注入時は全 pair
+        for pair in target_pairs:
             # start_run は quote 取得・build より前に呼ぶ: 価格取得は落ちやすい入力なので、
             # 失敗時も failed run を必ず残し (dangling 防止)、かつ 1 ペアの失敗で残りペアを
             # 止めないため、quote 取得も含めて try 内に入れる。
@@ -89,6 +98,11 @@ class OrchestratorRuntime:
                     run_id, status="failed",
                     error_type=type(exc).__name__, error_message=str(exc),
                 )
+            finally:
+                # success / failure いずれでも mark: floor が再 fire を制御するため、
+                # 失敗ペアを毎 tick リトライしない (detector 注入時のみ)。
+                if self._detector is not None:
+                    self._detector.mark_planned(pair, now)
 
     def run_watch_cycle(self) -> list[int]:
         """active plan を走査する。

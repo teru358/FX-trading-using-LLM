@@ -218,3 +218,44 @@ def test_run_planning_cycle_quote_failure_marks_failed_and_continues(tmp_path: P
     assert dec.decision_type == "direct_hold"
     assert dec.snapshot_id == run2.snapshot_id   # run2 の trace graph も繋がっている
     assert orch.get_decision(2) is None          # 2 件目の decision は無い (run1 は未記録)
+
+
+def test_planning_cycle_only_processes_detector_pairs(tmp_path: Path) -> None:
+    """detector が返した pair のみ planning する (material 駆動)。"""
+    db = tmp_path / "orch.db"
+    orch = OrchestratorStore(db)
+    builder = DecisionContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
+
+    def quote_provider(pair: str) -> QuoteSnapshot:
+        return QuoteSnapshot(
+            bid=150.0, ask=150.02, mid=150.01, spread=0.02,
+            source="test", observed_at=datetime(2026, 6, 20, 12, 0, 0),
+        )
+
+    class _FakeDetector:
+        def __init__(self, fire):
+            self.fire = fire
+            self.marked = []
+        def pairs_to_plan(self, now):
+            return list(self.fire)
+        def mark_planned(self, pair, now):
+            self.marked.append(pair)
+
+    detector = _FakeDetector(fire=["USDJPY=X"])
+    runtime = OrchestratorRuntime(
+        config=OrchestratorConfig(),
+        orch_store=orch,
+        context_builder=builder,
+        pairs=["USDJPY=X", "EURUSD=X"],
+        quote_provider=quote_provider,
+        detector=detector,
+    )
+    runtime.run_planning_cycle(now=datetime(2026, 6, 20, 12, 0, 0))
+
+    # USDJPY=X だけ planning される; EURUSD=X は detector が返さないので processed されない
+    dec1 = orch.get_decision(1)
+    assert dec1 is not None
+    assert dec1.pair == "USDJPY=X"
+    assert orch.get_decision(2) is None   # 2件目は無い
+    # mark_planned は処理した pair について呼ばれる
+    assert detector.marked == ["USDJPY=X"]
