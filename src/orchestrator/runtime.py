@@ -56,7 +56,9 @@ class OrchestratorRuntime:
         """
         now = now or db_now()
         for pair in self._pairs:
-            quote = self._quote_provider(pair)
+            # start_run は quote 取得・build より前に呼ぶ: 価格取得は落ちやすい入力なので、
+            # 失敗時も failed run を必ず残し (dangling 防止)、かつ 1 ペアの失敗で残りペアを
+            # 止めないため、quote 取得も含めて try 内に入れる。
             run_id = self._orch.start_run(
                 "OrchestratorRuntime",
                 pair=pair,
@@ -64,7 +66,11 @@ class OrchestratorRuntime:
                 trade_horizon=self._config.policy.trade_horizon,
             )
             try:
+                quote = self._quote_provider(pair)
                 ctx = self._ctx.build(pair=pair, now=now, quote=quote)
+                # snapshot を run に後付けで紐付け、agent_run → decision_snapshot の
+                # trace graph (§8.1) を繋ぐ (start_run 時点では snapshot 未作成のため)。
+                self._orch.attach_snapshot(run_id, ctx["snapshot_id"])
                 # later plan: ここで PlannerAgent を呼び trade_plan を立/改/無効化する。
                 # Phase 1 は機会判断を行わず direct_hold を記録する。
                 self._orch.record_decision(

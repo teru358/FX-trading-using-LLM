@@ -51,6 +51,11 @@ def test_run_planning_cycle_records_direct_hold(runtime: OrchestratorRuntime) ->
     assert dec.pair == "USDJPY=X"
     assert dec.plan_id is None
 
+    # trace graph が繋がっている: agent_run.snapshot_id == decision.snapshot_id
+    # (start_run 後に attach_snapshot で紐付けられ、NULL のまま残らない)。
+    assert run.snapshot_id is not None
+    assert run.snapshot_id == dec.snapshot_id
+
 
 def test_run_watch_cycle_no_active_plans_is_noop(runtime: OrchestratorRuntime) -> None:
     """active plan が無ければ watch cycle は何も執行せず例外も出さない。"""
@@ -74,6 +79,12 @@ def test_run_watch_cycle_records_freshness_for_active_plan(
     triggered = runtime.run_watch_cycle()
     # observe mode: 条件評価は later plan。ここでは執行 (order) が無いことを保証する。
     assert triggered == []
+    # freshness 行が実際に記録されていることを検証する (record_freshness が消えても
+    # triggered==[] は通るため、保存自体を assert してテストを名前通りにする)。
+    fresh = runtime._orch.get_freshness_for_snapshot(snap_id)
+    assert fresh is not None
+    assert fresh.snapshot_id == snap_id
+    assert fresh.pair == "USDJPY=X"
 
 
 def test_start_is_noop_when_disabled(runtime: OrchestratorRuntime) -> None:
@@ -153,3 +164,57 @@ def test_start_spawns_threads_when_enabled_and_stop_joins(tmp_path: Path) -> Non
         runtime.stop()
     assert runtime._planning_thread is None
     assert runtime._watch_thread is None
+
+
+def test_run_planning_cycle_quote_failure_marks_failed_and_continues(tmp_path: Path) -> None:
+    """quote 取得が落ちても failed run を残し、残りペアの planning は止めない。
+
+    quote_provider は落ちやすい入力。start_run 後の try 内で取得するため、
+    1 ペア目で例外 → そのペアは failed run + decision 無し、2 ペア目は正常処理される。
+    """
+    db = tmp_path / "orch.db"
+    orch = OrchestratorStore(db)
+    builder = ContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
+
+    def flaky_quote_provider(pair: str) -> QuoteSnapshot:
+        if pair == "USDJPY=X":
+            raise RuntimeError("price feed down")
+        return QuoteSnapshot(
+            bid=1.08, ask=1.0802, mid=1.0801, spread=0.0002,
+            source="test", observed_at=datetime(2026, 6, 20, 12, 0, 0),
+        )
+
+    runtime = OrchestratorRuntime(
+        config=OrchestratorConfig(),
+        orch_store=orch,
+        context_builder=builder,
+        pairs=["USDJPY=X", "EURUSD=X"],
+        quote_provider=flaky_quote_provider,
+    )
+    runtime.run_planning_cycle(now=datetime(2026, 6, 20, 12, 0, 0))
+
+    # run 1 (USDJPY=X): quote 失敗でも failed run が残る (dangling しない)
+    run1 = orch.get_run(1)
+    assert run1 is not None
+    assert run1.pair == "USDJPY=X"
+    assert run1.status == "failed"
+    assert run1.error_type == "RuntimeError"
+    assert run1.snapshot_id is None      # build 前に落ちたので snapshot 無し
+
+    # run 2 (EURUSD=X): 1 ペア目の失敗に巻き込まれず正常完了
+    run2 = orch.get_run(2)
+    assert run2 is not None
+    assert run2.pair == "EURUSD=X"
+    assert run2.status == "ok"
+    assert run2.snapshot_id is not None
+
+    # 記録された decision は run2 (EURUSD) のもの 1 件のみ。run1 は record_decision に
+    # 到達しないため、その decision は存在しない (decision_id は run_id と独立採番なので
+    # decision_id=1 が run2 のもの、decision_id=2 は存在しない)。
+    dec = orch.get_decision(1)
+    assert dec is not None
+    assert dec.run_id == run2.run_id             # run2 に紐づく decision
+    assert dec.pair == "EURUSD=X"
+    assert dec.decision_type == "direct_hold"
+    assert dec.snapshot_id == run2.snapshot_id   # run2 の trace graph も繋がっている
+    assert orch.get_decision(2) is None          # 2 件目の decision は無い (run1 は未記録)

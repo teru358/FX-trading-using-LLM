@@ -100,8 +100,15 @@ class LlmDispatcher:
             try:
                 # get 後に世代を再確認する。get(timeout=0.1) でブロック中に stop() が
                 # 走ると、超過 worker が 1 件だけ取り出してしまえる。現役でなければ
-                # fn() を実行せず抜ける (停止済みセッションのキューは破棄してよい)。
+                # fn() を実行せず破棄する (停止済みセッションのキューは破棄してよい)。
+                # 破棄は明示的に warning ログを残す: finally の task_done() で join 上は
+                # 「完了」に見えるが、実際には未実行で捨てた job であることを可視化し、
+                # silent な取りこぼしにしない。
                 if self._stop.is_set() or self._generation != generation:
+                    logger.warning(
+                        f"[LLM-QUEUE] job {item.job.label!r} discarded unexecuted "
+                        f"(dispatcher stopping)"
+                    )
                     break
                 item.job.fn()
             except Exception:

@@ -297,6 +297,21 @@ class OrchestratorStore:
             run.error_message = error_message
             session.commit()
 
+    def attach_snapshot(self, run_id: int, snapshot_id: int) -> None:
+        """run に decision_snapshot を後付けで紐付ける (§8.1 trace graph)。
+
+        start_run は snapshot 作成前に呼ぶ (失敗時も failed run を残すため)。
+        ContextBuilder.build で snapshot を materialize した後に本メソッドで
+        agent_runs.snapshot_id を埋め、agent_run → decision_snapshot のトレースを繋ぐ。
+        """
+        with Session(self._engine) as session:
+            run = session.get(_AgentRun, run_id)
+            if run is None:
+                logger.warning(f"attach_snapshot: run_id {run_id} not found")
+                return
+            run.snapshot_id = snapshot_id
+            session.commit()
+
     def get_run(self, run_id: int) -> _AgentRun | None:
         with Session(self._engine) as session:
             run = session.get(_AgentRun, run_id)
