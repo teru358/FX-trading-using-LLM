@@ -114,6 +114,100 @@ class _OrderIntent(_Base):
     )
 
 
+# spec §8.3 の decision_type 集合
+DECISION_TYPES = (
+    "plan_create", "plan_update", "plan_invalidate",
+    "plan_trigger", "direct_hold", "reject",
+)
+
+
+class _OrchestratorDecision(_Base):
+    """Orchestrator ランタイムが記録する判断ライフサイクルイベント (spec §8.3)。"""
+    __tablename__ = "orchestrator_decisions"
+
+    decision_id       = Column(Integer, primary_key=True, autoincrement=True)
+    run_id            = Column(Integer, index=True)
+    snapshot_id       = Column(Integer, index=True)
+    pair              = Column(String, nullable=False, index=True)
+    decision_type     = Column(String, nullable=False)
+    decision          = Column(String)   # buy | sell | hold | skip | reject | null
+    plan_id           = Column(Integer)
+    final_score       = Column(Float)
+    confidence        = Column(Float)
+    reasoning_summary = Column(String)
+    risk_gate_result  = Column(JSON)
+    order_id          = Column(String)
+    trade_horizon     = Column(String)
+    advice_memo_hash  = Column(String)
+    created_at        = Column(DateTime, nullable=False)
+
+
+class _DecisionVote(_Base):
+    """各 agent opinion の監査用 trace。最終判断ではない (spec §8.4)。"""
+    __tablename__ = "decision_votes"
+
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    decision_id       = Column(Integer, nullable=False, index=True)
+    agent_run_id      = Column(Integer)
+    agent_name        = Column(String, nullable=False)
+    vote_action       = Column(String)
+    vote_score        = Column(Float)
+    vote_confidence   = Column(Float)
+    reflected_in_plan = Column(Integer)   # 0/1 (bool を SQLite 互換に)
+
+
+class _DataFreshnessSnapshot(_Base):
+    """判断時に見たデータ鮮度 (spec §8.5)。snapshot 起点で紐付ける。"""
+    __tablename__ = "data_freshness_snapshots"
+
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    snapshot_id       = Column(Integer, nullable=False, index=True)
+    decision_id       = Column(Integer)  # 任意・trace 用 (UNIQUE/必須にしない)
+    pair              = Column(String, nullable=False)
+    price_age_sec     = Column(Float)
+    technical_age_sec = Column(Float)
+    news_age_sec      = Column(Float)
+    rag_case_count    = Column(Integer)
+    issues_json       = Column(JSON)
+
+
+class _AgentOutput(_Base):
+    """agent が出した opinion / summary (spec §8.2)。"""
+    __tablename__ = "agent_outputs"
+
+    id                     = Column(Integer, primary_key=True, autoincrement=True)
+    run_id                 = Column(Integer, nullable=False, index=True)
+    agent_name             = Column(String, nullable=False)
+    pair                   = Column(String)
+    output_type            = Column(String)
+    action                 = Column(String)  # buy | sell | hold | skip | advisory
+    score                  = Column(Float)
+    confidence             = Column(Float)
+    reasoning_summary      = Column(String)
+    structured_payload_json = Column(JSON)
+    observed_at            = Column(DateTime)
+    saved_at               = Column(DateTime, nullable=False)
+    data_freshness_status  = Column(String)
+
+
+class _ExecutionOpinion(_Base):
+    """ExecutionOpinionAgent の出力専用テーブル (spec §8.6)。"""
+    __tablename__ = "execution_opinions"
+
+    id                  = Column(Integer, primary_key=True, autoincrement=True)
+    run_id              = Column(Integer, nullable=False, index=True)
+    pair                = Column(String, nullable=False)
+    action              = Column(String)
+    entry_reference_price = Column(Float)
+    sl                  = Column(Float)
+    tp                  = Column(Float)
+    rr                  = Column(Float)
+    invalid_stops_risk  = Column(String)
+    bridge_risk         = Column(String)
+    comment_risk        = Column(String)
+    reasoning_summary   = Column(String)
+
+
 class OrchestratorStore:
     """spec §8 のテーブル群を 1 つの DB で管理するストア。"""
 
@@ -393,3 +487,117 @@ class OrchestratorStore:
             intent.broker_result_json = broker_result_json
             intent.updated_at = db_now()
             session.commit()
+
+    # ── orchestrator_decisions (§8.3) ──────────────────────────
+
+    def record_decision(
+        self,
+        *,
+        run_id: int,
+        snapshot_id: int,
+        pair: str,
+        decision_type: str,
+        decision: str | None = None,
+        plan_id: int | None = None,
+        final_score: float | None = None,
+        confidence: float | None = None,
+        reasoning_summary: str | None = None,
+        risk_gate_result: dict | None = None,
+        order_id: str | None = None,
+        trade_horizon: str | None = None,
+        advice_memo_hash: str | None = None,
+    ) -> int:
+        if decision_type not in DECISION_TYPES:
+            raise ValueError(
+                f"decision_type must be one of {DECISION_TYPES}, got {decision_type!r}"
+            )
+        with Session(self._engine) as session:
+            dec = _OrchestratorDecision(
+                run_id=run_id, snapshot_id=snapshot_id, pair=pair,
+                decision_type=decision_type, decision=decision, plan_id=plan_id,
+                final_score=final_score, confidence=confidence,
+                reasoning_summary=reasoning_summary, risk_gate_result=risk_gate_result,
+                order_id=order_id, trade_horizon=trade_horizon,
+                advice_memo_hash=advice_memo_hash, created_at=db_now(),
+            )
+            session.add(dec)
+            session.commit()
+            return dec.decision_id
+
+    def get_decision(self, decision_id: int) -> _OrchestratorDecision | None:
+        with Session(self._engine) as session:
+            dec = session.get(_OrchestratorDecision, decision_id)
+            if dec is not None:
+                session.expunge(dec)
+            return dec
+
+    # ── data_freshness_snapshots (§8.5) ────────────────────────
+
+    def record_freshness(
+        self,
+        *,
+        snapshot_id: int,
+        pair: str,
+        price_age_sec: float | None = None,
+        technical_age_sec: float | None = None,
+        news_age_sec: float | None = None,
+        rag_case_count: int | None = None,
+        issues: list | None = None,
+        decision_id: int | None = None,
+    ) -> int:
+        with Session(self._engine) as session:
+            row = _DataFreshnessSnapshot(
+                snapshot_id=snapshot_id, decision_id=decision_id, pair=pair,
+                price_age_sec=price_age_sec, technical_age_sec=technical_age_sec,
+                news_age_sec=news_age_sec, rag_case_count=rag_case_count,
+                issues_json=issues or [],
+            )
+            session.add(row)
+            session.commit()
+            return row.id
+
+    def get_freshness_for_snapshot(self, snapshot_id: int) -> _DataFreshnessSnapshot | None:
+        with Session(self._engine) as session:
+            stmt = (
+                select(_DataFreshnessSnapshot)
+                .where(_DataFreshnessSnapshot.snapshot_id == snapshot_id)
+                .order_by(_DataFreshnessSnapshot.id.desc())
+            )
+            row = session.execute(stmt).scalars().first()
+            if row is not None:
+                session.expunge(row)
+            return row
+
+    # ── decision_votes (§8.4) ──────────────────────────────────
+
+    def record_vote(
+        self,
+        *,
+        decision_id: int,
+        agent_run_id: int,
+        agent_name: str,
+        vote_action: str | None = None,
+        vote_score: float | None = None,
+        vote_confidence: float | None = None,
+        reflected_in_plan: bool = False,
+    ) -> int:
+        with Session(self._engine) as session:
+            vote = _DecisionVote(
+                decision_id=decision_id, agent_run_id=agent_run_id,
+                agent_name=agent_name, vote_action=vote_action,
+                vote_score=vote_score, vote_confidence=vote_confidence,
+                reflected_in_plan=1 if reflected_in_plan else 0,
+            )
+            session.add(vote)
+            session.commit()
+            return vote.id
+
+    def get_votes(self, decision_id: int) -> list:
+        """decision の vote 群を返す。reflected_in_plan は bool に正規化。"""
+        with Session(self._engine) as session:
+            stmt = select(_DecisionVote).where(_DecisionVote.decision_id == decision_id)
+            votes = list(session.execute(stmt).scalars().all())
+            for v in votes:
+                v.reflected_in_plan = bool(v.reflected_in_plan)
+                session.expunge(v)
+            return votes

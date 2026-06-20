@@ -202,3 +202,58 @@ def test_record_order_result_rejects_unknown_status(store: OrchestratorStore) ->
     )
     with pytest.raises(ValueError):
         store.record_order_result(plan_id=51, status="bogus_status")
+
+
+def test_record_decision_and_freshness(store: OrchestratorStore) -> None:
+    snap_id = store.create_snapshot(
+        pair="USDJPY=X", as_of_time=datetime(2026, 6, 20, 12, 0, 0),
+    )
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X", snapshot_id=snap_id)
+
+    decision_id = store.record_decision(
+        run_id=run_id,
+        snapshot_id=snap_id,
+        pair="USDJPY=X",
+        decision_type="direct_hold",
+        decision="hold",
+        reasoning_summary="no opportunity",
+        trade_horizon="swing",
+    )
+    assert isinstance(decision_id, int)
+
+    store.record_freshness(
+        snapshot_id=snap_id,
+        pair="USDJPY=X",
+        price_age_sec=12.0,
+        technical_age_sec=900.0,
+        news_age_sec=1800.0,
+        rag_case_count=3,
+        issues=[],
+        decision_id=decision_id,
+    )
+
+    dec = store.get_decision(decision_id)
+    assert dec.decision_type == "direct_hold"
+    assert dec.decision == "hold"
+    assert dec.plan_id is None
+
+    fresh = store.get_freshness_for_snapshot(snap_id)
+    assert fresh.price_age_sec == 12.0
+    assert fresh.decision_id == decision_id
+
+
+def test_record_vote_trace(store: OrchestratorStore) -> None:
+    snap_id = store.create_snapshot(pair="USDJPY=X", as_of_time=datetime(2026, 6, 20, 12, 0, 0))
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X", snapshot_id=snap_id)
+    decision_id = store.record_decision(
+        run_id=run_id, snapshot_id=snap_id, pair="USDJPY=X",
+        decision_type="direct_hold", decision="hold",
+    )
+    store.record_vote(
+        decision_id=decision_id, agent_run_id=run_id, agent_name="TechnicalAgent",
+        vote_action="hold", vote_score=0.1, vote_confidence=0.4, reflected_in_plan=False,
+    )
+    votes = store.get_votes(decision_id)
+    assert len(votes) == 1
+    assert votes[0].agent_name == "TechnicalAgent"
+    assert votes[0].reflected_in_plan is False
