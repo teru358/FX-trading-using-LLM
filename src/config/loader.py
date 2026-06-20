@@ -59,6 +59,7 @@ from src.config.schema import (
     OrchestratorLlmConfig,
     OrchestratorLocksConfig,
     OrchestratorEntryConfig,
+    OrchestratorFiringConfig,
     OrchestratorAgentsConfig,
 )
 
@@ -107,11 +108,13 @@ def _build_orchestrator_config(data: dict) -> OrchestratorConfig:
     return OrchestratorConfig(
         enabled=data.get("enabled", False),
         mode=data.get("mode", "shadow"),
+        pairs=list(data.get("pairs", []) or []),
         policy=_from_dict(OrchestratorPolicyConfig, data.get("policy", {}) or {}),
         market_state=_from_dict(OrchestratorMarketStateConfig, data.get("market_state", {}) or {}),
         llm=_from_dict(OrchestratorLlmConfig, data.get("llm", {}) or {}),
         locks=_from_dict(OrchestratorLocksConfig, data.get("locks", {}) or {}),
         entry=_from_dict(OrchestratorEntryConfig, data.get("entry", {}) or {}),
+        firing=_from_dict(OrchestratorFiringConfig, data.get("firing", {}) or {}),
         agents=_from_dict(OrchestratorAgentsConfig, data.get("agents", {}) or {}),
     )
 

@@ -67,3 +67,32 @@ def test_orchestrator_firing_config_defaults() -> None:
 def test_orchestrator_pairs_default_empty() -> None:
     cfg = OrchestratorConfig()
     assert cfg.pairs == []
+
+
+def test_build_orchestrator_config_parses_firing_block() -> None:
+    raw = {
+        "enabled": True,
+        "mode": "shadow",
+        "pairs": ["USDJPY=X", "EURUSD=X"],
+        "firing": {
+            "material_news_impact_min": 0.6,
+            "material_bias_delta_min": 0.25,
+            "debounce_window_seconds": 120,
+            "min_planning_interval_seconds": 900,
+        },
+        "entry": {"max_quote_age_seconds": 8, "max_technical_age_seconds": 1200},
+    }
+    cfg = _build_orchestrator_config(raw)
+    assert cfg.pairs == ["USDJPY=X", "EURUSD=X"]
+    assert cfg.firing.material_news_impact_min == 0.6
+    assert cfg.firing.material_bias_delta_min == 0.25
+    assert cfg.firing.debounce_window_seconds == 120
+    assert cfg.firing.min_planning_interval_seconds == 900
+    assert cfg.entry.max_quote_age_seconds == 8
+    assert cfg.entry.max_technical_age_seconds == 1200
+
+
+def test_build_orchestrator_config_pairs_defaults_empty() -> None:
+    cfg = _build_orchestrator_config({})
+    assert cfg.pairs == []
+    assert cfg.firing.debounce_window_seconds == 180  # default
