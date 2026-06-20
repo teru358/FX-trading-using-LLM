@@ -592,7 +592,7 @@ class OrchestratorStore:
             session.commit()
             return vote.id
 
-    def get_votes(self, decision_id: int) -> list:
+    def get_votes(self, decision_id: int) -> list[_DecisionVote]:
         """decision の vote 群を返す。reflected_in_plan は bool に正規化。"""
         with Session(self._engine) as session:
             stmt = select(_DecisionVote).where(_DecisionVote.decision_id == decision_id)

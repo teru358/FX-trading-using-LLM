@@ -257,3 +257,46 @@ def test_record_vote_trace(store: OrchestratorStore) -> None:
     assert len(votes) == 1
     assert votes[0].agent_name == "TechnicalAgent"
     assert votes[0].reflected_in_plan is False
+
+
+def test_record_decision_rejects_unknown_type(store: OrchestratorStore) -> None:
+    """未知の decision_type は ValueError (Tasks 1-2 の status 検証と同じ規約)。"""
+    snap_id = store.create_snapshot(
+        pair="USDJPY=X", as_of_time=datetime(2026, 6, 20, 12, 0, 0),
+    )
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X", snapshot_id=snap_id)
+    with pytest.raises(ValueError):
+        store.record_decision(
+            run_id=run_id, snapshot_id=snap_id, pair="USDJPY=X",
+            decision_type="bogus_type", decision="hold",
+        )
+
+
+def test_get_freshness_returns_latest_for_snapshot(store: OrchestratorStore) -> None:
+    """同一 snapshot に複数 freshness 行があれば最新 (id 最大) を返す。"""
+    snap_id = store.create_snapshot(
+        pair="USDJPY=X", as_of_time=datetime(2026, 6, 20, 12, 0, 0),
+    )
+    store.record_freshness(snapshot_id=snap_id, pair="USDJPY=X", price_age_sec=10.0)
+    store.record_freshness(snapshot_id=snap_id, pair="USDJPY=X", price_age_sec=99.0)
+    fresh = store.get_freshness_for_snapshot(snap_id)
+    assert fresh.price_age_sec == 99.0   # 後に入れた行 (最新) が返る
+
+
+def test_record_vote_reflected_true_roundtrips_to_bool(store: OrchestratorStore) -> None:
+    """reflected_in_plan=True が int 1 で保存され bool True に正規化されて返る。"""
+    snap_id = store.create_snapshot(
+        pair="USDJPY=X", as_of_time=datetime(2026, 6, 20, 12, 0, 0),
+    )
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X", snapshot_id=snap_id)
+    decision_id = store.record_decision(
+        run_id=run_id, snapshot_id=snap_id, pair="USDJPY=X",
+        decision_type="direct_hold", decision="hold",
+    )
+    store.record_vote(
+        decision_id=decision_id, agent_run_id=run_id, agent_name="NewsAgent",
+        vote_action="buy", reflected_in_plan=True,
+    )
+    votes = store.get_votes(decision_id)
+    assert len(votes) == 1
+    assert votes[0].reflected_in_plan is True
