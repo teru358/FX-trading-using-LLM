@@ -38,3 +38,19 @@ def test_build_orchestrator_config_empty_dict_uses_defaults() -> None:
     cfg = _build_orchestrator_config({})
     assert cfg.enabled is False
     assert cfg.mode == "shadow"
+    # ネストブロックも dataclass デフォルトに落ちる
+    assert cfg.llm.max_concurrent_jobs == 1
+    assert cfg.locks.order_lock_ttl_seconds == 120
+    assert cfg.agents.audit_enabled is True
+
+
+def test_build_orchestrator_config_null_subkeys_use_defaults() -> None:
+    """YAML で `llm:` のように値なしキーを書くと None になる。`or {}` で
+    dataclass デフォルトに落ちることを保証する (None を _from_dict に渡さない)。"""
+    cfg = _build_orchestrator_config(
+        {"enabled": True, "llm": None, "policy": None, "agents": None}
+    )
+    assert cfg.enabled is True
+    assert cfg.llm.max_concurrent_jobs == 1          # None → デフォルト
+    assert cfg.policy.trade_horizon == "swing"       # None → デフォルト
+    assert cfg.agents.news_enabled is True           # None → デフォルト

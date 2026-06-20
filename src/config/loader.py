@@ -107,12 +107,12 @@ def _build_orchestrator_config(data: dict) -> OrchestratorConfig:
     return OrchestratorConfig(
         enabled=data.get("enabled", False),
         mode=data.get("mode", "shadow"),
-        policy=_from_dict(OrchestratorPolicyConfig, data.get("policy", {})),
-        market_state=_from_dict(OrchestratorMarketStateConfig, data.get("market_state", {})),
-        llm=_from_dict(OrchestratorLlmConfig, data.get("llm", {})),
-        locks=_from_dict(OrchestratorLocksConfig, data.get("locks", {})),
-        entry=_from_dict(OrchestratorEntryConfig, data.get("entry", {})),
-        agents=_from_dict(OrchestratorAgentsConfig, data.get("agents", {})),
+        policy=_from_dict(OrchestratorPolicyConfig, data.get("policy", {}) or {}),
+        market_state=_from_dict(OrchestratorMarketStateConfig, data.get("market_state", {}) or {}),
+        llm=_from_dict(OrchestratorLlmConfig, data.get("llm", {}) or {}),
+        locks=_from_dict(OrchestratorLocksConfig, data.get("locks", {}) or {}),
+        entry=_from_dict(OrchestratorEntryConfig, data.get("entry", {}) or {}),
+        agents=_from_dict(OrchestratorAgentsConfig, data.get("agents", {}) or {}),
     )
 
 
@@ -532,5 +532,5 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         economic_calendar=economic_calendar_cfg,
         weekly_diagnosis=weekly_diagnosis_cfg,
         data_backup=data_backup_cfg,
-        orchestrator=_build_orchestrator_config(raw.get("orchestrator", {})),
+        orchestrator=_build_orchestrator_config(raw.get("orchestrator", {}) or {}),
     )
