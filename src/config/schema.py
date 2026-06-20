@@ -557,6 +557,72 @@ class ProvidersConfig:
 
 
 @dataclass
+class OrchestratorPolicyConfig:
+    """運用方針 (spec §4.6)。trade_horizon は構造化・advice_memo は参考程度。"""
+    trade_horizon: str = "swing"   # day | swing
+    advice_memo: str = ""          # 自然文助言メモ (hard gate 不可侵)
+
+
+@dataclass
+class OrchestratorMarketStateConfig:
+    """market state 別の処理周期 (spec §5.2)。"""
+    calm_seconds: int = 300
+    normal_seconds: int = 60
+    active_seconds: int = 30
+    critical_seconds: int = 60
+
+
+@dataclass
+class OrchestratorLlmConfig:
+    """LLM 逐次実行・timeout (spec §4.2 / §5.1.1)。"""
+    max_concurrent_jobs: int = 1   # 固定。2 以上にしない (sequential-by-design)
+    planning_timeout_seconds: int = 180
+    execution_recheck_timeout_seconds: int = 30
+
+
+@dataclass
+class OrchestratorLocksConfig:
+    """lock TTL (spec §6 / §8.8)。"""
+    pair_lock_ttl_seconds: int = 300
+    decision_lock_ttl_seconds: int = 600
+    order_lock_ttl_seconds: int = 120
+
+
+@dataclass
+class OrchestratorEntryConfig:
+    """entry 感度・gate 閾値 (spec §12)。"""
+    price_move_pct: float = 0.15
+    spread_max_pips: float = 2.0
+    news_impact_min: float = 0.5
+    require_fresh_technical: bool = True
+
+
+@dataclass
+class OrchestratorAgentsConfig:
+    """各 agent の有効化フラグ (spec §12)。"""
+    news_enabled: bool = True
+    technical_enabled: bool = True
+    execution_opinion_enabled: bool = True
+    risk_enabled: bool = True
+    audit_enabled: bool = True
+
+
+@dataclass
+class OrchestratorConfig:
+    """orchestrator agent loop の設定 (spec §12)。既定は安全側 (enabled=false)。"""
+    enabled: bool = False
+    mode: str = "shadow"   # observe | shadow | live
+    policy: OrchestratorPolicyConfig = field(default_factory=OrchestratorPolicyConfig)
+    market_state: OrchestratorMarketStateConfig = field(
+        default_factory=OrchestratorMarketStateConfig
+    )
+    llm: OrchestratorLlmConfig = field(default_factory=OrchestratorLlmConfig)
+    locks: OrchestratorLocksConfig = field(default_factory=OrchestratorLocksConfig)
+    entry: OrchestratorEntryConfig = field(default_factory=OrchestratorEntryConfig)
+    agents: OrchestratorAgentsConfig = field(default_factory=OrchestratorAgentsConfig)
+
+
+@dataclass
 class AppConfig:
     # ── トップレベル mode + provider 選択 (旧 trading.trading_mode + 暗黙判定を置換) ──
     mode: str = "paper"                           # "paper" | "live" | "live_test"
@@ -580,6 +646,7 @@ class AppConfig:
     economic_calendar: EconomicCalendarConfig = field(default_factory=EconomicCalendarConfig)
     weekly_diagnosis: WeeklyDiagnosisConfig = field(default_factory=WeeklyDiagnosisConfig)
     data_backup: DataBackupConfig = field(default_factory=DataBackupConfig)
+    orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
 
     # ── プロバイダー別設定 (旧 price_provider + mt5_bridge を統合) ──
     providers: ProvidersConfig = field(default_factory=ProvidersConfig)

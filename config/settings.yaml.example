@@ -345,3 +345,36 @@ data_backup:
   retention_count: 30              # 保持世代数 (古いものから自動削除)
 
 # mt5_bridge → config/providers/mt5.yaml に分離 (live_broker=mt5 のとき必須)
+
+# ── Orchestrator Agent Loop (spec §12) ─────────────────────────
+# Phase 1 foundation. enabled=false で既存サイクルに影響しない。
+orchestrator:
+  enabled: false
+  mode: shadow  # observe | shadow | live
+  policy:
+    trade_horizon: swing    # day | swing
+    advice_memo: ""         # 自然文助言メモ (参考程度・hard gate 不可侵)
+  market_state:
+    calm_seconds: 300
+    normal_seconds: 60
+    active_seconds: 30
+    critical_seconds: 60
+  llm:
+    max_concurrent_jobs: 1  # 固定。2 以上にしない (sequential-by-design)
+    planning_timeout_seconds: 180
+    execution_recheck_timeout_seconds: 30
+  locks:
+    pair_lock_ttl_seconds: 300
+    decision_lock_ttl_seconds: 600
+    order_lock_ttl_seconds: 120
+  entry:
+    price_move_pct: 0.15
+    spread_max_pips: 2.0
+    news_impact_min: 0.5
+    require_fresh_technical: true
+  agents:
+    news_enabled: true
+    technical_enabled: true
+    execution_opinion_enabled: true
+    risk_enabled: true
+    audit_enabled: true

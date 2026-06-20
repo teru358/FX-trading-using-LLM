@@ -53,6 +53,13 @@ from src.config.schema import (
     TwelveDataConfig,
     WeeklyDiagnosisConfig,
     DataBackupConfig,
+    OrchestratorConfig,
+    OrchestratorPolicyConfig,
+    OrchestratorMarketStateConfig,
+    OrchestratorLlmConfig,
+    OrchestratorLocksConfig,
+    OrchestratorEntryConfig,
+    OrchestratorAgentsConfig,
 )
 
 
@@ -89,6 +96,24 @@ def _from_dict(cls, data: dict):
         if f.name in data:
             kwargs[f.name] = data[f.name]
     return cls(**kwargs)
+
+
+def _build_orchestrator_config(data: dict) -> OrchestratorConfig:
+    """orchestrator YAML ブロックを OrchestratorConfig に組み立てる (spec §12)。
+
+    各ネスト dict は _from_dict でフラット構築する (キーはフィールド名と 1:1)。
+    欠落キーは dataclass デフォルトで補完される。
+    """
+    return OrchestratorConfig(
+        enabled=data.get("enabled", False),
+        mode=data.get("mode", "shadow"),
+        policy=_from_dict(OrchestratorPolicyConfig, data.get("policy", {})),
+        market_state=_from_dict(OrchestratorMarketStateConfig, data.get("market_state", {})),
+        llm=_from_dict(OrchestratorLlmConfig, data.get("llm", {})),
+        locks=_from_dict(OrchestratorLocksConfig, data.get("locks", {})),
+        entry=_from_dict(OrchestratorEntryConfig, data.get("entry", {})),
+        agents=_from_dict(OrchestratorAgentsConfig, data.get("agents", {})),
+    )
 
 
 def _merge_split_configs(base: dict, config_dir: Path) -> dict:
@@ -507,4 +532,5 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         economic_calendar=economic_calendar_cfg,
         weekly_diagnosis=weekly_diagnosis_cfg,
         data_backup=data_backup_cfg,
+        orchestrator=_build_orchestrator_config(raw.get("orchestrator", {})),
     )

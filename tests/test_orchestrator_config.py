@@ -1,0 +1,40 @@
+"""orchestrator config block (spec §12) のパース・デフォルトテスト。"""
+from __future__ import annotations
+
+from src.config.schema import OrchestratorConfig
+from src.config.loader import _build_orchestrator_config
+
+
+def test_orchestrator_config_defaults() -> None:
+    cfg = OrchestratorConfig()
+    assert cfg.enabled is False
+    assert cfg.mode == "shadow"
+    assert cfg.policy.trade_horizon == "swing"
+    assert cfg.llm.max_concurrent_jobs == 1
+    assert cfg.llm.planning_timeout_seconds == 180
+    assert cfg.locks.order_lock_ttl_seconds == 120
+
+
+def test_build_orchestrator_config_from_yaml_dict() -> None:
+    data = {
+        "enabled": True,
+        "mode": "observe",
+        "policy": {"trade_horizon": "day", "advice_memo": "wait for CPI"},
+        "llm": {"max_concurrent_jobs": 1, "planning_timeout_seconds": 90},
+        "locks": {"order_lock_ttl_seconds": 60},
+        "entry": {"spread_max_pips": 1.5},
+    }
+    cfg = _build_orchestrator_config(data)
+    assert cfg.enabled is True
+    assert cfg.mode == "observe"
+    assert cfg.policy.trade_horizon == "day"
+    assert cfg.policy.advice_memo == "wait for CPI"
+    assert cfg.llm.planning_timeout_seconds == 90
+    assert cfg.locks.order_lock_ttl_seconds == 60
+    assert cfg.entry.spread_max_pips == 1.5
+
+
+def test_build_orchestrator_config_empty_dict_uses_defaults() -> None:
+    cfg = _build_orchestrator_config({})
+    assert cfg.enabled is False
+    assert cfg.mode == "shadow"
