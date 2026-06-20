@@ -82,3 +82,74 @@ def test_start_is_noop_when_disabled(runtime: OrchestratorRuntime) -> None:
     assert runtime._planning_thread is None
     assert runtime._watch_thread is None
     runtime.stop()  # 何もしないことを確認 (例外が出ない)
+
+
+def test_run_planning_cycle_marks_run_failed_on_error(tmp_path: Path) -> None:
+    """build() が例外を投げても run は failed で finish され、dangling run を残さない。"""
+    db = tmp_path / "orch.db"
+    orch = OrchestratorStore(db)
+
+    class _BoomBuilder:
+        def build(self, *, pair, now, quote):
+            raise RuntimeError("boom")
+
+    def quote_provider(pair: str) -> QuoteSnapshot:
+        return QuoteSnapshot(
+            bid=150.0, ask=150.02, mid=150.01, spread=0.02,
+            source="test", observed_at=datetime(2026, 6, 20, 12, 0, 0),
+        )
+
+    runtime = OrchestratorRuntime(
+        config=OrchestratorConfig(),
+        orch_store=orch,
+        context_builder=_BoomBuilder(),
+        pairs=["USDJPY=X"],
+        quote_provider=quote_provider,
+    )
+    # 例外は cycle 内で握られ、ループには伝播しない (raise しない)
+    runtime.run_planning_cycle(now=datetime(2026, 6, 20, 12, 0, 0))
+
+    run = orch.get_run(1)
+    assert run is not None
+    assert run.status == "failed"
+    assert run.finished_at is not None
+    assert run.error_type == "RuntimeError"
+    assert run.error_message == "boom"
+    # 失敗時は decision を記録しない (build より後の record_decision に到達しない)
+    assert orch.get_decision(1) is None
+
+
+def test_start_spawns_threads_when_enabled_and_stop_joins(tmp_path: Path) -> None:
+    """enabled=true なら start() で 2 スレッドが立ち、stop() で停止・join される。"""
+    db = tmp_path / "orch.db"
+    orch = OrchestratorStore(db)
+    builder = ContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
+
+    def quote_provider(pair: str) -> QuoteSnapshot:
+        return QuoteSnapshot(
+            bid=150.0, ask=150.02, mid=150.01, spread=0.02,
+            source="test", observed_at=datetime(2026, 6, 20, 12, 0, 0),
+        )
+
+    cfg = OrchestratorConfig(enabled=True)
+    runtime = OrchestratorRuntime(
+        config=cfg,
+        orch_store=orch,
+        context_builder=builder,
+        pairs=["USDJPY=X"],
+        quote_provider=quote_provider,
+    )
+    runtime.start()
+    try:
+        assert runtime._planning_thread is not None
+        assert runtime._watch_thread is not None
+        assert runtime._planning_thread.is_alive()
+        assert runtime._watch_thread.is_alive()
+        # 二重 start() は no-op (スレッドを増やさない): 同じスレッドオブジェクトのまま
+        planning_before = runtime._planning_thread
+        runtime.start()
+        assert runtime._planning_thread is planning_before
+    finally:
+        runtime.stop()
+    assert runtime._planning_thread is None
+    assert runtime._watch_thread is None

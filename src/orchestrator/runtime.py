@@ -109,9 +109,16 @@ class OrchestratorRuntime:
     # ── ループ駆動 (enabled 時のみ) ─────────────────────────────
 
     def start(self) -> None:
-        """enabled なら 2 ループスレッドを起動する。disabled なら何もしない。"""
+        """enabled なら 2 ループスレッドを起動する。disabled なら何もしない。
+
+        既に起動済み (スレッド生存中) の再 start() は no-op。これが無いと二重 start で
+        スレッドが 4 本になり、最初の 2 本が参照を失って stop() で join 不能になる。
+        """
         if not self._config.enabled:
             logger.info("[ORCH] orchestrator disabled — loops not started")
+            return
+        if self._planning_thread is not None and self._planning_thread.is_alive():
+            logger.warning("[ORCH] start() called while already running — ignored")
             return
         self._stop.clear()
         self._planning_thread = threading.Thread(
