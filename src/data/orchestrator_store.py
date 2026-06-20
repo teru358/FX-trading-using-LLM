@@ -55,6 +55,64 @@ class _AgentRun(_Base):
     error_message       = Column(String)
 
 
+# spec §8.9 が許可する plan status の集合 (watch loop は active 以外を執行しない)
+PLAN_STATUSES = (
+    "active", "triggered", "expired", "invalidated",
+    "superseded", "suspended", "requires_replan",
+)
+
+
+class _TradePlan(_Base):
+    """PlannerAgent が立てる条件付き発注意図 (spec §8.9)。"""
+    __tablename__ = "trade_plans"
+
+    plan_id               = Column(Integer, primary_key=True, autoincrement=True)
+    pair                  = Column(String, nullable=False, index=True)
+    snapshot_id           = Column(Integer)
+    horizon               = Column(String)   # day | swing
+    direction             = Column(String)   # long | short
+    entry_conditions_json = Column(JSON)
+    action_json           = Column(JSON)
+    invalidation_json     = Column(JSON)
+    expires_at            = Column(DateTime)
+    status                = Column(String, nullable=False, index=True)
+    created_by_run_id     = Column(Integer)
+    created_at            = Column(DateTime, nullable=False)
+    updated_at            = Column(DateTime, nullable=False)
+
+
+# spec §8.8 の order_intents status / recovery_status の集合
+ORDER_INTENT_STATUSES = (
+    "pending", "submitted", "filled", "rejected",
+    "failed", "needs_reconcile", "abandoned",
+)
+
+
+class _OrderIntent(_Base):
+    """二重発注を durable に防ぐテーブル (spec §8.8)。plan_id UNIQUE。"""
+    __tablename__ = "order_intents"
+
+    id                 = Column(Integer, primary_key=True, autoincrement=True)
+    plan_id            = Column(Integer, nullable=False)
+    trigger_id         = Column(String)
+    decision_id        = Column(Integer)
+    pair               = Column(String, nullable=False)
+    intended_action    = Column(String, nullable=False)  # buy | sell
+    status             = Column(String, nullable=False)
+    owner_run_id       = Column(Integer)
+    lease_until        = Column(DateTime)
+    submitted_at       = Column(DateTime)   # null = broker 送信前 (送信前/送信後の分岐点)
+    recovery_status    = Column(String)     # null | needs_reconcile | retryable | abandoned
+    order_id           = Column(String)
+    broker_result_json = Column(JSON)
+    created_at         = Column(DateTime, nullable=False)
+    updated_at         = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("plan_id", name="uq_order_intents_plan_id"),
+    )
+
+
 class OrchestratorStore:
     """spec §8 のテーブル群を 1 つの DB で管理するストア。"""
 
@@ -150,3 +208,180 @@ class OrchestratorStore:
             if run is not None:
                 session.expunge(run)
             return run
+
+    # ── trade_plans (§8.9) ─────────────────────────────────────
+
+    def create_trade_plan(
+        self,
+        *,
+        pair: str,
+        snapshot_id: int,
+        horizon: str,
+        direction: str,
+        entry_conditions_json: list,
+        action_json: dict,
+        invalidation_json: list,
+        expires_at: datetime,
+        created_by_run_id: int,
+    ) -> int:
+        """active な trade_plan を作成し plan_id を返す。"""
+        now = db_now()
+        with Session(self._engine) as session:
+            plan = _TradePlan(
+                pair=pair,
+                snapshot_id=snapshot_id,
+                horizon=horizon,
+                direction=direction,
+                entry_conditions_json=entry_conditions_json,
+                action_json=action_json,
+                invalidation_json=invalidation_json,
+                expires_at=expires_at,
+                status="active",
+                created_by_run_id=created_by_run_id,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(plan)
+            session.commit()
+            return plan.plan_id
+
+    def get_trade_plan(self, plan_id: int) -> _TradePlan | None:
+        with Session(self._engine) as session:
+            plan = session.get(_TradePlan, plan_id)
+            if plan is not None:
+                session.expunge(plan)
+            return plan
+
+    def update_plan_status(self, plan_id: int, status: str) -> None:
+        if status not in PLAN_STATUSES:
+            raise ValueError(f"status must be one of {PLAN_STATUSES}, got {status!r}")
+        with Session(self._engine) as session:
+            plan = session.get(_TradePlan, plan_id)
+            if plan is None:
+                logger.warning(f"update_plan_status: plan_id {plan_id} not found")
+                return
+            plan.status = status
+            plan.updated_at = db_now()
+            session.commit()
+
+    def get_active_plans(self, pair: str | None = None) -> list[_TradePlan]:
+        """status=active の plan を返す (pair 指定で絞り込み)。"""
+        with Session(self._engine) as session:
+            stmt = select(_TradePlan).where(_TradePlan.status == "active")
+            if pair is not None:
+                stmt = stmt.where(_TradePlan.pair == pair)
+            plans = list(session.execute(stmt).scalars().all())
+            for p in plans:
+                session.expunge(p)
+            return plans
+
+    # ── order_intents (§8.8) ───────────────────────────────────
+
+    def try_insert_order_intent(
+        self,
+        *,
+        plan_id: int,
+        pair: str,
+        intended_action: str,
+        owner_run_id: int,
+        lease_until: datetime,
+        decision_id: int | None = None,
+        trigger_id: str | None = None,
+    ) -> bool:
+        """発注前の pending intent を INSERT する。
+
+        plan_id UNIQUE 違反 (= 既発注) なら False を返し、呼び出し側は
+        発注を中止する。成功すれば True。
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        now = db_now()
+        with Session(self._engine) as session:
+            intent = _OrderIntent(
+                plan_id=plan_id,
+                trigger_id=trigger_id,
+                decision_id=decision_id,
+                pair=pair,
+                intended_action=intended_action,
+                status="pending",
+                owner_run_id=owner_run_id,
+                lease_until=lease_until,
+                submitted_at=None,
+                recovery_status=None,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(intent)
+            try:
+                session.commit()
+                return True
+            except IntegrityError:
+                session.rollback()
+                logger.info(
+                    f"order_intent INSERT rejected: plan_id {plan_id} already exists"
+                )
+                return False
+
+    def get_order_intent(self, plan_id: int) -> _OrderIntent | None:
+        with Session(self._engine) as session:
+            stmt = select(_OrderIntent).where(_OrderIntent.plan_id == plan_id)
+            intent = session.execute(stmt).scalars().first()
+            if intent is not None:
+                session.expunge(intent)
+            return intent
+
+    def get_stale_pending_intents(self, *, now: datetime) -> list[_OrderIntent]:
+        """lease_until を過ぎた pending 行を返す (recovery job 用、§8.8)。
+
+        pending のまま lease 超過した行は plan_id UNIQUE を永久に握り発注を
+        止めるため、起動時の recovery job がこれらを列挙し submitted_at の有無で
+        retryable / needs_reconcile を判定する (復旧本体は later plan)。
+        """
+        with Session(self._engine) as session:
+            stmt = (
+                select(_OrderIntent)
+                .where(_OrderIntent.status == "pending")
+                .where(_OrderIntent.lease_until < now)
+            )
+            rows = list(session.execute(stmt).scalars().all())
+            for r in rows:
+                session.expunge(r)
+            return rows
+
+    def mark_order_submitted(self, *, plan_id: int, submitted_at: datetime) -> None:
+        """broker 送信直前に submitted_at を埋める (送信前/後の分岐点)。"""
+        with Session(self._engine) as session:
+            stmt = select(_OrderIntent).where(_OrderIntent.plan_id == plan_id)
+            intent = session.execute(stmt).scalars().first()
+            if intent is None:
+                logger.warning(f"mark_order_submitted: plan_id {plan_id} not found")
+                return
+            intent.submitted_at = submitted_at
+            intent.status = "submitted"
+            intent.updated_at = db_now()
+            session.commit()
+
+    def record_order_result(
+        self,
+        *,
+        plan_id: int,
+        status: str,
+        order_id: str | None = None,
+        broker_result_json: dict | None = None,
+    ) -> None:
+        """broker 応答で status / order_id / broker_result を更新する。"""
+        if status not in ORDER_INTENT_STATUSES:
+            raise ValueError(
+                f"status must be one of {ORDER_INTENT_STATUSES}, got {status!r}"
+            )
+        with Session(self._engine) as session:
+            stmt = select(_OrderIntent).where(_OrderIntent.plan_id == plan_id)
+            intent = session.execute(stmt).scalars().first()
+            if intent is None:
+                logger.warning(f"record_order_result: plan_id {plan_id} not found")
+                return
+            intent.status = status
+            intent.order_id = order_id
+            intent.broker_result_json = broker_result_json
+            intent.updated_at = db_now()
+            session.commit()
