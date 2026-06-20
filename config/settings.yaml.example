@@ -351,6 +351,7 @@ data_backup:
 orchestrator:
   enabled: false
   mode: shadow  # observe | shadow | live
+  pairs: [USDJPY=X, EURUSD=X]  # 空なら tradeable instruments を使う
   policy:
     trade_horizon: swing    # day | swing
     advice_memo: ""         # 自然文助言メモ (参考程度・hard gate 不可侵)
@@ -372,6 +373,13 @@ orchestrator:
     spread_max_pips: 2.0
     news_impact_min: 0.5
     require_fresh_technical: true
+    max_quote_age_seconds: 10
+    max_technical_age_seconds: 1800
+  firing:
+    material_news_impact_min: 0.5
+    material_bias_delta_min: 0.20
+    debounce_window_seconds: 180
+    min_planning_interval_seconds: 1800
   agents:
     news_enabled: true
     technical_enabled: true
