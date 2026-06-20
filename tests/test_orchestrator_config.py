@@ -1,7 +1,7 @@
 """orchestrator config block (spec §12) のパース・デフォルトテスト。"""
 from __future__ import annotations
 
-from src.config.schema import OrchestratorConfig
+from src.config.schema import OrchestratorConfig, OrchestratorFiringConfig
 from src.config.loader import _build_orchestrator_config
 
 
@@ -54,3 +54,16 @@ def test_build_orchestrator_config_null_subkeys_use_defaults() -> None:
     assert cfg.llm.max_concurrent_jobs == 1          # None → デフォルト
     assert cfg.policy.trade_horizon == "swing"       # None → デフォルト
     assert cfg.agents.news_enabled is True           # None → デフォルト
+
+
+def test_orchestrator_firing_config_defaults() -> None:
+    cfg = OrchestratorConfig()
+    assert cfg.firing.material_news_impact_min == 0.5
+    assert cfg.firing.material_bias_delta_min == 0.20
+    assert cfg.firing.debounce_window_seconds == 180
+    assert cfg.firing.min_planning_interval_seconds == 1800
+
+
+def test_orchestrator_pairs_default_empty() -> None:
+    cfg = OrchestratorConfig()
+    assert cfg.pairs == []

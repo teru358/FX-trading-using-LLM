@@ -595,6 +595,17 @@ class OrchestratorEntryConfig:
     spread_max_pips: float = 2.0
     news_impact_min: float = 0.5
     require_fresh_technical: bool = True
+    max_quote_age_seconds: int = 10
+    max_technical_age_seconds: int = 1800
+
+
+@dataclass
+class OrchestratorFiringConfig:
+    """PlannerAgent 発火条件 (spec §5.4)。material landing + debounce + periodic floor。"""
+    material_news_impact_min: float = 0.5
+    material_bias_delta_min: float = 0.20
+    debounce_window_seconds: int = 180
+    min_planning_interval_seconds: int = 1800
 
 
 @dataclass
@@ -612,6 +623,7 @@ class OrchestratorConfig:
     """orchestrator agent loop の設定 (spec §12)。既定は安全側 (enabled=false)。"""
     enabled: bool = False
     mode: str = "shadow"   # observe | shadow | live
+    pairs: list[str] = field(default_factory=list)  # 空なら tradeable instruments を使う
     policy: OrchestratorPolicyConfig = field(default_factory=OrchestratorPolicyConfig)
     market_state: OrchestratorMarketStateConfig = field(
         default_factory=OrchestratorMarketStateConfig
@@ -619,6 +631,7 @@ class OrchestratorConfig:
     llm: OrchestratorLlmConfig = field(default_factory=OrchestratorLlmConfig)
     locks: OrchestratorLocksConfig = field(default_factory=OrchestratorLocksConfig)
     entry: OrchestratorEntryConfig = field(default_factory=OrchestratorEntryConfig)
+    firing: OrchestratorFiringConfig = field(default_factory=OrchestratorFiringConfig)
     agents: OrchestratorAgentsConfig = field(default_factory=OrchestratorAgentsConfig)
 
 
