@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from typing import Any
 
 from src.config.schema import OrchestratorConfig
 from src.data.analysis_store import AnalysisStore
@@ -44,7 +45,16 @@ class ContextBuilder:
         self._analysis = analysis_store
         self._config = config
 
-    def build(self, *, pair: str, now: datetime, quote: QuoteSnapshot) -> dict:
+    # technical snapshot をこの分数より古ければ stale 扱いにする (decision に古い
+    # データを使わせない)。
+    _TECHNICAL_MAX_STALE_MINUTES = 30
+    # lookback 窓。stale と missing を区別するため max_stale より十分広く取る必要が
+    # ある (窓が max_stale と同じだと、max_stale 超過の行が窓から外れて missing に
+    # 見え、stale と区別できない)。max_stale から導出し「窓 > max_stale」を機械的に
+    # 保証する (将来 max_stale を変えても窓が自動追従する)。最低 1h。
+    _TECHNICAL_LOOKBACK_HOURS = max(1, (_TECHNICAL_MAX_STALE_MINUTES * 48) // 60)
+
+    def build(self, *, pair: str, now: datetime, quote: QuoteSnapshot) -> dict[str, Any]:
         """decision_snapshot を materialize し §7 標準 context dict を返す。"""
         technical = self._build_technical(pair, now)
         quote_dict = {
@@ -79,15 +89,11 @@ class ContextBuilder:
             "similar_cases": {"items": []},
             "policy": {
                 "trade_horizon": self._config.policy.trade_horizon,
-                "advice_memo": self._config.policy.advice_memo or None,
+                "advice_memo": self._config.policy.advice_memo or None,  # "" -> None
             },
         }
 
-    # technical snapshot をこの分数より古ければ stale 扱いにする (decision に
-    # 古いデータを使わせない)。lookback 窓もこの値から算出する。
-    _TECHNICAL_MAX_STALE_MINUTES = 30
-
-    def _build_technical(self, pair: str, now: datetime) -> dict:
+    def _build_technical(self, pair: str, now: datetime) -> dict[str, Any]:
         """AnalysisStore の lookback 内 ok snapshot から technical ブロックを組む。
 
         **重要 (設計思想):** `get_latest_ok_row` のような lookback 非依存読みは
@@ -103,10 +109,9 @@ class ContextBuilder:
         分類できる。
         """
         max_stale = timedelta(minutes=self._TECHNICAL_MAX_STALE_MINUTES)
-        # 窓は max_stale を十分内包する広さにする (24h)。これにより max_stale 超過の
-        # 行も取得され、age>max_stale で stale に分類できる (missing と区別可能)。
-        lookback_hours = 24
-        rows = self._analysis.get_recent_ok_snapshots(pair, hours=lookback_hours)
+        rows = self._analysis.get_recent_ok_snapshots(
+            pair, hours=self._TECHNICAL_LOOKBACK_HOURS,
+        )
         if not rows:
             return {
                 "status": "missing", "bias_score": None, "confidence": None,
@@ -114,6 +119,9 @@ class ContextBuilder:
             }
 
         row = rows[0]  # get_recent_ok_snapshots は新しい順
+        # age が負 (row.analyzed_at > now) になりうる: now を DB 書き込み前に
+        # 捕捉した場合など。負の age は age <= max_stale なので ok 扱い — 直近未来の
+        # 行を fresh とみなすのは正しい。
         age = now - row.analyzed_at
         if age > max_stale:
             # 古すぎる: stale に倒し direction/bias は渡さない。参照だけ残す。
@@ -139,26 +147,26 @@ class ContextBuilder:
         }
 
     @staticmethod
-    def _empty_position() -> dict:
+    def _empty_position() -> dict[str, Any]:
         return {"side": None, "entry": None, "size": None, "pnl": None, "mfe_r": None}
 
     @staticmethod
-    def _empty_news() -> dict:
+    def _empty_news() -> dict[str, Any]:
         return {"sentiment_score": None, "confidence": None, "top_reasons": []}
 
     @staticmethod
-    def _empty_risk_state() -> dict:
+    def _empty_risk_state() -> dict[str, Any]:
         return {"halt": "none", "bridge_health": "ok", "market_open": True, "cooldown": False}
 
     @staticmethod
-    def _empty_trade_stats() -> dict:
+    def _empty_trade_stats() -> dict[str, Any]:
         return {
             "window_hours": 24, "order_count": 0, "win_count": 0, "loss_count": 0,
             "open_position_count": 0, "net_exposure": 0.0, "last_order_at": None,
         }
 
     @staticmethod
-    def _empty_move_maturity() -> dict:
+    def _empty_move_maturity() -> dict[str, Any]:
         return {
             "extension_from_ma": None, "overbought_oversold": None,
             "dist_from_recent_swing": None,

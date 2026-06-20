@@ -84,3 +84,57 @@ def test_build_falls_to_stale_when_latest_ok_is_too_old(
     # stale 時は direction/bias を判断材料に使わせない (None に倒す)
     assert ctx["technical"]["direction"] is None
     assert ctx["technical"]["bias_score"] is None
+
+
+def test_build_treats_row_older_than_lookback_as_missing(
+    builder: ContextBuilder, bullish_price
+) -> None:
+    """lookback 窓 (24h) より古い行は窓外 → missing (stale ではない)。
+
+    stale と missing の境界の最も鋭い部分: 窓内なら stale、窓外なら missing。
+    """
+    from datetime import timedelta
+
+    bullish_price.analyzed_at = datetime.now() - timedelta(hours=25)
+    builder._analysis.add_snapshot(bullish_price)
+    quote = QuoteSnapshot(
+        bid=150.0, ask=150.02, mid=150.01, spread=0.02,
+        source="mt5", observed_at=datetime.now(),
+    )
+    ctx = builder.build(pair="USDJPY=X", now=datetime.now(), quote=quote)
+    assert ctx["technical"]["status"] == "missing"
+    assert ctx["technical"]["direction"] is None
+
+
+def test_build_strips_internal_ref_from_returned_technical(
+    builder: ContextBuilder, bullish_price
+) -> None:
+    """内部キー _ref は返り値 technical ブロックから除去される (DB 内部 ID を露出しない)。
+
+    ただし snapshot の technical_ref には保存される。"""
+    builder._analysis.add_snapshot(bullish_price)
+    quote = QuoteSnapshot(
+        bid=150.0, ask=150.02, mid=150.01, spread=0.02,
+        source="mt5", observed_at=datetime.now(),
+    )
+    ctx = builder.build(pair="USDJPY=X", now=datetime.now(), quote=quote)
+    assert "_ref" not in ctx["technical"]
+    # snapshot 側には technical_ref が保存されている
+    snap = builder._orch.get_snapshot(ctx["snapshot_id"])
+    assert snap.technical_ref is not None
+    assert "snapshot_id" in snap.technical_ref
+
+
+def test_build_maps_neutral_direction(builder: ContextBuilder, bearish_price) -> None:
+    """direction_bias が long/short 以外なら direction=neutral にマップされる。
+
+    bearish_price を neutral に書き換えて neutral 分岐を踏ませる。"""
+    bearish_price.direction_bias = "neutral"
+    builder._analysis.add_snapshot(bearish_price)
+    quote = QuoteSnapshot(
+        bid=150.0, ask=150.02, mid=150.01, spread=0.02,
+        source="mt5", observed_at=datetime.now(),
+    )
+    ctx = builder.build(pair="USDJPY=X", now=datetime.now(), quote=quote)
+    assert ctx["technical"]["status"] == "ok"
+    assert ctx["technical"]["direction"] == "neutral"
