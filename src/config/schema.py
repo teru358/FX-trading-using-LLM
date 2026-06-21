@@ -313,6 +313,10 @@ class RagConfig:
 class ScheduleConfig:
     run_times: list[str] = field(default_factory=lambda: ["15:00", "21:00"])
     timezone: str = "Asia/Tokyo"
+    # technical 収集の間隔 (時間)。既定は現状維持 = 毎時 (1h)。
+    # trade は将来 cadence resolver で boost される土台、watch は低頻度固定用。
+    technical_trade_interval_hours: int = 1
+    technical_watch_interval_hours: int = 1
 
 
 @dataclass
