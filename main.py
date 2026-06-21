@@ -383,6 +383,21 @@ def main() -> None:
     scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True, name="scheduler")
     scheduler_thread.start()
 
+    # Orchestrator agent loop (shadow)。enabled 時のみ planning/watch/hindsight ループ +
+    # shadow 通知 worker を起動する。既存 trading cycle とは並走 (Phase 2〜6 は停止しない)。
+    # broker adapter は渡さない (shadow 境界)。disabled なら None で no-op。
+    from src.orchestrator.bootstrap import build_orchestrator_runtime
+    orchestrator = build_orchestrator_runtime(
+        config, store=store, price_store=price_store,
+        analysis_store=analysis_store, price_provider=price_provider,
+    )
+    if orchestrator is not None:
+        orchestrator.start()
+        _console.print(
+            f"[green][OK][/green]  Orchestrator (shadow) running — "
+            f"mode={config.orchestrator.mode}"
+        )
+
     _console.print(Rule("[dim cyan]Scheduler running[/dim cyan]", style="dim cyan"))
 
     _logger.info("[SYSTEM] Ready — scheduler running, entering main loop")
@@ -400,6 +415,8 @@ def main() -> None:
             run_commands(config, store, analysis_store, _stop, _llm_slot, forecast_store, price_store, hold_store, price_provider=price_provider)
     finally:
         _stop.set()
+        if orchestrator is not None:
+            orchestrator.stop()  # ループ停止 + 通知 worker drain
         _logger.info("[SYSTEM] Shutdown — FX Paper Trader stopped")
 
 
