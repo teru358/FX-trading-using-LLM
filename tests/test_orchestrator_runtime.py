@@ -235,11 +235,14 @@ def test_planning_cycle_only_processes_detector_pairs(tmp_path: Path) -> None:
     class _FakeDetector:
         def __init__(self, fire):
             self.fire = fire
-            self.marked = []
+            self.committed = []
+            self.attempted = []
         def pairs_to_plan(self, now):
             return list(self.fire)
-        def mark_planned(self, pair, now):
-            self.marked.append(pair)
+        def mark_committed(self, pair, now):
+            self.committed.append(pair)
+        def mark_attempted(self, pair, now):
+            self.attempted.append(pair)
 
     detector = _FakeDetector(fire=["USDJPY=X"])
     runtime = OrchestratorRuntime(
@@ -257,5 +260,6 @@ def test_planning_cycle_only_processes_detector_pairs(tmp_path: Path) -> None:
     assert dec1 is not None
     assert dec1.pair == "USDJPY=X"
     assert orch.get_decision(2) is None   # 2件目は無い
-    # mark_planned は処理した pair について呼ばれる
-    assert detector.marked == ["USDJPY=X"]
+    # snapshot 作成まで到達した (成功) ので mark_committed が呼ばれる (mark_attempted でない)
+    assert detector.committed == ["USDJPY=X"]
+    assert detector.attempted == []

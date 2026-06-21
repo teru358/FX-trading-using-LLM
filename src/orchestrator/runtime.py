@@ -74,12 +74,15 @@ class OrchestratorRuntime:
                 trigger_type="planning_cycle",
                 trade_horizon=self._config.policy.trade_horizon,
             )
+            committed = False
             try:
                 quote = self._quote_provider(pair)
                 ctx = self._ctx.build(pair=pair, now=now, quote=quote)
                 # snapshot を run に後付けで紐付け、agent_run → decision_snapshot の
                 # trace graph (§8.1) を繋ぐ (start_run 時点では snapshot 未作成のため)。
                 self._orch.attach_snapshot(run_id, ctx["snapshot_id"])
+                # snapshot 作成まで到達 = 材料を読めた。ここを境に material baseline を消費する。
+                committed = True
                 # later plan: ここで PlannerAgent を呼び trade_plan を立/改/無効化する。
                 # Phase 1 は機会判断を行わず direct_hold を記録する。
                 self._orch.record_decision(
@@ -99,10 +102,16 @@ class OrchestratorRuntime:
                     error_type=type(exc).__name__, error_message=str(exc),
                 )
             finally:
-                # success / failure いずれでも mark: floor が再 fire を制御するため、
-                # 失敗ペアを毎 tick リトライしない (detector 注入時のみ)。
+                # detector 注入時のみ mark (Codex Medium#4)。
+                # - snapshot 作成まで到達 (committed) → mark_committed: baseline を消費し
+                #   floor 起点を進める (同じ材料で再発火しない)。
+                # - snapshot 前に失敗 → mark_attempted: debounce 窓だけ閉じる。材料を読めて
+                #   いないので baseline は未消費 (次 tick で再評価され、毎 tick リトライはしない)。
                 if self._detector is not None:
-                    self._detector.mark_planned(pair, now)
+                    if committed:
+                        self._detector.mark_committed(pair, now)
+                    else:
+                        self._detector.mark_attempted(pair, now)
 
     def run_watch_cycle(self) -> list[int]:
         """active plan を走査する。

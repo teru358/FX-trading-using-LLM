@@ -2,18 +2,33 @@
 
 保存済み store を pull し「前回 planning 参照から material に変わった trade pair」を
 検出する。trade instrument のみ対象 (§4.8/§5.3/§5.4)。状態は in-memory。
+
+material の判定経路は 3 つ:
+- technical: 実 _TechnicalSnapshot (analysis_store) の direction_bias / bias_score /
+  collect_status を「前回 planning 参照」と比較し、反転・bias 変化・stale→ok 復帰を material とする。
+- news: pair 関連の高 impact news。同じ news (同 key) を二度消費しないよう consumed-key を持つ。
+- event: 高重要度 econ event window 内。同じ window を二度消費しないよう consumed-key を持つ。
+
+planning を起こしたら状態を確定する:
+- mark_committed(): snapshot 作成まで到達した (成功) ときに呼ぶ。technical baseline と
+  news/event の consumed-key を更新し、last_planned を進める。
+- mark_attempted(): snapshot 作成前に失敗したときに呼ぶ。debounce 窓だけ閉じ、baseline /
+  consumed-key は更新しない (材料を読めていないので消費扱いにしない)。
 """
 from __future__ import annotations
+
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable, Any
+from typing import Any, Callable
 
 
 @dataclass
 class _Seen:
-    direction: str | None
+    direction_bias: str | None
     bias_score: float | None
-    status: str | None
+    collect_status: str | None
+    news_key: str | None
+    event_key: str | None
 
 
 class MaterialLandingDetector:
@@ -24,7 +39,9 @@ class MaterialLandingDetector:
         material_bias_delta_min: float,
         get_news_impact: Callable[[str], float] | None = None,
         material_news_impact_min: float = 0.5,
+        get_news_key: Callable[[str], str | None] | None = None,
         in_event_window: Callable[[str], bool] | None = None,
+        get_event_key: Callable[[str], str | None] | None = None,
         debounce_window_seconds: int = 180,
         min_planning_interval_seconds: int = 1800,
         pairs: list[str] | None = None,
@@ -33,13 +50,17 @@ class MaterialLandingDetector:
         self._bias_delta_min = material_bias_delta_min
         self._get_news_impact = get_news_impact
         self._news_impact_min = material_news_impact_min
+        self._get_news_key = get_news_key
         self._in_event_window = in_event_window
+        self._get_event_key = get_event_key
         self._seen: dict[str, _Seen] = {}
         self._debounce_window = debounce_window_seconds
         self._floor = min_planning_interval_seconds
         self._pairs = list(pairs or [])
         self._material_since: dict[str, datetime] = {}
         self._last_planned: dict[str, datetime] = {}
+
+    # ── 個別 material 判定 ──────────────────────────────────────────
 
     def technical_material(self, pair: str) -> bool:
         snap = self._get_tech(pair)
@@ -48,24 +69,41 @@ class MaterialLandingDetector:
         prev = self._seen.get(pair)
         if prev is None:
             return True  # 初観測は material
-        if prev.status != "ok" and getattr(snap, "status", None) == "ok":
+        status = getattr(snap, "collect_status", None)
+        if prev.collect_status != "ok" and status == "ok":
             return True  # stale/missing → ok 復帰
-        if prev.direction != snap.direction:
-            return True  # direction 反転
-        if prev.bias_score is not None and snap.bias_score is not None:
-            if abs(snap.bias_score - prev.bias_score) >= self._bias_delta_min:
+        direction = getattr(snap, "direction_bias", None)
+        if prev.direction_bias != direction:
+            return True  # direction_bias 反転
+        bias = getattr(snap, "bias_score", None)
+        if prev.bias_score is not None and bias is not None:
+            if abs(bias - prev.bias_score) >= self._bias_delta_min:
                 return True
         return False
 
     def news_material(self, pair: str) -> bool:
         if self._get_news_impact is None:
             return False
-        return self._get_news_impact(pair) >= self._news_impact_min
+        if self._get_news_impact(pair) < self._news_impact_min:
+            return False
+        # 同じ news (同 key) を既に消費していれば material でない (再発火防止)。
+        key = self._get_news_key(pair) if self._get_news_key is not None else None
+        prev = self._seen.get(pair)
+        if prev is not None and key is not None and prev.news_key == key:
+            return False
+        return True
 
     def event_window_material(self, pair: str) -> bool:
         if self._in_event_window is None:
             return False
-        return bool(self._in_event_window(pair))
+        if not self._in_event_window(pair):
+            return False
+        # 同じ event window (同 key) を既に消費していれば material でない。
+        key = self._get_event_key(pair) if self._get_event_key is not None else None
+        prev = self._seen.get(pair)
+        if prev is not None and key is not None and prev.event_key == key:
+            return False
+        return True
 
     def is_material(self, pair: str) -> bool:
         """いずれかの経路で material なら True。"""
@@ -75,23 +113,51 @@ class MaterialLandingDetector:
             or self.event_window_material(pair)
         )
 
+    # ── 状態確定 ────────────────────────────────────────────────────
+
     def commit_seen(self, pair: str) -> None:
-        """planning を起こした後、現在状態を「前回参照」として記録する。"""
+        """現在状態を「前回参照」として記録する (technical baseline + news/event key を消費)。
+
+        snapshot 作成まで到達した planning の後に呼ぶ。technical snapshot が無くても
+        news/event の consumed-key は更新する (高 impact news 単独でも再発火を防ぐため)。
+        """
         snap = self._get_tech(pair)
-        if snap is None:
-            return
+        news_key = self._get_news_key(pair) if self._get_news_key is not None else None
+        event_key = self._get_event_key(pair) if self._get_event_key is not None else None
         self._seen[pair] = _Seen(
-            direction=getattr(snap, "direction", None),
-            bias_score=getattr(snap, "bias_score", None),
-            status=getattr(snap, "status", None),
+            direction_bias=getattr(snap, "direction_bias", None) if snap is not None else None,
+            bias_score=getattr(snap, "bias_score", None) if snap is not None else None,
+            collect_status=getattr(snap, "collect_status", None) if snap is not None else None,
+            news_key=news_key,
+            event_key=event_key,
         )
+
+    def mark_committed(self, pair: str, now: datetime) -> None:
+        """planning が snapshot 作成まで到達した (成功) ら呼ぶ。
+
+        debounce 窓を閉じ、material baseline / consumed-key を消費し、floor 起点を進める。
+        """
+        self._last_planned[pair] = now
+        self._material_since.pop(pair, None)
+        self.commit_seen(pair)
+
+    def mark_attempted(self, pair: str, now: datetime) -> None:
+        """planning が snapshot 作成前に失敗したら呼ぶ。
+
+        debounce 窓だけ閉じる (毎 tick リトライで詰まらせない)。material baseline /
+        consumed-key は更新しない — 材料を読めていないので消費扱いにしない (次回再評価される)。
+        floor 起点も進めない (失敗を「実施済み」と見なさない)。
+        """
+        self._material_since.pop(pair, None)
+
+    # ── 起動 pair 決定 ──────────────────────────────────────────────
 
     def pairs_to_plan(self, now: datetime) -> list[str]:
         out: list[str] = []
         for pair in self._pairs:
             fire = False
-            # material 経路（debounce 付き）
             if self.is_material(pair):
+                # material 経路: debounce 窓を抜けたら起動。
                 started = self._material_since.get(pair)
                 if started is None:
                     self._material_since[pair] = now  # 窓開始
@@ -99,16 +165,11 @@ class MaterialLandingDetector:
                     fire = True
             else:
                 self._material_since.pop(pair, None)  # material 解消で窓リセット
-            # periodic floor
-            last = self._last_planned.get(pair)
-            if last is not None and (now - last).total_seconds() >= self._floor:
-                fire = True
+                # periodic floor: material が無い pair も最低頻度で起動する。
+                # 初回 (last_planned 未設定) は bootstrap として due 扱いにする。
+                last = self._last_planned.get(pair)
+                if last is None or (now - last).total_seconds() >= self._floor:
+                    fire = True
             if fire:
                 out.append(pair)
         return out
-
-    def mark_planned(self, pair: str, now: datetime) -> None:
-        """planning を起動したら呼ぶ。debounce 窓を閉じ floor 起点を更新。"""
-        self._last_planned[pair] = now
-        self._material_since.pop(pair, None)
-        self.commit_seen(pair)
