@@ -161,6 +161,46 @@ def test_orphan_pending_is_marked_failed_not_relooped(tmp_path: Path) -> None:
     assert runtime.run_hindsight_cycle(now=NOW + timedelta(days=3)) == 0
 
 
+def test_eval_exception_marks_failed_not_perpetual_pending(tmp_path: Path) -> None:
+    """評価中に例外が出ても pending を残さず failed に倒す (毎 poll 再実行を防ぐ)。
+
+    provider 例外 / カラム欠損 / tz 差分など deterministic な評価不能は、ログだけで
+    pending のまま放置すると同じ行が毎 poll で永久に再実行される (Codex Medium)。
+    """
+    db = tmp_path / "orch.db"
+    orch = OrchestratorStore(db)
+    _seed_ok_technical(db)
+    cfg = OrchestratorConfig()
+    builder = DecisionContextBuilder(orch, AnalysisStore(db), cfg)
+
+    def quote_provider(pair: str) -> QuoteSnapshot:
+        return QuoteSnapshot(
+            bid=149.995, ask=150.005, mid=150.0, spread=0.01,
+            source="test", observed_at=NOW,
+        )
+
+    def boom_provider(symbol: str, start: datetime, end: datetime):
+        raise RuntimeError("provider exploded")
+
+    runtime = OrchestratorRuntime(
+        config=cfg, orch_store=orch, context_builder=builder,
+        pairs=["USDJPY=X"], quote_provider=quote_provider,
+        hindsight_evaluator=HindsightEvaluator(ohlcv_provider=boom_provider),
+    )
+    plan_id = _active_plan(
+        orch, entry=[{"type": "price_at_or_below", "value": 150.30}]
+    )
+    runtime.run_watch_cycle(now=NOW)
+    trig = orch.get_shadow_trigger(plan_id)
+
+    n = runtime.run_hindsight_cycle(now=NOW + timedelta(days=2))
+    assert n == 1
+    ev = orch.get_hindsight_evaluation(trig.id)
+    assert ev.status == "failed"
+    # 2 回目は pending が無いので 0 件 (再ループしない)
+    assert runtime.run_hindsight_cycle(now=NOW + timedelta(days=3)) == 0
+
+
 def test_no_evaluator_does_not_enqueue(tmp_path: Path) -> None:
     """hindsight_evaluator 未注入なら trigger 時に enqueue しない (後方互換)。"""
     db = tmp_path / "orch.db"

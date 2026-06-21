@@ -217,10 +217,23 @@ class OrchestratorRuntime:
             try:
                 if self._evaluate_one_hindsight(ev, now):
                     evaluated += 1
-            except Exception:
+            except Exception as exc:
+                # provider 例外 / OHLCV カラム欠損 / tz 差分など deterministic な評価不能を
+                # pending に残すと同じ行が毎 poll 再実行され続ける (Codex Medium)。failed に
+                # 倒し再 query されないようにする。failed 化自体が落ちても他行は止めない。
                 logger.exception(
                     f"[ORCH] hindsight eval failed for trigger {ev.shadow_trigger_id}"
                 )
+                try:
+                    self._orch.update_hindsight_evaluation(
+                        ev.id, status="failed", evaluated_at=now,
+                        reasoning_summary=f"eval error: {type(exc).__name__}: {exc}",
+                    )
+                    evaluated += 1
+                except Exception:
+                    logger.exception(
+                        f"[ORCH] could not mark hindsight {ev.id} failed"
+                    )
         return evaluated
 
     def _evaluate_one_hindsight(self, ev, now: datetime) -> bool:

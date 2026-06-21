@@ -15,7 +15,10 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
+
+if TYPE_CHECKING:
+    from src.data.price_store import PriceStore
 
 logger = logging.getLogger(__name__)
 
@@ -97,18 +100,20 @@ class HindsightEvaluator:
         mfe_r = max(favorable, 0.0) / risk
         mae_r = min(adverse, 0.0) / risk
 
-        would_hit_sl = self._touched(df, sl, sign, is_sl=True)
-        would_hit_tp = tp is not None and self._touched(df, tp, sign, is_sl=False)
-
-        # path-aware PnL-R。バー内で SL/TP 両 touch は path 不明なので保守的に SL 優先。
-        if would_hit_sl:
+        # path-aware PnL-R。バーを時系列走査し最初に到達した SL/TP を採用する。
+        # 同一バー内で両方タッチした場合のみ path 不明として保守的に SL 優先。
+        first_hit = self._first_hit(df, sl, tp, sign)
+        if first_hit == "sl":
             pnl_r = -1.0
-            reason = "hit SL within horizon"
-        elif would_hit_tp:
+            would_hit_sl, would_hit_tp = True, False
+            reason = "hit SL first within horizon"
+        elif first_hit == "tp":
             pnl_r = (tp - trigger_price) * sign / risk
-            reason = "hit TP within horizon"
+            would_hit_sl, would_hit_tp = False, True
+            reason = "hit TP first within horizon"
         else:
             pnl_r = (last_close - trigger_price) * sign / risk
+            would_hit_sl, would_hit_tp = False, False
             reason = "mark-to-market at horizon end (no SL/TP touch)"
 
         return HindsightResult(
@@ -130,14 +135,52 @@ class HindsightEvaluator:
             return -1
         return 0
 
-    @staticmethod
-    def _touched(df, level: float, sign: int, *, is_sl: bool) -> bool:
-        """price が level に到達したか。
+    @classmethod
+    def _first_hit(cls, df, sl: float, tp: float | None, sign: int) -> str | None:
+        """バーを時系列走査し、最初に到達した側を返す ('sl' | 'tp' | None)。
 
-        long の SL は下抜け (Low<=sl)、TP は上抜け (High>=tp)。short は逆。
+        各バーで SL / TP のタッチを判定し、先に到達したバーの側を確定する。
+        同一バー内で両方タッチした場合は path 不明なので保守的に SL を優先する。
+        OHLCV は始値→終値の bar 内 path が不明なため、bar 単位 (= 利用可能な最小粒度)
+        での順序判定が現実的な近似。
+        """
+        for ts in df.index:
+            high = float(df.at[ts, "High"])
+            low = float(df.at[ts, "Low"])
+            sl_touch = cls._bar_touches(high, low, sl, sign, is_sl=True)
+            tp_touch = (
+                tp is not None and cls._bar_touches(high, low, tp, sign, is_sl=False)
+            )
+            if sl_touch and tp_touch:
+                return "sl"   # 同一バー両タッチ → 保守的に SL 優先
+            if sl_touch:
+                return "sl"
+            if tp_touch:
+                return "tp"
+        return None
+
+    @staticmethod
+    def _bar_touches(high: float, low: float, level: float, sign: int, *, is_sl: bool) -> bool:
+        """1 バー (high/low) が level に到達したか。
+
+        long の SL は下抜け (low<=sl)、TP は上抜け (high>=tp)。short は逆。
         """
         if (sign > 0) == is_sl:
-            # long+SL or short+TP → 下方向への到達 (Low <= level)
-            return bool((df["Low"] <= level).any())
-        # long+TP or short+SL → 上方向への到達 (High >= level)
-        return bool((df["High"] >= level).any())
+            # long+SL or short+TP → 下方向への到達 (low <= level)
+            return low <= level
+        # long+TP or short+SL → 上方向への到達 (high >= level)
+        return high >= level
+
+
+def make_hindsight_evaluator(price_store: "PriceStore") -> HindsightEvaluator:
+    """PriceStore.load_ohlcv をラップして HindsightEvaluator を組み立てる。
+
+    Phase 6 (main.py 配線) の injection point。OrchestratorRuntime に
+    `hindsight_evaluator=make_hindsight_evaluator(price_store)` を渡すと、trigger 後の
+    OHLCV を既存 OHLCV キャッシュから引いて R を後追い計測する。
+    make_news_provider と同じアダプタ方針 (runtime は PriceStore に直接依存しない)。
+    """
+    def provider(symbol: str, start: datetime, end: datetime):
+        return price_store.load_ohlcv(symbol, start, end)
+
+    return HindsightEvaluator(ohlcv_provider=provider)

@@ -11,7 +11,11 @@ from datetime import datetime, timedelta
 import pandas as pd
 import pytest
 
-from src.orchestrator.hindsight_evaluator import HindsightEvaluator, HindsightResult
+from src.orchestrator.hindsight_evaluator import (
+    HindsightEvaluator,
+    HindsightResult,
+    make_hindsight_evaluator,
+)
 
 TRIG = datetime(2026, 6, 21, 9, 0, 0)
 
@@ -152,6 +156,73 @@ def test_sl_before_tp_uses_conservative_sl() -> None:
     )
     assert res.would_hit_sl is True
     assert res.pnl_r == pytest.approx(-1.0)  # 不利側 (SL) を採用
+
+
+def test_tp_then_sl_across_bars_uses_first_hit_tp() -> None:
+    """1時間後に TP 到達、その後 2時間後に SL 水準へ反落 → 先に当たった TP を採用する。
+
+    Codex High: horizon 全体で would_hit_* を別々に出すと、TP 先着でも SL タッチがあれば
+    -1R になる誤り。bar を時系列走査し最初に到達した方を確定 PnL とする。
+    """
+    df = _ohlcv([
+        (TRIG + timedelta(hours=1), 152.1, 150.5, 152.0),  # TP(152.0) 先着
+        (TRIG + timedelta(hours=2), 150.2, 148.8, 149.0),  # 後で SL(149.0) へ反落
+    ])
+    res = _evaluator(df).evaluate(
+        pair="USDJPY=X", direction="long",
+        trigger_price=150.0, sl=149.0, tp=152.0,
+        triggered_at=TRIG, horizon_seconds=86400,
+    )
+    assert res.would_hit_tp is True
+    assert res.pnl_r == pytest.approx(2.0)   # 先着 TP を採用 (-1R にしない)
+    # MFE/MAE は horizon 全体の最大順行/逆行で算出する (確定 PnL とは別軸)
+    assert res.mfe_r == pytest.approx(2.1)   # (152.1-150.0)/1.0
+    assert res.mae_r == pytest.approx(-1.2)  # (148.8-150.0)/1.0
+
+
+def test_sl_then_tp_across_bars_uses_first_hit_sl() -> None:
+    """先に SL、後で TP に到達 → 先着 SL を採用 (-1R)。"""
+    df = _ohlcv([
+        (TRIG + timedelta(hours=1), 150.3, 148.8, 149.0),  # SL 先着
+        (TRIG + timedelta(hours=2), 152.5, 150.0, 152.2),  # 後で TP 到達
+    ])
+    res = _evaluator(df).evaluate(
+        pair="USDJPY=X", direction="long",
+        trigger_price=150.0, sl=149.0, tp=152.0,
+        triggered_at=TRIG, horizon_seconds=86400,
+    )
+    assert res.would_hit_sl is True
+    assert res.pnl_r == pytest.approx(-1.0)
+
+
+def test_make_hindsight_evaluator_wraps_price_store(tmp_path) -> None:
+    """make_hindsight_evaluator は PriceStore.load_ohlcv をラップした評価器を返す。
+
+    Phase 6 結線の土台。factory 経由でも trigger 後 OHLCV から R を算出できること。
+    """
+    from src.data.price_store import PriceStore
+
+    ps = PriceStore(tmp_path / "prices.db")
+    ps.upsert_ohlcv(
+        "USDJPY=X",
+        pd.DataFrame(
+            {
+                "Open": [150.0, 151.0], "High": [150.8, 151.6],
+                "Low": [149.8, 150.9], "Close": [150.7, 151.5], "Volume": [0, 0],
+            },
+            index=pd.to_datetime([TRIG + timedelta(hours=1), TRIG + timedelta(hours=2)]),
+        ),
+    )
+    evaluator = make_hindsight_evaluator(ps)
+    assert isinstance(evaluator, HindsightEvaluator)
+    res = evaluator.evaluate(
+        pair="USDJPY=X", direction="long",
+        trigger_price=150.0, sl=149.4, tp=151.5,
+        triggered_at=TRIG, horizon_seconds=86400,
+    )
+    assert res.has_data is True
+    assert res.would_hit_tp is True
+    assert res.pnl_r is not None
 
 
 def test_zero_risk_distance_returns_failed() -> None:
