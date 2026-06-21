@@ -24,7 +24,7 @@
 
 - **Modify** `src/config/schema.py` — `ScheduleConfig` に 2 つの interval フィールド追加。
 - **Modify** `src/jobs/technical_collector.py` — `collect_watch_technical` / `collect_trade_technical` を抽出、`collect_all_technical` を wrapper 化、`run_trade_technical_collection` / `run_watch_technical_collection` 追加、econ phase を `_collect_econ_impact` に抽出。
-- **Create** `src/jobs/technical_schedule.py` — `technical_times_for(interval_hours)` 純関数 (テスト容易化のため独立ファイル)。
+- **Create** `src/jobs/technical_schedule.py` — `technical_times_for(interval_hours)` 純関数 + `build_technical_dispatch(...)` (union 時刻 + watch→trade 単一 slot 逐次ディスパッチ。slot skip 回避)。
 - **Modify** `main.py` — `technical_times` を config 駆動の 2 系統に置換、別スケジュール登録、初回 collection を watch→trade 逐次化。
 - **Create** `tests/test_technical_collection_split.py` — 分割の振る舞いテスト (Task 3/4/5)。
 - **Create** `tests/test_technical_schedule.py` — `technical_times_for` テスト (Task 1/2)。
@@ -427,6 +427,46 @@ def test_collect_trade_skips_watch_with_missing_prices(tmp_path, monkeypatch):
     # trade は収集され、相関の watch 入力は空 (SPY 除外)
     assert store.get_latest_collect_row("USDJPY=X") is not None
     assert captured["watch_symbols"] == []
+
+
+def test_collect_trade_excludes_stale_watch_from_correlation(tmp_path, monkeypatch):
+    """watch の最新バーが stale (閾値超) なら相関入力から除外される。"""
+    import src.jobs.technical_collector as tc
+    from src.jobs.technical_collector import collect_trade_technical
+
+    store = AnalysisStore(tmp_path / "test.db")
+    watch = [_inst("SPY", "S&P500", "index")]  # index → watch staleness 閾値 120h
+    tradeable = [_inst("USDJPY=X", "USD/JPY")]
+    _patch_collectible(monkeypatch)
+
+    # 十分なバー数だが最新バーが 200h 前 = watch 閾値 120h を超え stale
+    n = 60
+    old_end = db_now() - timedelta(hours=200)
+    idx = pd.date_range(end=old_end, periods=n, freq="1h")
+    closes = [400.0 + (j % 5) * 0.5 for j in range(n)]
+    stale_df = pd.DataFrame(
+        {"Open": closes, "High": closes, "Low": closes,
+         "Close": closes, "Volume": [1000] * n}, index=idx,
+    )
+    price_store = MagicMock()
+    price_store.load_ohlcv.return_value = stale_df
+
+    captured = {}
+
+    def _fake_corr(trade_prices, watch_prices, watch_names, **kw):
+        captured["watch_symbols"] = sorted(watch_prices.keys())
+        return []
+
+    monkeypatch.setattr(tc, "compute_correlations", _fake_corr)
+    monkeypatch.setattr(tc, "format_macro_context_for_prompt", lambda *a, **kw: "MACRO")
+
+    asyncio.run(collect_trade_technical(
+        config=_split_config(watch, tradeable), store=MagicMock(),
+        price_store=price_store, analysis_store=store, force=True,
+    ))
+
+    assert store.get_latest_collect_row("USDJPY=X") is not None  # trade は継続
+    assert captured["watch_symbols"] == []  # stale な SPY は除外
 ```
 
 - [ ] **Step 2: テストを実行して失敗を確認**
@@ -462,7 +502,9 @@ def _reload_watch_prices(
 ) -> dict[str, "PriceData"]:
     """相関計算用に watch 価格を PriceStore から再ロードする。
 
-    空・バー不足の watch symbol は除外する (相関入力から外れるだけで trade 収集は継続)。
+    空・バー不足・stale な watch symbol は除外する (相関入力から外れるだけで trade 収集は継続)。
+    分割後は watch 収集が停止しても prices.db に古いバーが残るため、stale 判定で古いバーを
+    相関から弾く (code review Medium)。
     """
     from src.data.price_fetcher import PriceData
     from src.utils.clock import db_now
@@ -479,10 +521,15 @@ def _reload_watch_prices(
             continue
         if df is None or df.empty or len(df) < min_bars:
             continue
-        last_close = float(df["Close"].iloc[-1])
-        out[w.symbol] = PriceData(
-            symbol=w.symbol, df=df, current_price=last_close, fetched_at=end,
+        pd_w = PriceData(
+            symbol=w.symbol, df=df,
+            current_price=float(df["Close"].iloc[-1]), fetched_at=end,
         )
+        # 古いバーで相関を作り続けないよう stale 判定 (既存ヘルパ流用、watch 閾値=120h)
+        if _is_price_data_stale(pd_w, max_staleness=_max_staleness_for(w)) is not None:
+            logger.debug(f"[CORR] watch {w.symbol} stale, excluded from correlation")
+            continue
+        out[w.symbol] = pd_w
     return out
 ```
 
@@ -821,7 +868,108 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd /home/teru/project/finance && git add src/jo
 
 ---
 
-## Task 7: main.py の結線 (別スケジュール + 初回逐次)
+## Task 7: union ディスパッチ関数 (build_technical_dispatch)
+
+spec §5.1 の slot-skip 回避。watch/trade を**別々に登録せず**、union 時刻ごとに 1 つの
+scheduled job を登録し、その job 内で単一 slot 取得のまま watch→trade を逐次実行する。
+この振る舞いをテストできるよう、ディスパッチ生成を `main.py` ではなく純関数に切り出す。
+
+**Files:**
+- Create: `src/jobs/technical_schedule.py` (Task 2 で作成済み、追記)
+- Test: `tests/test_technical_schedule.py` (追記)
+
+- [ ] **Step 1: 失敗テストを追記**
+
+`tests/test_technical_schedule.py` の末尾に追加:
+
+```python
+def test_build_technical_dispatch_routes_by_time():
+    """union 時刻ごとに、trade 時刻のみ→trade、watch 時刻のみ→watch、両方→watch→trade 順。"""
+    from src.jobs.technical_schedule import build_technical_dispatch
+
+    calls = []  # (kind, time) の順序を記録
+    runners = {
+        "watch": lambda t: calls.append(("watch", t)),
+        "trade": lambda t: calls.append(("trade", t)),
+    }
+    trade_set = {"00:00", "01:00"}      # trade は毎時
+    watch_set = {"00:00"}               # watch は 00:00 のみ
+    times, dispatch = build_technical_dispatch(
+        trade_set, watch_set, runners["watch"], runners["trade"],
+    )
+
+    assert times == ["00:00", "01:00"]  # union, ソート済み
+
+    dispatch("00:00")
+    dispatch("01:00")
+    # 00:00 は watch→trade 両方 (順序保証)、01:00 は trade のみ
+    assert calls == [("watch", "00:00"), ("trade", "00:00"), ("trade", "01:00")]
+
+
+def test_build_technical_dispatch_watch_only_time():
+    """watch のみの時刻では watch だけ実行する。"""
+    from src.jobs.technical_schedule import build_technical_dispatch
+
+    calls = []
+    times, dispatch = build_technical_dispatch(
+        trade_set={"00:00"}, watch_set={"06:00"},
+        run_watch=lambda t: calls.append(("watch", t)),
+        run_trade=lambda t: calls.append(("trade", t)),
+    )
+    assert times == ["00:00", "06:00"]
+    dispatch("06:00")
+    assert calls == [("watch", "06:00")]
+```
+
+- [ ] **Step 2: テストを実行して失敗を確認**
+
+Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd /home/teru/project/finance && .venv/bin/python -m pytest tests/test_technical_schedule.py -v -k dispatch"`
+Expected: FAIL — `ImportError: cannot import name 'build_technical_dispatch'`
+
+- [ ] **Step 3: build_technical_dispatch を実装**
+
+`src/jobs/technical_schedule.py` に追加:
+
+```python
+from collections.abc import Callable
+
+
+def build_technical_dispatch(
+    trade_set: set[str],
+    watch_set: set[str],
+    run_watch: Callable[[str], None],
+    run_trade: Callable[[str], None],
+) -> tuple[list[str], Callable[[str], None]]:
+    """union 時刻リストと、時刻ごとのディスパッチ関数を返す。
+
+    ディスパッチは単一 slot 内で呼ばれる前提で、時刻が watch_set に入れば watch を、
+    trade_set に入れば trade を **watch→trade の順**に同期実行する (slot skip 回避)。
+    """
+    times = sorted(trade_set | watch_set)
+
+    def dispatch(t: str) -> None:
+        if t in watch_set:
+            run_watch(t)
+        if t in trade_set:
+            run_trade(t)
+
+    return times, dispatch
+```
+
+- [ ] **Step 4: テストを実行して成功を確認**
+
+Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd /home/teru/project/finance && .venv/bin/python -m pytest tests/test_technical_schedule.py -v"`
+Expected: PASS (全件)
+
+- [ ] **Step 5: コミット**
+
+```bash
+wsl -d Ubuntu-24.04 -- bash -lc "cd /home/teru/project/finance && git add src/jobs/technical_schedule.py tests/test_technical_schedule.py && git commit -m 'feat: build_technical_dispatch (union 時刻 + watch→trade 単一 slot 逐次)'"
+```
+
+---
+
+## Task 8: main.py の結線 (union ディスパッチ + exit_check 温存 + 初回逐次)
 
 **Files:**
 - Modify: `main.py`
@@ -830,18 +978,19 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd /home/teru/project/finance && git add src/jo
 
 `main.py` の以下を確認:
 - 行 158: `technical_times = [f"{h:02d}:00" for h in range(24)]` (ハードコード)
-- 行 247-251: `technical_times` を **exit_check** (SL/TP 確認) が利用 — **変更しない**
+- 行 247-251: `technical_times` を **exit_check** (SL/TP 確認) が利用 — **変更しない (毎時固定温存)**
 - 行 263-270: technical 収集スケジュール登録 (`run_technical_collection` を `_run_with_slot` +
-  `_market_aware=True`) — ここを置換
+  `_market_aware=True`) — ここを union ディスパッチに置換
 - 行 374-380: 初回 collection (`run_technical_collection(..., force=is_fresh_start, ...)`) — 置換
 
-> **注意:** 行 158 の `technical_times` は exit_check (247-251) がまだ使うので**残す**。
-> このタスクで触るのは技術収集 (263-270) と初回 (374-380) のみ。
+> **重要 (code review Medium):** 行 158 の `technical_times` は exit_check (247-251) が使う。
+> これを technical interval config に連動させると SL/TP 確認まで間隔が伸びる事故になる。
+> **`technical_times` は毎時固定のまま exit_check 専用として残し**、technical 収集だけが
+> union 時刻を使う。
 
-- [ ] **Step 2: import とスケジュール時刻生成を追加**
+- [ ] **Step 2: import と union 時刻・ディスパッチを追加**
 
-`main.py` の technical collector import 箇所を更新 (既存
-`from src.jobs.technical_collector import run_technical_collection` を拡張):
+`main.py` の technical collector import を拡張:
 
 ```python
 from src.jobs.technical_collector import (
@@ -849,40 +998,50 @@ from src.jobs.technical_collector import (
     run_trade_technical_collection,
     run_watch_technical_collection,
 )
-from src.jobs.technical_schedule import technical_times_for
+from src.jobs.technical_schedule import technical_times_for, build_technical_dispatch
 ```
 
-行 158 の直後に config 駆動の 2 系統の時刻を追加 (行 158 の `technical_times` は残す):
+行 158 の直後に追加 (行 158 の `technical_times` は exit_check 用に**残す**):
 
 ```python
-    # technical 収集は trade/watch 別 interval (既定は両方 1h = 毎時、現状維持)
-    trade_tech_times = technical_times_for(config.schedule.technical_trade_interval_hours)
-    watch_tech_times = technical_times_for(config.schedule.technical_watch_interval_hours)
+    # technical 収集は trade/watch 別 interval (既定は両方 1h = 毎時)。
+    # 単一 slot skip を避けるため union 時刻 + watch→trade 逐次ディスパッチにする。
+    _trade_tech_set = set(technical_times_for(config.schedule.technical_trade_interval_hours))
+    _watch_tech_set = set(technical_times_for(config.schedule.technical_watch_interval_hours))
+
+    def _run_watch_tech(_t: str) -> None:
+        run_watch_technical_collection(
+            config, store, price_store, analysis_store,
+            price_provider=price_provider,
+        )
+
+    def _run_trade_tech(_t: str) -> None:
+        run_trade_technical_collection(
+            config, store, price_store, analysis_store,
+            price_provider=price_provider, gate=bridge_gate,
+        )
+
+    _tech_union_times, _tech_dispatch = build_technical_dispatch(
+        _trade_tech_set, _watch_tech_set, _run_watch_tech, _run_trade_tech,
+    )
 ```
 
-- [ ] **Step 3: スケジュール登録を 2 系統に置換**
+- [ ] **Step 3: スケジュール登録を union ディスパッチに置換**
 
-`main.py` 行 263-270 の技術収集登録ブロックを置換:
+`main.py` 行 263-270 の技術収集登録ブロックを置換 (各 union 時刻につき 1 登録、1 slot 内で
+watch→trade を逐次実行):
 
 ```python
-    # 4a. テクニカル分析 (trade 経路・LLMあり・gate probe あり)
-    for t in trade_tech_times:
+    # 4. テクニカル分析 (trade/watch を union 時刻で単一 slot 内逐次実行)
+    for t in _tech_union_times:
         schedule.every().day.at(t, news_tz).do(
-            _run_with_slot,
-            run_trade_technical_collection, config, store, price_store, analysis_store,
-            price_provider=price_provider,
-            gate=bridge_gate,
-            _market_aware=True,
-        )
-    # 4b. テクニカル分析 (watch 経路・LLMあり・gate probe なし・低頻度固定)
-    for t in watch_tech_times:
-        schedule.every().day.at(t, news_tz).do(
-            _run_with_slot,
-            run_watch_technical_collection, config, store, price_store, analysis_store,
-            price_provider=price_provider,
-            _market_aware=True,
+            _run_with_slot, _tech_dispatch, t, _market_aware=True,
         )
 ```
+
+> **注意:** `_run_with_slot(fn, *args, ...)` は `fn(*args)` を slot 内で 1 回呼ぶ
+> ([main.py:59-76])。`_tech_dispatch` を渡し `t` を引数にすることで、1 slot 取得の中で
+> watch→trade が逐次実行される (片方 skip が起きない)。
 
 - [ ] **Step 4: 初回 collection を watch→trade 逐次に置換**
 
@@ -911,12 +1070,12 @@ Expected: `IMPORT_OK` (構文・import エラーなし)
 - [ ] **Step 6: コミット**
 
 ```bash
-wsl -d Ubuntu-24.04 -- bash -lc "cd /home/teru/project/finance && git add main.py && git commit -m 'feat: main.py で technical 収集を trade/watch 別スケジュール化 + 初回逐次'"
+wsl -d Ubuntu-24.04 -- bash -lc "cd /home/teru/project/finance && git add main.py && git commit -m 'feat: main.py で technical 収集を union ディスパッチ化 (slot skip 回避) + 初回逐次'"
 ```
 
 ---
 
-## Task 8: 全テスト suite green 確認 + code review + memory 更新
+## Task 9: 全テスト suite green 確認 + code review + memory 更新
 
 **Files:** なし (検証 + memory のみ)
 
@@ -942,12 +1101,16 @@ ecc:python-reviewer または ecc:code-reviewer で
 
 ## Self-Review Notes (記入済み)
 
-- **Spec coverage:** §3 分割 (Task 3/4/5)、§3.1 相関再ロード (Task 4)、§3.2 econ 移設 (Task 4)、
-  §4 config (Task 1/2)、§5 main.py 結線 + 初回逐次 (Task 7)、§6 テスト (Task 1-6)、
-  §7 別タスク (Task 8 Step 3 で memory に引き継ぎ)。全カバー。
+- **Spec coverage:** §3 分割 (Task 3/4/5)、§3.1 相関再ロード + stale 除外 + PriceData 明示
+  (Task 4)、§3.2 econ 移設 (Task 4)、§4 config (Task 1/2)、§5.1 union ディスパッチ (Task 7/8)、
+  §5.3 exit_check 温存 (Task 8 Step 1 の注意 + 行 158 を残す)、§5.4 初回逐次 (Task 8)、
+  §6 テスト (Task 1-8: #4 stale 除外 = Task 4 / #8 union = Task 7)、§7 別タスク
+  (Task 9 Step 3 で memory に引き継ぎ)。全カバー。
 - **型整合:** `collect_watch_technical` / `collect_trade_technical` /
   `run_trade_technical_collection` / `run_watch_technical_collection` / `technical_times_for` /
-  `_reload_watch_prices` / `_collect_econ_impact` の名前は全タスクで一貫。
+  `build_technical_dispatch` / `_reload_watch_prices` / `_collect_econ_impact` の名前は全タスクで
+  一貫。`build_technical_dispatch(trade_set, watch_set, run_watch, run_trade) -> (times, dispatch)`
+  の引数順は Task 7 のテスト・実装・Task 8 の呼び出しで一致。
   `compute_correlations(trade_prices, watch_prices, watch_names)` は実シグネチャ
   ([src/data/correlation.py:58]) と一致。`PriceData(symbol, df, current_price, fetched_at)` は
   実 dataclass ([price_fetcher.py:22]) と一致。`load_ohlcv(symbol, start, end)` は実シグネチャ
