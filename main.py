@@ -386,17 +386,28 @@ def main() -> None:
     # Orchestrator agent loop (shadow)。enabled 時のみ planning/watch/hindsight ループ +
     # shadow 通知 worker を起動する。既存 trading cycle とは並走 (Phase 2〜6 は停止しない)。
     # broker adapter は渡さない (shadow 境界)。disabled なら None で no-op。
-    from src.orchestrator.bootstrap import build_orchestrator_runtime
-    orchestrator = build_orchestrator_runtime(
-        config, store=store, price_store=price_store,
-        analysis_store=analysis_store, price_provider=price_provider,
-    )
-    if orchestrator is not None:
-        orchestrator.start()
-        _console.print(
-            f"[green][OK][/green]  Orchestrator (shadow) running — "
-            f"mode={config.orchestrator.mode}"
+    # shadow 機能の結線/起動失敗で既存 scheduler/trading/API まで巻き込まないよう guard。
+    # 段階導入: orchestrator が立ち上がらなくても本体は継続する (Codex Medium)。
+    orchestrator = None
+    try:
+        from src.orchestrator.bootstrap import build_orchestrator_runtime
+        orchestrator = build_orchestrator_runtime(
+            config, store=store, price_store=price_store,
+            analysis_store=analysis_store, price_provider=price_provider,
         )
+        if orchestrator is not None:
+            orchestrator.start()
+            _console.print(
+                f"[green][OK][/green]  Orchestrator (shadow) running — "
+                f"mode={config.orchestrator.mode}"
+            )
+    except Exception:
+        _logger.exception("[ORCH] bootstrap failed — orchestrator disabled, app continues")
+        _console.print(
+            "[yellow][WARN][/yellow] Orchestrator bootstrap failed — disabled "
+            "(既存 trading cycle は継続)"
+        )
+        orchestrator = None
 
     _console.print(Rule("[dim cyan]Scheduler running[/dim cyan]", style="dim cyan"))
 

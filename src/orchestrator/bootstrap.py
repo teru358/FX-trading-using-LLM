@@ -29,6 +29,7 @@ from src.orchestrator.hindsight_evaluator import make_hindsight_evaluator
 from src.orchestrator.material_landing import MaterialLandingDetector
 from src.orchestrator.runtime import OrchestratorRuntime, QuoteProvider
 from src.orchestrator.shadow_notifier import create_shadow_notifier
+from src.trading.market_state import market_skip_check
 from src.utils.clock import db_now
 
 if TYPE_CHECKING:
@@ -45,9 +46,10 @@ logger = logging.getLogger(__name__)
 def make_quote_provider(price_provider: "PriceProvider") -> QuoteProvider:
     """PriceProvider.get_current_price を §7 QuoteSnapshot provider に適合させる。
 
-    CurrentPrice は bid/ask を持たず price のみ (yfinance/TD/MT5 共通形)。Phase 6 では
-    bid=ask=mid=price / spread=0 とする (実 spread の tick 受信は websocket 化の後続
-    フェーズ)。spread=0 は spread gate を必ず通すが、shadow は発注しないため許容。
+    CurrentPrice は bid/ask を持たず price のみ (yfinance/TD/MT5 共通形)。実 spread が
+    取れないため **spread=None (不明)** とする (Codex Low-Medium)。spread=0 にすると spread
+    gate を楽観的に必ず通し shadow 検証値が歪むため、不明として gate に安全側 (block/reject)
+    で扱わせる。実 spread (bid/ask) の tick 受信は websocket 化の後続フェーズ。
     """
 
     def provider(pair: str) -> QuoteSnapshot:
@@ -56,9 +58,49 @@ def make_quote_provider(price_provider: "PriceProvider") -> QuoteProvider:
         # が無ければ now で補完する。context_builder は isoformat して snapshot に保存する。
         observed = cp.timestamp or db_now()
         return QuoteSnapshot(
-            bid=cp.price, ask=cp.price, mid=cp.price, spread=0.0,
+            bid=cp.price, ask=cp.price, mid=cp.price, spread=None,
             source=cp.source, observed_at=observed,
         )
+
+    return provider
+
+
+def _read_halt(config: "AppConfig") -> tuple[bool, str, str]:
+    """halt 状態を (halted, halt_level, bridge_health) に正規化する。
+
+    bridge の live probe は副作用 (再 halt 発動) と遅延があるため毎 cycle 叩かない。
+    bridge 不通は既存設計で halt に反映される (BridgeHealthGate が soft halt を発動) ため、
+    halt 状態から bridge_health を導出する: auto_triggered な halt = bridge/health 由来の
+    可能性が高い → degraded、手動 halt は ok 扱い。
+    """
+    from src.persistence import halt_state
+
+    state = halt_state.read(config.state_dir)
+    if not state.soft_halted:
+        return (False, "none", "ok")
+    bridge = "degraded" if state.auto_triggered else "ok"
+    return (True, "soft", bridge)
+
+
+def make_risk_state_provider(config: "AppConfig"):
+    """market_skip_check + halt_state を §7 risk_state に集約する provider。
+
+    休場中 (market_skip_check) は market_open=False、soft halt 中は halt='soft' を返す。
+    これを DecisionContextBuilder に注入することで、休場/halt 中の planning は risk_gate
+    structural reject、watch trigger は freshness_issues の market/halt wall で止まる
+    (Codex High: 固定 risk_state による gate 素通りの是正)。
+    """
+
+    def provider(pair: str) -> dict:
+        halted, halt_level, bridge_health = _read_halt(config)
+        return {
+            "halt": halt_level,
+            "bridge_health": bridge_health,
+            "market_open": not market_skip_check(),
+            # cooldown (timeout 後の再エントリ抑制) は pair 別状態で別管理。ここでは
+            # 集約せず False (re-entry guard は RiskGateWorker 側 §4.5 の後続作業)。
+            "cooldown": False,
+        }
 
     return provider
 
@@ -87,15 +129,33 @@ def build_orchestrator_runtime(
 
     orch_store = OrchestratorStore(config.prices_db_path)
 
-    # pairs は tradeable のみ (watch は planning/trigger 対象外、§4.8)。
-    pairs = [inst.symbol for inst in config.tradeable_instruments]
+    # pairs は tradeable のみ (watch は planning/trigger 対象外、§4.8)。orch.pairs が
+    # 指定されていれば tradeable との intersection に絞る (orchestrator だけ USDJPY に
+    # 限定する等の運用、Codex Medium)。watch/未知 symbol は warning で除外する。
+    tradeable = [inst.symbol for inst in config.tradeable_instruments]
+    configured = list(orch_cfg.pairs or [])
+    if configured:
+        tradeable_set = set(tradeable)
+        pairs = [s for s in configured if s in tradeable_set]
+        dropped = [s for s in configured if s not in tradeable_set]
+        if dropped:
+            logger.warning(
+                "[ORCH] orchestrator.pairs に tradeable でない symbol が含まれ除外: %s",
+                dropped,
+            )
+    else:
+        pairs = tradeable
     if not pairs:
-        logger.warning("[ORCH] no tradeable instruments — runtime not built")
+        logger.warning(
+            "[ORCH] no tradeable pairs to orchestrate (configured=%s) — runtime not built",
+            configured or "<all tradeable>",
+        )
         return None
 
     context_builder = DecisionContextBuilder(
         orch_store, analysis_store, orch_cfg,
         news_provider=make_news_provider(config, store),
+        risk_state_provider=make_risk_state_provider(config),
     )
 
     quote_provider = make_quote_provider(price_provider)

@@ -144,12 +144,17 @@ def _build_runtime(
         config=OrchestratorConfig(),
     )
 
-    def get_latest_technical(pair: str):
-        snaps = AnalysisStore(db).get_recent_ok_snapshots(pair)
-        return snaps[0] if snaps else None
+    # detector の technical 入力は wall-clock 非依存の固定スナップで与える。
+    # get_recent_ok_snapshots は db_now() 相対 lookback のため、固定 NOW(2026-06-21) seed が
+    # 実時刻と離れると窓外になり material 判定が時刻依存で揺れる。E2E は debounce 経路を
+    # 安定検証したいので material=True を固定する (collect_status=ok / bias 固定)。
+    class _FakeTech:
+        collect_status = "ok"
+        direction_bias = "long"
+        bias_score = 0.5
 
     detector = MaterialLandingDetector(
-        get_latest_technical=get_latest_technical,
+        get_latest_technical=lambda pair: _FakeTech(),
         material_bias_delta_min=0.20,
         pairs=["USDJPY=X"],
     )

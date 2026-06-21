@@ -150,6 +150,16 @@ class TestFixableReject:
         assert res.passed is False
         assert res.reject_class == "fixable"
 
+    def test_spread_unknown_is_fixable(self, worker: RiskGateWorker) -> None:
+        """spread が None (不明) なら楽観通過させず fixable reject (Codex Low-Medium)。
+
+        実 spread が取れない (bid/ask 無し) 場合に通過させると shadow 評価が楽観化する。
+        """
+        res = worker.pre_check(_draft(), _ctx(spread=None))
+        assert res.passed is False
+        assert res.reject_class == "fixable"
+        assert any("spread" in i.lower() for i in res.issues)
+
     def test_eurusd_spread_uses_pip_0001(self, worker: RiskGateWorker) -> None:
         # Codex High#3: EURUSD の 3 pips = 0.0003。pip_size=0.01 固定だと
         # 0.0003/0.01=0.03 pips と過小評価され見逃す。pair 依存なら 3 pips で reject。

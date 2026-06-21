@@ -34,6 +34,18 @@ def _ctx(
     }
 
 
+def test_freshness_blocks_when_spread_unknown() -> None:
+    """spread が None (不明) なら freshness wall で block する (楽観通過しない, Codex)。
+
+    実 spread が取れない場合に spread=0 で楽観評価すると shadow 検証値が歪む。
+    """
+    ev = WatchEvaluator(OrchestratorEntryConfig())
+    ctx = _ctx()
+    ctx["quote"]["spread"] = None
+    issues = ev.freshness_issues(ctx)
+    assert any("spread" in i for i in issues)
+
+
 # ── entry_conditions (§6.2, AND only) ──────────────────────────
 
 

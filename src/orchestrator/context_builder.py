@@ -29,6 +29,18 @@ logger = logging.getLogger(__name__)
 # オプション注入パターンで、None なら従来の空 news に倒す。
 NewsProvider = Callable[[str], dict[str, Any]]
 
+# pair -> §7 risk_state ブロック ({"halt", "bridge_health", "market_open", "cooldown"})。
+# market_skip_check / halt_state / bridge health を集約するアダプタ。None なら従来の
+# 楽観既定 (_empty_risk_state) に倒す (後方互換)。production では必ず注入する
+# (未注入だと休場/halt 中でも gate が素通りする — Codex High)。
+RiskStateProvider = Callable[[str], dict[str, Any]]
+
+# provider 失敗時に倒す安全側 risk_state。gate 状態が読めない以上、楽観既定 (market_open=
+# True) ではなく執行を止める方向に倒す (休場/halt 中の誤 trigger を防ぐ)。
+_SAFE_RISK_STATE = {
+    "halt": "soft", "bridge_health": "unknown", "market_open": False, "cooldown": True,
+}
+
 
 @dataclass
 class QuoteSnapshot:
@@ -36,7 +48,7 @@ class QuoteSnapshot:
     bid: float
     ask: float
     mid: float
-    spread: float
+    spread: float | None   # None = 実 spread 不明 (bid/ask 無し provider)。gate は安全側に倒す
     source: str
     observed_at: datetime
 
@@ -55,11 +67,13 @@ class DecisionContextBuilder:
         analysis_store: AnalysisStore,
         config: OrchestratorConfig,
         news_provider: NewsProvider | None = None,
+        risk_state_provider: "RiskStateProvider | None" = None,
     ) -> None:
         self._orch = orch_store
         self._analysis = analysis_store
         self._config = config
         self._news_provider = news_provider
+        self._risk_state_provider = risk_state_provider
 
     # technical snapshot をこの分数より古ければ stale 扱いにする (decision に古い
     # データを使わせない)。
@@ -123,7 +137,7 @@ class DecisionContextBuilder:
             "position": self._empty_position(),
             "technical": {k: v for k, v in technical.items() if k != "_ref"},
             "news": {k: v for k, v in news.items() if k != "_ref"},
-            "risk_state": self._empty_risk_state(),
+            "risk_state": self._build_risk_state(pair),
             "data_health": {"issues": []},
             "recent_decisions": {"items": []},
             "recent_orders": {"items": []},
@@ -222,6 +236,24 @@ class DecisionContextBuilder:
     @staticmethod
     def _empty_news() -> dict[str, Any]:
         return {"sentiment_score": None, "confidence": None, "top_reasons": []}
+
+    def _build_risk_state(self, pair: str) -> dict[str, Any]:
+        """risk_state_provider 経由で実 gate 状態を取る。未注入なら楽観既定。
+
+        provider 失敗時は安全側 (_SAFE_RISK_STATE) に倒す: gate 状態が読めないのに
+        market_open=True の楽観既定に倒すと、休場/halt 中でも planning/watch が通る
+        (Codex High)。production では bootstrap が必ず provider を注入する。
+        """
+        if self._risk_state_provider is None:
+            return self._empty_risk_state()
+        try:
+            return self._risk_state_provider(pair)
+        except Exception:
+            logger.warning(
+                "[ORCH] risk_state provider failed for %s — failing safe (no trigger)",
+                pair, exc_info=True,
+            )
+            return dict(_SAFE_RISK_STATE)
 
     @staticmethod
     def _empty_risk_state() -> dict[str, Any]:

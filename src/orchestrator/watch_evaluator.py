@@ -149,8 +149,12 @@ class WatchEvaluator:
                     f"> {self._entry.max_technical_age_seconds}s"
                 )
 
+        # spread 不明 (None) は安全側 = block (Codex Low-Medium): 実 spread が取れない
+        # まま trigger すると shadow 検証値が楽観化する。
         spread = context.get("quote", {}).get("spread")
-        if spread is not None:
+        if spread is None:
+            issues.append("spread unknown")
+        else:
             pip = _pip_size_for(context.get("pair"))
             spread_pips = spread / pip
             if spread_pips > self._entry.spread_max_pips:

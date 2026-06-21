@@ -175,6 +175,81 @@ def test_build_falls_back_to_empty_news_when_provider_none(builder: DecisionCont
     assert snap.news_ref is None
 
 
+def test_build_uses_injected_risk_state_provider(tmp_path: Path) -> None:
+    """risk_state_provider 注入時は build()/assemble() の risk_state が provider 由来になる。
+
+    休場中・halt 中を context に反映できないと risk_gate / watch の final wall が
+    固定値 (market_open=True/halt=none) で素通りしてしまう (Codex High)。
+    """
+    db = tmp_path / "orch.db"
+    captured: list[str] = []
+
+    def risk_provider(pair: str) -> dict:
+        captured.append(pair)
+        return {"halt": "soft", "bridge_health": "down", "market_open": False, "cooldown": True}
+
+    builder = DecisionContextBuilder(
+        orch_store=OrchestratorStore(db),
+        analysis_store=AnalysisStore(db),
+        config=OrchestratorConfig(),
+        risk_state_provider=risk_provider,
+    )
+    quote = QuoteSnapshot(
+        bid=150.0, ask=150.02, mid=150.01, spread=0.02,
+        source="mt5", observed_at=datetime(2026, 6, 20, 12, 0, 0),
+    )
+    now = datetime(2026, 6, 20, 12, 0, 0)
+    ctx = builder.build(pair="USDJPY=X", now=now, quote=quote)
+    assert captured == ["USDJPY=X"]
+    assert ctx["risk_state"] == {
+        "halt": "soft", "bridge_health": "down", "market_open": False, "cooldown": True,
+    }
+    # assemble() (watch 経路) も同じ provider を通す
+    actx = builder.assemble(pair="USDJPY=X", now=now, quote=quote)
+    assert actx["risk_state"]["market_open"] is False
+
+
+def test_build_risk_state_none_provider_uses_empty(builder: DecisionContextBuilder) -> None:
+    """risk_state_provider 未注入なら従来の楽観既定 (後方互換)。production は必ず注入する。"""
+    quote = QuoteSnapshot(
+        bid=150.0, ask=150.02, mid=150.01, spread=0.02,
+        source="mt5", observed_at=datetime(2026, 6, 20, 12, 0, 0),
+    )
+    ctx = builder.build(
+        pair="USDJPY=X", now=datetime(2026, 6, 20, 12, 0, 0), quote=quote,
+    )
+    assert ctx["risk_state"] == {
+        "halt": "none", "bridge_health": "ok", "market_open": True, "cooldown": False,
+    }
+
+
+def test_build_risk_state_provider_failure_falls_safe(tmp_path: Path) -> None:
+    """risk_state_provider が例外を投げたら安全側 (market_open=False) に倒す。
+
+    gate 状態が取れないのに楽観既定に倒すと、休場/halt 中でも trigger しうる。安全側。
+    """
+    db = tmp_path / "orch.db"
+
+    def boom(pair: str) -> dict:
+        raise RuntimeError("gate read failed")
+
+    builder = DecisionContextBuilder(
+        orch_store=OrchestratorStore(db),
+        analysis_store=AnalysisStore(db),
+        config=OrchestratorConfig(),
+        risk_state_provider=boom,
+    )
+    quote = QuoteSnapshot(
+        bid=150.0, ask=150.02, mid=150.01, spread=0.02,
+        source="mt5", observed_at=datetime(2026, 6, 20, 12, 0, 0),
+    )
+    ctx = builder.build(
+        pair="USDJPY=X", now=datetime(2026, 6, 20, 12, 0, 0), quote=quote,
+    )
+    assert ctx["risk_state"]["market_open"] is False
+    assert ctx["risk_state"]["bridge_health"] != "ok"
+
+
 def test_build_survives_news_provider_failure(tmp_path: Path) -> None:
     """news_provider が例外を投げても build() は落ちず空 news に倒す (材料1つで全停止しない)。"""
     db = tmp_path / "orch.db"

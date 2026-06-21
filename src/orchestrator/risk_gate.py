@@ -152,9 +152,13 @@ class RiskGateWorker:
             issues.append(f"rr {rr} below min {self._min_rr}")
 
         # spread 上限。pip_size は pair 依存 (JPY=0.01, それ以外=0.0001)。
+        # spread 不明 (None) は楽観通過させず fixable reject (Codex Low-Medium): 実 spread
+        # が取れないまま発注判断品質を検証すると shadow 評価が楽観化する。
         spread = context.get("quote", {}).get("spread")
         pip_size = self._pip_size_of(context.get("pair"))
-        if spread is not None and pip_size > 0:
+        if spread is None:
+            issues.append("spread unknown")
+        elif pip_size > 0:
             spread_pips = spread / pip_size
             if spread_pips > self._spread_max_pips:
                 issues.append(
