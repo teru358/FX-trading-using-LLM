@@ -94,8 +94,19 @@ class OrchestratorRuntime:
                     result = asyncio.run(
                         self._pipeline.run(pair=pair, context=ctx, run_id=run_id)
                     )
-                    status = "failed" if result.outcome == "failed" else "ok"
-                    self._orch.finish_run(run_id, status=status)
+                    if result.outcome == "failed":
+                        # 一時失敗 (LLM timeout / parse / circuit) で baseline を消費しない:
+                        # committed を下ろし finally で mark_attempted 側に倒す (Codex High)。
+                        # 同じ材料の再 planning を抑制せず、次 tick で再評価させる。
+                        committed = False
+                        # 原因を DB に残し、後から SchemaParseError/Timeout 等を区別できる
+                        # ようにする (Codex Medium)。error_type は pipeline 由来 failed の標識。
+                        self._orch.finish_run(
+                            run_id, status="failed",
+                            error_type="PipelineFailed", error_message=result.error,
+                        )
+                    else:
+                        self._orch.finish_run(run_id, status="ok")
                 else:
                     # 後方互換 (pipeline 未注入): 機会判断を行わず direct_hold を記録する。
                     self._orch.record_decision(

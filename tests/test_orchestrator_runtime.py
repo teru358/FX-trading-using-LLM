@@ -298,6 +298,106 @@ def test_planning_cycle_marks_failed_when_pipeline_outcome_failed(tmp_path: Path
     assert run.finished_at is not None
     # snapshot は作れている (fail-safe は plan を作らないだけで snapshot は残す)
     assert run.snapshot_id is not None
+    # PipelineResult.error を DB に保存し、後から原因を区別できる (Codex Medium)
+    assert run.error_type == "PipelineFailed"
+    assert run.error_message == "SchemaParseError: boom"
+
+
+def test_pipeline_failed_marks_attempted_not_committed(tmp_path: Path) -> None:
+    """pipeline が failed を返したら material baseline を消費しない (mark_attempted 側)。
+
+    一時失敗 (LLM timeout / parse / circuit) で同じ材料の再 planning を抑制しないため、
+    snapshot を作れても planning が failed なら mark_committed しない (Codex High)。
+    """
+    from src.orchestrator.planning_pipeline import PipelineResult
+
+    db = tmp_path / "orch.db"
+    orch = OrchestratorStore(db)
+    builder = DecisionContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
+
+    def quote_provider(pair: str) -> QuoteSnapshot:
+        return QuoteSnapshot(
+            bid=150.0, ask=150.02, mid=150.01, spread=0.02,
+            source="test", observed_at=datetime(2026, 6, 20, 12, 0, 0),
+        )
+
+    class _FailingPipeline:
+        async def run(self, *, pair, context, run_id):
+            return PipelineResult(outcome="failed", error="TimeoutError: slow")
+
+    class _FakeDetector:
+        def __init__(self, fire):
+            self.fire = fire
+            self.committed = []
+            self.attempted = []
+        def pairs_to_plan(self, now):
+            return list(self.fire)
+        def mark_committed(self, pair, now):
+            self.committed.append(pair)
+        def mark_attempted(self, pair, now):
+            self.attempted.append(pair)
+
+    detector = _FakeDetector(fire=["USDJPY=X"])
+    runtime = OrchestratorRuntime(
+        config=OrchestratorConfig(),
+        orch_store=orch,
+        context_builder=builder,
+        pairs=["USDJPY=X"],
+        quote_provider=quote_provider,
+        detector=detector,
+        pipeline=_FailingPipeline(),
+    )
+    runtime.run_planning_cycle(now=datetime(2026, 6, 20, 12, 0, 0))
+
+    # snapshot は作れているが planning は failed → baseline を消費しない
+    assert detector.committed == []
+    assert detector.attempted == ["USDJPY=X"]
+
+
+def test_pipeline_success_marks_committed(tmp_path: Path) -> None:
+    """pipeline が成功 (failed 以外) を返したら baseline を消費する (mark_committed)。"""
+    from src.orchestrator.planning_pipeline import PipelineResult
+
+    db = tmp_path / "orch.db"
+    orch = OrchestratorStore(db)
+    builder = DecisionContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
+
+    def quote_provider(pair: str) -> QuoteSnapshot:
+        return QuoteSnapshot(
+            bid=150.0, ask=150.02, mid=150.01, spread=0.02,
+            source="test", observed_at=datetime(2026, 6, 20, 12, 0, 0),
+        )
+
+    class _OkPipeline:
+        async def run(self, *, pair, context, run_id):
+            return PipelineResult(outcome="direct_hold", decision_ids=[])
+
+    class _FakeDetector:
+        def __init__(self, fire):
+            self.fire = fire
+            self.committed = []
+            self.attempted = []
+        def pairs_to_plan(self, now):
+            return list(self.fire)
+        def mark_committed(self, pair, now):
+            self.committed.append(pair)
+        def mark_attempted(self, pair, now):
+            self.attempted.append(pair)
+
+    detector = _FakeDetector(fire=["USDJPY=X"])
+    runtime = OrchestratorRuntime(
+        config=OrchestratorConfig(),
+        orch_store=orch,
+        context_builder=builder,
+        pairs=["USDJPY=X"],
+        quote_provider=quote_provider,
+        detector=detector,
+        pipeline=_OkPipeline(),
+    )
+    runtime.run_planning_cycle(now=datetime(2026, 6, 20, 12, 0, 0))
+
+    assert detector.committed == ["USDJPY=X"]
+    assert detector.attempted == []
 
 
 def test_planning_cycle_only_processes_detector_pairs(tmp_path: Path) -> None:
