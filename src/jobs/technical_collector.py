@@ -349,6 +349,63 @@ async def _collect_one(
     )
 
 
+async def collect_watch_technical(
+    config: AppConfig,
+    store: VectorStore,
+    price_store: PriceStore,
+    analysis_store: AnalysisStore,
+    force: bool = False,
+    price_provider: "PriceProvider | None" = None,
+) -> None:
+    """watch_only 銘柄のみのテクニカル分析を収集する (macro/correlation 無し)。"""
+    if not force and not is_market_open():
+        return
+
+    watch_only = config.watch_only_instruments
+    if not watch_only:
+        return
+
+    llm_price = create_llm_client(config, "price_analysis")
+    delay = config.news_collection.inter_pair_delay_seconds
+    logger.info(f"[COLLECT] Watch technical: {len(watch_only)} watch-only instruments")
+
+    for i, inst in enumerate(watch_only):
+        try:
+            price_data = _fetch_instrument_ohlcv(inst, config, price_store, price_provider)
+        except Exception as e:
+            analysis_store.add_sentinel(
+                symbol=inst.symbol, status="failed",
+                reason=f"prefetch_failed: {type(e).__name__}: {e}",
+            )
+            logger.warning(f"[COLLECT] {inst.display_name}: failed sentinel (prefetch)")
+            if i < len(watch_only) - 1:
+                await asyncio.sleep(delay)
+            continue
+        try:
+            await _collect_one(
+                inst, config, store, price_store, analysis_store, llm_price,
+                price_provider=price_provider, price_data=price_data,
+            )
+        except Exception as e:
+            logger.error(
+                f"[COLLECT] {inst.display_name}: unexpected raise from _collect_one — {e}",
+                exc_info=True,
+            )
+            try:
+                analysis_store.add_sentinel(
+                    symbol=inst.symbol, status="failed",
+                    reason=f"unexpected_raise: {type(e).__name__}: {e}",
+                )
+            except Exception as sentinel_err:
+                logger.error(
+                    f"[COLLECT] {inst.display_name}: sentinel write also failed: "
+                    f"{type(sentinel_err).__name__}: {sentinel_err}",
+                    exc_info=False,
+                )
+        if i < len(watch_only) - 1:
+            await asyncio.sleep(delay)
+
+
 async def collect_all_technical(
     config: AppConfig,
     store: VectorStore,
