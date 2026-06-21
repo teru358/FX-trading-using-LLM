@@ -123,3 +123,38 @@ def test_build_orchestrator_config_null_hindsight_uses_defaults() -> None:
     cfg = _build_orchestrator_config({"enabled": True, "hindsight": None})
     assert cfg.hindsight.horizon_seconds == 86400
     assert cfg.hindsight.poll_interval_seconds == 600
+
+
+def test_orchestrator_notifications_config_defaults() -> None:
+    cfg = OrchestratorConfig()
+    # shadow 通知は既定で on (Phase 2 design §12)。各イベント個別フラグも既定 on。
+    assert cfg.notifications.shadow_enabled is True
+    assert cfg.notifications.shadow_plan_created is True
+    assert cfg.notifications.shadow_triggered is True
+    assert cfg.notifications.shadow_hindsight is True
+    assert cfg.notifications.shadow_daily_summary is True
+
+
+def test_build_orchestrator_config_parses_notifications_block() -> None:
+    raw = {
+        "enabled": True,
+        "notifications": {
+            "shadow_enabled": True,
+            "shadow_plan_created": False,
+            "shadow_triggered": True,
+            "shadow_hindsight": False,
+            "shadow_daily_summary": False,
+        },
+    }
+    cfg = _build_orchestrator_config(raw)
+    assert cfg.notifications.shadow_enabled is True
+    assert cfg.notifications.shadow_plan_created is False
+    assert cfg.notifications.shadow_triggered is True
+    assert cfg.notifications.shadow_hindsight is False
+    assert cfg.notifications.shadow_daily_summary is False
+
+
+def test_build_orchestrator_config_null_notifications_uses_defaults() -> None:
+    cfg = _build_orchestrator_config({"enabled": True, "notifications": None})
+    assert cfg.notifications.shadow_enabled is True
+    assert cfg.notifications.shadow_plan_created is True

@@ -53,6 +53,14 @@ class PipelineResult:
     decision_ids: list[int] = field(default_factory=list)
     redraft_count: int = 0
     error: str | None = None
+    # ── shadow 通知用 (Phase 5)。記録系は store が source of truth だが、通知に必要な
+    # 表示値 (direction/score/confidence/reason/supersede) を runtime に再 query させず
+    # ここで運ぶ。outcome が plan_create/reject のときのみ意味を持つ。
+    direction: str | None = None
+    score: float | None = None
+    confidence: float | None = None
+    reason: str | None = None
+    superseded_plan_ids: list[int] = field(default_factory=list)
 
 
 class PlanningPipeline:
@@ -149,7 +157,8 @@ class PlanningPipeline:
                     run_id, snapshot_id, pair, horizon, final, risk_result=None
                 )
                 return PipelineResult(
-                    outcome="reject", decision_ids=[did], redraft_count=redraft_count
+                    outcome="reject", decision_ids=[did], redraft_count=redraft_count,
+                    reason=f"planner reject: {final.reasoning_summary}",
                 )
 
             # PlannerAgent が revise → draft を採用せず 1 回だけ再起案 (§13#6: 最終権限は
@@ -163,7 +172,8 @@ class PlanningPipeline:
                     run_id, snapshot_id, pair, horizon, final, risk_result=None
                 )
                 return PipelineResult(
-                    outcome="reject", decision_ids=[did], redraft_count=redraft_count
+                    outcome="reject", decision_ids=[did], redraft_count=redraft_count,
+                    reason=f"planner revise exhausted: {final.reasoning_summary}",
                 )
 
             # accept のみ risk gate (hard veto) へ。
@@ -182,8 +192,10 @@ class PlanningPipeline:
             did = self._record_reject(
                 run_id, snapshot_id, pair, horizon, final, risk_result=risk
             )
+            risk_reason = "; ".join(risk.issues) if risk.issues else "structural"
             return PipelineResult(
-                outcome="reject", decision_ids=[did], redraft_count=redraft_count
+                outcome="reject", decision_ids=[did], redraft_count=redraft_count,
+                reason=f"risk reject ({risk.reject_class}): {risk_reason}",
             )
 
     # ── persistence helpers ──────────────────────────────────
@@ -250,12 +262,15 @@ class PlanningPipeline:
         )
         # active plan policy: pair 単位最大 1 (§6.1)。旧 active を superseded に
         # (新 plan はまだ requires_replan なので except 不要だが、明示で安全側)。
-        self._orch.supersede_active_plans(pair, except_plan_id=plan_id)
+        superseded = self._orch.supersede_active_plans(pair, except_plan_id=plan_id)
         # 全 write 成功 → ここで初めて active 化 (orphan window を閉じる)。
         self._orch.update_plan_status(plan_id, "active")
         return PipelineResult(
             outcome="plan_create", plan_id=plan_id, decision_ids=[did],
             redraft_count=redraft_count,
+            direction=draft.direction, score=final.final_score,
+            confidence=final.confidence, reason=final.reasoning_summary,
+            superseded_plan_ids=superseded,
         )
 
 

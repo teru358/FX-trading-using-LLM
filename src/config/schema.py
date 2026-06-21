@@ -616,6 +616,26 @@ class OrchestratorHindsightConfig:
 
 
 @dataclass
+class OrchestratorNotificationsConfig:
+    """shadow 専用 Discord 通知のフラグ (Phase 2 design §11/§12)。
+
+    既存 cycle summary と分離した shadow 専用 channel への通知。`shadow_enabled` が
+    マスタースイッチで、各イベント (plan lifecycle / triggered / hindsight / daily_summary)
+    は個別 on/off できる。webhook は DISCORD_SHADOW_WEBHOOK_URL を使い、未設定なら
+    既存の DISCORD_WEBHOOK_URL にフォールバックする (shadow_notifier 側で解決)。
+
+    NOTE: `shadow_plan_created` は plan ライフサイクル通知 (created / rejected /
+    superseded) を**まとめて** gate する。design §12 の config キーが `shadow_plan_created`
+    1 本のため、3 種を 1 フラグに束ねる (個別 gate が要れば後でフラグを足す)。
+    """
+    shadow_enabled: bool = True
+    shadow_plan_created: bool = True       # plan lifecycle: created / rejected / superseded
+    shadow_triggered: bool = True
+    shadow_hindsight: bool = True
+    shadow_daily_summary: bool = True
+
+
+@dataclass
 class OrchestratorAgentsConfig:
     """各 agent の有効化フラグ (spec §12)。"""
     news_enabled: bool = True
@@ -641,6 +661,9 @@ class OrchestratorConfig:
     firing: OrchestratorFiringConfig = field(default_factory=OrchestratorFiringConfig)
     hindsight: OrchestratorHindsightConfig = field(
         default_factory=OrchestratorHindsightConfig
+    )
+    notifications: OrchestratorNotificationsConfig = field(
+        default_factory=OrchestratorNotificationsConfig
     )
     agents: OrchestratorAgentsConfig = field(default_factory=OrchestratorAgentsConfig)
 

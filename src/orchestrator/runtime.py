@@ -32,7 +32,8 @@ from src.utils.clock import db_now
 
 if TYPE_CHECKING:
     from src.orchestrator.material_landing import MaterialLandingDetector
-    from src.orchestrator.planning_pipeline import PlanningPipeline
+    from src.orchestrator.planning_pipeline import PipelineResult, PlanningPipeline
+    from src.orchestrator.shadow_notifier import ShadowNotifier
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,7 @@ class OrchestratorRuntime:
         evaluator: WatchEvaluator | None = None,
         risk_gate: RiskGateWorker | None = None,
         hindsight_evaluator: HindsightEvaluator | None = None,
+        shadow_notifier: "ShadowNotifier | None" = None,
     ) -> None:
         self._config = config
         self._orch = orch_store
@@ -72,6 +74,9 @@ class OrchestratorRuntime:
         self._quote_provider = quote_provider
         self._detector = detector
         self._pipeline = pipeline
+        # shadow 専用通知 (Phase 5)。未注入なら通知しない (後方互換・shadow 境界不変)。
+        # 通知は deterministic path の外側で fire-and-forget し、失敗は握り潰す。
+        self._notifier = shadow_notifier
         # trigger 後の判断品質を後追い計測する評価器 (Phase 4)。未注入なら hindsight を
         # enqueue/評価しない (Phase 1〜3 後方互換・shadow 境界も不変)。
         self._hindsight = hindsight_evaluator
@@ -140,6 +145,9 @@ class OrchestratorRuntime:
                         )
                     else:
                         self._orch.finish_run(run_id, status="ok")
+                        # plan_create / reject を shadow 通知 (direct_hold は通知しない)。
+                        # 記録完了後・deterministic path の外で fire する。
+                        self._notify_planning_result(pair, result)
                 else:
                     # 後方互換 (pipeline 未注入): 機会判断を行わず direct_hold を記録する。
                     self._orch.record_decision(
@@ -272,6 +280,8 @@ class OrchestratorRuntime:
             would_hit_sl=result.would_hit_sl, would_hit_tp=result.would_hit_tp,
             reasoning_summary=result.reasoning_summary,
         )
+        # 評価成功のみ shadow 通知 (failed は通知しない — ノイズ抑制)。
+        self._notify_hindsight(trig, result)
         return True
 
     def _evaluate_plan(self, plan, pair: str, now: datetime) -> bool:
@@ -419,6 +429,7 @@ class OrchestratorRuntime:
             "OrchestratorRuntime", pair=pair, trigger_type="watch_cycle",
         )
         ok = False
+        action: dict = plan.action_json or {}  # finally 後の通知でも参照するため try 外で確定
         try:
             # 新規 snapshot を materialize (planning 時点とは別。trigger 時の quote/freshness/
             # risk pre-check を独立 trace する — §7.1)。
@@ -427,7 +438,6 @@ class OrchestratorRuntime:
             self._orch.attach_snapshot(run_id, snapshot_id)
 
             # shadow risk pre-check。Phase 2 は hard veto にせず結果を残すだけ。
-            action = plan.action_json or {}
             risk_result = self._shadow_risk_precheck(plan, trigger_ctx)
 
             decision_id = self._orch.record_decision(
@@ -455,13 +465,19 @@ class OrchestratorRuntime:
                 f"[ORCH] 🧪 shadow trigger plan {plan.plan_id} {pair} {plan.direction} "
                 f"@ {quote.mid}"
             )
-            return True
         finally:
             self._orch.finish_run(run_id, status="ok" if ok else "failed")
             if not ok:
                 # claim 後・記録前に落ちた: plan を active に戻し、次 tick で再評価させる
                 # (triggered のまま放置すると shadow_trigger 行が無いのに再 trigger 不可になる)。
                 self._orch.update_plan_status(plan.plan_id, "active")
+        # 通知は run lifecycle (finish_run) を閉じた後に fire する: 同期 HTTP POST の遅延を
+        # run の確定より後ろに置き、watch loop の hot path 内滞留を避ける (review MEDIUM)。
+        # ok のときだけ通知 (失敗 trigger は通知しない)。
+        if not ok:
+            return False
+        self._notify_shadow_trigger(plan, pair, quote, action)
+        return True
 
     def _shadow_risk_precheck(self, plan, trigger_ctx: dict) -> dict | None:
         """ExecutionPlanDraft 相当を組んで RiskGateWorker.pre_check を回し dict 化する。
@@ -495,6 +511,82 @@ class OrchestratorRuntime:
             )
             return None
         return self._risk_gate.pre_check(draft, trigger_ctx).to_dict()
+
+    # ── shadow 通知 (Phase 5, fire-and-forget) ─────────────────
+
+    def _run_notify(self, coro) -> None:
+        """通知コルーチンを同期スレッドから実行し、失敗を握り潰す。
+
+        planning/watch/hindsight ループは同期スレッドで回るため asyncio.run で境界を
+        またぐ。通知は deterministic path の付随物であり、ここでの例外 (送信失敗・
+        notifier 不整合) が記録系・ループを止めてはならない。よって例外は warning に
+        落として継続する (§通知失敗はシステムを止めない)。
+        """
+        try:
+            asyncio.run(coro)
+        except Exception:
+            logger.warning("[ORCH] shadow notification failed", exc_info=True)
+
+    def _notify_planning_result(self, pair: str, result: "PipelineResult") -> None:
+        """plan_create / reject を shadow 通知する。direct_hold/failed は通知しない。"""
+        if self._notifier is None:
+            return
+        from src.orchestrator.shadow_notifier import PlanCreatedInfo
+
+        if result.outcome == "plan_create" and result.plan_id is not None:
+            for old_id in result.superseded_plan_ids:
+                self._run_notify(
+                    self._notifier.notify_plan_superseded(
+                        pair=pair, old_plan_id=old_id, new_plan_id=result.plan_id,
+                    )
+                )
+            self._run_notify(
+                self._notifier.notify_plan_created(
+                    PlanCreatedInfo(
+                        pair=pair, direction=result.direction or "?",
+                        plan_id=result.plan_id, score=result.score,
+                        confidence=result.confidence, reason=result.reason or "",
+                    )
+                )
+            )
+        elif result.outcome == "reject":
+            self._run_notify(
+                self._notifier.notify_plan_rejected(
+                    pair=pair, reason=result.reason or "rejected",
+                )
+            )
+
+    def _notify_shadow_trigger(self, plan, pair: str, quote: QuoteSnapshot, action: dict) -> None:
+        if self._notifier is None:
+            return
+        from src.orchestrator.shadow_notifier import ShadowTriggerInfo
+
+        self._run_notify(
+            self._notifier.notify_shadow_trigger(
+                ShadowTriggerInfo(
+                    pair=pair, direction=plan.direction or "?", plan_id=plan.plan_id,
+                    score=None, confidence=None,  # plan 行に score/conf は無い (§trigger)
+                    trigger_price=quote.mid,
+                    sl=action.get("sl"), tp=action.get("tp"), rr=action.get("rr"),
+                    reason=(action.get("comment") or ""),
+                )
+            )
+        )
+
+    def _notify_hindsight(self, trig, result) -> None:
+        if self._notifier is None:
+            return
+        from src.orchestrator.shadow_notifier import HindsightInfo
+
+        self._run_notify(
+            self._notifier.notify_hindsight_evaluated(
+                HindsightInfo(
+                    pair=trig.pair, direction=trig.direction, plan_id=trig.plan_id,
+                    mfe_r=result.mfe_r, mae_r=result.mae_r, pnl_r=result.pnl_r,
+                    would_hit_tp=result.would_hit_tp, would_hit_sl=result.would_hit_sl,
+                )
+            )
+        )
 
     # ── ループ駆動 (enabled 時のみ) ─────────────────────────────
 

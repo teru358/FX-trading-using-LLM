@@ -61,6 +61,7 @@ from src.config.schema import (
     OrchestratorEntryConfig,
     OrchestratorFiringConfig,
     OrchestratorHindsightConfig,
+    OrchestratorNotificationsConfig,
     OrchestratorAgentsConfig,
 )
 
@@ -118,6 +119,9 @@ def _build_orchestrator_config(data: dict) -> OrchestratorConfig:
         firing=_from_dict(OrchestratorFiringConfig, data.get("firing", {}) or {}),
         hindsight=_from_dict(
             OrchestratorHindsightConfig, data.get("hindsight", {}) or {}
+        ),
+        notifications=_from_dict(
+            OrchestratorNotificationsConfig, data.get("notifications", {}) or {}
         ),
         agents=_from_dict(OrchestratorAgentsConfig, data.get("agents", {}) or {}),
     )
