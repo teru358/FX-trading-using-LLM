@@ -645,6 +645,24 @@ def test_get_hindsight_evaluation_none_when_absent(store: OrchestratorStore) -> 
     assert store.get_hindsight_evaluation(999) is None
 
 
+def test_record_hindsight_evaluation_duplicate_is_noop(store: OrchestratorStore) -> None:
+    """同一 shadow_trigger への 2 回目 enqueue は UNIQUE で弾くが crash させず既存 id を返す。
+
+    trigger 記録パスの一部なので、重複時に例外を投げると trigger 記録ごと巻き戻る。
+    冪等に既存 id を返す (record_shadow_trigger と同思想の IntegrityError ハンドリング)。
+    """
+    trig_id = _shadow_trigger(store, triggered_at=datetime(2026, 6, 21, 9, 0, 0))
+    first = store.record_hindsight_evaluation(
+        shadow_trigger_id=trig_id, horizon_seconds=86400,
+    )
+    second = store.record_hindsight_evaluation(
+        shadow_trigger_id=trig_id, horizon_seconds=86400,
+    )
+    assert second == first  # 既存行の id を返す (新規作成しない)
+    # 行は 1 件のまま
+    assert store.get_hindsight_evaluation(trig_id).id == first
+
+
 def test_update_hindsight_evaluation_fills_metrics(store: OrchestratorStore) -> None:
     """poll loop が pending 行に metric を埋め status=evaluated にする。"""
     trig_id = _shadow_trigger(store, triggered_at=datetime(2026, 6, 21, 9, 0, 0))

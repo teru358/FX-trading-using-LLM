@@ -144,6 +144,23 @@ def test_hindsight_cycle_marks_failed_when_no_ohlcv(tmp_path: Path) -> None:
     assert ev.mfe_r is None
 
 
+def test_orphan_pending_is_marked_failed_not_relooped(tmp_path: Path) -> None:
+    """shadow_trigger が見つからない pending 行は failed に倒し、再 query させない。
+
+    放置すると pending のまま horizon 超過で毎 poll 再評価される無限ループになる。
+    """
+    runtime, orch = _make_runtime(tmp_path, mid=150.0, ohlcv=pd.DataFrame())
+    # 実在しない shadow_trigger_id を指す孤児 pending を直接作る
+    orch.record_hindsight_evaluation(shadow_trigger_id=99999, horizon_seconds=86400)
+
+    n = runtime.run_hindsight_cycle(now=NOW + timedelta(days=2))
+    assert n == 1
+    ev = orch.get_hindsight_evaluation(99999)
+    assert ev.status == "failed"
+    # 2 回目は pending が無いので 0 件 (再ループしない)
+    assert runtime.run_hindsight_cycle(now=NOW + timedelta(days=3)) == 0
+
+
 def test_no_evaluator_does_not_enqueue(tmp_path: Path) -> None:
     """hindsight_evaluator 未注入なら trigger 時に enqueue しない (後方互換)。"""
     db = tmp_path / "orch.db"

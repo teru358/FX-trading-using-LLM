@@ -922,6 +922,10 @@ class OrchestratorStore:
 
         metric (mfe_r 等) はこの時点では None。horizon_seconds 経過後に poll loop が
         update_hindsight_evaluation で埋める。shadow_trigger_id UNIQUE で二重 enqueue を防ぐ。
+
+        この呼び出しは trigger 記録パスの一部なので、重複時に例外を投げると trigger
+        記録ごと巻き戻る。UNIQUE 違反は「既に enqueue 済み」として冪等に既存行の id を返す
+        (record_shadow_trigger と同じ IntegrityError ハンドリング思想)。
         """
         with Session(self._engine) as session:
             ev = _ShadowHindsightEvaluation(
@@ -932,8 +936,25 @@ class OrchestratorStore:
                 created_at=db_now(),
             )
             session.add(ev)
-            session.commit()
-            return ev.id
+            try:
+                session.commit()
+                return ev.id
+            except IntegrityError as exc:
+                session.rollback()
+                orig = str(getattr(exc, "orig", exc))
+                if (
+                    "uq_shadow_hindsight_trigger_id" in orig
+                    or "shadow_hindsight_evaluations.shadow_trigger_id" in orig
+                ):
+                    existing = self.get_hindsight_evaluation(shadow_trigger_id)
+                    if existing is not None:
+                        logger.info(
+                            f"hindsight enqueue skipped: shadow_trigger {shadow_trigger_id} "
+                            "already has an evaluation"
+                        )
+                        return existing.id
+                # 想定外の IntegrityError は握り潰さず再送出 (silent failure 防止)。
+                raise
 
     def get_hindsight_evaluation(
         self, shadow_trigger_id: int
@@ -997,14 +1018,18 @@ class OrchestratorStore:
     ) -> list[_ShadowHindsightEvaluation]:
         """評価期限 (triggered_at + horizon_seconds <= now) を過ぎた pending 行を返す。
 
-        shadow_triggers と join し triggered_at を引く。SQLite には interval 演算が無いため
-        Python 側で now - triggered_at の経過秒を horizon_seconds と比較する。
+        shadow_triggers と LEFT join し triggered_at を引く。SQLite には interval 演算が
+        無いため Python 側で now - triggered_at の経過秒を horizon_seconds と比較する。
         evaluated/failed 済みは status='pending' フィルタで自然に除外される。
+
+        outer join にするのは、shadow_trigger が見つからない孤児 pending 行も返すため。
+        inner join だと孤児は永遠に拾われず pending のまま残る。孤児 (triggered_at=None) は
+        評価期限到達済みとして返し、呼び出し側 (runtime) が failed に倒す。
         """
         with Session(self._engine) as session:
             stmt = (
                 select(_ShadowHindsightEvaluation, _ShadowTrigger.triggered_at)
-                .join(
+                .outerjoin(
                     _ShadowTrigger,
                     _ShadowTrigger.id == _ShadowHindsightEvaluation.shadow_trigger_id,
                 )
@@ -1013,6 +1038,10 @@ class OrchestratorStore:
             ready: list[_ShadowHindsightEvaluation] = []
             for ev, triggered_at in session.execute(stmt).all():
                 if triggered_at is None:
+                    # 孤児 pending (対応する shadow_trigger 無し)。評価対象として返し、
+                    # runtime 側で failed に倒させる (pending のまま残さない)。
+                    session.expunge(ev)
+                    ready.append(ev)
                     continue
                 elapsed = (now - triggered_at).total_seconds()
                 if elapsed >= (ev.horizon_seconds or 0):

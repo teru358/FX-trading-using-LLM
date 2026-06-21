@@ -227,10 +227,17 @@ class OrchestratorRuntime:
         """1 pending hindsight 行を評価し DB に書き戻す。評価を試みたら True。"""
         trig = self._orch.get_shadow_trigger_by_id(ev.shadow_trigger_id)
         if trig is None:
+            # 孤児 pending を pending のままにすると horizon 超過で毎 poll 再評価され続ける。
+            # failed に倒して二度と get_pending に拾われないようにする。
             logger.warning(
-                f"[ORCH] hindsight: shadow_trigger {ev.shadow_trigger_id} missing"
+                f"[ORCH] hindsight: shadow_trigger {ev.shadow_trigger_id} missing — "
+                "marking evaluation failed"
             )
-            return False
+            self._orch.update_hindsight_evaluation(
+                ev.id, status="failed", evaluated_at=now,
+                reasoning_summary="shadow_trigger row missing",
+            )
+            return True
         result = self._hindsight.evaluate(
             pair=trig.pair,
             direction=trig.direction,
