@@ -10,7 +10,7 @@ trade/watch 別経路に分割する。
 
 ## 1. 目的と背景
 
-現行 `collect_all_technical` ([src/jobs/technical_collector.py:352]) は
+現行 `collect_all_technical` (`src/jobs/technical_collector.py`) は
 
 1. **Phase 1** — watch_only 銘柄を収集 (`analyze_price_action` = LLM)
 2. **Phase 1.5** — trade×watch の価格相関を計算 (LLM なし、prefetch キャッシュ参照)
@@ -38,7 +38,7 @@ PlannerAgent 駆動の頻度調整 (§5.3 / §5.6) は別タスク (後述 §7) 
 | 論点 | 決定 |
 |---|---|
 | 相関 (Phase 1.5) の watch 価格源 | **PriceStore から再ロード** (`price_store.load_ohlcv`)。watch 経路が prices.db に保存済みなので、別スケジュール・別タイミングでも最新の watch 価格を読める。プロセス内 dict 共有・スレッド間状態は不要 |
-| 駆動方式 | **Option A: 2 スケジュール + 初回のみ順番**。watch 用・trade 用を別登録。定常は順序無保証 (prices.db で吸収)、初回 collection のみ watch→trade を逐次実行して cold start の相関欠損を回避 |
+| 駆動方式 | **論理的には trade/watch 別経路 (別関数 `collect_trade_technical` / `collect_watch_technical`)、物理 schedule は union dispatch で 1 slot 実行**。当初 Option A (2 スケジュール別登録・順序無保証) を採ったが、同時刻に別 schedule 登録すると `PriorityJobSlot` busy 時に片方が毎回 skip される問題があり、**union 時刻 1 job + 単一 slot 内 watch→trade 逐次** (`build_technical_dispatch`) に改めた (§5.1 と整合)。相関 (Phase 1.5) は trade 経路が PriceStore から watch 価格を再ロードするため、物理順序に依存しない。初回 collection のみ watch→trade を明示逐次実行して cold start の相関欠損を回避 |
 | base interval | 両方 1h (現状維持)。ただしハードコードを廃し **config 設定項目**にして調整可能化 |
 | watch の頻度調整 | watch は固定 (config の interval) で **Planner 頻度調整の対象外**。boost は trade のみ (spec §5.3 / §5.4 準拠、負荷を trade に集中) |
 | 頻度調整本体 (resolver/TTL/queue) | **別タスク** (§7)。本タスクには含めない |
@@ -124,7 +124,7 @@ correlations = compute_correlations(trade_prices, watch_prices, watch_names)
 
 ### 3.2 econ phase の移動
 
-現 `collect_all_technical` 末尾の Phase 3 (経済指標影響分析、[technical_collector.py:516-641])
+現 `collect_all_technical` 末尾の Phase 3 (経済指標影響分析、`_collect_econ_impact`)
 は `related_pairs = [p for p in tradeable ...]` と tradeable に依存する。これを
 `collect_trade_technical` の末尾に移す。watch 経路には含めない。
 
@@ -132,8 +132,10 @@ correlations = compute_correlations(trade_prices, watch_prices, watch_names)
 
 ## 4. config 設計
 
-現在 main.py にハードコードされている `technical_times` を `ScheduleConfig` へ移し、
-trade/watch 別の interval を持たせる。
+technical **収集**用の interval を `ScheduleConfig` に追加し、trade/watch 別に持たせる。
+収集スケジュールは config の interval から `technical_times_for()` で生成し、union dispatch
+で回す。**exit_check 用の `technical_times` (毎時:00 固定) は main.py に残す** — SL/TP 確認・
+ポジション再評価の頻度は technical 収集 interval の変更に波及させない (両者を独立させる)。
 
 ```python
 @dataclass
@@ -154,6 +156,10 @@ class ScheduleConfig:
       return [f"{h:02d}:00" for h in range(0, 24, max(1, interval_hours))]
   ```
 - watch を将来 2〜3 にすれば「watch だけ低頻度」が config で実現する。
+- **設定例の更新 (変更対象・確認項目):** `config/settings.yaml.example` の `schedule:` に
+  `technical_trade_interval_hours` / `technical_watch_interval_hours` を追記する。運用で
+  調整する項目なので example に載っていないと発見されない。実装後の確認項目に
+  「example が schema と一致しているか」を含める。
 
 ---
 

@@ -201,6 +201,12 @@ schedule:
     - "15:00"
     - "21:30"
   timezone: "Asia/Tokyo"
+  # technical 収集の間隔（時間）。trade/watch 別に調整可能（既定はどちらも 1h = 毎時）。
+  # trade は将来 cadence resolver で boost される土台、watch は低頻度固定用。
+  # 収集スケジュールはこの interval から生成し union dispatch で回す
+  # （exit_check の毎時:00 はこれとは独立で固定）。
+  technical_trade_interval_hours: 1
+  technical_watch_interval_hours: 1
 
 analysis:
   # テクニカル指標の有効/無効
