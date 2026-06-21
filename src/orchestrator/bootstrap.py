@@ -160,7 +160,7 @@ def build_orchestrator_runtime(
 
     quote_provider = make_quote_provider(price_provider)
 
-    detector = _build_detector(orch_cfg, analysis_store, pairs)
+    detector = _build_detector(config, orch_cfg, analysis_store, pairs, store=store)
     pipeline = _build_pipeline(config, orch_store)
     hindsight = make_hindsight_evaluator(price_store)
     notifier = create_shadow_notifier(orch_cfg.notifications)
@@ -185,22 +185,47 @@ def build_orchestrator_runtime(
 
 
 def _build_detector(
-    orch_cfg, analysis_store: "AnalysisStore", pairs: list[str]
+    config: "AppConfig", orch_cfg, analysis_store: "AnalysisStore",
+    pairs: list[str], *, store: "VectorStore",
 ) -> MaterialLandingDetector:
-    """planning 発火フィルタ。technical bias を AnalysisStore から引く。
+    """planning 発火フィルタ。technical bias + news/event landing を引く (§5.4①)。
 
-    news/event 経路は Phase 6 では未配線 (technical bias delta + periodic floor のみで
-    発火)。news_material / event_window は callable 未注入で常に False に倒れる
-    (detector の既定挙動)。これらの配線は §5.3/§5.4 の cadence/econ 連携の後続作業。
+    technical bias は AnalysisStore、news 経路は RAG 集計、event 経路は EconEventStore の
+    高重要度イベント window から判定する (Phase1 A-2 で配線)。provider 構築に失敗した経路は
+    None のままにし、detector 側の既定 (常に False) に安全に倒す (technical 経路は不変)。
     """
     def get_latest_technical(pair: str):
         snaps = analysis_store.get_recent_ok_snapshots(pair)
         return snaps[0] if snaps else None
 
+    # news / event provider を配線する (§5.4①)。構築失敗は技術経路だけで動かす。
+    get_news_impact = get_news_key = None
+    in_event_window = get_event_key = None
+    try:
+        from src.orchestrator.landing_providers import (
+            make_event_window_provider,
+            make_news_material_provider,
+        )
+
+        get_news_impact, get_news_key = make_news_material_provider(config, store)
+        from src.data.econ_event_store import EconEventStore
+
+        econ_store = EconEventStore(config.prices_db_path)
+        in_event_window, get_event_key = make_event_window_provider(config, econ_store)
+    except Exception:
+        logger.warning(
+            "[ORCH] news/event landing provider 構築に失敗 — technical 経路のみで発火",
+            exc_info=True,
+        )
+
     return MaterialLandingDetector(
         get_latest_technical=get_latest_technical,
         material_bias_delta_min=orch_cfg.firing.material_bias_delta_min,
+        get_news_impact=get_news_impact,
         material_news_impact_min=orch_cfg.firing.material_news_impact_min,
+        get_news_key=get_news_key,
+        in_event_window=in_event_window,
+        get_event_key=get_event_key,
         debounce_window_seconds=orch_cfg.firing.debounce_window_seconds,
         min_planning_interval_seconds=orch_cfg.firing.min_planning_interval_seconds,
         pairs=pairs,

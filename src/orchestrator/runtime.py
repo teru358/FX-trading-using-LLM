@@ -14,7 +14,7 @@ import asyncio
 import logging
 import queue
 import threading
-from datetime import datetime
+from datetime import date, datetime, time as dtime
 from typing import TYPE_CHECKING, Callable
 
 from src.config.schema import OrchestratorConfig
@@ -99,6 +99,10 @@ class OrchestratorRuntime:
         # worker 未起動時 (テスト・手動駆動) は同期実行にフォールバックする。
         self._notify_queue: "queue.Queue[Callable[[], object] | None]" = queue.Queue()
         self._notify_thread: threading.Thread | None = None
+        # daily summary (Phase1 A-1): 1 日 1 回ガード。最後に送った日付を持ち、設定時刻を
+        # 跨いだ最初の cycle で 1 回だけ送る。notifier 未注入 / flag off なら loop を起こさない。
+        self._daily_summary_thread: threading.Thread | None = None
+        self._last_summary_date: date | None = None
 
     # ── 1 サイクル分の処理 (テスト・手動駆動可) ─────────────────
 
@@ -250,6 +254,46 @@ class OrchestratorRuntime:
                         f"[ORCH] could not mark hindsight {ev.id} failed"
                     )
         return evaluated
+
+    def run_daily_summary_cycle(self, now: datetime | None = None) -> bool:
+        """1 日 1 回 shadow daily summary を送る (§11 / Phase1 A-1)。
+
+        `daily_summary_time` を跨いだ最初の cycle で 1 回だけ送り、その日付を記録する。
+        同日二度目は no-op。notifier 未注入 / `shadow_daily_summary` off なら何もしない。
+
+        Returns: 送信した (= cycle で発火した) なら True。
+        """
+        if self._notifier is None or not self._config.notifications.shadow_daily_summary:
+            return False
+        now = now or db_now()
+        today = now.date()
+        if self._last_summary_date == today:
+            return False  # 同日は送信済み
+        if now.time() < self._parse_summary_time():
+            return False  # まだ送信時刻前
+        # この時点で「今日まだ送っておらず、送信時刻を過ぎた」= 発火。
+        self._last_summary_date = today
+        try:
+            from src.orchestrator.shadow_metrics import compute_shadow_metrics
+
+            metrics = compute_shadow_metrics(self._orch, now=now)
+        except Exception:
+            logger.exception("[ORCH] daily summary metrics 計算に失敗")
+            return False
+        n = self._notifier
+        self._run_notify(lambda: n.notify_daily_summary(metrics, day=now))
+        logger.info(f"[ORCH] 🧪 shadow daily summary fired ({today})")
+        return True
+
+    def _parse_summary_time(self) -> dtime:
+        """`daily_summary_time` (HH:MM) を datetime.time に parse。不正値は 07:00 に倒す。"""
+        raw = self._config.notifications.daily_summary_time or "07:00"
+        try:
+            h, m = raw.split(":")
+            return dtime(int(h), int(m))
+        except (ValueError, TypeError):
+            logger.warning(f"[ORCH] 不正な daily_summary_time={raw!r} — 07:00 を使用")
+            return dtime(7, 0)
 
     def _evaluate_one_hindsight(self, ev, now: datetime) -> bool:
         """1 pending hindsight 行を評価し DB に書き戻す。評価を試みたら True。"""
@@ -666,16 +710,26 @@ class OrchestratorRuntime:
                 target=self._hindsight_loop, name="orch-hindsight", daemon=True
             )
             self._hindsight_thread.start()
+        # daily summary loop は notifier 注入 + flag on のときだけ起動 (Phase1 A-1)。
+        if self._notifier is not None and self._config.notifications.shadow_daily_summary:
+            self._daily_summary_thread = threading.Thread(
+                target=self._daily_summary_loop, name="orch-daily-summary", daemon=True
+            )
+            self._daily_summary_thread.start()
         logger.info(f"[ORCH] started (mode={self._config.mode}, pairs={self._pairs})")
 
     def stop(self) -> None:
         self._stop.set()
-        for t in (self._planning_thread, self._watch_thread, self._hindsight_thread):
+        for t in (
+            self._planning_thread, self._watch_thread,
+            self._hindsight_thread, self._daily_summary_thread,
+        ):
             if t is not None:
                 t.join(timeout=2.0)
         self._planning_thread = None
         self._watch_thread = None
         self._hindsight_thread = None
+        self._daily_summary_thread = None
         # ループ停止後に通知 worker を drain して止める (in-flight 通知を取りこぼさない)。
         self._stop_notify_worker()
 
@@ -706,4 +760,15 @@ class OrchestratorRuntime:
                 self.run_hindsight_cycle()
             except Exception:
                 logger.exception("[ORCH] hindsight loop iteration failed")
+            self._stop.wait(timeout=wait)
+
+    def _daily_summary_loop(self) -> None:
+        # 日次判定なので粗いポーリングで十分 (normal_seconds 周期)。run_daily_summary_cycle
+        # 内の 1 日 1 回ガードが多重送信を防ぐ。
+        wait = self._config.market_state.normal_seconds
+        while not self._stop.is_set():
+            try:
+                self.run_daily_summary_cycle()
+            except Exception:
+                logger.exception("[ORCH] daily summary loop iteration failed")
             self._stop.wait(timeout=wait)

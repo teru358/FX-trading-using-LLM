@@ -130,6 +130,31 @@ class EconEventStore:
             rows = session.execute(stmt).scalars().all()
         return [_row_to_event(r) for r in rows]
 
+    def get_events_in_window(
+        self,
+        start: datetime,
+        end: datetime,
+        min_importance: int = 0,
+    ) -> list[EconEvent]:
+        """event_time が [start, end] に入る min_importance 以上のイベントを返す。
+
+        get_recent_published と異なり `<= now` で clamp しない (未来のイベントも返す)。
+        cadence boost / material event window 判定で「これから来る高重要度イベント」を
+        先回り検出するために使う (§5.3 経路① / Phase1 A-2)。start/end は naive UTC で渡す。
+        """
+        s = _to_naive_utc(start)
+        e = _to_naive_utc(end)
+        with Session(self._engine) as session:
+            stmt = (
+                select(_EconEventRow)
+                .where(_EconEventRow.event_time >= s)
+                .where(_EconEventRow.event_time <= e)
+                .where(_EconEventRow.importance >= min_importance)
+                .order_by(_EconEventRow.event_time.asc())
+            )
+            rows = session.execute(stmt).scalars().all()
+        return [_row_to_event(r) for r in rows]
+
     def get_unanalyzed_with_actual(
         self,
         lookback_min: int,

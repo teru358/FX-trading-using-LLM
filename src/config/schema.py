@@ -637,6 +637,9 @@ class OrchestratorNotificationsConfig:
     shadow_triggered: bool = True
     shadow_hindsight: bool = True
     shadow_daily_summary: bool = True
+    # daily summary を送る時刻 (HH:MM, schedule.timezone に従う)。1 日 1 回・この時刻を
+    # 跨いだ最初の cycle で送る (§11 / Phase1 Task A-1)。
+    daily_summary_time: str = "07:00"
 
 
 @dataclass
