@@ -84,12 +84,27 @@ collect_all_technical(...)  ← 後方互換 wrapper
 trade 経路の Phase 1.5 では、watch 価格を prefetch キャッシュではなく PriceStore から読む。
 
 ```python
-# trade 経路内 (擬似コード)
+# trade 経路内 (擬似コード) — _reload_watch_prices ヘルパ
+from src.data.price_fetcher import PriceData
+from src.data.correlation import _DEFAULT_ROLLING_WINDOW
+from src.utils.clock import db_now
+
+MIN_BARS = _DEFAULT_ROLLING_WINDOW + 5   # compute_correlations の要求 (= 25)
+end = db_now()
+start = end - timedelta(days=_CORR_LOOKBACK_DAYS)   # 既定 30d (バー数を確保)
 watch_prices = {}
 for w in config.watch_only_instruments:
     df = price_store.load_ohlcv(w.symbol, start, end)   # lookback 窓
-    if df is not None and not df.empty and len(df) >= MIN_BARS:
-        watch_prices[w.symbol] = _as_price_data(df)     # 既存 PriceData 形へ
+    if df is None or df.empty or len(df) < MIN_BARS:
+        continue
+    pd_w = PriceData(
+        symbol=w.symbol, df=df,
+        current_price=float(df["Close"].iloc[-1]), fetched_at=end,
+    )
+    # 古いバーで相関を作り続けないよう stale 判定 (既存 _is_price_data_stale を流用)
+    if _is_price_data_stale(pd_w, max_staleness=_max_staleness_for(w)) is not None:
+        continue
+    watch_prices[w.symbol] = pd_w
 trade_prices = { i.symbol: prices[i.symbol] for i in tradeable if i.symbol in prices }
 correlations = compute_correlations(trade_prices, watch_prices, watch_names)
 ```
@@ -97,8 +112,15 @@ correlations = compute_correlations(trade_prices, watch_prices, watch_names)
 - **欠損/不足時の扱い:** `load_ohlcv` が空・バー不足の watch symbol は **相関入力から除外**
   (現行の `if i.symbol in prices` ガードと同じ思想)。trade の technical 収集自体は継続し、
   相関 context が一部欠けるだけ。
-- lookback 窓は相関計算に必要な範囲 (既存 `compute_correlations` が要求するバー数を満たす
-  期間)。実装時に既存の相関要求バー数に合わせる。
+- **stale 判定 (重要):** 分割後は watch 収集が失敗・停止しても prices.db に古いバーが残るため、
+  trade 相関が古い watch 価格で作られ続ける穴がある。`_reload_watch_prices` は最新バー時刻を
+  既存 `_is_price_data_stale` / `_max_staleness_for` (watch は 120h 閾値) で判定し、stale な
+  watch symbol も相関入力から除外する。
+- **`PriceData` 構築の明示:** 再ロードした df は `PriceData(symbol=w.symbol, df=df,
+  current_price=float(df["Close"].iloc[-1]), fetched_at=db_now())` で構築する
+  (`compute_correlations` は `PriceData.df` を読む)。
+- lookback 窓は相関計算に必要な範囲 (`MIN_BARS = _DEFAULT_ROLLING_WINDOW + 5 = 25` バーを
+  満たす)。`_CORR_LOOKBACK_DAYS = 30` を既定とする。
 
 ### 3.2 econ phase の移動
 
@@ -123,7 +145,9 @@ class ScheduleConfig:
     technical_watch_interval_hours: int = 1
 ```
 
-- **既定値は両方 1 = 毎時:00 = 現状と完全に同じ挙動** (後方互換)。
+- **既定値は両方 1 = 毎時:00。** §5.1 の union ディスパッチにより、各 :00 で 1 slot 内に
+  watch→trade を順次実行する = 現行の単一 `run_technical_collection` (watch+trade を 1 回) と
+  **挙動等価** (後方互換)。
 - 時刻リスト生成を純関数に切り出してテスト可能にする:
   ```python
   def technical_times_for(interval_hours: int) -> list[str]:
@@ -135,17 +159,77 @@ class ScheduleConfig:
 
 ## 5. 呼び出し側 (main.py)
 
-- 新たに同期 wrapper を 2 本追加 (仮称):
-  - `run_trade_technical_collection(...)` → `asyncio.run(collect_trade_technical(...))`
-  - `run_watch_technical_collection(...)` → `asyncio.run(collect_watch_technical(...))`
-  - `gate.probe` は **trade 経路側のみ** で行う (balance 更新は trade 文脈で十分。watch は
-    market context 収集のみで発注に関与しないため)。
+### 5.1 単一 slot 内で watch→trade を逐次実行する (重要)
+
+**問題 (code review High):** `_run_with_slot` は単一の共有 `_llm_slot` を使い、
+`PriorityJobSlot.try_run_scheduled()` は slot busy 時に **queue せず skip** する
+([priority_job_slot.py:70-74]、[main.py:59-76])。watch 用・trade 用を**同時刻に別々の
+`_run_with_slot` で登録すると、片方が毎回 skip され得る**。既定 (両方 1h = 両方毎時:00) では
+watch か trade が毎時欠落する。「現状維持」にならない。
+
+**対応:** 別々に登録せず、**trade 時刻と watch 時刻の和集合 (union) を作り、各時刻につき
+1 つの scheduled job を 1 回だけ `_run_with_slot` 登録する**。そのジョブは単一 slot 取得の
+中で「この時刻が trade 時刻集合に入っていれば trade を、watch 時刻集合に入っていれば watch を」
+**watch→trade の順で逐次実行**する。これにより:
+- 同時刻 (両方該当) → 1 slot 内で watch→trade を順次実行 (skip なし)。
+- trade のみの時刻 → trade だけ実行。watch のみの時刻 → watch だけ実行。
+- watch→trade 順なので相関の watch 価格鮮度も担保される (cold start も含む)。
+
+```python
+# main.py (擬似コード)
+from src.jobs.technical_schedule import technical_times_for
+
+trade_set = set(technical_times_for(config.schedule.technical_trade_interval_hours))
+watch_set = set(technical_times_for(config.schedule.technical_watch_interval_hours))
+
+def _run_technical_at(t: str):
+    """時刻 t に該当する経路を単一 slot 内で watch→trade 順に実行する。"""
+    if t in watch_set:
+        run_watch_technical_collection(
+            config, store, price_store, analysis_store,
+            price_provider=price_provider,
+        )
+    if t in trade_set:
+        run_trade_technical_collection(
+            config, store, price_store, analysis_store,
+            price_provider=price_provider, gate=bridge_gate,
+        )
+
+for t in sorted(trade_set | watch_set):
+    schedule.every().day.at(t, news_tz).do(
+        _run_with_slot, _run_technical_at, t, _market_aware=True,
+    )
+```
+
+> **注意:** `run_watch_technical_collection` / `run_trade_technical_collection` は内部で
+> `asyncio.run(...)` する同期関数なので、`_run_technical_at` から順次呼んでよい (それぞれ別の
+> event loop を生成して完了する)。1 つの `_run_with_slot` スレッド内で逐次なので slot 取得は 1 回。
+
+### 5.2 同期 wrapper
+
+- 新たに同期 wrapper を 2 本追加:
+  - `run_trade_technical_collection(...)` → `asyncio.run(collect_trade_technical(...))`。
+    `gate.probe` は **trade 経路側のみ** (balance 更新は trade 文脈で十分。watch は発注非関与)。
+  - `run_watch_technical_collection(...)` → `asyncio.run(collect_watch_technical(...))`。
+    gate probe しない。
 - 既存 `run_technical_collection(...)` は **後方互換のため残す** (collect_all = watch+trade
   両方を 1 回ずつ)。
-- スケジュール登録: `technical_trade_interval_hours` / `technical_watch_interval_hours` から
-  それぞれ時刻リストを生成し、`_run_with_slot` + `_market_aware=True` で別登録する。
+
+### 5.3 exit_check は毎時固定で温存する (code review Medium)
+
+現行 `technical_times` ([main.py:158]) は technical 収集だけでなく **exit_check (SL/TP 確認・
+ポジション再評価)** の毎時実行にも使われている ([main.py:247-251])。technical の
+trade/watch interval を変えた副作用で exit_check の SL/TP 確認まで 2h/3h 間隔になる事故を防ぐ。
+
+- **exit_check 用の時刻は毎時固定で残す** (`technical_times = [f"{h:02d}:00" for h in range(24)]`
+  をそのまま exit_check 登録に使い続ける)。technical interval config の影響を受けさせない。
+- technical 収集だけが `trade_set`/`watch_set` の union 時刻を使う。
+
+### 5.4 初回 collection
+
 - **初回 collection (initial collection):** cold start の相関欠損を避けるため、watch→trade を
-  **逐次実行**する。`--skip-tech` 指定時は両方スキップ (現状踏襲)。
+  **逐次実行**する (§5.1 の `_run_technical_at` と同じ順序)。`--skip-tech` 指定時は両方スキップ
+  (現状踏襲)。
 
 ---
 
@@ -156,9 +240,11 @@ class ScheduleConfig:
 | 1 | `collect_watch_technical` は watch_only のみ収集し tradeable を収集しない (保存 snapshot が watch symbol のみ) |
 | 2 | `collect_trade_technical` は tradeable を収集し、相関 context に PriceStore から再ロードした watch 価格が反映される |
 | 3 | watch 価格が prices.db に無い場合、trade 収集は継続し相関はそのペアを skip する (失敗しない) |
-| 4 | econ phase は trade 経路で走り、watch 経路では走らない |
-| 5 | `collect_all_technical` wrapper は従来どおり watch+trade 両方を収集 (後方互換) |
-| 6 | `technical_times_for(interval_hours)` が interval を反映した時刻リストを返す (1→24個, 2→12個, ...) |
+| 4 | **watch 価格が stale (最新バーが閾値超) の場合、相関入力から除外される** (古いバーで相関を作らない) |
+| 5 | econ phase は trade 経路で走り、watch 経路では走らない |
+| 6 | `collect_all_technical` wrapper は従来どおり watch+trade 両方を収集 (後方互換) |
+| 7 | `technical_times_for(interval_hours)` が interval を反映した時刻リストを返す (1→24個, 2→12個, ...) |
+| 8 | **union ディスパッチ `_run_technical_at(t)`: t が trade 時刻のみ→trade のみ実行 / watch 時刻のみ→watch のみ / 両方→watch→trade 順で両方 (1 slot 内)** |
 
 既存の `collect_all_technical` 系テストを壊さないこと (後方互換 wrapper で吸収)。
 
