@@ -534,3 +534,69 @@ def test_record_and_get_shadow_trigger(store: OrchestratorStore) -> None:
 
 def test_get_shadow_trigger_none_when_absent(store: OrchestratorStore) -> None:
     assert store.get_shadow_trigger(999) is None
+
+
+def test_shadow_trigger_plan_id_is_unique(store: OrchestratorStore) -> None:
+    """同一 plan_id への 2 回目の shadow_trigger は UNIQUE 制約で拒否される。
+
+    並行 watch が原子 claim を擦り抜けても、shadow_triggers 重複は DB が防ぐ
+    (defense-in-depth, Codex High#1)。
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    snap = store.create_snapshot(pair="USDJPY=X", as_of_time=datetime(2026, 6, 21, 9, 0, 0))
+    run_id = store.start_run("OrchestratorRuntime", pair="USDJPY=X")
+    plan_id = store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=snap, horizon="swing", direction="long",
+        entry_conditions_json=[], action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 6, 27, 12, 0, 0), created_by_run_id=run_id,
+    )
+    store.record_shadow_trigger(
+        plan_id=plan_id, decision_id=None, pair="USDJPY=X", direction="long",
+        triggered_at=datetime(2026, 6, 21, 9, 0, 0),
+    )
+    with pytest.raises(IntegrityError):
+        store.record_shadow_trigger(
+            plan_id=plan_id, decision_id=None, pair="USDJPY=X", direction="long",
+            triggered_at=datetime(2026, 6, 21, 9, 1, 0),
+        )
+
+
+# ── try_claim_plan_status (条件付き状態遷移, Codex High#1/#2) ───
+
+
+@pytest.fixture
+def active_plan(store: OrchestratorStore) -> int:
+    snap = store.create_snapshot(pair="USDJPY=X", as_of_time=datetime(2026, 6, 21, 9, 0, 0))
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    return store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=snap, horizon="swing", direction="long",
+        entry_conditions_json=[], action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 6, 27, 12, 0, 0), created_by_run_id=run_id,
+    )
+
+
+def test_try_claim_plan_status_succeeds_from_active(
+    store: OrchestratorStore, active_plan: int
+) -> None:
+    assert store.try_claim_plan_status(active_plan, "triggered") is True
+    assert store.get_trade_plan(active_plan).status == "triggered"
+
+
+def test_try_claim_plan_status_fails_when_not_active(
+    store: OrchestratorStore, active_plan: int
+) -> None:
+    """別経路で triggered になった plan を古い watch 評価が invalidated に戻せない。"""
+    assert store.try_claim_plan_status(active_plan, "triggered") is True
+    # 既に triggered: 2 回目の active→invalidated claim は負ける
+    assert store.try_claim_plan_status(active_plan, "invalidated") is False
+    assert store.get_trade_plan(active_plan).status == "triggered"  # 上書きされない
+
+
+def test_try_mark_plan_triggered_is_conditional_claim(
+    store: OrchestratorStore, active_plan: int
+) -> None:
+    """try_mark_plan_triggered は active のときだけ勝ち、2 回目は負ける。"""
+    assert store.try_mark_plan_triggered(active_plan) is True
+    assert store.try_mark_plan_triggered(active_plan) is False
+    assert store.get_trade_plan(active_plan).status == "triggered"

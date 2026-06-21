@@ -294,6 +294,15 @@ class OrchestratorRuntime:
         必ず finish する (planning loop と同規律, Codex review #2)。
         """
         status = "expired" if reason == "expired" else "invalidated"
+        # 古い watch 評価が、別経路で triggered/superseded になった plan を invalidated/
+        # expired に巻き戻すのを防ぐ: active のときだけ原子的に claim し、勝ったときだけ
+        # decision を残す (Codex High#2)。負けたら何もしない。
+        if not self._orch.try_claim_plan_status(plan.plan_id, status, from_status="active"):
+            logger.info(
+                f"[ORCH] plan {plan.plan_id} ({pair}) no longer active — "
+                f"{status} ({reason}) skipped"
+            )
+            return
         run_id = self._orch.start_run(
             "OrchestratorRuntime", pair=pair, trigger_type="watch_cycle",
         )
@@ -306,7 +315,6 @@ class OrchestratorRuntime:
                 decision_type="plan_invalidate", plan_id=plan.plan_id,
                 reasoning_summary=f"watch invalidate: {reason}",
             )
-            self._orch.update_plan_status(plan.plan_id, status)
             ok = True
             logger.info(f"[ORCH] plan {plan.plan_id} ({pair}) {status}: {reason}")
         finally:

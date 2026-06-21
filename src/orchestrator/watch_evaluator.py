@@ -124,8 +124,13 @@ class WatchEvaluator:
         """
         issues: list[str] = []
 
+        # age 不明 (None / 欠落) は安全側 = block。time parse 不能や aware/naive 混在で
+        # _enrich_ages が age を出せないと None になる。これを「鮮度 OK」と誤認すると
+        # tz 不整合時に古い quote で trigger しうる (過去に timezone 実害, Codex Medium)。
         quote_age = context.get("quote_age_sec")
-        if quote_age is not None and quote_age > self._entry.max_quote_age_seconds:
+        if quote_age is None:
+            issues.append("quote age unknown (uncomputable)")
+        elif quote_age > self._entry.max_quote_age_seconds:
             issues.append(
                 f"quote stale: age {quote_age:.1f}s > {self._entry.max_quote_age_seconds}s"
             )
@@ -136,7 +141,9 @@ class WatchEvaluator:
             if status != "ok":
                 issues.append(f"technical not ok: {status}")
             tech_age = tech.get("age_sec")
-            if tech_age is not None and tech_age > self._entry.max_technical_age_seconds:
+            if tech_age is None:
+                issues.append("technical age unknown (uncomputable)")
+            elif tech_age > self._entry.max_technical_age_seconds:
                 issues.append(
                     f"technical stale: age {tech_age:.0f}s "
                     f"> {self._entry.max_technical_age_seconds}s"

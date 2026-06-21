@@ -180,6 +180,35 @@ def test_freshness_ignores_technical_when_not_required() -> None:
     assert ev.freshness_issues(_ctx(tech_status="stale", tech_age=99999)) == []
 
 
+def test_freshness_blocks_when_quote_age_uncomputable() -> None:
+    """quote_age_sec が None (時刻 parse 不能 / tz 混在) なら freshness を block する。
+
+    age 不明を「鮮度 OK」と誤認すると tz 不整合時に古い quote で trigger しうる
+    (過去に timezone 実害あり, Codex Medium)。安全側 = block。
+    """
+    ev = WatchEvaluator(OrchestratorEntryConfig())
+    ctx = _ctx()
+    ctx["quote_age_sec"] = None
+    assert any("quote" in i for i in ev.freshness_issues(ctx))
+
+
+def test_freshness_blocks_when_quote_age_missing() -> None:
+    """quote_age_sec キーが欠落していても block する (None と同等扱い)。"""
+    ev = WatchEvaluator(OrchestratorEntryConfig())
+    ctx = _ctx()
+    del ctx["quote_age_sec"]
+    assert any("quote" in i for i in ev.freshness_issues(ctx))
+
+
+def test_freshness_blocks_when_technical_age_uncomputable() -> None:
+    """require_fresh_technical 時、technical.age_sec が None なら block する。"""
+    cfg = OrchestratorEntryConfig(require_fresh_technical=True)
+    ev = WatchEvaluator(cfg)
+    ctx = _ctx()
+    ctx["technical"]["age_sec"] = None
+    assert any("technical" in i for i in ev.freshness_issues(ctx))
+
+
 def test_freshness_blocks_wide_spread_halt_and_closed_market() -> None:
     cfg = OrchestratorEntryConfig(spread_max_pips=2.0)
     ev = WatchEvaluator(cfg)

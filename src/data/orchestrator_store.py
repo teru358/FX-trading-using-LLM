@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import (
-    JSON, Column, DateTime, Float, Integer, String, UniqueConstraint, select,
+    JSON, Column, DateTime, Float, Integer, String, UniqueConstraint, select, update,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -247,6 +247,12 @@ class _ShadowTrigger(_Base):
     snapshot_id           = Column(Integer)
     risk_gate_result_json = Column(JSON)
 
+    # plan ごとに shadow trigger は最大 1 回 (Phase 2 active plan = 1)。原子 claim を
+    # 擦り抜けても重複行を DB が拒否する defense-in-depth (Codex High#1)。
+    __table_args__ = (
+        UniqueConstraint("plan_id", name="uq_shadow_triggers_plan_id"),
+    )
+
 
 class OrchestratorStore:
     """spec §8 のテーブル群を 1 つの DB で管理するストア。"""
@@ -423,28 +429,36 @@ class OrchestratorStore:
             plan.updated_at = db_now()
             session.commit()
 
-    def try_mark_plan_triggered(self, plan_id: int) -> bool:
-        """plan を active のときだけ triggered に進める (条件付き claim)。
+    def try_claim_plan_status(
+        self, plan_id: int, new_status: str, *, from_status: str = "active",
+    ) -> bool:
+        """plan を from_status のときだけ new_status に進める原子的 claim。
 
-        active→triggered を 1 transaction の条件付き UPDATE で行い、status='active' を
-        満たす行を with_for_update でロックしてから更新する。これにより watch loop の
+        `UPDATE ... WHERE plan_id=? AND status=from_status` の rowcount で判定する。
+        SQLite では SELECT ... FOR UPDATE が発行されない (with_for_update は no-op) ため、
+        select→update の TOCTOU 隙間が残る。単一文の条件付き UPDATE なら 1 行更新が
+        原子的になり、並行 watch / planning の二重遷移・stale 上書きを防ぐ
+        (Codex High#1/#2)。勝てば True、既に from_status でなければ False。
+        """
+        if new_status not in PLAN_STATUSES:
+            raise ValueError(f"status must be one of {PLAN_STATUSES}, got {new_status!r}")
+        with Session(self._engine) as session:
+            result = session.execute(
+                update(_TradePlan)
+                .where(_TradePlan.plan_id == plan_id)
+                .where(_TradePlan.status == from_status)
+                .values(status=new_status, updated_at=db_now())
+            )
+            session.commit()
+            return result.rowcount == 1
+
+    def try_mark_plan_triggered(self, plan_id: int) -> bool:
+        """plan を active のときだけ triggered に進める (条件付き原子 claim)。
+
         get_active_plans → 状態遷移の TOCTOU で同一 plan が二重 trigger されるのを防ぐ。
         既に非 active (triggered/superseded/invalidated 等) なら False を返す。
         """
-        with Session(self._engine) as session:
-            stmt = (
-                select(_TradePlan)
-                .where(_TradePlan.plan_id == plan_id)
-                .where(_TradePlan.status == "active")
-                .with_for_update()
-            )
-            plan = session.execute(stmt).scalars().first()
-            if plan is None:
-                return False
-            plan.status = "triggered"
-            plan.updated_at = db_now()
-            session.commit()
-            return True
+        return self.try_claim_plan_status(plan_id, "triggered", from_status="active")
 
     def get_active_plans(self, pair: str | None = None) -> list[_TradePlan]:
         """status=active の plan を返す (pair 指定で絞り込み)。"""
