@@ -351,8 +351,17 @@ class OrchestratorStore:
         invalidation_json: list,
         expires_at: datetime,
         created_by_run_id: int,
+        status: str = "active",
     ) -> int:
-        """active な trade_plan を作成し plan_id を返す。"""
+        """trade_plan を作成し plan_id を返す。
+
+        status を指定可能 (既定 active)。pipeline は orphan 防止のため一旦
+        'requires_replan' で作り、decision/vote 記録後に update_plan_status('active')
+        で昇格する (Codex High#2)。get_active_plans は active のみ拾うので、途中失敗時に
+        decision 無しの active plan が残らない。
+        """
+        if status not in PLAN_STATUSES:
+            raise ValueError(f"status must be one of {PLAN_STATUSES}, got {status!r}")
         now = db_now()
         with Session(self._engine) as session:
             plan = _TradePlan(
@@ -364,7 +373,7 @@ class OrchestratorStore:
                 action_json=action_json,
                 invalidation_json=invalidation_json,
                 expires_at=expires_at,
-                status="active",
+                status=status,
                 created_by_run_id=created_by_run_id,
                 created_at=now,
                 updated_at=now,

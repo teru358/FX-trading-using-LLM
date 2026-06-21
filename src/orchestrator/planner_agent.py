@@ -87,13 +87,19 @@ class PlannerAgent:
 
 
 def _compact_context(context: dict[str, Any]) -> dict[str, Any]:
+    # Codex Medium#2: 再エントリー抑制・直近損益反映のため recent_exits /
+    # recent_trade_stats / similar_cases も渡す。
     return {
         "quote": context.get("quote"),
+        "position": context.get("position"),
         "technical": context.get("technical"),
         "news": context.get("news"),
         "policy": context.get("policy"),
         "move_maturity": context.get("move_maturity"),
         "recent_decisions": context.get("recent_decisions"),
+        "recent_exits": context.get("recent_exits"),
+        "recent_trade_stats": context.get("recent_trade_stats"),
+        "similar_cases": context.get("similar_cases"),
     }
 
 

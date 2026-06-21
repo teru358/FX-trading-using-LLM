@@ -222,6 +222,9 @@ class PlanningPipeline:
     ) -> PipelineResult:
         storage = draft.to_storage_dict()
         side = "buy" if draft.direction == "long" else "sell"
+        # orphan 防止 (Codex High#2): まず非 active (requires_replan) で作る。
+        # get_active_plans は active のみ拾うので、decision/vote 記録前にクラッシュしても
+        # この plan は active として可視化されない。最後に update_plan_status('active')。
         plan_id = self._orch.create_trade_plan(
             pair=pair, snapshot_id=snapshot_id, horizon=horizon,
             direction=draft.direction,
@@ -229,11 +232,9 @@ class PlanningPipeline:
             action_json=storage["action"],
             invalidation_json=storage["invalidation"],
             expires_at=draft.expires_at, created_by_run_id=run_id,
+            status="requires_replan",
         )
-        # write 順序 (CRITICAL-2/HIGH-3 対応): create → decision → vote → supersede。
-        # supersede を最後にすることで、decision/vote の記録に失敗しても旧 active plan は
-        # まだ生きており「pair に active plan が一切無い」無音状態を避ける。新 plan が
-        # decision 無しで残る orphan は run() の generic fail-safe が failed として捕える。
+        # write 順序: create(pending) → decision → vote → supersede → activate。
         did = self._orch.record_decision(
             run_id=run_id, snapshot_id=snapshot_id, pair=pair,
             decision_type="plan_create", decision=side,
@@ -247,8 +248,11 @@ class PlanningPipeline:
             vote_action=side, vote_score=final.final_score,
             vote_confidence=final.confidence, reflected_in_plan=True,
         )
-        # active plan policy: pair 単位最大 1 (§6.1)。新 plan 以外を superseded に。
+        # active plan policy: pair 単位最大 1 (§6.1)。旧 active を superseded に
+        # (新 plan はまだ requires_replan なので except 不要だが、明示で安全側)。
         self._orch.supersede_active_plans(pair, except_plan_id=plan_id)
+        # 全 write 成功 → ここで初めて active 化 (orphan window を閉じる)。
+        self._orch.update_plan_status(plan_id, "active")
         return PipelineResult(
             outcome="plan_create", plan_id=plan_id, decision_ids=[did],
             redraft_count=redraft_count,

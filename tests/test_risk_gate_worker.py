@@ -54,6 +54,27 @@ def worker() -> RiskGateWorker:
     return RiskGateWorker(min_rr=1.5, spread_max_pips=2.0, pip_size=0.01)
 
 
+class TestRealContextIntegration:
+    """DecisionContextBuilder 由来の risk_state enum と整合すること (Codex High#1)。
+
+    context_builder._empty_risk_state() は bridge_health='ok' を返す。risk_gate が
+    'healthy' しか通さないと実 context で常に structural reject になる。
+    """
+
+    def test_real_empty_risk_state_passes(self, worker: RiskGateWorker) -> None:
+        from src.orchestrator.context_builder import DecisionContextBuilder
+
+        ctx = _ctx()
+        ctx["risk_state"] = DecisionContextBuilder._empty_risk_state()
+        ctx["technical"]["status"] = "ok"
+        res = worker.pre_check(_draft(), ctx)
+        assert res.passed is True, res.issues
+
+    def test_bridge_ok_is_healthy(self, worker: RiskGateWorker) -> None:
+        res = worker.pre_check(_draft(), _ctx(bridge_health="ok"))
+        assert res.passed is True
+
+
 class TestPass:
     def test_clean_long_passes(self, worker: RiskGateWorker) -> None:
         res = worker.pre_check(_draft(), _ctx())
@@ -129,12 +150,37 @@ class TestFixableReject:
         assert res.passed is False
         assert res.reject_class == "fixable"
 
+    def test_eurusd_spread_uses_pip_0001(self, worker: RiskGateWorker) -> None:
+        # Codex High#3: EURUSD の 3 pips = 0.0003。pip_size=0.01 固定だと
+        # 0.0003/0.01=0.03 pips と過小評価され見逃す。pair 依存なら 3 pips で reject。
+        ctx = _ctx(spread=0.0003)
+        ctx["pair"] = "EURUSD=X"
+        res = worker.pre_check(_draft(), ctx)
+        assert res.passed is False
+        assert res.reject_class == "fixable"
+        assert any("spread" in i.lower() for i in res.issues)
+
+    def test_eurusd_tight_spread_passes(self, worker: RiskGateWorker) -> None:
+        ctx = _ctx(spread=0.0001)  # 1 pip < 2.0
+        ctx["pair"] = "EURUSD=X"
+        res = worker.pre_check(_draft(), ctx)
+        assert res.passed is True, res.issues
+
     def test_missing_sl_is_fixable(self, worker: RiskGateWorker) -> None:
         draft = _draft()
         draft.action.pop("sl")
         res = worker.pre_check(draft, _ctx())
         assert res.passed is False
         assert res.reject_class == "fixable"
+
+    def test_missing_rr_is_fixable(self, worker: RiskGateWorker) -> None:
+        # rr 未指定 draft が gate を通過してはならない (Codex Medium#1)
+        draft = _draft()
+        draft.action.pop("rr")
+        res = worker.pre_check(draft, _ctx())
+        assert res.passed is False
+        assert res.reject_class == "fixable"
+        assert any("rr" in i.lower() for i in res.issues)
 
 
 class TestPrecedence:

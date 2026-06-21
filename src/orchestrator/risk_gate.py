@@ -23,6 +23,17 @@ from src.orchestrator.schemas import ExecutionPlanDraft
 STRUCTURAL = "structural"
 FIXABLE = "fixable"
 
+# bridge health の健全値。context_builder は 'ok' を、一部 fixture は 'healthy' を使う。
+_HEALTHY_BRIDGE = frozenset({"ok", "healthy"})
+
+
+def _default_pip_size_for(pair: str) -> float:
+    """pair の pip size。JPY を含むクロスは 0.01、それ以外は 0.0001。
+
+    既存 symbol 表記 (USDJPY=X / EURUSD=X) を想定。'JPY' 部分一致で判定。
+    """
+    return 0.01 if "JPY" in pair.upper() else 0.0001
+
 
 @dataclass
 class RiskGateResult:
@@ -46,13 +57,28 @@ class RiskGateWorker:
     ----------
     min_rr : 最低 reward/risk 比。draft.action["rr"] がこれ未満なら fixable reject。
     spread_max_pips : 許容 spread (pips)。quote spread がこれ超で fixable reject。
-    pip_size : pips → price 換算 (USDJPY=0.01, EURUSD=0.0001)。
+    pip_size : 旧 API 互換の単一 pip size。pip_size_for が無い pair の fallback。
+    pip_size_for : pair → pip_size の解決関数。JPY クロスは 0.01、それ以外 0.0001 が
+        既定 (Codex High#3: 固定 0.01 だと EURUSD の spread を過小評価する)。
     """
 
-    def __init__(self, *, min_rr: float = 1.5, spread_max_pips: float = 2.0, pip_size: float = 0.01) -> None:
+    def __init__(
+        self,
+        *,
+        min_rr: float = 1.5,
+        spread_max_pips: float = 2.0,
+        pip_size: float = 0.01,
+        pip_size_for=None,
+    ) -> None:
         self._min_rr = min_rr
         self._spread_max_pips = spread_max_pips
         self._pip_size = pip_size
+        self._pip_size_for = pip_size_for or _default_pip_size_for
+
+    def _pip_size_of(self, pair: str | None) -> float:
+        if pair is None:
+            return self._pip_size
+        return self._pip_size_for(pair)
 
     def pre_check(self, draft: ExecutionPlanDraft, context: dict[str, Any]) -> RiskGateResult:
         """draft を context に対して検証する。
@@ -77,7 +103,9 @@ class RiskGateWorker:
         risk = context.get("risk_state", {})
         if risk.get("halt", "none") != "none":
             issues.append(f"halt active: {risk.get('halt')}")
-        if risk.get("bridge_health", "healthy") != "healthy":
+        # DecisionContextBuilder._empty_risk_state() は bridge_health='ok' を返す。
+        # 'ok'/'healthy' を健全とみなす (enum 不整合で実 context が常に reject されるのを防ぐ)。
+        if risk.get("bridge_health", "ok") not in _HEALTHY_BRIDGE:
             issues.append(f"bridge unhealthy: {risk.get('bridge_health')}")
         if not risk.get("market_open", True):
             issues.append("market closed")
@@ -116,15 +144,18 @@ class RiskGateWorker:
                 if tp >= mid:
                     issues.append("short tp must be below entry")
 
-        # RR 下限。
+        # RR: 欠落も下限割れも fixable (再起案で直せる)。
         rr = action.get("rr")
-        if rr is not None and rr < self._min_rr:
+        if rr is None:
+            issues.append("missing rr")
+        elif rr < self._min_rr:
             issues.append(f"rr {rr} below min {self._min_rr}")
 
-        # spread 上限。
+        # spread 上限。pip_size は pair 依存 (JPY=0.01, それ以外=0.0001)。
         spread = context.get("quote", {}).get("spread")
-        if spread is not None and self._pip_size > 0:
-            spread_pips = spread / self._pip_size
+        pip_size = self._pip_size_of(context.get("pair"))
+        if spread is not None and pip_size > 0:
+            spread_pips = spread / pip_size
             if spread_pips > self._spread_max_pips:
                 issues.append(
                     f"spread {spread_pips:.1f}pips above max {self._spread_max_pips}"

@@ -250,6 +250,8 @@ async def test_unexpected_store_error_yields_failed(store: OrchestratorStore, mo
     result = await pipe.run(pair="USDJPY=X", context=ctx, run_id=run_id)
 
     assert result.outcome == "failed"  # クラッシュせず failed を返す
+    # orphan 防止 (Codex High#2): decision 記録に失敗したら active plan は残らない
+    assert store.get_active_plans("USDJPY=X") == []
 
 
 # ── final reject ──────────────────────────────────────────────
