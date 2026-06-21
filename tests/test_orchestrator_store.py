@@ -483,3 +483,54 @@ def test_record_agent_output_serializes_datetime_payload(store: OrchestratorStor
     assert payload["expires_at"] == expires.isoformat()
     assert payload["direction"] == "long"
     assert payload["rr"] == 2.0
+
+
+# ── shadow_triggers (§8.1) ─────────────────────────────────────
+
+
+def test_record_and_get_shadow_trigger(store: OrchestratorStore) -> None:
+    """watch loop の plan_trigger を shadow_triggers に保存し plan_id で読み戻せる。"""
+    snap = store.create_snapshot(
+        pair="USDJPY=X", as_of_time=datetime(2026, 6, 20, 12, 0, 0),
+    )
+    run_id = store.start_run("OrchestratorRuntime", pair="USDJPY=X")
+    plan_id = store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=snap, horizon="swing", direction="long",
+        entry_conditions_json=[{"type": "price_at_or_below", "value": 150.30}],
+        action_json={"sl": 149.4, "tp": 151.5, "rr": 2.0}, invalidation_json=[],
+        expires_at=datetime(2026, 6, 27, 12, 0, 0), created_by_run_id=run_id,
+    )
+    decision_id = store.record_decision(
+        run_id=run_id, snapshot_id=snap, pair="USDJPY=X",
+        decision_type="plan_trigger", plan_id=plan_id,
+    )
+    tid = store.record_shadow_trigger(
+        plan_id=plan_id,
+        decision_id=decision_id,
+        pair="USDJPY=X",
+        direction="long",
+        triggered_at=datetime(2026, 6, 21, 9, 0, 0),
+        trigger_price=150.12,
+        sl=149.4,
+        tp=151.5,
+        rr=2.0,
+        snapshot_id=snap,
+        risk_gate_result={"passed": True, "reject_class": None, "issues": []},
+    )
+    assert isinstance(tid, int) and tid > 0
+
+    trig = store.get_shadow_trigger(plan_id)
+    assert trig is not None
+    assert trig.plan_id == plan_id
+    assert trig.decision_id == decision_id
+    assert trig.pair == "USDJPY=X"
+    assert trig.direction == "long"
+    assert trig.triggered_at == datetime(2026, 6, 21, 9, 0, 0)
+    assert trig.trigger_price == 150.12
+    assert trig.rr == 2.0
+    assert trig.snapshot_id == snap
+    assert trig.risk_gate_result_json["passed"] is True
+
+
+def test_get_shadow_trigger_none_when_absent(store: OrchestratorStore) -> None:
+    assert store.get_shadow_trigger(999) is None

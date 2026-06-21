@@ -226,6 +226,28 @@ class _ExecutionOpinion(_Base):
     reasoning_summary   = Column(String)
 
 
+class _ShadowTrigger(_Base):
+    """watch loop が shadow で記録する plan_trigger イベント (spec §8.1)。
+
+    Phase 2/3 の判断品質検証の主対象。trigger と outcome は後続分析の主対象なので
+    orchestrator_decisions.risk_gate_result に詰め込まず独立 table にする (§8.1)。
+    """
+    __tablename__ = "shadow_triggers"
+
+    id                    = Column(Integer, primary_key=True, autoincrement=True)
+    plan_id               = Column(Integer, nullable=False, index=True)
+    decision_id           = Column(Integer)
+    pair                  = Column(String, nullable=False)
+    direction             = Column(String)   # long | short
+    triggered_at          = Column(DateTime, nullable=False)
+    trigger_price         = Column(Float)
+    sl                    = Column(Float)
+    tp                    = Column(Float)
+    rr                    = Column(Float)
+    snapshot_id           = Column(Integer)
+    risk_gate_result_json = Column(JSON)
+
+
 class OrchestratorStore:
     """spec §8 のテーブル群を 1 つの DB で管理するストア。"""
 
@@ -400,6 +422,29 @@ class OrchestratorStore:
             plan.status = status
             plan.updated_at = db_now()
             session.commit()
+
+    def try_mark_plan_triggered(self, plan_id: int) -> bool:
+        """plan を active のときだけ triggered に進める (条件付き claim)。
+
+        active→triggered を 1 transaction の条件付き UPDATE で行い、status='active' を
+        満たす行を with_for_update でロックしてから更新する。これにより watch loop の
+        get_active_plans → 状態遷移の TOCTOU で同一 plan が二重 trigger されるのを防ぐ。
+        既に非 active (triggered/superseded/invalidated 等) なら False を返す。
+        """
+        with Session(self._engine) as session:
+            stmt = (
+                select(_TradePlan)
+                .where(_TradePlan.plan_id == plan_id)
+                .where(_TradePlan.status == "active")
+                .with_for_update()
+            )
+            plan = session.execute(stmt).scalars().first()
+            if plan is None:
+                return False
+            plan.status = "triggered"
+            plan.updated_at = db_now()
+            session.commit()
+            return True
 
     def get_active_plans(self, pair: str | None = None) -> list[_TradePlan]:
         """status=active の plan を返す (pair 指定で絞り込み)。"""
@@ -750,6 +795,63 @@ class OrchestratorStore:
             if op is not None:
                 session.expunge(op)
             return op
+
+    # ── shadow_triggers (§8.1) ─────────────────────────────────
+
+    def record_shadow_trigger(
+        self,
+        *,
+        plan_id: int,
+        decision_id: int | None,
+        pair: str,
+        direction: str | None,
+        triggered_at: datetime,
+        trigger_price: float | None = None,
+        sl: float | None = None,
+        tp: float | None = None,
+        rr: float | None = None,
+        snapshot_id: int | None = None,
+        risk_gate_result: dict | None = None,
+    ) -> int:
+        """shadow_triggers に 1 行書き、新規 id を返す (§8.1)。
+
+        watch loop が plan_trigger を shadow 記録した直後に呼ぶ。risk_gate_result は
+        JSON 安全な dict (RiskGateResult.to_dict()) を渡す。
+        """
+        with Session(self._engine) as session:
+            trig = _ShadowTrigger(
+                plan_id=plan_id,
+                decision_id=decision_id,
+                pair=pair,
+                direction=direction,
+                triggered_at=triggered_at,
+                trigger_price=trigger_price,
+                sl=sl,
+                tp=tp,
+                rr=rr,
+                snapshot_id=snapshot_id,
+                risk_gate_result_json=_json_safe(risk_gate_result),
+            )
+            session.add(trig)
+            session.commit()
+            return trig.id
+
+    def get_shadow_trigger(self, plan_id: int) -> _ShadowTrigger | None:
+        """plan_id の最新 shadow_trigger を返す (無ければ None)。
+
+        Phase 2 は pair ごとに active plan 1 件・trigger 1 回が原則だが、
+        同 plan に複数あれば最大 id (= 最新) を返す。
+        """
+        with Session(self._engine) as session:
+            stmt = (
+                select(_ShadowTrigger)
+                .where(_ShadowTrigger.plan_id == plan_id)
+                .order_by(_ShadowTrigger.id.desc())
+            )
+            trig = session.execute(stmt).scalars().first()
+            if trig is not None:
+                session.expunge(trig)
+            return trig
 
     # ── plan supersede helper (§8.9) ───────────────────────────
 

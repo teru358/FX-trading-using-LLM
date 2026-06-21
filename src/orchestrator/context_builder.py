@@ -74,11 +74,7 @@ class DecisionContextBuilder:
         """decision_snapshot を materialize し §7 標準 context dict を返す。"""
         technical = self._build_technical(pair, now)
         news = self._build_news(pair, now)
-        quote_dict = {
-            "bid": quote.bid, "ask": quote.ask, "mid": quote.mid,
-            "spread": quote.spread, "source": quote.source,
-            "observed_at": quote.observed_at.isoformat(),
-        }
+        quote_dict = self._quote_dict(quote)
 
         snapshot_id = self._orch.create_snapshot(
             pair=pair,
@@ -87,9 +83,40 @@ class DecisionContextBuilder:
             technical_ref=technical.get("_ref"),
             news_ref=news.get("_ref"),
         )
+        ctx = self._assemble(pair, now, quote_dict, technical, news)
+        ctx["snapshot_id"] = snapshot_id
+        return ctx
 
+    def assemble(self, *, pair: str, now: datetime, quote: QuoteSnapshot) -> dict[str, Any]:
+        """snapshot を作らずに §7 標準 context dict を返す (watch loop の条件評価用)。
+
+        watch loop は 1s polling で active plan を tick 評価する。毎 tick で snapshot を
+        materialize すると無駄が大きいため、trigger 確定前の entry/invalidation/freshness
+        評価にはこの非永続版を使う (§7.1: 新規 snapshot は trigger 確定時のみ作る)。
+        `snapshot_id` キーは含まない (build() のみが付与する)。
+        """
+        technical = self._build_technical(pair, now)
+        news = self._build_news(pair, now)
+        return self._assemble(pair, now, self._quote_dict(quote), technical, news)
+
+    @staticmethod
+    def _quote_dict(quote: QuoteSnapshot) -> dict[str, Any]:
         return {
-            "snapshot_id": snapshot_id,
+            "bid": quote.bid, "ask": quote.ask, "mid": quote.mid,
+            "spread": quote.spread, "source": quote.source,
+            "observed_at": quote.observed_at.isoformat(),
+        }
+
+    def _assemble(
+        self,
+        pair: str,
+        now: datetime,
+        quote_dict: dict[str, Any],
+        technical: dict[str, Any],
+        news: dict[str, Any],
+    ) -> dict[str, Any]:
+        """technical/news/quote から §7 標準 context dict を組む (snapshot_id 無し)。"""
+        return {
             "pair": pair,
             "now": now.isoformat(),
             "quote": quote_dict,

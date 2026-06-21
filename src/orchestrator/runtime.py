@@ -19,6 +19,14 @@ from typing import TYPE_CHECKING, Callable
 from src.config.schema import OrchestratorConfig
 from src.data.orchestrator_store import OrchestratorStore
 from src.orchestrator.context_builder import DecisionContextBuilder, QuoteSnapshot
+from src.orchestrator.risk_gate import RiskGateWorker
+from src.orchestrator.schemas import (
+    EntryCondition,
+    ExecutionPlanDraft,
+    InvalidationCondition,
+    SchemaParseError,
+)
+from src.orchestrator.watch_evaluator import WatchEvaluator
 from src.utils.clock import db_now
 
 if TYPE_CHECKING:
@@ -28,6 +36,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 QuoteProvider = Callable[[str], QuoteSnapshot]
+
+
+def _side_of(direction: str | None) -> str | None:
+    """plan direction (long/short) を decision.decision の side (buy/sell) に写像する。"""
+    if direction == "long":
+        return "buy"
+    if direction == "short":
+        return "sell"
+    return None
 
 
 class OrchestratorRuntime:
@@ -43,6 +60,8 @@ class OrchestratorRuntime:
         quote_provider: QuoteProvider,
         detector: "MaterialLandingDetector | None" = None,
         pipeline: "PlanningPipeline | None" = None,
+        evaluator: WatchEvaluator | None = None,
+        risk_gate: RiskGateWorker | None = None,
     ) -> None:
         self._config = config
         self._orch = orch_store
@@ -51,6 +70,14 @@ class OrchestratorRuntime:
         self._quote_provider = quote_provider
         self._detector = detector
         self._pipeline = pipeline
+        # watch loop の条件評価層。未注入なら config.entry から既定構築する。
+        self._evaluator = evaluator or WatchEvaluator(config.entry)
+        # trigger 直前の shadow risk pre-check (§7.1)。hard veto ではなく結果を
+        # shadow_triggers に残すだけ — Phase 2 は発注しないため pre_check の reject でも
+        # trigger 記録は行う (判断品質データ収集が目的)。
+        self._risk_gate = risk_gate or RiskGateWorker(
+            spread_max_pips=config.entry.spread_max_pips
+        )
         self._stop = threading.Event()
         self._planning_thread: threading.Thread | None = None
         self._watch_thread: threading.Thread | None = None
@@ -137,27 +164,241 @@ class OrchestratorRuntime:
                     else:
                         self._detector.mark_attempted(pair, now)
 
-    def run_watch_cycle(self) -> list[int]:
-        """active plan を走査する。
+    def run_watch_cycle(self, now: datetime | None = None) -> list[int]:
+        """active plan を走査し、shadow trigger flow を回す (design §7)。
 
-        Phase 1: freshness を記録するのみ。entry_conditions の評価・執行は
-        later plan。**発注は行わないため triggered は常に空を返す。**
+        各 active plan について優先順:
+          1. expiry / invalidation 成立 → plan を invalidated/expired にし plan_invalidate
+             を記録 (trigger しない)。
+          2. freshness final wall 失敗 → freshness に issue を残し trigger しない
+             (plan は active のまま、§7.2)。
+          3. entry_conditions 成立 → trigger 時点 snapshot を新規 materialize し、
+             plan_trigger decision + shadow_trigger を記録、plan を triggered にする。
 
-        Returns: triggered plan_id のリスト (Phase 1 では常に [])。
+        **Phase 2 shadow boundary (§7.3):** broker / MT5 / order_intents には一切
+        触れない。発注 path はこの関数に存在しない。
+
+        Returns: trigger した plan_id のリスト。
         """
+        now = now or db_now()
         triggered: list[int] = []
         for pair in self._pairs:
-            plans = self._orch.get_active_plans(pair)
-            for plan in plans:
-                # later plan: ここで entry_conditions を tick 評価し、成立なら
-                # plan freshness 再検証 → RiskGateWorker → broker gate → 発注。
-                # Phase 1 は観測のみ。
-                self._orch.record_freshness(
-                    snapshot_id=plan.snapshot_id,
-                    pair=pair,
-                    issues=[],
-                )
+            for plan in self._orch.get_active_plans(pair):
+                try:
+                    if self._evaluate_plan(plan, pair, now):
+                        triggered.append(plan.plan_id)
+                except Exception:
+                    # 1 plan の評価失敗で他 plan / 他 pair を止めない (planning loop と同思想)。
+                    logger.exception(
+                        f"[ORCH] watch eval failed for plan {plan.plan_id} ({pair})"
+                    )
         return triggered
+
+    def _evaluate_plan(self, plan, pair: str, now: datetime) -> bool:
+        """1 plan を評価する。trigger したら True。
+
+        評価 context は非永続 (assemble) で組み、trigger 確定時のみ build() で
+        新規 snapshot を materialize する (§7.1)。
+        """
+        quote = self._quote_provider(pair)
+        ctx = self._ctx.assemble(pair=pair, now=now, quote=quote)
+        self._enrich_ages(ctx, now)
+        # news_conflict は plan.direction を知る runtime 側で算出して ctx に注入する
+        # (evaluator の invalidation_reason は direction を持たないため)。
+        ctx["news_conflict"] = self._news_conflicts(ctx, plan.direction)
+
+        # 保存済み条件を parse。壊れた条件 (未知 type / 欠損) を持つ plan は trigger
+        # できないので、毎 tick 例外ループにせず失効させる (Codex review #5)。
+        try:
+            entry_conds = [
+                EntryCondition.from_dict(c) for c in (plan.entry_conditions_json or [])
+            ]
+            inval_conds = [
+                InvalidationCondition.from_dict(c) for c in (plan.invalidation_json or [])
+            ]
+        except SchemaParseError as exc:
+            logger.warning(
+                f"[ORCH] plan {plan.plan_id} ({pair}) has unparseable conditions, "
+                f"invalidating: {exc}"
+            )
+            self._invalidate_plan(plan, pair, ctx, "unparseable_conditions", now)
+            return False
+
+        # 1. expiry / invalidation を最優先 (期限切れ・前提崩壊した plan は trigger しない)。
+        reason = self._evaluator.invalidation_reason(
+            inval_conds, ctx, now=now, expires_at=plan.expires_at
+        )
+        if reason is not None:
+            self._invalidate_plan(plan, pair, ctx, reason, now)
+            return False
+
+        # 2. entry 未成立なら何もしない (freshness 評価は trigger 候補のみで十分)。
+        if not self._evaluator.entry_conditions_hold(entry_conds, ctx):
+            return False
+
+        # 3. freshness final wall。失敗時は trigger せず既存 snapshot に issue を残す。
+        issues = self._evaluator.freshness_issues(ctx)
+        if issues:
+            self._orch.record_freshness(
+                snapshot_id=plan.snapshot_id, pair=pair, issues=issues
+            )
+            return False
+
+        # 4. trigger 確定。新規 snapshot を materialize し shadow trigger を記録する。
+        # claim に負けた (既に非 active) 場合は False が返り、triggered には数えない。
+        return self._record_shadow_trigger(plan, pair, quote, now)
+
+    @staticmethod
+    def _enrich_ages(ctx: dict, now: datetime) -> None:
+        """評価 context に quote_age_sec / technical.age_sec を後付けする。
+
+        assemble() は ISO 文字列の observed_at / last_ok_at しか持たないため、now 基準で
+        age 秒を算出して evaluator が freshness wall を判定できるようにする。
+        """
+        observed = ctx.get("quote", {}).get("observed_at")
+        if observed:
+            try:
+                ctx["quote_age_sec"] = (now - datetime.fromisoformat(observed)).total_seconds()
+            except (TypeError, ValueError):
+                ctx["quote_age_sec"] = None
+        last_ok = ctx.get("technical", {}).get("last_ok_at")
+        if last_ok:
+            try:
+                ctx["technical"]["age_sec"] = (
+                    now - datetime.fromisoformat(last_ok)
+                ).total_seconds()
+            except (TypeError, ValueError):
+                ctx["technical"]["age_sec"] = None
+
+    def _news_conflicts(self, ctx: dict, direction: str | None) -> bool:
+        """news sentiment が plan 方向に逆行し、かつ閾値を超えていれば True (§6.3)。
+
+        long plan は強い negative sentiment、short plan は強い positive sentiment を
+        conflict とみなす。閾値は entry.news_impact_min。sentiment 欠落時は conflict 無し。
+        direction を持つ runtime 側で算出し ctx["news_conflict"] に注入する。
+        """
+        score = ctx.get("news", {}).get("sentiment_score")
+        if score is None or direction is None:
+            return False
+        threshold = self._config.entry.news_impact_min
+        if direction == "long":
+            return score <= -threshold
+        if direction == "short":
+            return score >= threshold
+        return False
+
+    def _invalidate_plan(self, plan, pair: str, ctx: dict, reason: str, now: datetime) -> None:
+        """plan を expired/invalidated にし plan_invalidate decision を記録する (§6.3)。
+
+        start_run 後・finish_run 前の例外で run が dangling しないよう try/finally で
+        必ず finish する (planning loop と同規律, Codex review #2)。
+        """
+        status = "expired" if reason == "expired" else "invalidated"
+        run_id = self._orch.start_run(
+            "OrchestratorRuntime", pair=pair, trigger_type="watch_cycle",
+        )
+        ok = False
+        try:
+            # plan_invalidate decision は planning 時点 snapshot に紐付ける (trigger 時の
+            # 新規 snapshot は作らない — 失効に判断品質データは不要)。
+            self._orch.record_decision(
+                run_id=run_id, snapshot_id=plan.snapshot_id, pair=pair,
+                decision_type="plan_invalidate", plan_id=plan.plan_id,
+                reasoning_summary=f"watch invalidate: {reason}",
+            )
+            self._orch.update_plan_status(plan.plan_id, status)
+            ok = True
+            logger.info(f"[ORCH] plan {plan.plan_id} ({pair}) {status}: {reason}")
+        finally:
+            self._orch.finish_run(run_id, status="ok" if ok else "failed")
+
+    def _record_shadow_trigger(self, plan, pair: str, quote: QuoteSnapshot, now: datetime) -> bool:
+        """trigger 時点 snapshot を作り plan_trigger + shadow_trigger を記録する (§7.1)。
+
+        Returns True if a shadow trigger was recorded. TOCTOU 対策として、まず
+        active→triggered の条件付き UPDATE で plan を「予約」し、勝ったときだけ記録する
+        (二重 trigger / 二重 shadow_trigger 行を防ぐ, Codex review #3)。負けたら False。
+        start_run 後の例外でも finish_run を保証する (try/finally, Codex review #2)。
+        """
+        # 1. plan を active から triggered へ条件付きで claim。負け (既に非 active) なら何もしない。
+        if not self._orch.try_mark_plan_triggered(plan.plan_id):
+            logger.info(
+                f"[ORCH] plan {plan.plan_id} ({pair}) already non-active — trigger skipped"
+            )
+            return False
+
+        run_id = self._orch.start_run(
+            "OrchestratorRuntime", pair=pair, trigger_type="watch_cycle",
+        )
+        ok = False
+        try:
+            # 新規 snapshot を materialize (planning 時点とは別。trigger 時の quote/freshness/
+            # risk pre-check を独立 trace する — §7.1)。
+            trigger_ctx = self._ctx.build(pair=pair, now=now, quote=quote)
+            snapshot_id = trigger_ctx["snapshot_id"]
+            self._orch.attach_snapshot(run_id, snapshot_id)
+
+            # shadow risk pre-check。Phase 2 は hard veto にせず結果を残すだけ。
+            action = plan.action_json or {}
+            risk_result = self._shadow_risk_precheck(plan, trigger_ctx)
+
+            decision_id = self._orch.record_decision(
+                run_id=run_id, snapshot_id=snapshot_id, pair=pair,
+                decision_type="plan_trigger", decision=_side_of(plan.direction),
+                plan_id=plan.plan_id, reasoning_summary="watch shadow trigger",
+                risk_gate_result=risk_result, trade_horizon=plan.horizon,
+            )
+            self._orch.record_shadow_trigger(
+                plan_id=plan.plan_id, decision_id=decision_id, pair=pair,
+                direction=plan.direction, triggered_at=now, trigger_price=quote.mid,
+                sl=action.get("sl"), tp=action.get("tp"), rr=action.get("rr"),
+                snapshot_id=snapshot_id, risk_gate_result=risk_result,
+            )
+            ok = True
+            logger.info(
+                f"[ORCH] 🧪 shadow trigger plan {plan.plan_id} {pair} {plan.direction} "
+                f"@ {quote.mid}"
+            )
+            return True
+        finally:
+            self._orch.finish_run(run_id, status="ok" if ok else "failed")
+            if not ok:
+                # claim 後・記録前に落ちた: plan を active に戻し、次 tick で再評価させる
+                # (triggered のまま放置すると shadow_trigger 行が無いのに再 trigger 不可になる)。
+                self._orch.update_plan_status(plan.plan_id, "active")
+
+    def _shadow_risk_precheck(self, plan, trigger_ctx: dict) -> dict | None:
+        """ExecutionPlanDraft 相当を組んで RiskGateWorker.pre_check を回し dict 化する。
+
+        plan の保存済み entry/action/invalidation から draft を復元する。復元できない
+        (vocabulary 不整合 / expires_at 欠落等) 場合は None を返し trigger 記録は継続する
+        (shadow なので risk reject でも発注はしない — 記録の欠落だけ許容)。
+        """
+        # expires_at は ExecutionPlanDraft で datetime 必須。nullable column なので
+        # None のとき draft を作らず pre-check を skip する (Codex review #4)。
+        if plan.expires_at is None:
+            return None
+        try:
+            draft = ExecutionPlanDraft(
+                direction=plan.direction,
+                entry_conditions=[
+                    EntryCondition.from_dict(c) for c in (plan.entry_conditions_json or [])
+                ],
+                action=dict(plan.action_json or {}),
+                invalidation=[
+                    InvalidationCondition.from_dict(c)
+                    for c in (plan.invalidation_json or [])
+                ],
+                expires_at=plan.expires_at,
+                reasoning_summary="shadow precheck",
+            )
+        except (SchemaParseError, ValueError):
+            logger.warning(
+                f"[ORCH] shadow risk pre-check skipped for plan {plan.plan_id}: "
+                "could not reconstruct draft"
+            )
+            return None
+        return self._risk_gate.pre_check(draft, trigger_ctx).to_dict()
 
     # ── ループ駆動 (enabled 時のみ) ─────────────────────────────
 
