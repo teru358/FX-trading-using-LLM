@@ -6,6 +6,8 @@ ShadowNotifier の対応メソッドが呼ばれること、未注入 (None) で
 """
 from __future__ import annotations
 
+import threading
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -238,3 +240,89 @@ def test_hindsight_evaluated_notifies(tmp_path: Path) -> None:
     assert info.pair == "USDJPY=X"
     assert info.pnl_r == 2.0
     assert info.would_hit_tp is True
+
+
+# ── 通知 worker (ノンブロッキング) — Codex Medium#1 ───────────
+
+
+class SlowNotifier(RecordingShadowNotifier):
+    """notify が指定秒ブロックする notifier。ループ滞留検証用。"""
+
+    def __init__(self, *, delay: float) -> None:
+        super().__init__()
+        self._delay = delay
+
+    async def notify_shadow_trigger(self, info) -> None:
+        time.sleep(self._delay)
+        await super().notify_shadow_trigger(info)
+
+
+def test_notifications_run_on_worker_thread_do_not_block_cycle(tmp_path: Path) -> None:
+    """worker 起動時、遅い通知が watch cycle の戻りをブロックしない。
+
+    通知は worker thread へ enqueue され、run_watch_cycle 自体は即座に返る。
+    その後 worker が遅延付きで処理を完了する。
+    """
+    notifier = SlowNotifier(delay=0.5)
+    rt = _make_runtime(tmp_path, notifier=notifier, mid=150.10)
+    plan_id = _create_plan(rt._orch, entry=[{"type": "price_at_or_below", "value": 150.30}])
+
+    rt._start_notify_worker()
+    try:
+        t0 = time.monotonic()
+        triggered = rt.run_watch_cycle(now=NOW)
+        elapsed = time.monotonic() - t0
+
+        assert triggered == [plan_id]
+        # cycle は通知完了 (0.5s) を待たずに返る。
+        assert elapsed < 0.3, f"cycle blocked on notification: {elapsed:.3f}s"
+
+        # worker が最終的に通知を処理する。
+        deadline = time.monotonic() + 3.0
+        while not notifier.kinds() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert "shadow_trigger" in notifier.kinds()
+    finally:
+        rt._stop_notify_worker()
+
+
+def test_stop_notify_worker_drains_pending(tmp_path: Path) -> None:
+    """_stop_notify_worker は queue の未処理分を drain してから止まる。"""
+    notifier = RecordingShadowNotifier()
+    rt = _make_runtime(tmp_path, notifier=notifier, mid=150.10)
+    plan_id = _create_plan(rt._orch, entry=[{"type": "price_at_or_below", "value": 150.30}])
+
+    rt._start_notify_worker()
+    rt.run_watch_cycle(now=NOW)
+    assert triggered_ok(plan_id, rt)
+    rt._stop_notify_worker()  # drain + join
+
+    assert "shadow_trigger" in notifier.kinds()
+
+
+def triggered_ok(plan_id: int, rt: OrchestratorRuntime) -> bool:
+    return rt._orch.get_trade_plan(plan_id).status == "triggered"
+
+
+def test_worker_thread_not_started_falls_back_to_sync(tmp_path: Path) -> None:
+    """worker 未起動なら同期実行 (テスト・手動駆動の後方互換)。"""
+    notifier = RecordingShadowNotifier()
+    rt = _make_runtime(tmp_path, notifier=notifier, mid=150.10)
+    _create_plan(rt._orch, entry=[{"type": "price_at_or_below", "value": 150.30}])
+    rt.run_watch_cycle(now=NOW)
+    # worker を起動していないので、戻り時点で既に同期処理済み。
+    assert "shadow_trigger" in notifier.kinds()
+
+
+def test_only_one_notify_worker_even_on_double_start(tmp_path: Path) -> None:
+    notifier = RecordingShadowNotifier()
+    rt = _make_runtime(tmp_path, notifier=notifier, mid=150.10)
+    rt._start_notify_worker()
+    rt._start_notify_worker()  # 2 回目は no-op
+    try:
+        alive = [
+            t for t in threading.enumerate() if t.name == "orch-notify" and t.is_alive()
+        ]
+        assert len(alive) == 1
+    finally:
+        rt._stop_notify_worker()

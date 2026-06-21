@@ -103,12 +103,12 @@ class ShadowNotifier:
         )
         if info.reason:
             msg += f"\nreason: {info.reason}"
-        await self._notifier.send(msg)
+        await self._send_capped(msg)
 
     async def notify_plan_rejected(self, *, pair: str, reason: str) -> None:
         if not self._enabled(self._config.shadow_plan_created):
             return
-        await self._notifier.send(
+        await self._send_capped(
             f"{_PREFIX} Plan rejected {pair}\nreason: {reason}"
         )
 
@@ -117,7 +117,7 @@ class ShadowNotifier:
     ) -> None:
         if not self._enabled(self._config.shadow_plan_created):
             return
-        await self._notifier.send(
+        await self._send_capped(
             f"{_PREFIX} Plan superseded {pair}\n"
             f"plan={old_plan_id} → plan={new_plan_id}"
         )
@@ -142,7 +142,7 @@ class ShadowNotifier:
         lines.append(levels)
         if info.reason:
             lines.append(f"reason: {info.reason}")
-        await self._notifier.send("\n".join(lines))
+        await self._send_capped("\n".join(lines))
 
     # ── hindsight ─────────────────────────────────────────────
 
@@ -155,7 +155,7 @@ class ShadowNotifier:
         elif info.would_hit_sl:
             hit = " (SL hit)"
         plan_part = f"plan={info.plan_id} " if info.plan_id is not None else ""
-        await self._notifier.send(
+        await self._send_capped(
             f"{_PREFIX} Hindsight {info.pair} {info.direction.upper()}{hit}\n"
             f"{plan_part}PnL {_fmt_opt(info.pnl_r)}R | "
             f"MFE {_fmt_opt(info.mfe_r)}R | MAE {_fmt_opt(info.mae_r)}R"
@@ -189,6 +189,17 @@ class ShadowNotifier:
     def _enabled(self, event_flag: bool) -> bool:
         """マスタースイッチ AND イベント個別フラグ。"""
         return self._config.shadow_enabled and event_flag
+
+    async def _send_capped(self, message: str) -> None:
+        """単発メッセージを Discord 2000 字制限内に収めて送る (Codex Low-Medium#4)。
+
+        LLM 由来の reason が長いと 2000 字を超え、Discord が拒否 → DiscordNotifier が
+        例外を warning に落とし通知が無言で欠落する。送信前に末尾を切詰めて欠落を防ぐ。
+        """
+        if len(message) > _MAX_CONTENT:
+            ellipsis = "\n…(truncated)"
+            message = message[: _MAX_CONTENT - len(ellipsis)] + ellipsis
+        await self._notifier.send(message)
 
     async def _send_chunked(self, header: str, lines: list[str]) -> None:
         """header + 複数行を 2000 字制限内のメッセージに分割して送る。
@@ -224,23 +235,23 @@ def create_shadow_notifier(
 ) -> ShadowNotifier:
     """config から ShadowNotifier を組み立てる。
 
-    `shadow_enabled` が false、または webhook 未設定なら NullNotifier を使う
-    (送信は no-op だが ShadowNotifier の gate も二重で効く)。webhook は
-    `DISCORD_SHADOW_WEBHOOK_URL` を優先し、無ければ `DISCORD_WEBHOOK_URL` に
-    フォールバックする (専用 channel を分けたい場合は前者を設定する)。
+    `shadow_enabled` が false、または `DISCORD_SHADOW_WEBHOOK_URL` 未設定なら
+    NullNotifier を使う (送信は no-op)。
+
+    **本番 `DISCORD_WEBHOOK_URL` には fallback しない (Codex Medium#2)。** fallback すると
+    shadow 通知が本番 (取引サイクル) チャンネルに漏れ、Phase 5 の「shadow-only・既存と
+    分離」という目的が崩れる。shadow 通知を出したい場合は専用 webhook を明示設定する。
     """
     notifier: NotifierAdapter = NullNotifier()
     if config.shadow_enabled:
-        webhook = os.environ.get("DISCORD_SHADOW_WEBHOOK_URL") or os.environ.get(
-            "DISCORD_WEBHOOK_URL", ""
-        )
+        webhook = os.environ.get("DISCORD_SHADOW_WEBHOOK_URL", "")
         if webhook:
             from src.notifications.discord_notifier import DiscordNotifier
 
             notifier = DiscordNotifier(webhook_url=webhook)
         else:
             logger.warning(
-                "[ORCH] shadow notifications enabled but no DISCORD_SHADOW_WEBHOOK_URL "
-                "/ DISCORD_WEBHOOK_URL set — using NullNotifier"
+                "[ORCH] shadow notifications enabled but DISCORD_SHADOW_WEBHOOK_URL "
+                "not set — using NullNotifier (本番 channel には fallback しない)"
             )
     return ShadowNotifier(notifier, config)

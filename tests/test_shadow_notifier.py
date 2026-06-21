@@ -11,13 +11,15 @@ from datetime import datetime, timezone
 import pytest
 
 from src.config.schema import OrchestratorNotificationsConfig
-from src.notifications.notifier import NotifierAdapter
+from src.notifications.notifier import NotifierAdapter, NullNotifier
+from src.notifications.discord_notifier import DiscordNotifier
 from src.orchestrator.shadow_metrics import ShadowMetrics
 from src.orchestrator.shadow_notifier import (
     PlanCreatedInfo,
     ShadowTriggerInfo,
     HindsightInfo,
     ShadowNotifier,
+    create_shadow_notifier,
 )
 
 
@@ -172,3 +174,63 @@ async def test_long_message_split_under_2000() -> None:
     # 全行が送られている
     joined = "\n".join(fake.messages)
     assert "pair0=X" in joined and "pair119=X" in joined
+
+
+# ── factory: shadow channel 分離 (Codex Medium#2) ─────────────
+
+
+def test_factory_uses_shadow_webhook(monkeypatch) -> None:
+    monkeypatch.setenv("DISCORD_SHADOW_WEBHOOK_URL", "https://discord.test/shadow")
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.test/prod")
+    sn = create_shadow_notifier(OrchestratorNotificationsConfig())
+    assert isinstance(sn._notifier, DiscordNotifier)
+    assert sn._notifier._url == "https://discord.test/shadow"
+
+
+def test_factory_no_fallback_to_prod_webhook(monkeypatch) -> None:
+    """shadow webhook 未設定なら本番 webhook に fallback せず NullNotifier。
+
+    fallback すると shadow 通知が本番チャンネルに漏れ Phase 5 の目的 (分離) が崩れる。
+    """
+    monkeypatch.delenv("DISCORD_SHADOW_WEBHOOK_URL", raising=False)
+    monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.test/prod")
+    sn = create_shadow_notifier(OrchestratorNotificationsConfig())
+    assert isinstance(sn._notifier, NullNotifier)
+
+
+def test_factory_disabled_uses_null(monkeypatch) -> None:
+    monkeypatch.setenv("DISCORD_SHADOW_WEBHOOK_URL", "https://discord.test/shadow")
+    cfg = OrchestratorNotificationsConfig(shadow_enabled=False)
+    sn = create_shadow_notifier(cfg)
+    assert isinstance(sn._notifier, NullNotifier)
+
+
+# ── 全イベント 2000字 cap (Codex Low-Medium#4) ────────────────
+
+
+@pytest.mark.asyncio
+async def test_long_reason_is_capped_under_2000() -> None:
+    """長い reason (LLM 由来) があっても各通知は 2000 字以内に収まる。
+
+    超過すると Discord が拒否し、DiscordNotifier は例外を warning に落とすため通知が
+    無言で欠落する。送信前に cap して欠落を防ぐ。
+    """
+    fake = FakeNotifier()
+    sn = ShadowNotifier(fake, OrchestratorNotificationsConfig())
+    huge = "x" * 5000
+    await sn.notify_shadow_trigger(
+        ShadowTriggerInfo(
+            pair="USDJPY=X", direction="long", plan_id=1,
+            score=0.5, confidence=0.5, trigger_price=150.0,
+            sl=149.0, tp=152.0, rr=2.0, reason=huge,
+        )
+    )
+    await sn.notify_plan_created(
+        PlanCreatedInfo(pair="USDJPY=X", direction="long", plan_id=2,
+                        score=0.5, confidence=0.5, reason=huge)
+    )
+    await sn.notify_plan_rejected(pair="USDJPY=X", reason=huge)
+    assert len(fake.messages) == 3
+    assert all(len(m) <= 2000 for m in fake.messages)
+    # cap されても prefix は保たれる。
+    assert all(m.startswith("🧪") for m in fake.messages)

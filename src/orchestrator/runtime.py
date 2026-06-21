@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import queue
 import threading
 from datetime import datetime
 from typing import TYPE_CHECKING, Callable
@@ -92,6 +93,12 @@ class OrchestratorRuntime:
         self._planning_thread: threading.Thread | None = None
         self._watch_thread: threading.Thread | None = None
         self._hindsight_thread: threading.Thread | None = None
+        # 通知 worker (Codex Medium#1): 通知は HTTP 待ち (最大 10s) を伴うため、
+        # planning/watch/hindsight ループ上で同期実行するとループが滞留する。専用 queue +
+        # worker thread に逃がし、ループは enqueue だけで即戻る (真の fire-and-forget)。
+        # worker 未起動時 (テスト・手動駆動) は同期実行にフォールバックする。
+        self._notify_queue: "queue.Queue[Callable[[], object] | None]" = queue.Queue()
+        self._notify_thread: threading.Thread | None = None
 
     # ── 1 サイクル分の処理 (テスト・手動駆動可) ─────────────────
 
@@ -512,18 +519,64 @@ class OrchestratorRuntime:
             return None
         return self._risk_gate.pre_check(draft, trigger_ctx).to_dict()
 
-    # ── shadow 通知 (Phase 5, fire-and-forget) ─────────────────
+    # ── shadow 通知 (Phase 5, worker thread で非ブロッキング) ────
 
-    def _run_notify(self, coro) -> None:
-        """通知コルーチンを同期スレッドから実行し、失敗を握り潰す。
+    def _start_notify_worker(self) -> None:
+        """通知 worker thread を起動する。二重起動は no-op。
 
-        planning/watch/hindsight ループは同期スレッドで回るため asyncio.run で境界を
-        またぐ。通知は deterministic path の付随物であり、ここでの例外 (送信失敗・
-        notifier 不整合) が記録系・ループを止めてはならない。よって例外は warning に
-        落として継続する (§通知失敗はシステムを止めない)。
+        notifier 未注入時は worker を起こさない (通知が無いので不要)。
+        """
+        if self._notifier is None:
+            return
+        if self._notify_thread is not None and self._notify_thread.is_alive():
+            return
+        self._notify_thread = threading.Thread(
+            target=self._notify_worker_loop, name="orch-notify", daemon=True
+        )
+        self._notify_thread.start()
+
+    def _stop_notify_worker(self) -> None:
+        """sentinel を積んで worker に残りを drain させ、join する。"""
+        t = self._notify_thread
+        if t is None:
+            return
+        self._notify_queue.put(None)  # sentinel
+        t.join(timeout=15.0)  # Discord timeout(10s) + マージン
+        self._notify_thread = None
+
+    def _notify_worker_loop(self) -> None:
+        """queue から通知ジョブ (coroutine factory) を取り出し順次実行する。
+
+        ジョブは「呼ぶと coroutine を返す callable」。enqueue 時点で coroutine 化すると
+        未 await 警告が出るため factory にしている。None は stop sentinel。
+        """
+        while True:
+            factory = self._notify_queue.get()
+            if factory is None:
+                return
+            self._execute_notify(factory)
+
+    def _run_notify(self, factory: "Callable[[], object]") -> None:
+        """通知ジョブを worker に enqueue する。worker 未起動なら同期実行。
+
+        worker 起動中はループをブロックしない (enqueue は即時)。未起動時 (テスト・手動
+        駆動) は後方互換のためその場で実行する。
+        """
+        if self._notify_thread is not None and self._notify_thread.is_alive():
+            self._notify_queue.put(factory)
+        else:
+            self._execute_notify(factory)
+
+    @staticmethod
+    def _execute_notify(factory: "Callable[[], object]") -> None:
+        """factory() で coroutine を生成し asyncio.run で実行。失敗は握り潰す。
+
+        通知は deterministic path の付随物であり、送信失敗・notifier 不整合が記録系を
+        止めてはならない (§通知失敗はシステムを止めない)。同期スレッドから呼ぶ前提
+        (asyncio.run はネストした running loop からは呼べない)。
         """
         try:
-            asyncio.run(coro)
+            asyncio.run(factory())
         except Exception:
             logger.warning("[ORCH] shadow notification failed", exc_info=True)
 
@@ -533,27 +586,25 @@ class OrchestratorRuntime:
             return
         from src.orchestrator.shadow_notifier import PlanCreatedInfo
 
+        n = self._notifier
         if result.outcome == "plan_create" and result.plan_id is not None:
+            new_id = result.plan_id
             for old_id in result.superseded_plan_ids:
                 self._run_notify(
-                    self._notifier.notify_plan_superseded(
-                        pair=pair, old_plan_id=old_id, new_plan_id=result.plan_id,
+                    lambda old_id=old_id: n.notify_plan_superseded(
+                        pair=pair, old_plan_id=old_id, new_plan_id=new_id,
                     )
                 )
-            self._run_notify(
-                self._notifier.notify_plan_created(
-                    PlanCreatedInfo(
-                        pair=pair, direction=result.direction or "?",
-                        plan_id=result.plan_id, score=result.score,
-                        confidence=result.confidence, reason=result.reason or "",
-                    )
-                )
+            info = PlanCreatedInfo(
+                pair=pair, direction=result.direction or "?",
+                plan_id=new_id, score=result.score,
+                confidence=result.confidence, reason=result.reason or "",
             )
+            self._run_notify(lambda: n.notify_plan_created(info))
         elif result.outcome == "reject":
+            reason = result.reason or "rejected"
             self._run_notify(
-                self._notifier.notify_plan_rejected(
-                    pair=pair, reason=result.reason or "rejected",
-                )
+                lambda: n.notify_plan_rejected(pair=pair, reason=reason)
             )
 
     def _notify_shadow_trigger(self, plan, pair: str, quote: QuoteSnapshot, action: dict) -> None:
@@ -561,32 +612,28 @@ class OrchestratorRuntime:
             return
         from src.orchestrator.shadow_notifier import ShadowTriggerInfo
 
-        self._run_notify(
-            self._notifier.notify_shadow_trigger(
-                ShadowTriggerInfo(
-                    pair=pair, direction=plan.direction or "?", plan_id=plan.plan_id,
-                    score=None, confidence=None,  # plan 行に score/conf は無い (§trigger)
-                    trigger_price=quote.mid,
-                    sl=action.get("sl"), tp=action.get("tp"), rr=action.get("rr"),
-                    reason=(action.get("comment") or ""),
-                )
-            )
+        n = self._notifier
+        info = ShadowTriggerInfo(
+            pair=pair, direction=plan.direction or "?", plan_id=plan.plan_id,
+            score=None, confidence=None,  # plan 行に score/conf は無い (§trigger)
+            trigger_price=quote.mid,
+            sl=action.get("sl"), tp=action.get("tp"), rr=action.get("rr"),
+            reason=(action.get("comment") or ""),
         )
+        self._run_notify(lambda: n.notify_shadow_trigger(info))
 
     def _notify_hindsight(self, trig, result) -> None:
         if self._notifier is None:
             return
         from src.orchestrator.shadow_notifier import HindsightInfo
 
-        self._run_notify(
-            self._notifier.notify_hindsight_evaluated(
-                HindsightInfo(
-                    pair=trig.pair, direction=trig.direction, plan_id=trig.plan_id,
-                    mfe_r=result.mfe_r, mae_r=result.mae_r, pnl_r=result.pnl_r,
-                    would_hit_tp=result.would_hit_tp, would_hit_sl=result.would_hit_sl,
-                )
-            )
+        n = self._notifier
+        info = HindsightInfo(
+            pair=trig.pair, direction=trig.direction, plan_id=trig.plan_id,
+            mfe_r=result.mfe_r, mae_r=result.mae_r, pnl_r=result.pnl_r,
+            would_hit_tp=result.would_hit_tp, would_hit_sl=result.would_hit_sl,
         )
+        self._run_notify(lambda: n.notify_hindsight_evaluated(info))
 
     # ── ループ駆動 (enabled 時のみ) ─────────────────────────────
 
@@ -603,6 +650,8 @@ class OrchestratorRuntime:
             logger.warning("[ORCH] start() called while already running — ignored")
             return
         self._stop.clear()
+        # 通知 worker を先に起こす: ループが enqueue する前に worker を立てておく。
+        self._start_notify_worker()
         self._planning_thread = threading.Thread(
             target=self._planning_loop, name="orch-planning", daemon=True
         )
@@ -627,6 +676,8 @@ class OrchestratorRuntime:
         self._planning_thread = None
         self._watch_thread = None
         self._hindsight_thread = None
+        # ループ停止後に通知 worker を drain して止める (in-flight 通知を取りこぼさない)。
+        self._stop_notify_worker()
 
     def _planning_loop(self) -> None:
         wait = self._config.market_state.normal_seconds
