@@ -220,6 +220,86 @@ def test_run_planning_cycle_quote_failure_marks_failed_and_continues(tmp_path: P
     assert orch.get_decision(2) is None          # 2 件目の decision は無い (run1 は未記録)
 
 
+def test_planning_cycle_drives_pipeline_when_injected(tmp_path: Path) -> None:
+    """pipeline 注入時は direct_hold stub でなく pipeline.run を駆動し ok で finish する。"""
+    from src.orchestrator.planning_pipeline import PipelineResult
+
+    db = tmp_path / "orch.db"
+    orch = OrchestratorStore(db)
+    builder = DecisionContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
+
+    def quote_provider(pair: str) -> QuoteSnapshot:
+        return QuoteSnapshot(
+            bid=150.0, ask=150.02, mid=150.01, spread=0.02,
+            source="test", observed_at=datetime(2026, 6, 20, 12, 0, 0),
+        )
+
+    calls: list[dict] = []
+
+    class _FakePipeline:
+        async def run(self, *, pair, context, run_id):
+            calls.append({"pair": pair, "run_id": run_id, "snapshot_id": context["snapshot_id"]})
+            return PipelineResult(outcome="direct_hold", decision_ids=[])
+
+    runtime = OrchestratorRuntime(
+        config=OrchestratorConfig(),
+        orch_store=orch,
+        context_builder=builder,
+        pairs=["USDJPY=X"],
+        quote_provider=quote_provider,
+        pipeline=_FakePipeline(),
+    )
+    runtime.run_planning_cycle(now=datetime(2026, 6, 20, 12, 0, 0))
+
+    # pipeline.run が build 済み context と run_id で呼ばれた
+    assert len(calls) == 1
+    assert calls[0]["pair"] == "USDJPY=X"
+    run = orch.get_run(1)
+    assert run is not None
+    assert run.run_id == calls[0]["run_id"]
+    assert run.snapshot_id == calls[0]["snapshot_id"]
+    # outcome != failed → ok で finish
+    assert run.status == "ok"
+    # Phase1 stub の direct_hold は記録されない (pipeline が decision を担う)
+    assert orch.get_decision(1) is None
+
+
+def test_planning_cycle_marks_failed_when_pipeline_outcome_failed(tmp_path: Path) -> None:
+    """pipeline が outcome='failed' を返したら run を failed で finish する。"""
+    from src.orchestrator.planning_pipeline import PipelineResult
+
+    db = tmp_path / "orch.db"
+    orch = OrchestratorStore(db)
+    builder = DecisionContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
+
+    def quote_provider(pair: str) -> QuoteSnapshot:
+        return QuoteSnapshot(
+            bid=150.0, ask=150.02, mid=150.01, spread=0.02,
+            source="test", observed_at=datetime(2026, 6, 20, 12, 0, 0),
+        )
+
+    class _FailingPipeline:
+        async def run(self, *, pair, context, run_id):
+            return PipelineResult(outcome="failed", error="SchemaParseError: boom")
+
+    runtime = OrchestratorRuntime(
+        config=OrchestratorConfig(),
+        orch_store=orch,
+        context_builder=builder,
+        pairs=["USDJPY=X"],
+        quote_provider=quote_provider,
+        pipeline=_FailingPipeline(),
+    )
+    runtime.run_planning_cycle(now=datetime(2026, 6, 20, 12, 0, 0))
+
+    run = orch.get_run(1)
+    assert run is not None
+    assert run.status == "failed"
+    assert run.finished_at is not None
+    # snapshot は作れている (fail-safe は plan を作らないだけで snapshot は残す)
+    assert run.snapshot_id is not None
+
+
 def test_planning_cycle_only_processes_detector_pairs(tmp_path: Path) -> None:
     """detector が返した pair のみ planning する (material 駆動)。"""
     db = tmp_path / "orch.db"

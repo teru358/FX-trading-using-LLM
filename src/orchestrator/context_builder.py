@@ -12,13 +12,22 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from src.config.schema import OrchestratorConfig
 from src.data.analysis_store import AnalysisStore
 from src.data.orchestrator_store import OrchestratorStore
 
+if TYPE_CHECKING:
+    from src.config.schema import AppConfig
+    from src.rag.vector_store import VectorStore
+
 logger = logging.getLogger(__name__)
+
+# pair -> §7 news ブロック ({"sentiment_score", "confidence", "top_reasons"})。
+# 実装は RAG 集計 (aggregate_news_sentiment) のアダプタ。detector と同じ後方互換の
+# オプション注入パターンで、None なら従来の空 news に倒す。
+NewsProvider = Callable[[str], dict[str, Any]]
 
 
 @dataclass
@@ -45,10 +54,12 @@ class DecisionContextBuilder:
         orch_store: OrchestratorStore,
         analysis_store: AnalysisStore,
         config: OrchestratorConfig,
+        news_provider: NewsProvider | None = None,
     ) -> None:
         self._orch = orch_store
         self._analysis = analysis_store
         self._config = config
+        self._news_provider = news_provider
 
     # technical snapshot をこの分数より古ければ stale 扱いにする (decision に古い
     # データを使わせない)。
@@ -62,6 +73,7 @@ class DecisionContextBuilder:
     def build(self, *, pair: str, now: datetime, quote: QuoteSnapshot) -> dict[str, Any]:
         """decision_snapshot を materialize し §7 標準 context dict を返す。"""
         technical = self._build_technical(pair, now)
+        news = self._build_news(pair, now)
         quote_dict = {
             "bid": quote.bid, "ask": quote.ask, "mid": quote.mid,
             "spread": quote.spread, "source": quote.source,
@@ -73,7 +85,7 @@ class DecisionContextBuilder:
             as_of_time=now,
             quote_json=quote_dict,
             technical_ref=technical.get("_ref"),
-            news_ref=None,
+            news_ref=news.get("_ref"),
         )
 
         return {
@@ -83,7 +95,7 @@ class DecisionContextBuilder:
             "quote": quote_dict,
             "position": self._empty_position(),
             "technical": {k: v for k, v in technical.items() if k != "_ref"},
-            "news": self._empty_news(),
+            "news": {k: v for k, v in news.items() if k != "_ref"},
             "risk_state": self._empty_risk_state(),
             "data_health": {"issues": []},
             "recent_decisions": {"items": []},
@@ -151,6 +163,31 @@ class DecisionContextBuilder:
             "_ref": {"snapshot_id": row.id, "analyzed_at": row.analyzed_at.isoformat()},
         }
 
+    def _build_news(self, pair: str, now: datetime) -> dict[str, Any]:
+        """注入された news_provider から §7 news ブロックを組む。
+
+        provider 未注入なら従来の空 news に倒す (後方互換)。provider が落ちても
+        build 全体を止めない: news は判断材料の 1 つに過ぎず、1 材料の取得失敗で
+        decision サイクル全体を落とすのは過剰 (technical の missing/stale と同じ思想)。
+        失敗時は空 news + _ref なしに倒し、traceback を error ログに残す。
+
+        `_ref` は build() が snapshot.news_ref に保存し (§8.1 trace)、返り値 context の
+        news ブロックからは除去される (technical の _ref と同じ扱い)。
+        """
+        if self._news_provider is None:
+            return {**self._empty_news(), "_ref": None}
+        try:
+            raw = self._news_provider(pair)
+        except Exception:
+            logger.exception("[ORCH] news_provider failed for %s — empty news", pair)
+            return {**self._empty_news(), "_ref": None}
+        return {
+            "sentiment_score": raw.get("sentiment_score"),
+            "confidence": raw.get("confidence"),
+            "top_reasons": raw.get("top_reasons") or [],
+            "_ref": {"source": "rag_aggregate", "as_of": now.isoformat()},
+        }
+
     @staticmethod
     def _empty_position() -> dict[str, Any]:
         return {"side": None, "entry": None, "size": None, "pnl": None, "mfe_r": None}
@@ -176,3 +213,34 @@ class DecisionContextBuilder:
             "extension_from_ma": None, "overbought_oversold": None,
             "dist_from_recent_swing": None,
         }
+
+
+def make_news_provider(config: "AppConfig", store: "VectorStore") -> NewsProvider:
+    """既存 RAG 集計 (aggregate_news_sentiment) を §7 news provider に適合させる。
+
+    DecisionContextBuilder は news を `Callable[[str], dict]` として受ける (RAG/LLM へ
+    直接依存しない)。本 factory が pair 文字列 → InstrumentConfig 解決 + 集計 +
+    §7 shape ({sentiment_score, confidence, top_reasons}) への変換を担うアダプタ。
+
+    NewsSentiment.key_themes を top_reasons に写す。config に無い pair は集計せず
+    空 news に倒す (新規取得は一切しない: 保存済み RAG の集約のみ)。
+
+    import はローカル: aggregate_news_sentiment が RAG/LLM スタックを引き込むため、
+    context_builder の module-level import を軽量に保つ (trading.py と同じ方針)。
+    """
+    from src.analysis.news_aggregator import aggregate_news_sentiment
+
+    by_symbol = {inst.symbol: inst for inst in config.enabled_instruments}
+
+    def provider(pair: str) -> dict[str, Any]:
+        pair_cfg = by_symbol.get(pair)
+        if pair_cfg is None:
+            return DecisionContextBuilder._empty_news()
+        sentiment = aggregate_news_sentiment(pair_cfg, store, config)
+        return {
+            "sentiment_score": sentiment.sentiment_score,
+            "confidence": sentiment.confidence,
+            "top_reasons": list(sentiment.key_themes),
+        }
+
+    return provider

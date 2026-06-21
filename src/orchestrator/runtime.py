@@ -10,6 +10,7 @@ Phase 1 foundation: planning loop と watch loop の 2 ループの骨格。
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import threading
 from datetime import datetime
@@ -22,6 +23,7 @@ from src.utils.clock import db_now
 
 if TYPE_CHECKING:
     from src.orchestrator.material_landing import MaterialLandingDetector
+    from src.orchestrator.planning_pipeline import PlanningPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,7 @@ class OrchestratorRuntime:
         pairs: list[str],
         quote_provider: QuoteProvider,
         detector: "MaterialLandingDetector | None" = None,
+        pipeline: "PlanningPipeline | None" = None,
     ) -> None:
         self._config = config
         self._orch = orch_store
@@ -47,6 +50,7 @@ class OrchestratorRuntime:
         self._pairs = pairs
         self._quote_provider = quote_provider
         self._detector = detector
+        self._pipeline = pipeline
         self._stop = threading.Event()
         self._planning_thread: threading.Thread | None = None
         self._watch_thread: threading.Thread | None = None
@@ -83,18 +87,27 @@ class OrchestratorRuntime:
                 self._orch.attach_snapshot(run_id, ctx["snapshot_id"])
                 # snapshot 作成まで到達 = 材料を読めた。ここを境に material baseline を消費する。
                 committed = True
-                # later plan: ここで PlannerAgent を呼び trade_plan を立/改/無効化する。
-                # Phase 1 は機会判断を行わず direct_hold を記録する。
-                self._orch.record_decision(
-                    run_id=run_id,
-                    snapshot_id=ctx["snapshot_id"],
-                    pair=pair,
-                    decision_type="direct_hold",
-                    decision="hold",
-                    reasoning_summary="phase1 observe: no planning agent wired yet",
-                    trade_horizon=self._config.policy.trade_horizon,
-                )
-                self._orch.finish_run(run_id, status="ok")
+                if self._pipeline is not None:
+                    # Layer2 planning (Task 2.11)。planning thread には event loop が無いので
+                    # asyncio.run で同期境界をまたぐ (二重 loop にならない)。pipeline は内部で
+                    # fail-safe し、decision/plan の記録も自身で行う (§5.2/§5.4)。
+                    result = asyncio.run(
+                        self._pipeline.run(pair=pair, context=ctx, run_id=run_id)
+                    )
+                    status = "failed" if result.outcome == "failed" else "ok"
+                    self._orch.finish_run(run_id, status=status)
+                else:
+                    # 後方互換 (pipeline 未注入): 機会判断を行わず direct_hold を記録する。
+                    self._orch.record_decision(
+                        run_id=run_id,
+                        snapshot_id=ctx["snapshot_id"],
+                        pair=pair,
+                        decision_type="direct_hold",
+                        decision="hold",
+                        reasoning_summary="phase1 observe: no planning agent wired yet",
+                        trade_horizon=self._config.policy.trade_horizon,
+                    )
+                    self._orch.finish_run(run_id, status="ok")
             except Exception as exc:
                 logger.exception(f"[ORCH] planning cycle failed for {pair}")
                 self._orch.finish_run(
