@@ -157,6 +157,30 @@ def test_collect_trade_skips_watch_with_missing_prices(tmp_path, monkeypatch):
     assert captured["watch_symbols"] == []
 
 
+def test_collect_all_runs_both_watch_and_trade(tmp_path, monkeypatch):
+    """collect_all_technical wrapper は watch + trade 両方を収集する (後方互換)。"""
+    import src.jobs.technical_collector as tc
+    from src.jobs.technical_collector import collect_all_technical
+
+    store = AnalysisStore(tmp_path / "test.db")
+    watch = [_inst("SPY", "S&P500", "index")]
+    tradeable = [_inst("USDJPY=X", "USD/JPY")]
+    _patch_collectible(monkeypatch)
+
+    price_store = MagicMock()
+    price_store.load_ohlcv.return_value = _watch_ohlcv_df()
+    monkeypatch.setattr(tc, "compute_correlations", lambda *a, **kw: [])
+    monkeypatch.setattr(tc, "format_macro_context_for_prompt", lambda *a, **kw: "MACRO")
+
+    asyncio.run(collect_all_technical(
+        config=_split_config(watch, tradeable), store=MagicMock(),
+        price_store=price_store, analysis_store=store, force=True,
+    ))
+
+    assert store.get_latest_collect_row("SPY") is not None
+    assert store.get_latest_collect_row("USDJPY=X") is not None
+
+
 def test_collect_trade_excludes_stale_watch_from_correlation(tmp_path, monkeypatch):
     """watch の最新バーが stale (閾値超) なら相関入力から除外される。"""
     import src.jobs.technical_collector as tc
