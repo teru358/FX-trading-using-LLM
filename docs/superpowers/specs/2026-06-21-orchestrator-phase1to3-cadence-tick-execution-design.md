@@ -124,6 +124,12 @@ shadow 境界内。全て非LLM / 配線 / 状態管理。
 
 **テスト:** C-1 state 遷移 + ヒステリシス (calm↔active の即時上げ/遅延下げ、閾値バタつき無し、horizon 別閾値)。C-2 active/critical で boost 書込・calm で失効・trade のみ。C-3 regime 変化で planning トリガ + debounce。
 
+**Phase1 実装スコープ (code review 反映):** market state 判定の入力は **Phase1 では価格変化率 (move_pct) ベースに限定**する。detector 自体は `bridge_degraded` / SL-TP 近接 / `important_news` / spread spike も判定に使えるが、Phase1 ではそれらの provider を接続しない:
+- **spread:** 現行 quote provider は `spread=None` (bid/ask 非取得)。実 spread は **Phase2/D の websocket tick 基盤**で供給。それまで spread 経路は不活性。
+- **position 近接 / bridge:** PriceMonitorWorker (§5.5) / risk_state の責務。market state loop からの接続は Phase2/D 以降。
+- **cadence boost 経路②の resolver 共有:** `main._build_cadence_driver()` が生成した `CadenceResolver` を `build_orchestrator_runtime(cadence_resolver=...)` 経由で bridge に渡し実反映する (`cadence_enabled` + `market_state_enabled` 双方 on のとき)。片方 off なら bridge は regime コールバックのみの縮退。
+- **regime → planning 再計画:** 現状は regime 変化を log するのみ。planning 再計画への接続は material landing 経由 (§5.4①) を前提とし、push 型の即時トリガは後続。
+
 ---
 
 ## Phase 2 — D: websocket tick 基盤 + ポジション保護移設 (大・駆動方式刷新)

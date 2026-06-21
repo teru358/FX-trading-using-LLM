@@ -100,3 +100,28 @@ def test_invalid_time_falls_back_to_0700(tmp_path):
     # 不正値は 07:00 扱い → 06:59 は前、07:30 は後。
     assert rt.run_daily_summary_cycle(datetime(2026, 6, 21, 6, 59)) is False
     assert rt.run_daily_summary_cycle(datetime(2026, 6, 21, 7, 30)) is True
+
+
+def test_metrics_failure_retries_same_day(tmp_path, monkeypatch):
+    """metrics 計算が一時失敗した日は送信済み扱いにせず、当日中に再試行する (Medium#4)。"""
+    n = RecordingNotifier()
+    rt = _build_runtime(tmp_path, notifier=n)
+
+    calls = {"n": 0}
+
+    def flaky_metrics(store, *, now):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient")
+        from src.orchestrator.shadow_metrics import ShadowMetrics
+        return ShadowMetrics()
+
+    monkeypatch.setattr(
+        "src.orchestrator.shadow_metrics.compute_shadow_metrics", flaky_metrics
+    )
+    # 1 回目: metrics 失敗 → False、日付未確定。
+    assert rt.run_daily_summary_cycle(datetime(2026, 6, 21, 7, 30)) is False
+    assert n.days == []
+    # 2 回目 (同日): 再試行が成功して送信される。
+    assert rt.run_daily_summary_cycle(datetime(2026, 6, 21, 7, 35)) is True
+    assert len(n.days) == 1

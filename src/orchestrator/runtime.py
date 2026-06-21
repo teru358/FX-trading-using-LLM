@@ -283,18 +283,23 @@ class OrchestratorRuntime:
         today = now.date()
         if now.time() < self._parse_summary_time():
             return False  # まだ送信時刻前 (lock 不要の早期 return)
-        # check-then-set を lock 内で原子化する (二重送信防止, code review High#2)。
+        from src.orchestrator.shadow_metrics import compute_shadow_metrics
+
+        # lock 内で check + metrics 計算 + 日付確定をまとめて原子化する:
+        # - 二重送信防止 (concurrent caller を直列化, High#2)。
+        # - metrics 計算が成功してから日付を確定する (失敗時は未送信扱いのまま、当日中の
+        #   後続 cycle で再試行できる, code review Medium#4)。metrics は軽量 SQL 集計なので
+        #   lock 内実行で問題ない。
         with self._summary_lock:
             if self._last_summary_date == today:
                 return False  # 同日は送信済み
+            try:
+                metrics = compute_shadow_metrics(self._orch, now=now)
+            except Exception:
+                logger.exception("[ORCH] daily summary metrics 計算に失敗 — 当日再試行する")
+                return False  # 日付を確定しない (次 cycle で再試行)
             self._last_summary_date = today
-        try:
-            from src.orchestrator.shadow_metrics import compute_shadow_metrics
-
-            metrics = compute_shadow_metrics(self._orch, now=now)
-        except Exception:
-            logger.exception("[ORCH] daily summary metrics 計算に失敗")
-            return False
+        # enqueue は lock の外で (通知 worker への引き渡しのみ。HTTP 待ちは worker 側)。
         n = self._notifier
         self._run_notify(lambda: n.notify_daily_summary(metrics, day=now))
         logger.info(f"[ORCH] 🧪 shadow daily summary fired ({today})")
@@ -303,9 +308,20 @@ class OrchestratorRuntime:
     def run_market_state_cycle(self, now: datetime | None = None) -> dict[str, str]:
         """全 pair の市場 state を 1 周更新する (Phase1 Task C)。
 
-        quote provider から軽量に spread / mid を取り、前回 mid との差で move_pct を出す。
-        detector で state を判定し、state_bridge 経由で cadence boost (経路②) と regime 変化
-        トリガを駆動する。detector/bridge 未注入なら no-op。
+        **Phase1 のスコープは「価格変化率ベース」に限定する (code review Medium#3)。**
+        quote provider から mid (と spread が取れれば spread) を取り、前回 mid との差で
+        move_pct を出して detector に渡す。detector は本来 bridge_degraded / SL-TP 近接 /
+        important_news も critical/active 判定に使えるが、Phase1 ではそれらの provider を
+        接続せず move_pct (+ spread が利用可能なら spread) のみで判定する:
+
+        - spread: 現行 quote provider は spread=None を返す (bid/ask 非取得)。実 spread は
+          **Phase2/D の websocket tick 基盤**で供給される。それまで spread 経路は不活性。
+        - position 近接 / bridge: PriceMonitorWorker (§5.5) と risk_state 側の責務で、
+          market state loop は軽量監視に留める。これらの接続も Phase2/D 以降。
+
+        実質「価格変化率 (+ 将来 spread)」での state 判定。detector で state を判定し、
+        state_bridge 経由で cadence boost (経路②) と regime 変化トリガを駆動する。
+        detector/bridge 未注入なら no-op。
 
         **執行は制御しない (§5.2)。** boost と planning トリガにのみ効く。
 
@@ -327,8 +343,8 @@ class OrchestratorRuntime:
             spread_pips = self._spread_pips(pair, quote.spread)
             obs = MarketObservation(
                 move_pct=move_pct, spread_pips=spread_pips,
-                # position / bridge 近接は context builder 経由で取れるが、ここでは軽量
-                # 監視に留め quote ベースの観測のみ (position 保護は PriceMonitorWorker §5.5)。
+                # position / bridge / news は Phase1 では未接続 (上 docstring 参照)。
+                # 実質 move_pct (+ 将来 spread) ベースの判定。
             )
             state = self._mstate.observe(pair, obs, now)
             out[pair] = state

@@ -107,7 +107,7 @@ def _build_cadence_driver(config, run_watch_tech, run_trade_tech):
         trade_pairs=trade_pairs, watch_pairs=watch_pairs,
         trade_base_interval_sec=trade_base, watch_base_interval_sec=watch_base,
     )
-    econ_store = EconEventStore(config.prices_db_path)
+    econ_store = EconEventStore(config.econ_db_path)
     econ_source = EconCadenceSource(
         config=config, econ_store=econ_store, resolver=resolver,
         boost_interval_sec=boost_sec, trade_pairs=trade_pairs,
@@ -148,7 +148,9 @@ def _build_cadence_driver(config, run_watch_tech, run_trade_tech):
                 _logger.exception("[CADENCE] econ boost refresh failed")
             return driver.tick(now)
 
-    return _CadenceDriver()
+    # resolver も返す: market state loop (orchestrator runtime 側) が同じ resolver に
+    # state boost を書けるよう共有する (code review High#2)。
+    return _CadenceDriver(), resolver
 
 
 def _scheduler_loop() -> None:
@@ -258,8 +260,9 @@ def main() -> None:
     # batch 粒度で回す: trade batch / watch batch を 1 つの論理 pair として扱い、trade batch
     # の有効 interval は trade 全 pair の最短 boost で律速する (_build_cadence_driver 参照)。
     _cadence_driver = None
+    _cadence_resolver = None
     if config.schedule.cadence_enabled:
-        _cadence_driver = _build_cadence_driver(
+        _cadence_driver, _cadence_resolver = _build_cadence_driver(
             config, _run_watch_tech, _run_trade_tech,
         )
 
@@ -513,6 +516,9 @@ def main() -> None:
         orchestrator = build_orchestrator_runtime(
             config, store=store, price_store=price_store,
             analysis_store=analysis_store, price_provider=price_provider,
+            # cadence_enabled 時は同じ resolver を共有し、market state boost (経路②) を
+            # 実収集 interval に反映させる (code review High#2)。None なら縮退 (regime のみ)。
+            cadence_resolver=_cadence_resolver,
         )
         if orchestrator is not None:
             orchestrator.start()

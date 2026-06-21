@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from src.data.orchestrator_store import OrchestratorStore
     from src.data.price_provider import PriceProvider
     from src.data.price_store import PriceStore
+    from src.orchestrator.cadence_resolver import CadenceResolver
     from src.rag.vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
@@ -112,6 +113,7 @@ def build_orchestrator_runtime(
     price_store: "PriceStore",
     analysis_store: "AnalysisStore",
     price_provider: "PriceProvider",
+    cadence_resolver: "CadenceResolver | None" = None,
 ) -> OrchestratorRuntime | None:
     """enabled なら OrchestratorRuntime を組み立てて返す。disabled なら None。
 
@@ -165,7 +167,9 @@ def build_orchestrator_runtime(
     hindsight = make_hindsight_evaluator(price_store)
     notifier = create_shadow_notifier(orch_cfg.notifications)
 
-    mstate, state_bridge = _build_market_state(config, orch_cfg, pairs)
+    mstate, state_bridge = _build_market_state(
+        config, orch_cfg, pairs, cadence_resolver=cadence_resolver,
+    )
 
     runtime = OrchestratorRuntime(
         config=orch_cfg,
@@ -214,7 +218,7 @@ def _build_detector(
         get_news_impact, get_news_key = make_news_material_provider(config, store)
         from src.data.econ_event_store import EconEventStore
 
-        econ_store = EconEventStore(config.prices_db_path)
+        econ_store = EconEventStore(config.econ_db_path)
         in_event_window, get_event_key = make_event_window_provider(config, econ_store)
     except Exception:
         logger.warning(
@@ -236,17 +240,19 @@ def _build_detector(
     )
 
 
-def _build_market_state(config: "AppConfig", orch_cfg, pairs: list[str]):
-    """market state 検知器 + bridge を組む (Phase1 Task C-4)。
+def _build_market_state(
+    config: "AppConfig", orch_cfg, pairs: list[str],
+    *, cadence_resolver: "CadenceResolver | None" = None,
+):
+    """market state 検知器 + bridge を組む (Phase1 Task C-4 / code review High#2)。
 
     `orchestrator.market_state_enabled` が false なら (None, None) を返し state ループを
-    起動しない。enabled 時は horizon overlay 済み detector と、regime 変化を log する bridge
-    を返す。
+    起動しない。enabled 時は horizon overlay 済み detector と bridge を返す。
 
-    **cadence boost (経路②) の resolver 接続について:** cadence_driver (main.py) と
-    orchestrator runtime (本 bootstrap) は別経路で resolver を共有しないため、ここでは
-    resolver=None の縮退モード (regime コールバックのみ) で bridge を組む。cadence と
-    runtime が同一 resolver を共有する構成は後続の統合作業 (本 Phase の shadow 範囲外)。
+    **cadence boost (経路②) の resolver 接続:** main._build_cadence_driver() が生成した
+    `CadenceResolver` を `cadence_resolver` で受け取り bridge に渡す。これにより market state
+    loop の state boost が実収集 interval に反映される (High#2)。`cadence_enabled` が off で
+    resolver=None の場合は縮退モード (regime コールバックのみ・boost は書かない)。
     """
     if not orch_cfg.market_state_enabled:
         return None, None
@@ -261,13 +267,14 @@ def _build_market_state(config: "AppConfig", orch_cfg, pairs: list[str]):
         logger.info("[ORCH] regime change %s → %s", pair, state)
 
     bridge = MarketStateBridge(
-        resolver=None,
+        resolver=cadence_resolver,  # cadence_enabled 時のみ非None (boost を実反映)
         boost_interval_sec=config.schedule.cadence_boost_interval_minutes * 60,
         boost_ttl_sec=config.orchestrator.market_state.active_seconds * 4,
         on_regime_change=_on_regime,
     )
-    logger.info("[ORCH] market state detection enabled (horizon=%s)",
-                orch_cfg.policy.trade_horizon)
+    _connected = "resolver-shared" if cadence_resolver is not None else "regime-only"
+    logger.info("[ORCH] market state detection enabled (horizon=%s, %s)",
+                orch_cfg.policy.trade_horizon, _connected)
     return detector, bridge
 
 

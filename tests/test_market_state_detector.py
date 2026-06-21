@@ -167,6 +167,57 @@ def test_runtime_market_state_cycle_drives_detector(tmp_path):
     assert out["USDJPY=X"] == ACTIVE
 
 
+def test_build_market_state_shares_resolver(tmp_path):
+    """_build_market_state に渡した resolver に bridge が boost を書く (High#2)。"""
+    from src.config.schema import AppConfig, InstrumentConfig
+    from src.orchestrator import bootstrap as bs
+
+    cfg = AppConfig(instruments=[
+        InstrumentConfig(symbol="USDJPY=X", display_name="USD/JPY", asset_type="fx",
+                         mode="trade", base_currency="USD", quote_currency="JPY"),
+    ])
+    cfg.orchestrator.market_state_enabled = True
+    resolver = CadenceResolver(
+        trade_pairs=["USDJPY=X"], watch_pairs=[],
+        trade_base_interval_sec=3600, watch_base_interval_sec=7200,
+    )
+    det, bridge = bs._build_market_state(
+        cfg, cfg.orchestrator, ["USDJPY=X"], cadence_resolver=resolver,
+    )
+    assert det is not None and bridge is not None
+    # active 観測で bridge が共有 resolver に boost を書く → effective interval 短縮。
+    bridge.update("USDJPY=X", ACTIVE, NOW)
+    assert resolver.effective_interval("USDJPY=X", NOW) < 3600
+
+
+def test_build_market_state_disabled_returns_none(tmp_path):
+    from src.config.schema import AppConfig
+    from src.orchestrator import bootstrap as bs
+
+    cfg = AppConfig()
+    cfg.orchestrator.market_state_enabled = False
+    det, bridge = bs._build_market_state(cfg, cfg.orchestrator, [])
+    assert det is None and bridge is None
+
+
+def test_build_market_state_no_resolver_is_regime_only(tmp_path):
+    """resolver=None (cadence off) でも detector/bridge は作られ、boost は書かれない。"""
+    from src.config.schema import AppConfig, InstrumentConfig
+    from src.orchestrator import bootstrap as bs
+
+    cfg = AppConfig(instruments=[
+        InstrumentConfig(symbol="USDJPY=X", display_name="USD/JPY", asset_type="fx",
+                         mode="trade", base_currency="USD", quote_currency="JPY"),
+    ])
+    cfg.orchestrator.market_state_enabled = True
+    det, bridge = bs._build_market_state(
+        cfg, cfg.orchestrator, ["USDJPY=X"], cadence_resolver=None,
+    )
+    assert det is not None and bridge is not None
+    # resolver 無しでも例外なく update できる (regime のみ)。
+    bridge.update("USDJPY=X", ACTIVE, NOW)
+
+
 def test_runtime_no_detector_is_noop(tmp_path):
     from src.config.schema import OrchestratorConfig
     from src.data.analysis_store import AnalysisStore
