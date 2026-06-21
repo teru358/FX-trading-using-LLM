@@ -32,6 +32,8 @@ from src.orchestrator.watch_evaluator import WatchEvaluator
 from src.utils.clock import db_now
 
 if TYPE_CHECKING:
+    from src.orchestrator.cadence_sources import MarketStateBridge
+    from src.orchestrator.market_state_detector import MarketStateDetector
     from src.orchestrator.material_landing import MaterialLandingDetector
     from src.orchestrator.planning_pipeline import PipelineResult, PlanningPipeline
     from src.orchestrator.shadow_notifier import ShadowNotifier
@@ -67,6 +69,8 @@ class OrchestratorRuntime:
         risk_gate: RiskGateWorker | None = None,
         hindsight_evaluator: HindsightEvaluator | None = None,
         shadow_notifier: "ShadowNotifier | None" = None,
+        market_state_detector: "MarketStateDetector | None" = None,
+        state_bridge: "MarketStateBridge | None" = None,
     ) -> None:
         self._config = config
         self._orch = orch_store
@@ -103,6 +107,16 @@ class OrchestratorRuntime:
         # 跨いだ最初の cycle で 1 回だけ送る。notifier 未注入 / flag off なら loop を起こさない。
         self._daily_summary_thread: threading.Thread | None = None
         self._last_summary_date: date | None = None
+        # check-then-set (今日送信済みか) を直列化する。loop スレッドと手動呼び出しが
+        # 同時に guard を通過して二重送信するのを防ぐ (code review High#2)。
+        self._summary_lock = threading.Lock()
+        # market state 検知 (Phase1 Task C)。両方注入されたときのみ state ループを起動し、
+        # cadence boost (経路②) + regime 変化トリガを駆動する。未注入なら起動しない。
+        self._mstate = market_state_detector
+        self._state_bridge = state_bridge
+        self._mstate_thread: threading.Thread | None = None
+        # pair -> 直近 mid (move_pct 算出用)。
+        self._last_mid: dict[str, float] = {}
 
     # ── 1 サイクル分の処理 (テスト・手動駆動可) ─────────────────
 
@@ -267,12 +281,13 @@ class OrchestratorRuntime:
             return False
         now = now or db_now()
         today = now.date()
-        if self._last_summary_date == today:
-            return False  # 同日は送信済み
         if now.time() < self._parse_summary_time():
-            return False  # まだ送信時刻前
-        # この時点で「今日まだ送っておらず、送信時刻を過ぎた」= 発火。
-        self._last_summary_date = today
+            return False  # まだ送信時刻前 (lock 不要の早期 return)
+        # check-then-set を lock 内で原子化する (二重送信防止, code review High#2)。
+        with self._summary_lock:
+            if self._last_summary_date == today:
+                return False  # 同日は送信済み
+            self._last_summary_date = today
         try:
             from src.orchestrator.shadow_metrics import compute_shadow_metrics
 
@@ -284,6 +299,63 @@ class OrchestratorRuntime:
         self._run_notify(lambda: n.notify_daily_summary(metrics, day=now))
         logger.info(f"[ORCH] 🧪 shadow daily summary fired ({today})")
         return True
+
+    def run_market_state_cycle(self, now: datetime | None = None) -> dict[str, str]:
+        """全 pair の市場 state を 1 周更新する (Phase1 Task C)。
+
+        quote provider から軽量に spread / mid を取り、前回 mid との差で move_pct を出す。
+        detector で state を判定し、state_bridge 経由で cadence boost (経路②) と regime 変化
+        トリガを駆動する。detector/bridge 未注入なら no-op。
+
+        **執行は制御しない (§5.2)。** boost と planning トリガにのみ効く。
+
+        Returns: {pair: state} (観測用)。
+        """
+        if self._mstate is None:
+            return {}
+        from src.orchestrator.market_state_detector import MarketObservation
+
+        now = now or db_now()
+        out: dict[str, str] = {}
+        for pair in self._pairs:
+            try:
+                quote = self._quote_provider(pair)
+            except Exception:
+                logger.exception(f"[ORCH] market state quote 取得失敗 ({pair})")
+                continue
+            move_pct = self._move_pct(pair, quote.mid)
+            spread_pips = self._spread_pips(pair, quote.spread)
+            obs = MarketObservation(
+                move_pct=move_pct, spread_pips=spread_pips,
+                # position / bridge 近接は context builder 経由で取れるが、ここでは軽量
+                # 監視に留め quote ベースの観測のみ (position 保護は PriceMonitorWorker §5.5)。
+            )
+            state = self._mstate.observe(pair, obs, now)
+            out[pair] = state
+            if self._state_bridge is not None:
+                self._state_bridge.update(pair, state, now)
+        return out
+
+    def _move_pct(self, pair: str, mid: float | None) -> float:
+        """前回 mid からの変動率 (絶対値, **パーセント値**)。初回 / mid 欠落は 0。
+
+        単位は active_move_pct と揃える (% 値、例: 0.15 = 0.15%、code review High#1)。
+        """
+        if mid is None:
+            return 0.0
+        prev = self._last_mid.get(pair)
+        self._last_mid[pair] = mid
+        if prev is None or prev == 0:
+            return 0.0
+        return abs(mid - prev) / prev * 100.0
+
+    @staticmethod
+    def _spread_pips(pair: str, spread: float | None) -> float | None:
+        """spread (価格差) を pips に変換。None は不明として透過。"""
+        if spread is None:
+            return None
+        pip_size = 0.01 if pair.upper().endswith("JPY=X") or "JPY" in pair.upper() else 0.0001
+        return spread / pip_size
 
     def _parse_summary_time(self) -> dtime:
         """`daily_summary_time` (HH:MM) を datetime.time に parse。不正値は 07:00 に倒す。"""
@@ -716,6 +788,12 @@ class OrchestratorRuntime:
                 target=self._daily_summary_loop, name="orch-daily-summary", daemon=True
             )
             self._daily_summary_thread.start()
+        # market state loop は detector 注入時のみ起動 (Phase1 Task C)。
+        if self._mstate is not None:
+            self._mstate_thread = threading.Thread(
+                target=self._market_state_loop, name="orch-market-state", daemon=True
+            )
+            self._mstate_thread.start()
         logger.info(f"[ORCH] started (mode={self._config.mode}, pairs={self._pairs})")
 
     def stop(self) -> None:
@@ -723,6 +801,7 @@ class OrchestratorRuntime:
         for t in (
             self._planning_thread, self._watch_thread,
             self._hindsight_thread, self._daily_summary_thread,
+            self._mstate_thread,
         ):
             if t is not None:
                 t.join(timeout=2.0)
@@ -730,6 +809,7 @@ class OrchestratorRuntime:
         self._watch_thread = None
         self._hindsight_thread = None
         self._daily_summary_thread = None
+        self._mstate_thread = None
         # ループ停止後に通知 worker を drain して止める (in-flight 通知を取りこぼさない)。
         self._stop_notify_worker()
 
@@ -763,12 +843,24 @@ class OrchestratorRuntime:
             self._stop.wait(timeout=wait)
 
     def _daily_summary_loop(self) -> None:
-        # 日次判定なので粗いポーリングで十分 (normal_seconds 周期)。run_daily_summary_cycle
-        # 内の 1 日 1 回ガードが多重送信を防ぐ。
-        wait = self._config.market_state.normal_seconds
+        # 日次判定なので粗いポーリングで十分。market_state の timing とは独立させる
+        # (code review Medium#2 — 結合回避)。固定 300s。run_daily_summary_cycle 内の
+        # 1 日 1 回ガードが多重送信を防ぐ。
+        wait = 300
         while not self._stop.is_set():
             try:
                 self.run_daily_summary_cycle()
             except Exception:
                 logger.exception("[ORCH] daily summary loop iteration failed")
+            self._stop.wait(timeout=wait)
+
+    def _market_state_loop(self) -> None:
+        # state 検知は active_seconds 程度の周期で軽量にポーリングする (§5.2)。急変即応では
+        # ない (執行は watch loop)。boost/regime トリガのための観測更新が目的。
+        wait = self._config.market_state.active_seconds
+        while not self._stop.is_set():
+            try:
+                self.run_market_state_cycle()
+            except Exception:
+                logger.exception("[ORCH] market state loop iteration failed")
             self._stop.wait(timeout=wait)

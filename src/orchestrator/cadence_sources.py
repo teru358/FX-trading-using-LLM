@@ -15,7 +15,10 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Callable
 
-from src.orchestrator.cadence_resolver import SOURCE_ECON, CadenceResolver
+from src.orchestrator.cadence_resolver import (
+    SOURCE_ECON, SOURCE_STATE, CadenceResolver,
+)
+from src.orchestrator.market_state_detector import ACTIVE, CRITICAL
 from src.utils.clock import db_utc_now
 
 if TYPE_CHECKING:
@@ -95,3 +98,51 @@ class EconCadenceSource:
         for pair, until in boost_until.items():
             self._resolver.set_boost(pair, SOURCE_ECON, self._boost_interval, until)
         return len(boost_until)
+
+
+class MarketStateBridge:
+    """market state を cadence boost (経路②) と regime 変化イベントに橋渡しする (Task C-2/C-3)。
+
+    detector が出した pair 別 state を受け、(a) active/critical の trade pair に state boost
+    を書く、(b) state が **上がった** (regime 変化) 際に planning 再計画コールバックを呼ぶ。
+    boost の TTL は短め (state は reactive なので calm 復帰で速やかに base へ戻したい)。
+
+    regime コールバックは material フィルタ + debounce を持つ既存機構 (MaterialLanding
+    Detector 経由) に委ねる前提で、ここでは「state が上がった事実」だけを通知する。
+    """
+
+    def __init__(
+        self,
+        *,
+        resolver: CadenceResolver | None,
+        boost_interval_sec: int,
+        boost_ttl_sec: int,
+        on_regime_change: Callable[[str, str], None] | None = None,
+    ) -> None:
+        # resolver=None の場合は cadence boost を書かず regime コールバックのみ駆動する
+        # (cadence_driver と runtime が別経路で resolver を共有しない構成での縮退モード)。
+        self._resolver = resolver
+        self._boost_interval = boost_interval_sec
+        self._boost_ttl = boost_ttl_sec
+        self._on_regime = on_regime_change
+        self._last_state: dict[str, str] = {}
+        self._rank = {"calm": 0, "normal": 1, ACTIVE: 2, CRITICAL: 3}
+
+    def update(self, pair: str, state: str, now: datetime) -> None:
+        """1 pair の state を反映する。boost 書込 + regime 上昇でコールバック。"""
+        prev = self._last_state.get(pair, "normal")
+        # (a) cadence boost (経路②): active/critical の間だけ boost。resolver 未接続なら skip。
+        if self._resolver is not None:
+            if state in (ACTIVE, CRITICAL):
+                self._resolver.set_boost(
+                    pair, SOURCE_STATE, self._boost_interval,
+                    now + timedelta(seconds=self._boost_ttl),
+                )
+            else:
+                # calm/normal へ戻ったら state boost を即取り消す (TTL を待たない)。
+                self._resolver.clear_boost(pair, SOURCE_STATE)
+        # (b) regime 変化: state が上がった (rank 増) ときだけ通知。
+        if self._rank.get(state, 1) > self._rank.get(prev, 1):
+            if self._on_regime is not None:
+                self._on_regime(pair, state)
+        self._last_state[pair] = state

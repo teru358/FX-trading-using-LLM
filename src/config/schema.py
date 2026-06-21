@@ -574,11 +574,22 @@ class OrchestratorPolicyConfig:
 
 @dataclass
 class OrchestratorMarketStateConfig:
-    """market state 別の処理周期 (spec §5.2)。"""
+    """market state 別の処理周期 + 遷移閾値 (spec §5.2 / §5.2.1)。"""
+    # state 別の処理周期 (秒)。
     calm_seconds: int = 300
     normal_seconds: int = 60
     active_seconds: int = 30
     critical_seconds: int = 60
+    # 遷移閾値 (§5.2.1, Phase1 Task C)。horizon 連動は below の overlay で上書き。
+    # active_move_pct は **パーセント値** (0.15 = 0.15%)。runtime._move_pct も同じ % 単位で
+    # 算出する (両者の単位を揃える — code review High#1)。
+    active_move_pct: float = 0.15        # この変動率(%)超で → active (price_move_window 内)
+    price_move_window_seconds: int = 300  # 変動率を測る窓
+    spread_spike_pips: float = 4.0       # spread がこの pips 超で → critical
+    sl_tp_near_pct: float = 0.1          # ポジションが SL/TP までこの割合以内で → critical
+    # ヒステリシス (下げは安定継続を要求、§5.2.1)。
+    calm_after_seconds: int = 600        # normal が継続したら calm へ落とす
+    normal_after_seconds: int = 120      # active/critical 解消後 normal へ落とす猶予
 
 
 @dataclass
@@ -663,6 +674,9 @@ class OrchestratorConfig:
     enabled: bool = False
     mode: str = "shadow"   # observe | shadow | live
     pairs: list[str] = field(default_factory=list)  # 空なら tradeable instruments を使う
+    # market state 検知 (§4.8/§5.2, Phase1 Task C)。既定 false。enabled 時のみ state ループ
+    # 起動 + cadence②/regime 接続。orchestrator.enabled とは独立に on/off できる。
+    market_state_enabled: bool = False
     policy: OrchestratorPolicyConfig = field(default_factory=OrchestratorPolicyConfig)
     market_state: OrchestratorMarketStateConfig = field(
         default_factory=OrchestratorMarketStateConfig

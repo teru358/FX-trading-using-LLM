@@ -165,6 +165,8 @@ def build_orchestrator_runtime(
     hindsight = make_hindsight_evaluator(price_store)
     notifier = create_shadow_notifier(orch_cfg.notifications)
 
+    mstate, state_bridge = _build_market_state(config, orch_cfg, pairs)
+
     runtime = OrchestratorRuntime(
         config=orch_cfg,
         orch_store=orch_store,
@@ -175,6 +177,8 @@ def build_orchestrator_runtime(
         pipeline=pipeline,
         hindsight_evaluator=hindsight,
         shadow_notifier=notifier,
+        market_state_detector=mstate,
+        state_bridge=state_bridge,
         # broker adapter は渡さない (shadow 境界, §7.3)。
     )
     logger.info(
@@ -230,6 +234,41 @@ def _build_detector(
         min_planning_interval_seconds=orch_cfg.firing.min_planning_interval_seconds,
         pairs=pairs,
     )
+
+
+def _build_market_state(config: "AppConfig", orch_cfg, pairs: list[str]):
+    """market state 検知器 + bridge を組む (Phase1 Task C-4)。
+
+    `orchestrator.market_state_enabled` が false なら (None, None) を返し state ループを
+    起動しない。enabled 時は horizon overlay 済み detector と、regime 変化を log する bridge
+    を返す。
+
+    **cadence boost (経路②) の resolver 接続について:** cadence_driver (main.py) と
+    orchestrator runtime (本 bootstrap) は別経路で resolver を共有しないため、ここでは
+    resolver=None の縮退モード (regime コールバックのみ) で bridge を組む。cadence と
+    runtime が同一 resolver を共有する構成は後続の統合作業 (本 Phase の shadow 範囲外)。
+    """
+    if not orch_cfg.market_state_enabled:
+        return None, None
+    from src.orchestrator.cadence_sources import MarketStateBridge
+    from src.orchestrator.market_state_detector import detector_with_horizon
+
+    detector = detector_with_horizon(orch_cfg.market_state, orch_cfg.policy.trade_horizon)
+
+    def _on_regime(pair: str, state: str) -> None:
+        # regime 変化を log。planning 再計画への接続は material landing 経由 (§5.4①) に
+        # 委ねる前提で、ここでは観測ログに留める (執行は制御しない §5.2)。
+        logger.info("[ORCH] regime change %s → %s", pair, state)
+
+    bridge = MarketStateBridge(
+        resolver=None,
+        boost_interval_sec=config.schedule.cadence_boost_interval_minutes * 60,
+        boost_ttl_sec=config.orchestrator.market_state.active_seconds * 4,
+        on_regime_change=_on_regime,
+    )
+    logger.info("[ORCH] market state detection enabled (horizon=%s)",
+                orch_cfg.policy.trade_horizon)
+    return detector, bridge
 
 
 def _build_pipeline(config: "AppConfig", orch_store: "OrchestratorStore"):
