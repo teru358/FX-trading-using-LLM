@@ -17,7 +17,12 @@ from typing import TYPE_CHECKING
 from src.analysis.price_analyzer import analyze_price_action
 from src.config import AppConfig, InstrumentConfig
 from src.data.analysis_store import AnalysisStore
-from src.data.correlation import PairCorrelation, compute_correlations, format_correlation_context
+from src.data.correlation import (
+    PairCorrelation,
+    compute_correlations,
+    format_correlation_context,
+    _DEFAULT_ROLLING_WINDOW,
+)
 from src.data.indicators import compute_indicators
 from src.data.price_provider import PriceProvider
 from src.data.price_store import PriceStore
@@ -84,6 +89,45 @@ def _is_price_data_stale(
     if staleness > max_staleness:
         return staleness
     return None
+
+
+_CORR_LOOKBACK_DAYS = 30  # 相関に十分なバー数を確保する lookback
+
+
+def _reload_watch_prices(
+    config: AppConfig,
+    price_store: PriceStore,
+) -> dict[str, "PriceData"]:
+    """相関計算用に watch 価格を PriceStore から再ロードする。
+
+    空・バー不足・stale な watch symbol は除外する (相関入力から外れるだけで trade 収集は継続)。
+    分割後は watch 収集が停止しても prices.db に古いバーが残るため、stale 判定で古いバーを
+    相関から弾く。
+    """
+    from src.data.price_fetcher import PriceData
+    from src.utils.clock import db_now
+
+    min_bars = _DEFAULT_ROLLING_WINDOW + 5
+    end = db_now()
+    start = end - timedelta(days=_CORR_LOOKBACK_DAYS)
+    out: dict[str, PriceData] = {}
+    for w in config.watch_only_instruments:
+        try:
+            df = price_store.load_ohlcv(w.symbol, start, end)
+        except Exception as e:
+            logger.debug(f"[CORR] watch reload failed {w.symbol}: {e}")
+            continue
+        if df is None or df.empty or len(df) < min_bars:
+            continue
+        pd_w = PriceData(
+            symbol=w.symbol, df=df,
+            current_price=float(df["Close"].iloc[-1]), fetched_at=end,
+        )
+        if _is_price_data_stale(pd_w, max_staleness=_max_staleness_for(w)) is not None:
+            logger.debug(f"[CORR] watch {w.symbol} stale, excluded from correlation")
+            continue
+        out[w.symbol] = pd_w
+    return out
 
 
 def _compute_and_log_tech_score(inst: InstrumentConfig, summary, config: AppConfig):
@@ -404,6 +448,236 @@ async def collect_watch_technical(
                 )
         if i < len(watch_only) - 1:
             await asyncio.sleep(delay)
+
+
+async def _collect_econ_impact(
+    config: AppConfig,
+    store: VectorStore,
+    price_store: PriceStore,
+    analysis_store: AnalysisStore,
+    tradeable: list[InstrumentConfig],
+) -> None:
+    """経済指標影響分析 (オプション)。現 collect_all_technical Phase 3 をそのまま移植。"""
+    if not config.economic_calendar.enabled:
+        return
+    try:
+        from src.utils.clock import db_now
+
+        from src.data.econ_event_store import EconEventStore
+        from src.jobs.econ_calendar_fetcher import refresh_recent_events
+        from src.analysis.econ_impact_analyzer import (
+            analyze_event_impact, PairReaction, SnapshotBrief
+        )
+        from src.analysis.economic_calendar import classify_surprise
+        from src.rag.embedder import make_embed_fn
+
+        econ_store = EconEventStore(config.econ_db_path)
+
+        # 3a. actual更新
+        refresh_recent_events(
+            econ_store,
+            lookback_min=config.economic_calendar.refresh_lookback_min,
+            currencies=config.economic_calendar.currencies,
+        )
+
+        # 3b. 未分析イベントを取得
+        events_to_analyze = econ_store.get_unanalyzed_with_actual(
+            lookback_min=config.economic_calendar.refresh_lookback_min,
+            min_importance=config.economic_calendar.post_event_impact_min,
+        )
+
+        if events_to_analyze:
+            llm_reflect = create_llm_client(config, "reflection")
+            logger.info(f"[ECON] {len(events_to_analyze)} events to analyze")
+
+            for ev in events_to_analyze:
+                try:
+                    # 関連ペアを特定 (base または quote が該当通貨)
+                    related_pairs = [
+                        p for p in tradeable
+                        if ev.currency in (p.base_currency, p.quote_currency)
+                    ]
+                    if not related_pairs:
+                        econ_store.mark_analyzed(ev.event_id)
+                        continue
+
+                    # 価格反応データ収集
+                    pair_reactions = []
+                    snapshot_briefs = []
+                    for p in related_pairs:
+                        try:
+                            event_time_naive = ev.event_time.replace(tzinfo=None)
+                            pd_ = price_store.load_ohlcv(
+                                p.symbol,
+                                event_time_naive - timedelta(hours=1),
+                                event_time_naive + timedelta(hours=1),
+                            )
+                            if pd_.empty or len(pd_) < 2:
+                                continue
+
+                            def _close_at(offset_min: int) -> float:
+                                target = event_time_naive + timedelta(minutes=offset_min)
+                                best_idx = 0
+                                best_diff = None
+                                for i, ts in enumerate(pd_.index):
+                                    ts_py = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
+                                    if hasattr(ts_py, "tzinfo") and ts_py.tzinfo is not None:
+                                        ts_py = ts_py.replace(tzinfo=None)
+                                    diff = abs((ts_py - target).total_seconds())
+                                    if best_diff is None or diff < best_diff:
+                                        best_diff = diff
+                                        best_idx = i
+                                return float(pd_["Close"].iloc[best_idx])
+
+                            pair_reactions.append(PairReaction(
+                                pair=p.display_name,
+                                t_minus_5=_close_at(-5),
+                                t_zero=_close_at(0),
+                                t_plus_5=_close_at(5),
+                                t_plus_15=_close_at(15),
+                                t_plus_30=_close_at(30),
+                            ))
+                        except Exception as e:
+                            logger.debug(f"[ECON] price reaction failed for {p.symbol}: {e}")
+
+                        snaps = analysis_store.get_recent_ok_snapshots(p.symbol, hours=2)
+                        if snaps:
+                            s = snaps[0]
+                            snapshot_briefs.append(SnapshotBrief(
+                                pair=p.display_name,
+                                bias_score=s.bias_score,
+                                confidence=s.confidence,
+                                direction_bias=s.direction_bias,
+                            ))
+
+                    if not pair_reactions:
+                        econ_store.mark_analyzed(ev.event_id)
+                        continue
+
+                    # LLM分析実行
+                    report = await analyze_event_impact(
+                        event=ev,
+                        pair_reactions=pair_reactions,
+                        snapshots=snapshot_briefs,
+                        llm=llm_reflect,
+                        temperature=config.llm.reflection.temperature,
+                    )
+
+                    # RAG保存
+                    embed_fn = make_embed_fn(config)
+                    embedding = await embed_fn(report)
+                    store.upsert_econ_analysis(
+                        event_id=ev.event_id,
+                        text=report,
+                        embedding=embedding,
+                        title=ev.title,
+                        currency=ev.currency,
+                        importance=ev.importance,
+                        event_time=ev.event_time,
+                        actual=ev.actual,
+                        forecast=ev.forecast,
+                        surprise=classify_surprise(ev.actual, ev.forecast),
+                        analyzed_at=db_now(),
+                    )
+                    econ_store.mark_analyzed(ev.event_id)
+                    logger.info(f"[ECON] Analyzed {ev.event_id}: {ev.title[:40]}")
+                except Exception as e:
+                    logger.error(f"[ECON] Analysis failed for {ev.event_id}: {e}", exc_info=True)
+    except Exception as e:
+        logger.warning(f"[ECON] Economic calendar phase failed: {e}")
+
+
+async def collect_trade_technical(
+    config: AppConfig,
+    store: VectorStore,
+    price_store: PriceStore,
+    analysis_store: AnalysisStore,
+    force: bool = False,
+    price_provider: "PriceProvider | None" = None,
+) -> None:
+    """tradeable 銘柄のテクニカル分析を収集する (macro + 相関 + econ 付き)。"""
+    if not force and not is_market_open():
+        return
+
+    tradeable = config.tradeable_instruments
+    watch_only = config.watch_only_instruments
+    if not tradeable:
+        return
+
+    llm_price = create_llm_client(config, "price_analysis")
+    delay = config.news_collection.inter_pair_delay_seconds
+    logger.info(f"[COLLECT] Trade technical: {len(tradeable)} tradeable instruments")
+
+    prices: dict[str, "PriceData"] = {}
+    prefetch_errors: dict[str, str] = {}
+    for inst in tradeable:
+        try:
+            prices[inst.symbol] = _fetch_instrument_ohlcv(
+                inst, config, price_store, price_provider,
+            )
+        except Exception as e:
+            prefetch_errors[inst.symbol] = f"{type(e).__name__}: {e}"
+            logger.warning(f"[PREFETCH] {inst.display_name}: OHLCV fetch failed: {e}")
+
+    macro_snapshots = []
+    for inst in watch_only:
+        snaps = analysis_store.get_recent_ok_snapshots(inst.symbol, hours=8)
+        if snaps:
+            macro_snapshots.append(snaps[0])
+    macro_ctx = format_macro_context_for_prompt(
+        macro_snapshots, watch_only, realtime_provider=config.paper_provider,
+    )
+
+    correlations: list[PairCorrelation] = []
+    if watch_only:
+        try:
+            watch_prices = _reload_watch_prices(config, price_store)
+            trade_prices = {i.symbol: prices[i.symbol] for i in tradeable if i.symbol in prices}
+            watch_names = {inst.symbol: inst.display_name for inst in watch_only}
+            correlations = compute_correlations(trade_prices, watch_prices, watch_names)
+            logger.info(f"[CORR] Computed {len(correlations)} correlation pairs")
+        except Exception as e:
+            logger.error(f"[CORR] Correlation computation failed: {e}", exc_info=True)
+
+    for i, inst in enumerate(tradeable):
+        pd_cached = prices.get(inst.symbol)
+        if pd_cached is None:
+            err = prefetch_errors.get(inst.symbol, "no cached price (unknown reason)")
+            analysis_store.add_sentinel(
+                symbol=inst.symbol, status="failed", reason=f"prefetch_failed: {err}",
+            )
+            logger.warning(f"[COLLECT] {inst.display_name}: failed sentinel (prefetch)")
+            if i < len(tradeable) - 1:
+                await asyncio.sleep(delay)
+            continue
+        try:
+            corr_ctx = format_correlation_context(correlations, inst.symbol)
+            await _collect_one(
+                inst, config, store, price_store, analysis_store, llm_price,
+                macro_context=macro_ctx, correlation_context=corr_ctx,
+                price_provider=price_provider, price_data=pd_cached,
+            )
+        except Exception as e:
+            logger.error(
+                f"[COLLECT] {inst.display_name}: unexpected raise from _collect_one — {e}",
+                exc_info=True,
+            )
+            try:
+                analysis_store.add_sentinel(
+                    symbol=inst.symbol, status="failed",
+                    reason=f"unexpected_raise: {type(e).__name__}: {e}",
+                )
+            except Exception as sentinel_err:
+                logger.error(
+                    f"[COLLECT] {inst.display_name}: sentinel write also failed: "
+                    f"{type(sentinel_err).__name__}: {sentinel_err}",
+                    exc_info=False,
+                )
+        if i < len(tradeable) - 1:
+            await asyncio.sleep(delay)
+
+    await _collect_econ_impact(config, store, price_store, analysis_store, tradeable)
+    logger.info("=== Trade technical collection complete ===")
 
 
 async def collect_all_technical(
