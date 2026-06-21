@@ -398,3 +398,88 @@ def test_supersede_active_plans_scopes_to_pair(store: OrchestratorStore) -> None
     assert usd in superseded
     assert eur not in superseded
     assert eur in {pl.plan_id for pl in store.get_active_plans("EURUSD=X")}
+
+
+def test_supersede_only_touches_active_plans(store: OrchestratorStore) -> None:
+    """並走 watch loop が active でなくした plan を supersede が上書きしない (High)。
+
+    supersede は status='active' の plan だけを変更する。get_active_plans の読み取りと
+    update の間に triggered/invalidated へ遷移した plan は対象外でなければ trigger 記録や
+    lifecycle metric を壊す。status 条件付きの単一 UPDATE でこれを保証する。
+    """
+    snap = store.create_snapshot(
+        pair="USDJPY=X", as_of_time=datetime(2026, 6, 20, 12, 0, 0),
+    )
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    p1 = store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=snap, horizon="swing", direction="long",
+        entry_conditions_json=[], action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 6, 27, 12, 0, 0), created_by_run_id=run_id,
+    )
+    p2 = store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=snap, horizon="swing", direction="long",
+        entry_conditions_json=[], action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 6, 27, 12, 0, 0), created_by_run_id=run_id,
+    )
+    # watch loop が p1 を triggered にした (active でなくなった) と仮定
+    store.update_plan_status(p1, "triggered")
+    superseded = store.supersede_active_plans("USDJPY=X")
+    # p1 は active でないので superseded にならず、triggered のまま残る
+    assert p1 not in superseded
+    assert store.get_trade_plan(p1).status == "triggered"
+    # p2 は active だったので superseded になる
+    assert p2 in superseded
+    assert store.get_trade_plan(p2).status == "superseded"
+
+
+def test_supersede_does_not_clobber_stale_read(store: OrchestratorStore) -> None:
+    """get_active_plans が返した後に triggered へ遷移した plan を上書きしない (High TOCTOU)。
+
+    旧実装 (read → 各 plan を無条件 update_plan_status) では、stale read に含まれた
+    plan を triggered のまま上書きしてしまう。status 条件付き単一 UPDATE なら、
+    UPDATE 時点で active でない plan は対象外になる。
+    get_active_plans を「triggered 済 plan を stale に含めて返す」よう差し替えて検証する。
+    """
+    snap = store.create_snapshot(
+        pair="USDJPY=X", as_of_time=datetime(2026, 6, 20, 12, 0, 0),
+    )
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    p1 = store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=snap, horizon="swing", direction="long",
+        entry_conditions_json=[], action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 6, 27, 12, 0, 0), created_by_run_id=run_id,
+    )
+    stale_snapshot = store.get_active_plans("USDJPY=X")  # p1 を active として読む
+    # 読み取り後に watch loop が p1 を triggered にした
+    store.update_plan_status(p1, "triggered")
+    # supersede が万一 stale な read を信じて update_plan_status を回しても triggered を
+    # 壊さないこと。get_active_plans を stale 読みに差し替えて最悪条件を作る。
+    store.get_active_plans = lambda pair=None: stale_snapshot  # type: ignore[assignment]
+    superseded = store.supersede_active_plans("USDJPY=X")
+    assert p1 not in superseded
+    assert store.get_trade_plan(p1).status == "triggered"  # 上書きされない
+
+
+def test_record_agent_output_serializes_datetime_payload(store: OrchestratorStore) -> None:
+    """structured_payload に datetime が含まれても保存できる (Medium)。
+
+    ExecutionPlanDraft.expires_at: datetime のような値を含む payload を渡しても
+    'Object of type datetime is not JSON serializable' で落ちず、読み戻せる
+    (datetime は ISO 文字列に正規化される)。
+    """
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    expires = datetime(2026, 6, 27, 12, 0, 0)
+    oid = store.record_agent_output(
+        run_id=run_id,
+        agent_name="ExecutionOpinionAgent",
+        pair="USDJPY=X",
+        structured_payload={"expires_at": expires, "direction": "long", "rr": 2.0},
+    )
+    assert isinstance(oid, int) and oid > 0
+    rows = store.get_agent_outputs(run_id)
+    assert len(rows) == 1
+    payload = rows[0].structured_payload_json
+    # datetime は ISO 文字列として保存される (JSON 互換)
+    assert payload["expires_at"] == expires.isoformat()
+    assert payload["direction"] == "long"
+    assert payload["rr"] == 2.0

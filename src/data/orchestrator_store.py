@@ -23,6 +23,24 @@ from src.utils.clock import db_now
 logger = logging.getLogger(__name__)
 
 
+def _json_safe(value: Any) -> Any:
+    """JSON カラムに入れる前に datetime 等の非 JSON 値を正規化する。
+
+    dict / list を再帰的に走査し、datetime は ISO 文字列に変換する。SQLAlchemy の
+    JSON 型は標準 json エンコーダを使うため、datetime をそのまま渡すと
+    'Object of type datetime is not JSON serializable' で保存に失敗する。
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
 class _DecisionSnapshot(_Base):
     """decision 開始時に materialize する入力スナップショット (spec §8.7)。"""
     __tablename__ = "decision_snapshots"
@@ -636,7 +654,9 @@ class OrchestratorStore:
     ) -> int:
         """agent_outputs に 1 行書き、新規 id を返す。saved_at は db_now()。
 
-        structured_payload は structured_payload_json カラムに入れる。
+        structured_payload は structured_payload_json カラムに入れる。datetime 等の
+        非 JSON 値は ISO 文字列に正規化してから保存する (datetime is not JSON serializable
+        で保存に失敗しないため)。
         """
         with Session(self._engine) as session:
             out = _AgentOutput(
@@ -648,7 +668,7 @@ class OrchestratorStore:
                 score=score,
                 confidence=confidence,
                 reasoning_summary=reasoning_summary,
-                structured_payload_json=structured_payload,
+                structured_payload_json=_json_safe(structured_payload),
                 observed_at=observed_at,
                 saved_at=db_now(),
                 data_freshness_status=data_freshness_status,
@@ -737,12 +757,26 @@ class OrchestratorStore:
         使う。superseded にした plan_id のリストを返す。reason はログ用 (テーブルに
         reason 列が無いため status のみ変更し logger.info に残す)。
         """
-        active = self.get_active_plans(pair)
-        ids = [
-            p.plan_id for p in active if p.plan_id != except_plan_id
-        ]
-        for plan_id in ids:
-            self.update_plan_status(plan_id, "superseded")
+        # 読み取りと更新を 1 transaction にまとめ、status='active' 条件付きで UPDATE する。
+        # こうしないと get_active_plans → update の隙に watch loop が triggered/invalidated に
+        # した plan を無条件に superseded で上書きし、trigger 記録や lifecycle metric を壊す。
+        with Session(self._engine) as session:
+            stmt = (
+                select(_TradePlan)
+                .where(_TradePlan.pair == pair)
+                .where(_TradePlan.status == "active")
+                .with_for_update()
+            )
+            if except_plan_id is not None:
+                stmt = stmt.where(_TradePlan.plan_id != except_plan_id)
+            plans = list(session.execute(stmt).scalars().all())
+            now = db_now()
+            ids = []
+            for plan in plans:
+                plan.status = "superseded"
+                plan.updated_at = now
+                ids.append(plan.plan_id)
+            session.commit()
         logger.info(
             f"[ORCH] superseded {len(ids)} active plan(s) for {pair}: {reason}"
         )
