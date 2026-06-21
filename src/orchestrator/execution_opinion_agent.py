@@ -1,0 +1,90 @@
+"""ExecutionOpinionAgent (Task 2.4) — LLM で ExecutionPlanDraft を起案する。
+
+design §5.2 Step3。注入された LLMClient (role=price_analysis 相当) に decision
+context を渡し、entry_conditions / action(SL/TP/RR) / invalidation を含む draft を
+JSON で生成させる。出力は schemas.ExecutionPlanDraft.from_llm_json で厳格 parse。
+
+LLM raw text を直接 plan にしない (§13#5)。parse 失敗は SchemaParseError として
+上位 (planning_pipeline) に伝播し、fail-safe で no plan + failed run に倒す。
+
+Task 2.7 re-draft: revision_feedback (risk gate の fixable issues や
+revision_request) をプロンプトに添えて 1 回だけ再起案させる。
+"""
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from src.orchestrator.schemas import ExecutionPlanDraft
+
+_SYSTEM = (
+    "You are an FX execution planner. Given a decision context, produce a single "
+    "trade plan draft as STRICT JSON only (no prose, no markdown fences).\n"
+    "Schema: {\n"
+    '  "direction": "long"|"short",\n'
+    '  "entry_conditions": [{"type": "price_at_or_below"|"price_at_or_above"|'
+    '"breakout_above"|"breakout_below", "value": number} | '
+    '{"type": "spread_below", "value_pips": number} | '
+    '{"type": "technical_status_is", "status": "ok"}],\n'
+    '  "action": {"sl": number, "tp": number, "size_policy": string, "rr": number, "comment": string},\n'
+    '  "invalidation": [{"type": "price_below"|"price_above", "value": number} | '
+    '{"type": "technical_stale"|"news_conflict"|"expired"}],\n'
+    '  "expires_at": ISO-8601 datetime,\n'
+    '  "reasoning_summary": string\n'
+    "}\n"
+    "Use only the listed condition vocabularies. `and` semantics only."
+)
+
+
+class ExecutionOpinionAgent:
+    def __init__(self, llm) -> None:
+        self._llm = llm
+
+    async def draft(
+        self,
+        *,
+        pair: str,
+        direction: str,
+        context: dict[str, Any],
+        revision_feedback: list[str] | None = None,
+        temperature: float = 0.1,
+    ) -> ExecutionPlanDraft:
+        """draft を 1 件起案する。parse 失敗時 SchemaParseError。"""
+        user = self._build_user_prompt(pair, direction, context, revision_feedback)
+        raw = await self._llm.chat(
+            [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
+            temperature=temperature,
+        )
+        return ExecutionPlanDraft.from_llm_json(raw)
+
+    def _build_user_prompt(
+        self,
+        pair: str,
+        direction: str,
+        context: dict[str, Any],
+        revision_feedback: list[str] | None,
+    ) -> str:
+        lines = [
+            f"pair: {pair}",
+            f"intended direction: {direction}",
+            "decision_context:",
+            json.dumps(_compact_context(context), ensure_ascii=False),
+        ]
+        if revision_feedback:
+            lines.append(
+                "PREVIOUS DRAFT WAS REJECTED. Fix these issues and re-draft:"
+            )
+            lines.extend(f"  - {issue}" for issue in revision_feedback)
+        lines.append("Return the trade plan draft as STRICT JSON.")
+        return "\n".join(lines)
+
+
+def _compact_context(context: dict[str, Any]) -> dict[str, Any]:
+    """プロンプトに載せる主要フィールドだけ抜き出す (token 節約)。"""
+    return {
+        "quote": context.get("quote"),
+        "technical": context.get("technical"),
+        "news": context.get("news"),
+        "policy": context.get("policy"),
+        "move_maturity": context.get("move_maturity"),
+    }
