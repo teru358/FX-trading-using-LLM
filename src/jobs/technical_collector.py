@@ -2,9 +2,12 @@
 
 OHLCVデータ取得 → テクニカル指標計算 → LLM分析 → スナップショット保存。
 
-2フェーズ実行:
-  Phase 1: 監視専用銘柄（指数・参照FX）を先に収集
-  Phase 2: 取引対象FXペアを収集（Phase 1 のマクロコンテキスト付き）
+trade/watch 別経路 (Task 6.2):
+  - ``collect_watch_technical``: 監視専用銘柄のみ収集 (macro/相関なし)。
+  - ``collect_trade_technical``: 取引対象を収集 (watch snapshot からの macro +
+    watch 価格を PriceStore 再ロードした相関 + 経済指標影響分析)。
+  - ``collect_all_technical``: watch → trade を順に回す後方互換 wrapper。
+別スケジュール起動点で回せるよう watch は低頻度固定・trade のみ将来 cadence boost 対象。
 """
 
 from __future__ import annotations
