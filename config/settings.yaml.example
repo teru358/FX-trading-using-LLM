@@ -207,6 +207,11 @@ schedule:
   # （exit_check の毎時:00 はこれとは独立で固定）。
   technical_trade_interval_hours: 1
   technical_watch_interval_hours: 1
+  # cadence resolver による可変 interval 収集 (§5.3/§5.6)。false = 現行の毎時 union
+  # dispatch を維持。true で「経済カレンダー/市場 state の boost に応じて trade の収集
+  # 頻度を動的に上げる」cadence_driver に切替 (watch は base 固定)。
+  cadence_enabled: false
+  cadence_boost_interval_minutes: 5      # boost 中の収集間隔 (分)
 
 analysis:
   # テクニカル指標の有効/無効

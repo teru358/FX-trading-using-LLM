@@ -81,6 +81,76 @@ def _run_with_slot(fn, *args, **kwargs) -> None:
     ).start()
 
 
+def _build_cadence_driver(config, run_watch_tech, run_trade_tech):
+    """cadence driver を組む (§5.3/§5.6, Phase1 Task B)。
+
+    既存収集は銘柄一括 (per-pair でない) ため、driver は batch 粒度で回す:
+    - resolver は実 trade/watch pair を持ち、boost は per-pair に効く。
+    - driver の論理 pair は "__trade__" / "__watch__" の 2 つだけ。trade batch の有効
+      interval は実 trade pair の最短 effective_interval で律速する (most-aggressive)。
+    - 収集 callback は pair を無視して batch collection を回す。tick が boost を反映する
+      よう、tick ごとに EconCadenceSource.refresh() を先に呼ぶ。
+    """
+    from src.data.econ_event_store import EconEventStore
+    from src.jobs.cadence_driver import CadenceDriver
+    from src.orchestrator.cadence_resolver import CadenceResolver
+    from src.orchestrator.cadence_sources import EconCadenceSource
+    from src.utils.clock import db_now
+
+    trade_pairs = [i.symbol for i in config.tradeable_instruments]
+    watch_pairs = [i.symbol for i in config.watch_only_instruments]
+    trade_base = config.schedule.technical_trade_interval_hours * 3600
+    watch_base = config.schedule.technical_watch_interval_hours * 3600
+    boost_sec = config.schedule.cadence_boost_interval_minutes * 60
+
+    resolver = CadenceResolver(
+        trade_pairs=trade_pairs, watch_pairs=watch_pairs,
+        trade_base_interval_sec=trade_base, watch_base_interval_sec=watch_base,
+    )
+    econ_store = EconEventStore(config.prices_db_path)
+    econ_source = EconCadenceSource(
+        config=config, econ_store=econ_store, resolver=resolver,
+        boost_interval_sec=boost_sec, trade_pairs=trade_pairs,
+    )
+
+    # 論理 batch pair。trade batch interval は実 trade pair の最短で律速する。
+    _LT, _LW = "__trade__", "__watch__"
+
+    class _BatchResolver:
+        def effective_interval(self, pair, now):
+            pairs = trade_pairs if pair == _LT else watch_pairs
+            if not pairs:
+                return resolver.base_interval(pair)  # 空なら base へ (実質発火しない)
+            return min(resolver.effective_interval(p, now) for p in pairs)
+
+    def _run_watch(_pair):
+        run_watch_tech("")  # batch (pair 無視)
+        return True
+
+    def _run_trade(_pair):
+        run_trade_tech("")
+        return True
+
+    driver = CadenceDriver(
+        resolver=_BatchResolver(),
+        trade_pairs=[_LT] if trade_pairs else [],
+        watch_pairs=[_LW] if watch_pairs else [],
+        run_trade=_run_trade, run_watch=_run_watch,
+    )
+
+    # tick 前に econ boost を更新するラッパ driver を返す。
+    class _CadenceDriver:
+        def tick(self, now=None):
+            now = now or db_now()
+            try:
+                econ_source.refresh(now)
+            except Exception:
+                _logger.exception("[CADENCE] econ boost refresh failed")
+            return driver.tick(now)
+
+    return _CadenceDriver()
+
+
 def _scheduler_loop() -> None:
     """バックグラウンドでスケジュールジョブを定期実行する。
 
@@ -182,6 +252,16 @@ def main() -> None:
     _tech_union_times, _tech_dispatch = build_technical_dispatch(
         _trade_tech_set, _watch_tech_set, _run_watch_tech, _run_trade_tech,
     )
+
+    # cadence resolver による可変 interval 収集 (§5.3/§5.6, Phase1 Task B)。
+    # enabled 時のみ driver を組む。既存収集は銘柄一括 (per-pair でない) ため、driver も
+    # batch 粒度で回す: trade batch / watch batch を 1 つの論理 pair として扱い、trade batch
+    # の有効 interval は trade 全 pair の最短 boost で律速する (_build_cadence_driver 参照)。
+    _cadence_driver = None
+    if config.schedule.cadence_enabled:
+        _cadence_driver = _build_cadence_driver(
+            config, _run_watch_tech, _run_trade_tech,
+        )
 
     # スケジュール情報パネル
     sched_table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
@@ -285,11 +365,23 @@ def main() -> None:
     # RAGクリーンアップ（毎日1回、ニュース収集の最初の時刻に実行）
     schedule.every().day.at(news_times[0], news_tz).do(_run_rag_cleanup)
 
-    # 4. テクニカル分析 (trade/watch を union 時刻で単一 slot 内逐次実行)
-    for t in _tech_union_times:
-        schedule.every().day.at(t, news_tz).do(
-            _run_with_slot, _tech_dispatch, t, _market_aware=True,
+    # 4. テクニカル分析。cadence_enabled なら可変 interval driver、そうでなければ
+    #    現行の union 時刻 dispatch (後方互換・ロールバック先)。
+    if _cadence_driver is not None:
+        # driver tick を毎分 slot 経由で回す (§5.6 の薄い毎 tick ドライバ)。tick が slot busy
+        # で skip されても driver の last_run は進まないため次 tick で backfill される
+        # (§5.1.1)。tick 内の収集 callback は同一 slot 内で同期実行する (slot 再取得しない)。
+        def _cadence_tick() -> None:
+            _cadence_driver.tick()
+        schedule.every(1).minutes.do(
+            _run_with_slot, _cadence_tick, _market_aware=True,
         )
+        _logger.info("[CADENCE] variable-interval driver enabled (union dispatch bypassed)")
+    else:
+        for t in _tech_union_times:
+            schedule.every().day.at(t, news_tz).do(
+                _run_with_slot, _tech_dispatch, t, _market_aware=True,
+            )
 
     # 5. 予測サイクル（LLMなし・取引判定の直前）
     #    取引判定と同時刻の場合はスキップ（取引判定が最新データで判断するため）

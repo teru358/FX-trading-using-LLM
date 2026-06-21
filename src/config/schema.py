@@ -314,9 +314,14 @@ class ScheduleConfig:
     run_times: list[str] = field(default_factory=lambda: ["15:00", "21:00"])
     timezone: str = "Asia/Tokyo"
     # technical 収集の間隔 (時間)。既定は現状維持 = 毎時 (1h)。
-    # trade は将来 cadence resolver で boost される土台、watch は低頻度固定用。
+    # trade は cadence resolver で boost される土台、watch は低頻度固定用。
     technical_trade_interval_hours: int = 1
     technical_watch_interval_hours: int = 1
+    # cadence resolver による可変 interval 収集 (§5.3/§5.6, Phase1 Task B)。既定 false で
+    # 現行の union-time dispatch を維持 (後方互換)。true で cadence_driver に切替。
+    cadence_enabled: bool = False
+    # boost 中の収集間隔 (分)。econ/state 経路が窓内でこの間隔まで頻度を上げる。
+    cadence_boost_interval_minutes: int = 5
 
 
 @dataclass
