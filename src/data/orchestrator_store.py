@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import (
-    JSON, Column, DateTime, Float, Integer, String, UniqueConstraint, select, update,
+    JSON, Column, DateTime, Float, Integer, String, UniqueConstraint,
+    func, select, update,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -251,6 +252,40 @@ class _ShadowTrigger(_Base):
     # 擦り抜けても重複行を DB が拒否する defense-in-depth (Codex High#1)。
     __table_args__ = (
         UniqueConstraint("plan_id", name="uq_shadow_triggers_plan_id"),
+    )
+
+
+# shadow_hindsight_evaluations.status の集合 (spec §8.1)
+HINDSIGHT_STATUSES = ("pending", "evaluated", "failed")
+
+
+class _ShadowHindsightEvaluation(_Base):
+    """trigger 後の判断品質を後追い計測する outcome テーブル (spec §8.1 / Phase 4)。
+
+    Plan C: trigger 確定時に status='pending' で 1 行 enqueue し、hindsight poll loop が
+    horizon_seconds 経過後に MFE-R/MAE-R/PnL-R を埋めて 'evaluated'/'failed' に遷移する。
+    trigger と outcome は後続分析の主対象なので独立 table にする (§8.1)。
+    """
+    __tablename__ = "shadow_hindsight_evaluations"
+
+    id                = Column(Integer, primary_key=True, autoincrement=True)
+    shadow_trigger_id = Column(Integer, nullable=False, index=True)
+    evaluated_at      = Column(DateTime)   # null = まだ評価していない (pending)
+    status            = Column(String, nullable=False)  # pending | evaluated | failed
+    horizon_seconds   = Column(Integer)
+    mfe_r             = Column(Float)
+    mae_r             = Column(Float)
+    pnl_r             = Column(Float)
+    would_hit_sl      = Column(Integer)    # 0/1 (bool を SQLite 互換に)
+    would_hit_tp      = Column(Integer)    # 0/1
+    reasoning_summary = Column(String)
+    created_at        = Column(DateTime, nullable=False)
+
+    # trigger ごとに hindsight 行は最大 1 件 (二重 enqueue を DB で防ぐ)。
+    __table_args__ = (
+        UniqueConstraint(
+            "shadow_trigger_id", name="uq_shadow_hindsight_trigger_id"
+        ),
     )
 
 
@@ -850,6 +885,14 @@ class OrchestratorStore:
             session.commit()
             return trig.id
 
+    def get_shadow_trigger_by_id(self, trigger_id: int) -> _ShadowTrigger | None:
+        """主キー id で shadow_trigger を引く (hindsight poll 用)。"""
+        with Session(self._engine) as session:
+            trig = session.get(_ShadowTrigger, trigger_id)
+            if trig is not None:
+                session.expunge(trig)
+            return trig
+
     def get_shadow_trigger(self, plan_id: int) -> _ShadowTrigger | None:
         """plan_id の最新 shadow_trigger を返す (無ければ None)。
 
@@ -866,6 +909,176 @@ class OrchestratorStore:
             if trig is not None:
                 session.expunge(trig)
             return trig
+
+    # ── shadow_hindsight_evaluations (§8.1 / Phase 4) ──────────
+
+    def record_hindsight_evaluation(
+        self,
+        *,
+        shadow_trigger_id: int,
+        horizon_seconds: int,
+    ) -> int:
+        """trigger 確定時に pending hindsight 行を 1 件 enqueue し id を返す (Plan C)。
+
+        metric (mfe_r 等) はこの時点では None。horizon_seconds 経過後に poll loop が
+        update_hindsight_evaluation で埋める。shadow_trigger_id UNIQUE で二重 enqueue を防ぐ。
+        """
+        with Session(self._engine) as session:
+            ev = _ShadowHindsightEvaluation(
+                shadow_trigger_id=shadow_trigger_id,
+                evaluated_at=None,
+                status="pending",
+                horizon_seconds=horizon_seconds,
+                created_at=db_now(),
+            )
+            session.add(ev)
+            session.commit()
+            return ev.id
+
+    def get_hindsight_evaluation(
+        self, shadow_trigger_id: int
+    ) -> _ShadowHindsightEvaluation | None:
+        """shadow_trigger_id の最新 hindsight 行を返す (would_hit_* は bool 正規化)。"""
+        with Session(self._engine) as session:
+            stmt = (
+                select(_ShadowHindsightEvaluation)
+                .where(
+                    _ShadowHindsightEvaluation.shadow_trigger_id == shadow_trigger_id
+                )
+                .order_by(_ShadowHindsightEvaluation.id.desc())
+            )
+            ev = session.execute(stmt).scalars().first()
+            if ev is not None:
+                ev.would_hit_sl = None if ev.would_hit_sl is None else bool(ev.would_hit_sl)
+                ev.would_hit_tp = None if ev.would_hit_tp is None else bool(ev.would_hit_tp)
+                session.expunge(ev)
+            return ev
+
+    def update_hindsight_evaluation(
+        self,
+        hindsight_id: int,
+        *,
+        status: str,
+        evaluated_at: datetime,
+        mfe_r: float | None = None,
+        mae_r: float | None = None,
+        pnl_r: float | None = None,
+        would_hit_sl: bool | None = None,
+        would_hit_tp: bool | None = None,
+        reasoning_summary: str | None = None,
+    ) -> None:
+        """poll loop が pending 行に metric を埋め status を遷移させる。
+
+        評価成功なら status='evaluated' + metric 群、評価不能なら status='failed'。
+        """
+        if status not in HINDSIGHT_STATUSES:
+            raise ValueError(
+                f"status must be one of {HINDSIGHT_STATUSES}, got {status!r}"
+            )
+        with Session(self._engine) as session:
+            ev = session.get(_ShadowHindsightEvaluation, hindsight_id)
+            if ev is None:
+                logger.warning(
+                    f"update_hindsight_evaluation: id {hindsight_id} not found"
+                )
+                return
+            ev.status = status
+            ev.evaluated_at = evaluated_at
+            ev.mfe_r = mfe_r
+            ev.mae_r = mae_r
+            ev.pnl_r = pnl_r
+            ev.would_hit_sl = None if would_hit_sl is None else int(would_hit_sl)
+            ev.would_hit_tp = None if would_hit_tp is None else int(would_hit_tp)
+            ev.reasoning_summary = reasoning_summary
+            session.commit()
+
+    def get_pending_hindsight_evaluations(
+        self, *, now: datetime
+    ) -> list[_ShadowHindsightEvaluation]:
+        """評価期限 (triggered_at + horizon_seconds <= now) を過ぎた pending 行を返す。
+
+        shadow_triggers と join し triggered_at を引く。SQLite には interval 演算が無いため
+        Python 側で now - triggered_at の経過秒を horizon_seconds と比較する。
+        evaluated/failed 済みは status='pending' フィルタで自然に除外される。
+        """
+        with Session(self._engine) as session:
+            stmt = (
+                select(_ShadowHindsightEvaluation, _ShadowTrigger.triggered_at)
+                .join(
+                    _ShadowTrigger,
+                    _ShadowTrigger.id == _ShadowHindsightEvaluation.shadow_trigger_id,
+                )
+                .where(_ShadowHindsightEvaluation.status == "pending")
+            )
+            ready: list[_ShadowHindsightEvaluation] = []
+            for ev, triggered_at in session.execute(stmt).all():
+                if triggered_at is None:
+                    continue
+                elapsed = (now - triggered_at).total_seconds()
+                if elapsed >= (ev.horizon_seconds or 0):
+                    session.expunge(ev)
+                    ready.append(ev)
+            return ready
+
+    # ── shadow metrics 集計 (§8.2 / Phase 4 Task 4.3) ──────────
+
+    def get_shadow_metrics_raw(self) -> dict[str, Any]:
+        """shadow 検証 metric の生カウント / 合計を 1 dict で返す。
+
+        rate / 平均などの導出は shadow_metrics.compute_shadow_metrics 側で行う
+        (SQL は engine を持つ store に集約し、shaping は pure module に分離)。
+        """
+        with Session(self._engine) as session:
+            # plan lifecycle: status 別件数
+            plan_rows = session.execute(
+                select(_TradePlan.status, func.count())
+                .group_by(_TradePlan.status)
+            ).all()
+            plan_counts = {status: count for status, count in plan_rows}
+
+            # agent_runs: status 別件数 (LLM failure rate 用)
+            run_rows = session.execute(
+                select(_AgentRun.status, func.count())
+                .group_by(_AgentRun.status)
+            ).all()
+            run_counts = {status: count for status, count in run_rows}
+
+            # hindsight: status 別件数 + evaluated 行の集計
+            hs_rows = session.execute(
+                select(
+                    _ShadowHindsightEvaluation.status, func.count()
+                ).group_by(_ShadowHindsightEvaluation.status)
+            ).all()
+            hindsight_counts = {status: count for status, count in hs_rows}
+
+            evaluated = session.execute(
+                select(
+                    func.avg(_ShadowHindsightEvaluation.mfe_r),
+                    func.avg(_ShadowHindsightEvaluation.mae_r),
+                    func.avg(_ShadowHindsightEvaluation.pnl_r),
+                    func.sum(_ShadowHindsightEvaluation.would_hit_sl),
+                    func.sum(_ShadowHindsightEvaluation.would_hit_tp),
+                ).where(_ShadowHindsightEvaluation.status == "evaluated")
+            ).one()
+
+            # freshness block: issues_json が非空の行数。JSON 比較は型差が大きいため
+            # Python 側で判定する (data_freshness_snapshots は小規模テーブル)。
+            issues_rows = session.execute(
+                select(_DataFreshnessSnapshot.issues_json)
+            ).all()
+            freshness_blocks = sum(1 for (issues,) in issues_rows if issues)
+
+        return {
+            "plan_counts": plan_counts,
+            "run_counts": run_counts,
+            "hindsight_counts": hindsight_counts,
+            "avg_mfe_r": evaluated[0],
+            "avg_mae_r": evaluated[1],
+            "avg_pnl_r": evaluated[2],
+            "sl_hits": int(evaluated[3] or 0),
+            "tp_hits": int(evaluated[4] or 0),
+            "freshness_blocks": freshness_blocks,
+        }
 
     # ── plan supersede helper (§8.9) ───────────────────────────
 

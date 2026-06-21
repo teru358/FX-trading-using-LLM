@@ -609,6 +609,13 @@ class OrchestratorFiringConfig:
 
 
 @dataclass
+class OrchestratorHindsightConfig:
+    """trigger 後の判断品質後追い計測の設定 (spec §8.2 / plan Phase 4)。"""
+    horizon_seconds: int = 86400        # 24h。audit_post_hoc の post_close_hours=24 と整合
+    poll_interval_seconds: int = 600    # hindsight poll loop の評価間隔 (秒)
+
+
+@dataclass
 class OrchestratorAgentsConfig:
     """各 agent の有効化フラグ (spec §12)。"""
     news_enabled: bool = True
@@ -632,6 +639,9 @@ class OrchestratorConfig:
     locks: OrchestratorLocksConfig = field(default_factory=OrchestratorLocksConfig)
     entry: OrchestratorEntryConfig = field(default_factory=OrchestratorEntryConfig)
     firing: OrchestratorFiringConfig = field(default_factory=OrchestratorFiringConfig)
+    hindsight: OrchestratorHindsightConfig = field(
+        default_factory=OrchestratorHindsightConfig
+    )
     agents: OrchestratorAgentsConfig = field(default_factory=OrchestratorAgentsConfig)
 
 

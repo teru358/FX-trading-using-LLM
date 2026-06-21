@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Callable
 from src.config.schema import OrchestratorConfig
 from src.data.orchestrator_store import OrchestratorStore
 from src.orchestrator.context_builder import DecisionContextBuilder, QuoteSnapshot
+from src.orchestrator.hindsight_evaluator import HindsightEvaluator
 from src.orchestrator.risk_gate import RiskGateWorker
 from src.orchestrator.schemas import (
     EntryCondition,
@@ -62,6 +63,7 @@ class OrchestratorRuntime:
         pipeline: "PlanningPipeline | None" = None,
         evaluator: WatchEvaluator | None = None,
         risk_gate: RiskGateWorker | None = None,
+        hindsight_evaluator: HindsightEvaluator | None = None,
     ) -> None:
         self._config = config
         self._orch = orch_store
@@ -70,6 +72,9 @@ class OrchestratorRuntime:
         self._quote_provider = quote_provider
         self._detector = detector
         self._pipeline = pipeline
+        # trigger 後の判断品質を後追い計測する評価器 (Phase 4)。未注入なら hindsight を
+        # enqueue/評価しない (Phase 1〜3 後方互換・shadow 境界も不変)。
+        self._hindsight = hindsight_evaluator
         # watch loop の条件評価層。未注入なら config.entry から既定構築する。
         self._evaluator = evaluator or WatchEvaluator(config.entry)
         # trigger 直前の shadow risk pre-check (§7.1)。hard veto ではなく結果を
@@ -81,6 +86,7 @@ class OrchestratorRuntime:
         self._stop = threading.Event()
         self._planning_thread: threading.Thread | None = None
         self._watch_thread: threading.Thread | None = None
+        self._hindsight_thread: threading.Thread | None = None
 
     # ── 1 サイクル分の処理 (テスト・手動駆動可) ─────────────────
 
@@ -193,6 +199,60 @@ class OrchestratorRuntime:
                         f"[ORCH] watch eval failed for plan {plan.plan_id} ({pair})"
                     )
         return triggered
+
+    def run_hindsight_cycle(self, now: datetime | None = None) -> int:
+        """horizon を過ぎた pending hindsight を評価し metric を埋める (Plan C poll)。
+
+        各 pending について shadow_trigger を引き、HindsightEvaluator で MFE-R/MAE-R/
+        PnL-R を算出する。評価成功なら status=evaluated、OHLCV 不足等で評価不能なら
+        status=failed に倒す (再評価ループを防ぐ)。**発注は行わない (shadow boundary)。**
+
+        Returns: 評価 (evaluated/failed どちらも含む) した件数。
+        """
+        if self._hindsight is None:
+            return 0
+        now = now or db_now()
+        evaluated = 0
+        for ev in self._orch.get_pending_hindsight_evaluations(now=now):
+            try:
+                if self._evaluate_one_hindsight(ev, now):
+                    evaluated += 1
+            except Exception:
+                logger.exception(
+                    f"[ORCH] hindsight eval failed for trigger {ev.shadow_trigger_id}"
+                )
+        return evaluated
+
+    def _evaluate_one_hindsight(self, ev, now: datetime) -> bool:
+        """1 pending hindsight 行を評価し DB に書き戻す。評価を試みたら True。"""
+        trig = self._orch.get_shadow_trigger_by_id(ev.shadow_trigger_id)
+        if trig is None:
+            logger.warning(
+                f"[ORCH] hindsight: shadow_trigger {ev.shadow_trigger_id} missing"
+            )
+            return False
+        result = self._hindsight.evaluate(
+            pair=trig.pair,
+            direction=trig.direction,
+            trigger_price=trig.trigger_price,
+            sl=trig.sl,
+            tp=trig.tp,
+            triggered_at=trig.triggered_at,
+            horizon_seconds=ev.horizon_seconds or self._config.hindsight.horizon_seconds,
+        )
+        if not result.has_data:
+            self._orch.update_hindsight_evaluation(
+                ev.id, status="failed", evaluated_at=now,
+                reasoning_summary=result.reasoning_summary,
+            )
+            return True
+        self._orch.update_hindsight_evaluation(
+            ev.id, status="evaluated", evaluated_at=now,
+            mfe_r=result.mfe_r, mae_r=result.mae_r, pnl_r=result.pnl_r,
+            would_hit_sl=result.would_hit_sl, would_hit_tp=result.would_hit_tp,
+            reasoning_summary=result.reasoning_summary,
+        )
+        return True
 
     def _evaluate_plan(self, plan, pair: str, now: datetime) -> bool:
         """1 plan を評価する。trigger したら True。
@@ -356,12 +416,20 @@ class OrchestratorRuntime:
                 plan_id=plan.plan_id, reasoning_summary="watch shadow trigger",
                 risk_gate_result=risk_result, trade_horizon=plan.horizon,
             )
-            self._orch.record_shadow_trigger(
+            shadow_trigger_id = self._orch.record_shadow_trigger(
                 plan_id=plan.plan_id, decision_id=decision_id, pair=pair,
                 direction=plan.direction, triggered_at=now, trigger_price=quote.mid,
                 sl=action.get("sl"), tp=action.get("tp"), rr=action.get("rr"),
                 snapshot_id=snapshot_id, risk_gate_result=risk_result,
             )
+            # Plan C: trigger 確定と同時に pending hindsight 行を enqueue する。
+            # horizon 経過後に hindsight loop が MFE-R/MAE-R/PnL-R を埋める。
+            # evaluator 未注入 (Phase 1〜3) なら enqueue しない (shadow 境界・後方互換)。
+            if self._hindsight is not None:
+                self._orch.record_hindsight_evaluation(
+                    shadow_trigger_id=shadow_trigger_id,
+                    horizon_seconds=self._config.hindsight.horizon_seconds,
+                )
             ok = True
             logger.info(
                 f"[ORCH] 🧪 shadow trigger plan {plan.plan_id} {pair} {plan.direction} "
@@ -431,15 +499,22 @@ class OrchestratorRuntime:
         )
         self._planning_thread.start()
         self._watch_thread.start()
+        # hindsight poll loop は evaluator 注入時のみ起動 (Phase 4)。
+        if self._hindsight is not None:
+            self._hindsight_thread = threading.Thread(
+                target=self._hindsight_loop, name="orch-hindsight", daemon=True
+            )
+            self._hindsight_thread.start()
         logger.info(f"[ORCH] started (mode={self._config.mode}, pairs={self._pairs})")
 
     def stop(self) -> None:
         self._stop.set()
-        for t in (self._planning_thread, self._watch_thread):
+        for t in (self._planning_thread, self._watch_thread, self._hindsight_thread):
             if t is not None:
                 t.join(timeout=2.0)
         self._planning_thread = None
         self._watch_thread = None
+        self._hindsight_thread = None
 
     def _planning_loop(self) -> None:
         wait = self._config.market_state.normal_seconds
@@ -459,3 +534,13 @@ class OrchestratorRuntime:
             except Exception:
                 logger.exception("[ORCH] watch loop iteration failed")
             self._stop.wait(timeout=1.0)
+
+    def _hindsight_loop(self) -> None:
+        # horizon (既定 24h) 評価なので低頻度ポーリングで十分 (config.hindsight)。
+        wait = self._config.hindsight.poll_interval_seconds
+        while not self._stop.is_set():
+            try:
+                self.run_hindsight_cycle()
+            except Exception:
+                logger.exception("[ORCH] hindsight loop iteration failed")
+            self._stop.wait(timeout=wait)

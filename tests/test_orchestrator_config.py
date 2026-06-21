@@ -96,3 +96,30 @@ def test_build_orchestrator_config_pairs_defaults_empty() -> None:
     cfg = _build_orchestrator_config({})
     assert cfg.pairs == []
     assert cfg.firing.debounce_window_seconds == 180  # default
+
+
+def test_orchestrator_hindsight_config_defaults() -> None:
+    cfg = OrchestratorConfig()
+    # 既定 horizon は audit_post_hoc の post_close_hours=24 と揃える (= 86400 秒)
+    assert cfg.hindsight.horizon_seconds == 86400
+    # poll loop の評価間隔 (秒)。24h 評価なので長めの既定で十分。
+    assert cfg.hindsight.poll_interval_seconds == 600
+
+
+def test_build_orchestrator_config_parses_hindsight_block() -> None:
+    raw = {
+        "enabled": True,
+        "hindsight": {
+            "horizon_seconds": 14400,
+            "poll_interval_seconds": 60,
+        },
+    }
+    cfg = _build_orchestrator_config(raw)
+    assert cfg.hindsight.horizon_seconds == 14400
+    assert cfg.hindsight.poll_interval_seconds == 60
+
+
+def test_build_orchestrator_config_null_hindsight_uses_defaults() -> None:
+    cfg = _build_orchestrator_config({"enabled": True, "hindsight": None})
+    assert cfg.hindsight.horizon_seconds == 86400
+    assert cfg.hindsight.poll_interval_seconds == 600

@@ -600,3 +600,122 @@ def test_try_mark_plan_triggered_is_conditional_claim(
     assert store.try_mark_plan_triggered(active_plan) is True
     assert store.try_mark_plan_triggered(active_plan) is False
     assert store.get_trade_plan(active_plan).status == "triggered"
+
+
+# ── shadow_hindsight_evaluations (§8.1 / Phase 4) ──────────────
+
+
+def _shadow_trigger(
+    store: OrchestratorStore, *, triggered_at: datetime, trigger_price: float = 150.0,
+    sl: float = 149.0, tp: float = 152.0, direction: str = "long",
+) -> int:
+    """テスト用に shadow_trigger を 1 件作って id を返す。"""
+    snap = store.create_snapshot(pair="USDJPY=X", as_of_time=triggered_at)
+    run_id = store.start_run("OrchestratorRuntime", pair="USDJPY=X")
+    plan_id = store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=snap, horizon="swing", direction=direction,
+        entry_conditions_json=[], action_json={"sl": sl, "tp": tp, "rr": 2.0},
+        invalidation_json=[], expires_at=triggered_at, created_by_run_id=run_id,
+    )
+    return store.record_shadow_trigger(
+        plan_id=plan_id, decision_id=None, pair="USDJPY=X", direction=direction,
+        triggered_at=triggered_at, trigger_price=trigger_price, sl=sl, tp=tp, rr=2.0,
+        snapshot_id=snap,
+    )
+
+
+def test_record_hindsight_evaluation_pending(store: OrchestratorStore) -> None:
+    """trigger 時に status=pending の hindsight 行を作り読み戻せる (Plan C enqueue)。"""
+    trig_id = _shadow_trigger(store, triggered_at=datetime(2026, 6, 21, 9, 0, 0))
+    hid = store.record_hindsight_evaluation(
+        shadow_trigger_id=trig_id, horizon_seconds=86400,
+    )
+    assert isinstance(hid, int) and hid > 0
+
+    ev = store.get_hindsight_evaluation(trig_id)
+    assert ev is not None
+    assert ev.shadow_trigger_id == trig_id
+    assert ev.status == "pending"
+    assert ev.horizon_seconds == 86400
+    assert ev.mfe_r is None
+    assert ev.evaluated_at is None
+
+
+def test_get_hindsight_evaluation_none_when_absent(store: OrchestratorStore) -> None:
+    assert store.get_hindsight_evaluation(999) is None
+
+
+def test_update_hindsight_evaluation_fills_metrics(store: OrchestratorStore) -> None:
+    """poll loop が pending 行に metric を埋め status=evaluated にする。"""
+    trig_id = _shadow_trigger(store, triggered_at=datetime(2026, 6, 21, 9, 0, 0))
+    hid = store.record_hindsight_evaluation(
+        shadow_trigger_id=trig_id, horizon_seconds=86400,
+    )
+    store.update_hindsight_evaluation(
+        hid,
+        status="evaluated",
+        evaluated_at=datetime(2026, 6, 22, 9, 0, 0),
+        mfe_r=1.5, mae_r=-0.4, pnl_r=1.5,
+        would_hit_sl=False, would_hit_tp=True,
+        reasoning_summary="hit TP within 24h",
+    )
+    ev = store.get_hindsight_evaluation(trig_id)
+    assert ev.status == "evaluated"
+    assert ev.evaluated_at == datetime(2026, 6, 22, 9, 0, 0)
+    assert ev.mfe_r == 1.5
+    assert ev.mae_r == -0.4
+    assert ev.pnl_r == 1.5
+    assert ev.would_hit_sl is False
+    assert ev.would_hit_tp is True
+    assert ev.reasoning_summary == "hit TP within 24h"
+
+
+def test_update_hindsight_evaluation_can_mark_failed(store: OrchestratorStore) -> None:
+    """価格データ不足等で評価不能なら status=failed に倒せる。"""
+    trig_id = _shadow_trigger(store, triggered_at=datetime(2026, 6, 21, 9, 0, 0))
+    hid = store.record_hindsight_evaluation(
+        shadow_trigger_id=trig_id, horizon_seconds=86400,
+    )
+    store.update_hindsight_evaluation(
+        hid, status="failed", evaluated_at=datetime(2026, 6, 22, 9, 0, 0),
+        reasoning_summary="no ohlcv in horizon",
+    )
+    ev = store.get_hindsight_evaluation(trig_id)
+    assert ev.status == "failed"
+    assert ev.mfe_r is None
+
+
+def test_get_pending_hindsight_evaluations_respects_horizon(
+    store: OrchestratorStore,
+) -> None:
+    """pending 行のうち triggered_at + horizon を過ぎたものだけ poll が拾う。"""
+    # 25h 前に trigger → horizon 86400(24h) 経過済み = 評価対象
+    ready = _shadow_trigger(store, triggered_at=datetime(2026, 6, 20, 8, 0, 0))
+    store.record_hindsight_evaluation(shadow_trigger_id=ready, horizon_seconds=86400)
+    # 1h 前に trigger → horizon 未経過 = 対象外
+    notyet = _shadow_trigger(store, triggered_at=datetime(2026, 6, 21, 8, 0, 0))
+    store.record_hindsight_evaluation(shadow_trigger_id=notyet, horizon_seconds=86400)
+
+    now = datetime(2026, 6, 21, 9, 0, 0)
+    pending = store.get_pending_hindsight_evaluations(now=now)
+    ids = {p.shadow_trigger_id for p in pending}
+    assert ready in ids
+    assert notyet not in ids
+
+
+def test_get_pending_hindsight_excludes_already_evaluated(
+    store: OrchestratorStore,
+) -> None:
+    """evaluated/failed 済みの行は poll が再度拾わない。"""
+    trig_id = _shadow_trigger(store, triggered_at=datetime(2026, 6, 20, 8, 0, 0))
+    hid = store.record_hindsight_evaluation(
+        shadow_trigger_id=trig_id, horizon_seconds=86400,
+    )
+    store.update_hindsight_evaluation(
+        hid, status="evaluated", evaluated_at=datetime(2026, 6, 21, 9, 0, 0),
+        mfe_r=1.0, mae_r=0.0, pnl_r=1.0, would_hit_sl=False, would_hit_tp=True,
+    )
+    pending = store.get_pending_hindsight_evaluations(
+        now=datetime(2026, 6, 21, 9, 0, 0)
+    )
+    assert all(p.shadow_trigger_id != trig_id for p in pending)
