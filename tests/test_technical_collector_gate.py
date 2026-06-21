@@ -33,3 +33,37 @@ def test_run_technical_collection_no_gate_skips_probe(tmp_path):
             config, MagicMock(), MagicMock(), MagicMock(),
             price_provider=MagicMock(),
         )
+
+
+def test_run_trade_technical_probes_gate(monkeypatch):
+    """run_trade_technical_collection は gate.probe を呼ぶ (balance 同期は trade 文脈)。"""
+    import src.jobs.technical_collector as tc
+    from unittest.mock import MagicMock
+
+    async def _noop(*a, **kw):
+        return None
+    monkeypatch.setattr(tc, "collect_trade_technical", _noop)
+
+    gate = MagicMock()
+    tc.run_trade_technical_collection(
+        config=MagicMock(), store=MagicMock(), price_store=MagicMock(),
+        analysis_store=MagicMock(), force=True, gate=gate,
+    )
+    gate.probe.assert_called_once_with(caller="tech", sync_balance=True)
+
+
+def test_run_watch_technical_does_not_probe_gate(monkeypatch):
+    """run_watch_technical_collection は gate.probe を呼ばない (発注非関与)。"""
+    import src.jobs.technical_collector as tc
+    from unittest.mock import MagicMock
+
+    async def _noop(*a, **kw):
+        return None
+    monkeypatch.setattr(tc, "collect_watch_technical", _noop)
+
+    gate = MagicMock()
+    tc.run_watch_technical_collection(
+        config=MagicMock(), store=MagicMock(), price_store=MagicMock(),
+        analysis_store=MagicMock(), force=True, gate=gate,
+    )
+    gate.probe.assert_not_called()

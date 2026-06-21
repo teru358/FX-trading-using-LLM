@@ -725,3 +725,37 @@ def run_technical_collection(
         config, store, price_store, analysis_store,
         force=force, price_provider=price_provider,
     ))
+
+
+def run_trade_technical_collection(
+    config: AppConfig,
+    store: VectorStore,
+    price_store: PriceStore,
+    analysis_store: AnalysisStore,
+    force: bool = False,
+    price_provider: "PriceProvider | None" = None,
+    gate: "BridgeHealthGate | None" = None,
+) -> None:
+    """trade 経路の同期ラッパー。gate probe (balance 同期) は trade 文脈で行う。"""
+    if gate is not None:
+        gate.probe(caller="tech", sync_balance=True)
+    asyncio.run(collect_trade_technical(
+        config, store, price_store, analysis_store,
+        force=force, price_provider=price_provider,
+    ))
+
+
+def run_watch_technical_collection(
+    config: AppConfig,
+    store: VectorStore,
+    price_store: PriceStore,
+    analysis_store: AnalysisStore,
+    force: bool = False,
+    price_provider: "PriceProvider | None" = None,
+    gate: "BridgeHealthGate | None" = None,
+) -> None:
+    """watch 経路の同期ラッパー。gate probe はしない (発注に関与しないため)。"""
+    asyncio.run(collect_watch_technical(
+        config, store, price_store, analysis_store,
+        force=force, price_provider=price_provider,
+    ))
