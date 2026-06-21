@@ -7,7 +7,9 @@ trade/watch 別経路 (Task 6.2):
   - ``collect_trade_technical``: 取引対象を収集 (watch snapshot からの macro +
     watch 価格を PriceStore 再ロードした相関 + 経済指標影響分析)。
   - ``collect_all_technical``: watch → trade を順に回す後方互換 wrapper。
-別スケジュール起動点で回せるよう watch は低頻度固定・trade のみ将来 cadence boost 対象。
+watch/trade は別 public wrapper を持ち、main では union 時刻の単一 dispatch で
+watch→trade 順に実行する (`build_technical_dispatch`)。watch は base interval 固定、
+trade のみ将来 cadence boost 対象 (§5.3)。
 """
 
 from __future__ import annotations
