@@ -20,7 +20,12 @@ from src.data.analysis_store import AnalysisStore
 from src.data.price_store import PriceStore
 from src.jobs.news_collector import run_news_collection
 from src.jobs.price_monitor import run_price_monitor
-from src.jobs.technical_collector import run_technical_collection
+from src.jobs.technical_collector import (
+    run_technical_collection,
+    run_trade_technical_collection,
+    run_watch_technical_collection,
+)
+from src.jobs.technical_schedule import technical_times_for, build_technical_dispatch
 from src.logging_setup import setup_logging
 from src.rag.vector_store import VectorStore
 from src.startup import startup_checks
@@ -157,6 +162,27 @@ def main() -> None:
     # テクニカル分析は毎時:00（ニュース時刻と独立）
     technical_times = [f"{h:02d}:00" for h in range(24)]
 
+    # technical 収集は trade/watch 別 interval (既定は両方 1h = 毎時)。
+    # 単一 slot skip を避けるため union 時刻 + watch→trade 逐次ディスパッチにする。
+    _trade_tech_set = set(technical_times_for(config.schedule.technical_trade_interval_hours))
+    _watch_tech_set = set(technical_times_for(config.schedule.technical_watch_interval_hours))
+
+    def _run_watch_tech(_t: str) -> None:
+        run_watch_technical_collection(
+            config, store, price_store, analysis_store,
+            price_provider=price_provider,
+        )
+
+    def _run_trade_tech(_t: str) -> None:
+        run_trade_technical_collection(
+            config, store, price_store, analysis_store,
+            price_provider=price_provider, gate=bridge_gate,
+        )
+
+    _tech_union_times, _tech_dispatch = build_technical_dispatch(
+        _trade_tech_set, _watch_tech_set, _run_watch_tech, _run_trade_tech,
+    )
+
     # スケジュール情報パネル
     sched_table = Table(box=box.SIMPLE, show_header=False, padding=(0, 1))
     sched_table.add_column("Label", style="dim")
@@ -259,14 +285,10 @@ def main() -> None:
     # RAGクリーンアップ（毎日1回、ニュース収集の最初の時刻に実行）
     schedule.every().day.at(news_times[0], news_tz).do(_run_rag_cleanup)
 
-    # 4. テクニカル分析（LLMあり・最も時間がかかる）
-    for t in technical_times:
+    # 4. テクニカル分析 (trade/watch を union 時刻で単一 slot 内逐次実行)
+    for t in _tech_union_times:
         schedule.every().day.at(t, news_tz).do(
-            _run_with_slot,
-            run_technical_collection, config, store, price_store, analysis_store,
-            price_provider=price_provider,
-            gate=bridge_gate,
-            _market_aware=True,
+            _run_with_slot, _tech_dispatch, t, _market_aware=True,
         )
 
     # 5. 予測サイクル（LLMなし・取引判定の直前）
@@ -374,7 +396,12 @@ def main() -> None:
     if args.skip_tech:
         _console.print("[dim]--skip-tech: 初回テクニカル収集をスキップ[/dim]")
     else:
-        run_technical_collection(
+        # cold start の相関欠損を避けるため watch → trade の順で逐次実行
+        run_watch_technical_collection(
+            config, store, price_store, analysis_store,
+            force=is_fresh_start, price_provider=price_provider,
+        )
+        run_trade_technical_collection(
             config, store, price_store, analysis_store,
             force=is_fresh_start, price_provider=price_provider, gate=bridge_gate,
         )
