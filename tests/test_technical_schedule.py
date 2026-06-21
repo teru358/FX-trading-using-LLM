@@ -31,3 +31,35 @@ def test_technical_times_for_zero_or_negative_falls_back_to_hourly():
     from src.jobs.technical_schedule import technical_times_for
     assert len(technical_times_for(0)) == 24
     assert len(technical_times_for(-3)) == 24
+
+
+def test_build_technical_dispatch_routes_by_time():
+    """union 時刻ごとに、trade 時刻のみ→trade、watch 時刻のみ→watch、両方→watch→trade 順。"""
+    from src.jobs.technical_schedule import build_technical_dispatch
+
+    calls = []
+    times, dispatch = build_technical_dispatch(
+        trade_set={"00:00", "01:00"}, watch_set={"00:00"},
+        run_watch=lambda t: calls.append(("watch", t)),
+        run_trade=lambda t: calls.append(("trade", t)),
+    )
+
+    assert times == ["00:00", "01:00"]
+    dispatch("00:00")
+    dispatch("01:00")
+    assert calls == [("watch", "00:00"), ("trade", "00:00"), ("trade", "01:00")]
+
+
+def test_build_technical_dispatch_watch_only_time():
+    """watch のみの時刻では watch だけ実行する。"""
+    from src.jobs.technical_schedule import build_technical_dispatch
+
+    calls = []
+    times, dispatch = build_technical_dispatch(
+        trade_set={"00:00"}, watch_set={"06:00"},
+        run_watch=lambda t: calls.append(("watch", t)),
+        run_trade=lambda t: calls.append(("trade", t)),
+    )
+    assert times == ["00:00", "06:00"]
+    dispatch("06:00")
+    assert calls == [("watch", "06:00")]
