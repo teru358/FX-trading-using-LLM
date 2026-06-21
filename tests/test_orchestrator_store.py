@@ -300,3 +300,101 @@ def test_record_vote_reflected_true_roundtrips_to_bool(store: OrchestratorStore)
     votes = store.get_votes(decision_id)
     assert len(votes) == 1
     assert votes[0].reflected_in_plan is True
+
+
+# ── Task 2.1: agent_outputs / execution_opinions / supersede ──────────
+
+
+def test_record_and_get_agent_outputs(store: OrchestratorStore) -> None:
+    run_id = store.start_run(
+        "PlannerAgent", pair="USDJPY=X", trigger_type="planning_cycle"
+    )
+    oid = store.record_agent_output(
+        run_id=run_id, agent_name="PlannerAgent", pair="USDJPY=X",
+        output_type="opportunity", action="buy", score=0.7, confidence=0.6,
+        reasoning_summary="test", structured_payload={"opportunity": True},
+    )
+    assert isinstance(oid, int) and oid > 0
+    rows = store.get_agent_outputs(run_id)
+    assert len(rows) == 1
+    assert rows[0].agent_name == "PlannerAgent"
+    assert rows[0].action == "buy"
+    assert rows[0].structured_payload_json == {"opportunity": True}
+    assert rows[0].saved_at is not None
+
+
+def test_get_agent_outputs_id_ascending(store: OrchestratorStore) -> None:
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    first = store.record_agent_output(run_id=run_id, agent_name="TechnicalAgent")
+    second = store.record_agent_output(run_id=run_id, agent_name="NewsAgent")
+    rows = store.get_agent_outputs(run_id)
+    assert [r.id for r in rows] == [first, second]
+
+
+def test_record_and_get_execution_opinion(store: OrchestratorStore) -> None:
+    run_id = store.start_run("ExecutionOpinionAgent", pair="USDJPY=X")
+    eid = store.record_execution_opinion(
+        run_id=run_id, pair="USDJPY=X", action="buy",
+        entry_reference_price=150.0, sl=149.5, tp=151.0, rr=2.0,
+        reasoning_summary="draft",
+    )
+    assert isinstance(eid, int) and eid > 0
+    op = store.get_execution_opinion(run_id)
+    assert op is not None
+    assert op.pair == "USDJPY=X"
+    assert op.rr == 2.0
+    # latest = highest id
+    store.record_execution_opinion(run_id=run_id, pair="USDJPY=X", action="sell", rr=1.5)
+    op2 = store.get_execution_opinion(run_id)
+    assert op2.action == "sell"
+
+
+def test_get_execution_opinion_none_when_absent(store: OrchestratorStore) -> None:
+    assert store.get_execution_opinion(999) is None
+
+
+def test_supersede_active_plans(store: OrchestratorStore) -> None:
+    snap = store.create_snapshot(
+        pair="USDJPY=X", as_of_time=datetime(2026, 6, 20, 12, 0, 0),
+    )
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    p1 = store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=snap, horizon="swing", direction="long",
+        entry_conditions_json=[], action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 6, 27, 12, 0, 0), created_by_run_id=run_id,
+    )
+    p2 = store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=snap, horizon="swing", direction="long",
+        entry_conditions_json=[], action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 6, 27, 12, 0, 0), created_by_run_id=run_id,
+    )
+    # keep p2, supersede the rest
+    superseded = store.supersede_active_plans("USDJPY=X", except_plan_id=p2)
+    assert p1 in superseded
+    assert p2 not in superseded
+    active = store.get_active_plans("USDJPY=X")
+    active_ids = {pl.plan_id for pl in active}
+    assert p2 in active_ids
+    assert p1 not in active_ids
+
+
+def test_supersede_active_plans_scopes_to_pair(store: OrchestratorStore) -> None:
+    """supersede は対象 pair の active plan のみを変更し他 pair には触れない。"""
+    snap = store.create_snapshot(
+        pair="USDJPY=X", as_of_time=datetime(2026, 6, 20, 12, 0, 0),
+    )
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    usd = store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=snap, horizon="swing", direction="long",
+        entry_conditions_json=[], action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 6, 27, 12, 0, 0), created_by_run_id=run_id,
+    )
+    eur = store.create_trade_plan(
+        pair="EURUSD=X", snapshot_id=snap, horizon="swing", direction="long",
+        entry_conditions_json=[], action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 6, 27, 12, 0, 0), created_by_run_id=run_id,
+    )
+    superseded = store.supersede_active_plans("USDJPY=X")
+    assert usd in superseded
+    assert eur not in superseded
+    assert eur in {pl.plan_id for pl in store.get_active_plans("EURUSD=X")}

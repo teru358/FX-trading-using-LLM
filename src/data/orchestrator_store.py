@@ -616,3 +616,134 @@ class OrchestratorStore:
                 v.reflected_in_plan = bool(v.reflected_in_plan)
                 session.expunge(v)
             return votes
+
+    # ── agent_outputs (§8.2) ───────────────────────────────────
+
+    def record_agent_output(
+        self,
+        *,
+        run_id: int,
+        agent_name: str,
+        pair: str | None = None,
+        output_type: str | None = None,
+        action: str | None = None,
+        score: float | None = None,
+        confidence: float | None = None,
+        reasoning_summary: str | None = None,
+        structured_payload: dict | None = None,
+        observed_at: datetime | None = None,
+        data_freshness_status: str | None = None,
+    ) -> int:
+        """agent_outputs に 1 行書き、新規 id を返す。saved_at は db_now()。
+
+        structured_payload は structured_payload_json カラムに入れる。
+        """
+        with Session(self._engine) as session:
+            out = _AgentOutput(
+                run_id=run_id,
+                agent_name=agent_name,
+                pair=pair,
+                output_type=output_type,
+                action=action,
+                score=score,
+                confidence=confidence,
+                reasoning_summary=reasoning_summary,
+                structured_payload_json=structured_payload,
+                observed_at=observed_at,
+                saved_at=db_now(),
+                data_freshness_status=data_freshness_status,
+            )
+            session.add(out)
+            session.commit()
+            return out.id
+
+    def get_agent_outputs(self, run_id: int) -> list[_AgentOutput]:
+        """run_id の agent_outputs を id 昇順で返す。"""
+        with Session(self._engine) as session:
+            stmt = (
+                select(_AgentOutput)
+                .where(_AgentOutput.run_id == run_id)
+                .order_by(_AgentOutput.id.asc())
+            )
+            rows = list(session.execute(stmt).scalars().all())
+            for r in rows:
+                session.expunge(r)
+            return rows
+
+    # ── execution_opinions (§8.6) ──────────────────────────────
+
+    def record_execution_opinion(
+        self,
+        *,
+        run_id: int,
+        pair: str,
+        action: str | None = None,
+        entry_reference_price: float | None = None,
+        sl: float | None = None,
+        tp: float | None = None,
+        rr: float | None = None,
+        invalid_stops_risk: str | None = None,
+        bridge_risk: str | None = None,
+        comment_risk: str | None = None,
+        reasoning_summary: str | None = None,
+    ) -> int:
+        """execution_opinions に 1 行書き、新規 id を返す。"""
+        with Session(self._engine) as session:
+            op = _ExecutionOpinion(
+                run_id=run_id,
+                pair=pair,
+                action=action,
+                entry_reference_price=entry_reference_price,
+                sl=sl,
+                tp=tp,
+                rr=rr,
+                invalid_stops_risk=invalid_stops_risk,
+                bridge_risk=bridge_risk,
+                comment_risk=comment_risk,
+                reasoning_summary=reasoning_summary,
+            )
+            session.add(op)
+            session.commit()
+            return op.id
+
+    def get_execution_opinion(self, run_id: int) -> _ExecutionOpinion | None:
+        """run_id の最新 execution_opinion を返す (無ければ None)。
+
+        同 run_id に複数あれば最大 id (= 最新) を返す。
+        """
+        with Session(self._engine) as session:
+            stmt = (
+                select(_ExecutionOpinion)
+                .where(_ExecutionOpinion.run_id == run_id)
+                .order_by(_ExecutionOpinion.id.desc())
+            )
+            op = session.execute(stmt).scalars().first()
+            if op is not None:
+                session.expunge(op)
+            return op
+
+    # ── plan supersede helper (§8.9) ───────────────────────────
+
+    def supersede_active_plans(
+        self,
+        pair: str,
+        *,
+        except_plan_id: int | None = None,
+        reason: str = "superseded",
+    ) -> list[int]:
+        """pair の active plan を全て status='superseded' にする。
+
+        except_plan_id は除外する。pair 単位で active plan を最大 1 件に保つために
+        使う。superseded にした plan_id のリストを返す。reason はログ用 (テーブルに
+        reason 列が無いため status のみ変更し logger.info に残す)。
+        """
+        active = self.get_active_plans(pair)
+        ids = [
+            p.plan_id for p in active if p.plan_id != except_plan_id
+        ]
+        for plan_id in ids:
+            self.update_plan_status(plan_id, "superseded")
+        logger.info(
+            f"[ORCH] superseded {len(ids)} active plan(s) for {pair}: {reason}"
+        )
+        return ids
