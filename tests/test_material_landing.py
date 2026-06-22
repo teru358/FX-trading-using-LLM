@@ -268,15 +268,28 @@ def test_regime_consumed_then_not_material_until_higher():
     assert det.regime_material("USDJPY=X") is False
 
 
-def test_regime_downgrade_then_reupgrade_not_material():
+def test_regime_downgrade_then_reupgrade_is_material():
+    """出戻り上昇 (active→normal→active) は新たな上昇イベントなので再発火する (review High)。"""
     det = _regime_detector()
-    det.mark_regime("USDJPY=X", "active")
-    det.commit_seen("USDJPY=X")  # active 消費
-    det.mark_regime("USDJPY=X", "normal")  # 下降 (material でない)
+    det.mark_regime("USDJPY=X", "active")  # seq 1
+    det.commit_seen("USDJPY=X")            # consumed seq=1
     assert det.regime_material("USDJPY=X") is False
-    # 消費済み(active)と同ランクへ戻るだけでは再発火しない (連発防止・1上昇1回)。
-    det.mark_regime("USDJPY=X", "active")
+    det.mark_regime("USDJPY=X", "normal")  # 下降 = seq 据え置き (1)
+    assert det.regime_material("USDJPY=X") is False  # 上昇していないので material でない
+    # normal → active は新たな上昇イベント (seq 2) → 再 material (§5.4① の意図)。
+    det.mark_regime("USDJPY=X", "active")  # seq 2
+    assert det.regime_material("USDJPY=X") is True
+
+
+def test_regime_active_held_does_not_refire():
+    """active を維持したまま再 push しても (上昇でないので) 再発火しない (連発防止)。"""
+    det = _regime_detector()
+    det.mark_regime("USDJPY=X", "active")  # seq 1
+    det.commit_seen("USDJPY=X")            # consumed 1
+    det.mark_regime("USDJPY=X", "active")  # 同 rank = 上昇でない → seq 1 のまま
     assert det.regime_material("USDJPY=X") is False
+    det.mark_regime("USDJPY=X", "critical")  # active→critical = 上昇 (seq 2)
+    assert det.regime_material("USDJPY=X") is True
 
 
 def test_regime_drives_pairs_to_plan_after_debounce():

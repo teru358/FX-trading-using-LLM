@@ -34,8 +34,9 @@ class _Seen:
     collect_status: str | None
     news_key: str | None
     event_key: str | None
-    # 最後に planning で消費した regime state (これより上に上がったら再度 material)。
-    regime_state: str | None = None
+    # 最後に planning で消費した regime 上昇 sequence。current_seq > これ なら再 material
+    # (= 前回 planning 以降に新たな rank 上昇イベントが起きた)。
+    regime_seq: int = 0
 
 
 class MaterialLandingDetector:
@@ -67,10 +68,15 @@ class MaterialLandingDetector:
         self._material_since: dict[str, datetime] = {}
         self._last_planned: dict[str, datetime] = {}
         # regime push (§5.4① / Task C-3): market_state_loop が別スレッドから mark_regime() で
-        # 現在の market state を書き込む。planning_loop が pairs_to_plan() で読む。両スレッドが
+        # market state を push する。planning_loop が pairs_to_plan() で読む。両スレッドが
         # 触れるため lock で保護する。
+        #
+        # 「rank が上昇した回数」を sequence でカウントする (消費は sequence 単位)。これにより
+        # normal→active→critical の連続上昇も active→normal→active の出戻り上昇も各々 1 回の
+        # イベントとして再計画でき、active 維持中の連発だけを抑える (consumed_seq で防ぐ)。
         self._regime_lock = threading.Lock()
-        self._regime: dict[str, str] = {}
+        self._last_pushed_rank: dict[str, int] = {}  # 直近 push の rank (上昇検知用)
+        self._regime_seq: dict[str, int] = {}        # pair ごとの累積上昇イベント数
 
     # ── 個別 material 判定 ──────────────────────────────────────────
 
@@ -120,31 +126,32 @@ class MaterialLandingDetector:
     def mark_regime(self, pair: str, state: str) -> None:
         """market_state_loop から現在の market state を push する (§5.4① / Task C-3)。
 
-        別スレッド (market_state_loop) から呼ばれるため lock で保護する。値の保存のみで、
-        material 判定は planning_loop 側の regime_material() / pairs_to_plan() で行う。
+        別スレッド (market_state_loop) から呼ばれるため lock で保護する。直近 push の rank
+        より **上昇** したとき (= →active / →critical の regime 変化) だけ上昇 sequence を
+        進める。同等・下降では seq を据え置く (下降は再計画イベントにしない、§5.2)。
+        active 維持中の連発は consumed_seq (commit_seen で消費) が抑える。
         """
+        rank = _REGIME_RANK.get(state, 1)
         with self._regime_lock:
-            self._regime[pair] = state
+            prev_rank = self._last_pushed_rank.get(pair, _REGIME_RANK["normal"])
+            if rank > prev_rank:
+                self._regime_seq[pair] = self._regime_seq.get(pair, 0) + 1
+            self._last_pushed_rank[pair] = rank
 
     def regime_material(self, pair: str) -> bool:
-        """push された market state が「前回 planning で消費した state より上昇」なら True。
+        """前回 planning 以降に新たな rank 上昇イベントがあれば True。
 
-        1 回の上昇ごとに 1 回 material (normal→active で 1 回、active→critical でさらに 1 回)。
-        commit_seen() が消費済み state を _Seen.regime_state に記録し、それより上に上がった
-        ときだけ再び material になる。calm/normal への下降は material にしない (§5.2 執行非制御)。
+        current_seq (累積上昇数) > consumed_seq (前回 planning で消費した数) で判定する。
+        normal→active / active→critical / active→normal→active のいずれも各 1 回の上昇
+        イベントとして material になり、active 維持中 (上昇なし) は再発火しない。
         """
         with self._regime_lock:
-            current = self._regime.get(pair)
-        if current is None:
-            return False
-        cur_rank = _REGIME_RANK.get(current, 1)
-        # active 未満 (calm/normal) は regime landing として扱わない (急変局面のみ起こす)。
-        if cur_rank < _REGIME_RANK["active"]:
-            return False
+            current_seq = self._regime_seq.get(pair, 0)
+        if current_seq == 0:
+            return False  # 一度も上昇していない (起動時 normal/calm)
         prev = self._seen.get(pair)
-        consumed = prev.regime_state if prev is not None else None
-        consumed_rank = _REGIME_RANK.get(consumed, 0) if consumed is not None else 0
-        return cur_rank > consumed_rank
+        consumed_seq = prev.regime_seq if prev is not None else 0
+        return current_seq > consumed_seq
 
     def is_material(self, pair: str) -> bool:
         """いずれかの経路で material なら True。"""
@@ -167,15 +174,15 @@ class MaterialLandingDetector:
         news_key = self._get_news_key(pair) if self._get_news_key is not None else None
         event_key = self._get_event_key(pair) if self._get_event_key is not None else None
         with self._regime_lock:
-            regime_state = self._regime.get(pair)
+            regime_seq = self._regime_seq.get(pair, 0)
         self._seen[pair] = _Seen(
             direction_bias=getattr(snap, "direction_bias", None) if snap is not None else None,
             bias_score=getattr(snap, "bias_score", None) if snap is not None else None,
             collect_status=getattr(snap, "collect_status", None) if snap is not None else None,
             news_key=news_key,
             event_key=event_key,
-            # 消費した regime state を記録 (これより上に上がるまで regime_material は False)。
-            regime_state=regime_state,
+            # 消費した regime 上昇 sequence を記録 (これより上昇するまで regime_material は False)。
+            regime_seq=regime_seq,
         )
 
     def mark_committed(self, pair: str, now: datetime) -> None:
