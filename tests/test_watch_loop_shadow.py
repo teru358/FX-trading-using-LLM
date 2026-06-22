@@ -17,9 +17,11 @@ from src.orchestrator.context_builder import DecisionContextBuilder, QuoteSnapsh
 from src.orchestrator.runtime import OrchestratorRuntime
 from src.utils.clock import db_now
 
-# NOW は注入する評価時刻。quote age / plan expiry の基準に使う。実時刻 (db_now) とは
-# 独立 (テスト決定論性のため固定)。
-NOW = datetime(2026, 6, 21, 9, 0, 0)
+# NOW は注入する評価時刻。quote age / plan expiry / technical age の共通基準。
+# **実 db_now() 相対**にして全時刻系 (lookback / age / expiry / quote) を揃える
+# (固定過去日付だと get_recent_ok_snapshots の db_now lookback と乖離し date-flake になる、
+# review Medium)。db_now() は import 時 1 回評価 = テスト内では決定論的。
+NOW = db_now()
 FUTURE = NOW + timedelta(days=1)
 PAST = NOW - timedelta(hours=1)
 
@@ -27,18 +29,13 @@ PAST = NOW - timedelta(hours=1)
 def _seed_ok_technical(db: Path, *, analyzed_at: datetime | None = None) -> None:
     """freshness final wall を通すため ok technical snapshot を 1 件入れる。
 
-    NOTE: AnalysisStore.get_recent_ok_snapshots の lookback は **実 db_now() 基準**
-    (24h)。一方 _build_technical の age 判定は build(now=NOW) の NOW 基準。両者の時刻源が
-    異なるため、固定 NOW (過去日付) を analyzed_at に使うと、日付跨ぎで実 db_now() の
-    lookback 窓から外れて missing になる (date-coupling flake の原因)。
-
-    → seed は **db_now() 相対**で入れて必ず lookback 窓内に置く。age 判定 (now=NOW) では
-    analyzed_at(=db_now 近傍) > NOW となり age が負になるが、_build_technical は負の age を
-    fresh (ok) として扱う (直近未来の行は fresh とみなす設計) ため status=ok になる。
-    これで実時刻に依存せず安定して fresh technical を供給できる。
+    NOW が db_now() 相対なので、analyzed_at=NOW-60s は (a) get_recent_ok_snapshots の
+    実 db_now lookback (24h) 窓内、かつ (b) build(now=NOW) の age=60s が max_stale 内。
+    負の age に依存せず **正の age=60s で fresh** を検証するため freshness 回帰として健全
+    (review Medium 対応)。
     """
     if analyzed_at is None:
-        analyzed_at = db_now() - timedelta(seconds=60)
+        analyzed_at = NOW - timedelta(seconds=60)
     AnalysisStore(db).add_snapshot(
         PriceAnalysis(
             pair="USDJPY=X",

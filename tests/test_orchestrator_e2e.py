@@ -27,7 +27,8 @@ from src.orchestrator.risk_gate import RiskGateWorker
 from src.orchestrator.runtime import OrchestratorRuntime
 from src.utils.clock import db_now
 
-NOW = datetime(2026, 6, 21, 9, 0, 0)
+# NOW は db_now() 相対 (全時刻系を揃え date-flake を避ける、review Medium)。
+NOW = db_now()
 
 OPP_YES = (
     '{"opportunity": "yes", "direction": "long", "score": 0.7, '
@@ -81,15 +82,13 @@ class RecordingShadowNotifier:
 
 
 def _seed_ok_technical(db: Path, *, bias: float = 0.5) -> None:
-    # context_builder._build_technical が引く get_recent_ok_snapshots の lookback は実
-    # db_now() 相対 (24h)。seed を db_now() 相対で入れて窓内に置く (固定 NOW(2026-06-21) を
-    # 使うと日付跨ぎで窓外→missing→freshness block で trigger しない date-coupling flake)。
-    # age 判定 (now=NOW) では負の age = fresh 扱いで status=ok になる。
+    # NOW が db_now() 相対なので analyzed_at=NOW-60s は実 db_now lookback 窓内かつ
+    # age=60s で fresh (正の age で検証、review Medium)。
     AnalysisStore(db).add_snapshot(
         PriceAnalysis(
             pair="USDJPY=X", direction_bias="long", bias_score=bias, confidence=0.7,
             entry_zone=(149.0, 151.0), reasoning_summary="seed",
-            analyzed_at=db_now() - timedelta(seconds=60),
+            analyzed_at=NOW - timedelta(seconds=60),
         )
     )
 
