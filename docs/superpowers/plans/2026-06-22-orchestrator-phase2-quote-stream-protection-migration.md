@@ -38,18 +38,24 @@
 
 shadow 内。本番保護に触れない。
 
-## Task 1: config — `tick_migration_stage` / `quote_stream_poll_seconds`
+## Task 1: config — `tick_migration_stage` / `quote_stream_poll_seconds` (schema + loader + validation)
 
 **Files:**
-- Modify: `src/config/schema.py` (`OrchestratorConfig`)
-- Test: `tests/test_config_schema.py` (既存があれば追記、無ければ新規)
+- Modify: `src/config/schema.py` (`OrchestratorConfig` フィールド + `__post_init__` validation)
+- Modify: `src/config/loader.py` (`_build_orchestrator_config` で YAML から読む)
+- Test: `tests/test_orchestrator_config_tick_stage.py`
+
+**Note (review H-a):** dataclass にフィールドを足すだけでは不十分。loader の `_build_orchestrator_config` は `OrchestratorConfig(...)` を**手動構築**しており (`loader.py:110-127`)、新フィールドを明示的に渡さないと YAML 値が無視され**常に既定 off** になる。loader にも追加する。
 
 - [ ] **Step 1: Write the failing test**
 
 `tests/test_orchestrator_config_tick_stage.py` を新規作成:
 
 ```python
+import pytest
+
 from src.config.schema import OrchestratorConfig
+from src.config.loader import _build_orchestrator_config
 
 
 def test_tick_migration_stage_defaults_off():
@@ -62,16 +68,36 @@ def test_tick_migration_stage_accepts_known_values():
     for stage in ("off", "producer", "protect_shadow", "protect_live"):
         cfg = OrchestratorConfig(tick_migration_stage=stage)
         assert cfg.tick_migration_stage == stage
+
+
+def test_invalid_stage_rejected():
+    with pytest.raises(ValueError):
+        OrchestratorConfig(tick_migration_stage="bogus")
+
+
+def test_loader_reads_stage_from_yaml():
+    """YAML ブロックから stage / poll が読まれる (review H-a 回帰)。"""
+    cfg = _build_orchestrator_config(
+        {"tick_migration_stage": "producer", "quote_stream_poll_seconds": 3}
+    )
+    assert cfg.tick_migration_stage == "producer"
+    assert cfg.quote_stream_poll_seconds == 3
+
+
+def test_loader_defaults_when_absent():
+    cfg = _build_orchestrator_config({})
+    assert cfg.tick_migration_stage == "off"
+    assert cfg.quote_stream_poll_seconds == 2
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest tests/test_orchestrator_config_tick_stage.py -v`
-Expected: FAIL — `OrchestratorConfig` に `tick_migration_stage` 属性が無い (`TypeError: unexpected keyword argument` or `AttributeError`)。
+Expected: FAIL — `OrchestratorConfig` に `tick_migration_stage` が無い (`TypeError`/`AttributeError`)。
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3: Write minimal implementation (schema)**
 
-`src/config/schema.py` の `OrchestratorConfig` (dataclass) にフィールドを追加。既存フィールド群の末尾に (既存の `market_state_enabled: bool = False` 等の近く):
+`src/config/schema.py` の `OrchestratorConfig` (dataclass) にフィールドを追加 (既存 `market_state_enabled: bool = False` 等の近く):
 
 ```python
     # Phase 2/D: tick migration 段階導入。off→producer→protect_shadow→protect_live の単調列。
@@ -80,16 +106,39 @@ Expected: FAIL — `OrchestratorConfig` に `tick_migration_stage` 属性が無�
     quote_stream_poll_seconds: int = 2
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+`OrchestratorConfig` に `__post_init__` を追加 (既存に無ければ新設、あれば末尾に追記):
+
+```python
+    def __post_init__(self) -> None:
+        valid_stages = {"off", "producer", "protect_shadow", "protect_live"}
+        if self.tick_migration_stage not in valid_stages:
+            raise ValueError(
+                f"tick_migration_stage must be one of {valid_stages}, "
+                f"got {self.tick_migration_stage!r}"
+            )
+```
+
+> `OrchestratorConfig` に既存 `__post_init__` があるなら、その中に validation を追記する (二重定義は不可)。
+
+- [ ] **Step 4: Write minimal implementation (loader)**
+
+`src/config/loader.py` の `_build_orchestrator_config` の `OrchestratorConfig(...)` 呼び出しに引数を追加 (`loader.py:110-127`)。`agents=...` の後 (末尾) に:
+
+```python
+        tick_migration_stage=data.get("tick_migration_stage", "off"),
+        quote_stream_poll_seconds=data.get("quote_stream_poll_seconds", 2),
+```
+
+- [ ] **Step 5: Run test to verify it passes**
 
 Run: `pytest tests/test_orchestrator_config_tick_stage.py -v`
-Expected: PASS (2 passed)。
+Expected: PASS (5 passed)。
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add tests/test_orchestrator_config_tick_stage.py src/config/schema.py
-git commit -m "feat: tick_migration_stage / quote_stream_poll_seconds config 追加 (Phase 2/D)"
+git add tests/test_orchestrator_config_tick_stage.py src/config/schema.py src/config/loader.py
+git commit -m "feat: tick_migration_stage / quote_stream_poll_seconds (schema + loader + validation) (review H-a)"
 ```
 
 ---
@@ -101,6 +150,8 @@ git commit -m "feat: tick_migration_stage / quote_stream_poll_seconds config 追
 - Test: `tests/test_mt5_get_quote.py`
 
 **Note:** `Mt5OhlcvFetcher.__init__` は `bridge_url` / `request_timeout` / `api_key` を取り `self._url` / `self._timeout` / `self._headers` を持つ (`mt5_ohlcv_fetcher.py:72-81`)。`to_mt5_symbol` は `src.trading.symbol_mapping` に既存 import 済み (`mt5_ohlcv_fetcher.py:18`)。`Mt5UnreachableError` は同ファイル定義済み。
+
+**Note (review M-d — api_key 伝播):** 現行 `PriceProvider` は `Mt5OhlcvFetcher(...)` を生成する際 `api_key` を渡していない (`price_provider.py:71-74` — `bridge_url`/`request_timeout_seconds` のみ)。bridge 認証が有効な環境では `/quote` が 401 → producer が常時 degrade する。**get_quote 自体は `self._headers` を使うので正しいが、producer 用 fetcher が api_key 付きで生成される必要がある。** この修正は Task 4 (producer 用 fetcher の生成) で行う。本 Task の単体テストは `api_key=""` と `api_key="k"` の両方を検証する。
 
 - [ ] **Step 1: Write the failing test**
 
@@ -191,6 +242,26 @@ def test_get_quote_unreachable_raises(monkeypatch):
     monkeypatch.setattr(httpx, "get", fake_get)
     with pytest.raises(Mt5UnreachableError):
         _fetcher().get_quote("USDJPY=X")
+
+
+def test_get_quote_sends_api_key_header(monkeypatch):
+    """api_key 付き fetcher は X-Bridge-Api-Key ヘッダを送る (review M-d)。"""
+    captured = {}
+
+    def fake_get(url, params=None, timeout=None, headers=None):
+        captured["headers"] = headers
+        return _FakeResp(
+            200,
+            {"symbol": "USDJPY", "bid": 150.0, "ask": 150.02,
+             "spread_points": 20, "time": "2026-06-22T00:00:00+00:00"},
+        )
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    f = Mt5OhlcvFetcher(
+        bridge_url="http://localhost:8812", request_timeout=5.0, api_key="secret"
+    )
+    f.get_quote("USDJPY=X")
+    assert captured["headers"] == {"X-Bridge-Api-Key": "secret"}
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -616,16 +687,29 @@ def make_producer_quote_provider(producer, fallback: "QuoteProvider") -> QuotePr
     stage = getattr(orch_cfg, "tick_migration_stage", "off")
     if stage in ("producer", "protect_shadow", "protect_live"):
         from src.data.quote_stream import QuoteStreamProducer
+        from src.data.mt5_ohlcv_fetcher import Mt5OhlcvFetcher
 
-        mt5_fetcher = getattr(price_provider, "_mt5_fetcher", None)
+        # review M-d: price_provider._mt5_fetcher は api_key 無しで生成されている
+        # (price_provider.py:71-74)。producer 用に config から api_key 付きで作り直す。
+        # bridge 認証有効環境で /quote が 401 → 常時 degrade するのを防ぐ。
         mt5_enabled = getattr(price_provider, "_mt5_enabled", False)
+        mt5_cfg = config.providers.mt5
+        quote_fetcher = None
+        if mt5_enabled and mt5_cfg is not None:
+            quote_fetcher = Mt5OhlcvFetcher(
+                bridge_url=mt5_cfg.bridge_url,
+                request_timeout=mt5_cfg.request_timeout_seconds,
+                api_key=getattr(mt5_cfg, "api_key", "") or "",
+            )
         quote_producer = QuoteStreamProducer(
-            pairs=pairs, fetcher=mt5_fetcher, price_provider=price_provider,
+            pairs=pairs, fetcher=quote_fetcher, price_provider=price_provider,
             mt5_enabled=mt5_enabled,
             poll_seconds=getattr(orch_cfg, "quote_stream_poll_seconds", 2),
         )
         quote_provider = make_producer_quote_provider(quote_producer, quote_provider)
 ```
+
+> `mt5_cfg.api_key` の正確なフィールド名は `config.providers.mt5` の schema を確認 (`schema.py` の MT5 provider config)。無ければ `""`。`config/providers/mt5.yaml` に `api_key: ""` がある (調査済み) ので schema にも対応フィールドがあるはず。
 
 そして `OrchestratorRuntime(...)` 呼び出しに `quote_producer=quote_producer` を渡す引数を追加 (runtime 側で受ける)。`runtime.py` の `__init__` に `quote_producer=None` キーワードを足し `self._quote_producer = quote_producer` を保持。`start()` の冒頭 (loops 起動前) に:
 
@@ -802,6 +886,57 @@ def test_compare_detects_mismatch(tmp_path: Path):
     rows = orch.compare_protection_decisions(since=now - timedelta(minutes=5))
     assert len(rows) == 1
     assert rows[0]["action_match"] is False
+
+
+def test_compare_skips_far_apart_records(tmp_path: Path):
+    """ts が max_delta_seconds を超えて離れたペアは比較対象外 (review M-e)。
+
+    tick_worker は 2s 毎、price_monitor は数分毎なので、別局面同士を突き合わせて
+    false match/mismatch を出さないよう近接 ts のみペアリングする。
+    """
+    orch = OrchestratorStore(tmp_path / "orch.db")
+    now = db_now()
+    orch.record_protection_decision(
+        ts=now, pair="USDJPY=X", order_id="o3", source="price_monitor",
+        action="raise_sl", stage="half", target_sl=149.5, mfe_r=0.4, giveback_r=0.0,
+    )
+    # tick_worker は 10 分後 (別局面) → ペアリングしない
+    orch.record_protection_decision(
+        ts=now + timedelta(minutes=10), pair="USDJPY=X", order_id="o3",
+        source="tick_worker", action="close", stage="giveback", target_sl=None,
+        mfe_r=1.0, giveback_r=0.5,
+    )
+    rows = orch.compare_protection_decisions(
+        since=now - timedelta(hours=1), max_delta_seconds=60
+    )
+    assert rows == []  # 60s を超えて離れているのでペア無し
+
+
+def test_compare_pairs_nearest_within_delta(tmp_path: Path):
+    """同 order_id で複数行があるとき、最も近い ts 同士をペアにする (review M-e)。"""
+    orch = OrchestratorStore(tmp_path / "orch.db")
+    now = db_now()
+    # price_monitor: now
+    orch.record_protection_decision(
+        ts=now, pair="USDJPY=X", order_id="o4", source="price_monitor",
+        action="raise_sl", stage="half", target_sl=149.5, mfe_r=0.4, giveback_r=0.0,
+    )
+    # tick_worker: now+1s (近接, ペア候補) と now+30min (遠い)
+    orch.record_protection_decision(
+        ts=now + timedelta(seconds=1), pair="USDJPY=X", order_id="o4",
+        source="tick_worker", action="raise_sl", stage="half", target_sl=149.5,
+        mfe_r=0.4, giveback_r=0.0,
+    )
+    orch.record_protection_decision(
+        ts=now + timedelta(minutes=30), pair="USDJPY=X", order_id="o4",
+        source="tick_worker", action="close", stage="giveback", target_sl=None,
+        mfe_r=1.0, giveback_r=0.6,
+    )
+    rows = orch.compare_protection_decisions(
+        since=now - timedelta(hours=1), max_delta_seconds=60
+    )
+    assert len(rows) == 1
+    assert rows[0]["action_match"] is True  # 近接ペア (raise_sl vs raise_sl)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -847,10 +982,15 @@ class _ProtectionDecision(_Base):
             ))
             session.commit()
 
-    def compare_protection_decisions(self, *, since) -> list[dict]:
-        """同 order_id の price_monitor / tick_worker 判定をペアリングし一致を返す。
+    def compare_protection_decisions(
+        self, *, since, max_delta_seconds: int = 60,
+    ) -> list[dict]:
+        """同 pair+order_id の price_monitor / tick_worker 判定を近接 ts でペアリングし
+        一致を返す (review M-e)。
 
-        ts が近接する両 source のうち各 order_id の最新ペアを比較する簡易版。
+        各 price_monitor 行に対し、同 order_id・|ts差| <= max_delta_seconds の中で
+        最も近い tick_worker 行を選ぶ。tick_worker は 2s 毎・price_monitor は数分毎で
+        頻度が違うため、時間が離れた別局面を突き合わせて false match/mismatch を出さない。
         """
         with Session(self._engine) as session:
             rows = session.execute(
@@ -859,22 +999,28 @@ class _ProtectionDecision(_Base):
                 .order_by(_ProtectionDecision.ts)
             ).scalars().all()
 
-        by_key: dict[str, dict[str, _ProtectionDecision]] = {}
-        for r in rows:
-            by_key.setdefault(r.order_id, {})[r.source] = r  # 最新が後勝ち
+        pm_rows = [r for r in rows if r.source == "price_monitor"]
+        tw_rows = [r for r in rows if r.source == "tick_worker"]
 
         out: list[dict] = []
-        for order_id, srcs in by_key.items():
-            pm = srcs.get("price_monitor")
-            tw = srcs.get("tick_worker")
-            if pm is None or tw is None:
-                continue  # 片側のみは比較対象外
+        for pm in pm_rows:
+            # 同 order_id・delta 内で ts が最も近い tick_worker 行を選ぶ
+            candidates = [
+                tw for tw in tw_rows
+                if tw.order_id == pm.order_id
+                and abs((tw.ts - pm.ts).total_seconds()) <= max_delta_seconds
+            ]
+            if not candidates:
+                continue
+            tw = min(candidates, key=lambda x: abs((x.ts - pm.ts).total_seconds()))
             out.append({
-                "order_id": order_id,
+                "order_id": pm.order_id,
+                "pair": pm.pair,
                 "action_match": pm.action == tw.action,
                 "target_sl_match": pm.target_sl == tw.target_sl,
                 "price_monitor_action": pm.action,
                 "tick_worker_action": tw.action,
+                "delta_seconds": abs((tw.ts - pm.ts).total_seconds()),
             })
         return out
 ```
@@ -895,15 +1041,274 @@ git commit -m "feat: protection_decisions ORM + record/compare API (spec §5.4 M
 
 ---
 
-## Task 8: `PriceProtectionWorker` — 保護判定 (記録のみ / raise_sl のみ)
+## Task 7.5: 保護適用を共通 helper に抽出 (review H-b)
+
+**Files:**
+- Create: `src/trading/protection_apply.py` (`apply_protection` — 副作用一式を共通化)
+- Modify: `src/jobs/price_monitor.py` (`_apply_profit_protection` を helper 呼び出しに置換)
+- Test: `tests/test_protection_apply.py`
+
+**Note (review H-b — 最重要):** price_monitor の `_apply_profit_protection` (`price_monitor.py:73-114`) は単に純関数を呼ぶだけでなく、(1) `compute_mfe_update` → `position_mgr.update_protection_state` で MFE state 更新、(2) `more_protective_sl` で `pending_protection_sl` と合成、(3) `_apply_sl_target` で remote-first (`broker.update_remote_sl` 成功後に `position_mgr.update_stop_loss`)、(4) 適用後 `clear_pending_protection_target` + `last_protection_stage` 更新、までの**副作用一式**を行う。worker がこれを欠くと `protect_live` で MT5 側 SL だけ動いて内部 state が古いまま残り、毎 tick 同じ SL 更新を試行する/pending を無視する/比較がズレる。**この副作用一式を共通 helper に抽出し、price_monitor と worker が同一 helper を呼ぶことで「移設=同結果」を副作用レベルで成立させる。**
+
+- [ ] **Step 1: Write the failing test**
+
+`tests/test_protection_apply.py` を新規作成:
+
+```python
+from types import SimpleNamespace
+
+from src.trading.protection_apply import apply_protection, ProtectionApplyResult
+from src.trading.position_manager import Order
+
+
+def _cfg():
+    return SimpleNamespace(
+        protect_half_r=0.3, protect_breakeven_r=0.5, protect_lock_r=1.0,
+        giveback_close_r=0.4, giveback_close_min_mfe_r=0.8,
+    )
+
+
+def _pos() -> Order:
+    return Order.new(
+        pair="USDJPY=X", direction="buy", entry_price=150.0,
+        stop_loss=149.0, take_profit=152.0, position_size=1.0,
+    )
+
+
+class _PosMgr:
+    def __init__(self):
+        self.protection_state_calls = []
+        self.sl_updates = []
+        self.pending_cleared = []
+
+    def update_protection_state(self, order_id, **kw):
+        self.protection_state_calls.append((order_id, kw))
+
+    def update_stop_loss(self, order_id, new_sl, stage=None):
+        self.sl_updates.append((order_id, new_sl, stage))
+        return True
+
+    def clear_pending_protection_target(self, order_id):
+        self.pending_cleared.append(order_id)
+
+
+def test_apply_protection_updates_mfe_state_and_sl():
+    """helper が MFE state 更新 + SL 適用の副作用一式を行う (review H-b)。"""
+    mgr = _PosMgr()
+    res = apply_protection(
+        _pos(), current=150.6, cfg=_cfg(), position_mgr=mgr,
+        broker=None, remote_sync_enabled=False, execute=True,
+    )
+    assert isinstance(res, ProtectionApplyResult)
+    # MFE state は必ず更新される (適用有無に関わらず)
+    assert len(mgr.protection_state_calls) >= 1
+    # +0.6R → breakeven (entry) raise_sl が SL 適用される
+    assert len(mgr.sl_updates) == 1
+    assert res.action == "raise_sl"
+
+
+def test_apply_protection_execute_false_records_no_side_effects():
+    """execute=False (shadow) は判定だけ返し SL 適用も state 更新もしない。"""
+    mgr = _PosMgr()
+    res = apply_protection(
+        _pos(), current=150.6, cfg=_cfg(), position_mgr=mgr,
+        broker=None, remote_sync_enabled=False, execute=False,
+    )
+    assert res.action == "raise_sl"          # 判定は返る
+    assert mgr.sl_updates == []              # SL 適用なし
+    assert mgr.protection_state_calls == []  # state 更新もなし (純粋判定)
+
+
+def test_apply_protection_close_not_executed():
+    """close は実行しない (H4)。action=close でも SL 適用は走らない。"""
+    pos = _pos()
+    pos.max_favorable_r = 1.0
+    pos.max_favorable_price = 151.0
+    mgr = _PosMgr()
+    res = apply_protection(
+        pos, current=150.1, cfg=_cfg(), position_mgr=mgr,
+        broker=None, remote_sync_enabled=False, execute=True,
+    )
+    assert res.action == "close"
+    assert mgr.sl_updates == []  # close は SL 適用も close 実行もしない
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/test_protection_apply.py -v`
+Expected: FAIL — `src.trading.protection_apply` が無い (`ModuleNotFoundError`)。
+
+- [ ] **Step 3: Write helper (副作用一式を price_monitor から抽出)**
+
+`src/trading/protection_apply.py` を新規作成:
+
+```python
+"""ポジション保護適用の共通 helper (spec §5.1 / review H-b)。
+
+price_monitor と orchestrator の保護 worker が同一の副作用一式 (MFE state 更新 /
+pending 合成 / remote-first SL 適用 / pending clear / stage 更新) を共有するため
+_apply_profit_protection の中身をここに抽出する。
+
+- execute=False: 判定のみ返す (副作用なし、shadow 比較用)。
+- execute=True: 既存 price_monitor と同一の副作用を行う。close は実行しない (H4)。
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Any
+
+from src.trading.position_protection import (
+    compute_mfe_update, compute_profit_protection_action, more_protective_sl,
+)
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ProtectionApplyResult:
+    action: str               # none | raise_sl | close
+    stage: str
+    target_sl: "float | None"
+    mfe_r: float
+    giveback_r: float
+    updated: bool             # SL を実際に適用したか
+    remote_failed: bool
+
+
+def _apply_sl_target(
+    pos, target_sl, stage, position_mgr, broker, remote_sync_enabled,
+) -> tuple[bool, bool]:
+    """remote-first で SL 適用 (price_monitor._apply_sl_target と同一ロジック)。"""
+    if target_sl is None:
+        return False, False
+    if pos.direction == "buy" and target_sl <= pos.stop_loss:
+        return False, False
+    if pos.direction == "sell" and target_sl >= pos.stop_loss:
+        return False, False
+    if remote_sync_enabled and broker is not None:
+        if not broker.update_remote_sl(pos.order_id, target_sl):
+            return False, True
+    updated = position_mgr.update_stop_loss(pos.order_id, target_sl, stage=stage)
+    return updated, False
+
+
+def apply_protection(
+    pos, *, current: float, cfg: Any, position_mgr, broker,
+    remote_sync_enabled: bool, execute: bool,
+) -> ProtectionApplyResult:
+    """保護判定を行い、execute=True なら副作用一式を適用する。
+
+    判定 (action/target_sl/mfe_r/giveback_r) は常に返す。execute=False は純粋判定
+    (shadow 比較用、副作用ゼロ)。close は実行しない (H4)。
+    """
+    state = compute_mfe_update(pos, current)
+    action = compute_profit_protection_action(pos, current, cfg)
+
+    if not execute:
+        return ProtectionApplyResult(
+            action=action.action, stage=action.stage, target_sl=action.target_sl,
+            mfe_r=state.max_favorable_r, giveback_r=state.giveback_r,
+            updated=False, remote_failed=False,
+        )
+
+    # --- 以下、execute=True の副作用一式 (price_monitor._apply_profit_protection 相当) ---
+    position_mgr.update_protection_state(
+        pos.order_id,
+        max_favorable_price=state.max_favorable_price,
+        max_favorable_r=state.max_favorable_r,
+    )
+
+    action_target = action.target_sl if action.action == "raise_sl" else None
+    pending_target = getattr(pos, "pending_protection_sl", None)
+    target_sl = more_protective_sl(pos, action_target, pending_target)
+    updated = False
+    remote_failed = False
+    if target_sl is not None:
+        stage = action.stage if target_sl == action_target else "pending"
+        updated, remote_failed = _apply_sl_target(
+            pos, target_sl, stage, position_mgr, broker, remote_sync_enabled,
+        )
+        if updated:
+            if pending_target is not None:
+                position_mgr.clear_pending_protection_target(pos.order_id)
+            position_mgr.update_protection_state(
+                pos.order_id,
+                max_favorable_price=state.max_favorable_price,
+                max_favorable_r=state.max_favorable_r,
+                last_protection_stage=stage,
+            )
+            logger.info(
+                "[POSITION] %s mfe_r=%.2f giveback_r=%.2f stage=%s sl=%.5f remote=%s",
+                pos.pair, state.max_favorable_r, state.giveback_r, stage, target_sl,
+                "ok" if not remote_failed else "failed",
+            )
+
+    return ProtectionApplyResult(
+        action=action.action, stage=action.stage, target_sl=action.target_sl,
+        mfe_r=state.max_favorable_r, giveback_r=state.giveback_r,
+        updated=updated, remote_failed=remote_failed,
+    )
+```
+
+- [ ] **Step 4: Run helper test to verify it passes**
+
+Run: `pytest tests/test_protection_apply.py -v`
+Expected: PASS (3 passed)。
+
+- [ ] **Step 5: price_monitor を helper 呼び出しに置換 (副作用同一を維持)**
+
+`src/jobs/price_monitor.py` の `_apply_profit_protection` (`price_monitor.py:73-114`) 本体を helper 委譲に置換。シグネチャは互換維持 (戻り値 `tuple[bool, bool]`):
+
+```python
+def _apply_profit_protection(
+    pos, current, cfg, position_mgr, broker, remote_sync_enabled,
+    decision_store=None, protection_mode="legacy",
+) -> tuple[bool, bool]:
+    """Update MFE state and apply R/giveback based SL protection (helper 委譲)。"""
+    from src.trading.protection_apply import apply_protection
+    from src.utils.clock import db_now
+
+    # protect_live では実適用を worker に委譲、price_monitor は判定記録のみ (single writer)。
+    execute = protection_mode != "protect_live"
+    res = apply_protection(
+        pos, current=current, cfg=cfg, position_mgr=position_mgr,
+        broker=broker, remote_sync_enabled=remote_sync_enabled, execute=execute,
+    )
+    if decision_store is not None:
+        decision_store.record_protection_decision(
+            ts=db_now(), pair=pos.pair, order_id=pos.order_id,
+            source="price_monitor", action=res.action, stage=res.stage,
+            target_sl=res.target_sl, mfe_r=res.mfe_r, giveback_r=res.giveback_r,
+        )
+    return res.updated, res.remote_failed
+```
+
+> これは Task 9 (decision_store 追記) と Task 13 (protect_live skip) の両方をこの helper 委譲で**同時に満たす**。`_apply_sl_target` の旧定義は helper 側に移ったので price_monitor 側の旧 `_apply_sl_target` は残してよい (他から参照されていなければ削除可、まず残す)。
+
+- [ ] **Step 6: Run price_monitor regression**
+
+Run: `pytest tests/test_price_monitor.py -v`
+Expected: PASS — helper 委譲後も `legacy` 既定で従来副作用が同一。**FAIL したら helper の副作用順序が `_apply_profit_protection` 原典とズレていないか照合**する。
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/trading/protection_apply.py src/jobs/price_monitor.py tests/test_protection_apply.py
+git commit -m "refactor: 保護適用を protection_apply.apply_protection helper に抽出 (review H-b)"
+```
+
+---
+
+## Task 8: `PriceProtectionWorker` — helper 共有で保護判定 (記録のみ / raise_sl のみ)
 
 **Files:**
 - Create: `src/orchestrator/position_protection_worker.py`
 - Test: `tests/test_protection_worker.py`
 
-**Note:** 純関数は `src.trading.position_protection` の `compute_mfe_update(pos, current) -> ProtectionStateUpdate` (fields: `max_favorable_r`, `current_r`, `giveback_r`, `max_favorable_price`) と `compute_profit_protection_action(pos, current, cfg) -> ProtectionAction` (fields: `action`, `target_sl`, `stage`, `reason`)。**worker は `action="close"` を実行しない (spec §5.1.1)。** `protect_shadow` は記録のみ。
+**Note:** worker は Task 7.5 の `apply_protection` helper を呼ぶ (純関数を直接呼ばない)。これにより price_monitor と**同一の副作用一式**を共有する (review H-b)。`protect_shadow` は `execute=False` で判定記録のみ、`protect_live` は `execute=True` で副作用適用。**`action="close"` でも helper が SL 適用しない (H4)。**
 
-**重要 — 実 `Order` を使う:** 純関数は `Order` の `direction`(`"buy"`/`"sell"`、`"long"` ではない)、`initial_risk_price_distance`、`max_favorable_r: float`、`initial_stop_loss`、`entry_price` を参照する (`position_protection.py:30-58`)。SimpleNamespace で模すと属性欠落で `AttributeError` になるため、**テストでは実 `Order.new(...)` を使う**。`Order` は `src.trading.position_manager`。`Order.new(pair, direction, entry_price, stop_loss, ...)` が `initial_risk_price_distance` 等を自動計算する (`position_manager.py:62-70`)。
+**重要 — 実 `Order` と `position_mgr` を使う:** helper は `Order` の `direction`(`"buy"`/`"sell"`) と `position_mgr` の `update_protection_state`/`update_stop_loss`/`clear_pending_protection_target` を要求する。テストでは実 `Order.new(...)` と stub position_mgr を使う。`Order` は `src.trading.position_manager`。`Order.new(pair, direction, entry_price, stop_loss, take_profit, position_size)` が `initial_risk_price_distance` 等を自動計算する (`position_manager.py:47-76`)。
 
 - [ ] **Step 1: Write the failing test**
 
@@ -934,7 +1339,6 @@ def _cfg():
 
 def _pos(*, entry=150.0, sl=149.0, take_profit=152.0, max_fav_r=0.0,
          max_fav_price=None) -> Order:
-    # 実 Order を使う (純関数は direction='buy'/'sell' と initial_risk_price_distance 等を要求)。
     o = Order.new(
         pair="USDJPY=X", direction="buy", entry_price=entry,
         stop_loss=sl, take_profit=take_profit, position_size=1.0,
@@ -942,6 +1346,18 @@ def _pos(*, entry=150.0, sl=149.0, take_profit=152.0, max_fav_r=0.0,
     o.max_favorable_r = max_fav_r
     o.max_favorable_price = max_fav_price
     return o
+
+
+class _PosMgr:
+    def __init__(self):
+        self.sl_updates = []
+
+    def update_protection_state(self, *a, **k): ...
+    def clear_pending_protection_target(self, *a, **k): ...
+
+    def update_stop_loss(self, order_id, new_sl, stage=None):
+        self.sl_updates.append((order_id, new_sl, stage))
+        return True
 
 
 class _Producer:
@@ -956,47 +1372,47 @@ class _Producer:
         )
 
 
+def _worker(producer, positions, store, mgr, broker, mode):
+    return PriceProtectionWorker(
+        producer=producer, position_provider=lambda: positions,
+        store=store, cfg=_cfg(), position_mgr=mgr, broker=broker,
+        mode=mode, remote_sync_enabled=True,
+    )
+
+
 def test_shadow_records_decision_without_executing():
     store = _RecordingStore()
-    broker_calls = []
-    worker = PriceProtectionWorker(
-        producer=_Producer(mid=150.6),  # entry 150 / sl 149 → +0.6R 相当
-        position_provider=lambda: [_pos()],
-        store=store, cfg=_cfg(),
-        broker=SimpleNamespace(update_remote_sl=lambda *a, **k: broker_calls.append(a)),
+    mgr = _PosMgr()
+    worker = _worker(
+        _Producer(mid=150.6), [_pos()], store, mgr, broker=None,
         mode="protect_shadow",
     )
     worker.run_once()
     assert len(store.records) == 1
     assert store.records[0]["source"] == "tick_worker"
-    assert broker_calls == []  # protect_shadow は実 SL 更新しない
+    assert mgr.sl_updates == []  # protect_shadow は execute=False → SL 適用なし
 
 
 def test_close_action_is_not_executed():
     """giveback で action=close になっても worker は実行しない (H4)。"""
     store = _RecordingStore()
-    broker_calls = []
-    # MFE 1.0R を既に記録済み (max_fav_price=150.0+1.0R=151.0) で、現在 150.1 まで
-    # 戻すと giveback ≈ 0.9R ≥ giveback_close_r(0.4) かつ MFE 1.0R ≥ min(0.8) → close。
+    mgr = _PosMgr()
+    # MFE 1.0R 記録済み (max_fav_price=151.0) で現在 150.1 → giveback ≈ 0.9R ≥ 0.4 かつ
+    # MFE 1.0R ≥ min(0.8) → close。
     pos = _pos(max_fav_r=1.0, max_fav_price=151.0)
-    worker = PriceProtectionWorker(
-        producer=_Producer(mid=150.1),
-        position_provider=lambda: [pos],
-        store=store, cfg=_cfg(),
-        broker=SimpleNamespace(update_remote_sl=lambda *a, **k: broker_calls.append(a)),
-        mode="protect_shadow",
+    worker = _worker(
+        _Producer(mid=150.1), [pos], store, mgr, broker=None,
+        mode="protect_live",  # live でも close は適用しない
     )
     worker.run_once()
-    # close でも shadow なので実行ゼロ。記録はされてよい。
-    assert broker_calls == []
+    assert mgr.sl_updates == []  # close は SL 適用ゼロ
 
 
 def test_off_or_producer_mode_does_nothing():
     store = _RecordingStore()
-    worker = PriceProtectionWorker(
-        producer=_Producer(mid=150.6),
-        position_provider=lambda: [_pos()],
-        store=store, cfg=_cfg(), broker=None, mode="producer",
+    mgr = _PosMgr()
+    worker = _worker(
+        _Producer(mid=150.6), [_pos()], store, mgr, broker=None, mode="producer",
     )
     worker.run_once()
     assert store.records == []  # producer 段では保護 worker は何もしない
@@ -1014,10 +1430,10 @@ Expected: FAIL — `position_protection_worker` が無い (`ModuleNotFoundError`
 ```python
 """tick 駆動のポジション保護 worker (spec §5)。
 
-純関数 (compute_mfe_update / compute_profit_protection_action) を流用し駆動だけ
-tick 化する。close は price_monitor と同じく実行しない (spec §5.1.1, H4)。
-- protect_shadow: 判定を protection_decisions に記録のみ (実 SL 更新なし)。
-- protect_live: raise_sl のみ broker.update_remote_sl で実行 (close は別タスク)。
+apply_protection helper (Task 7.5) を price_monitor と共有し、副作用一式を同一化する
+(review H-b)。close は実行しない (spec §5.1.1, H4)。
+- protect_shadow: execute=False で判定を protection_decisions に記録のみ。
+- protect_live: execute=True で helper の副作用一式 (remote-first SL 適用 + state 更新) を実行。
 """
 from __future__ import annotations
 
@@ -1025,9 +1441,7 @@ import logging
 import threading
 from typing import Callable
 
-from src.trading.position_protection import (
-    compute_mfe_update, compute_profit_protection_action,
-)
+from src.trading.protection_apply import apply_protection
 from src.utils.clock import db_now
 
 logger = logging.getLogger(__name__)
@@ -1036,14 +1450,17 @@ logger = logging.getLogger(__name__)
 class PriceProtectionWorker:
     def __init__(
         self, *, producer, position_provider: Callable[[], list],
-        store, cfg, broker, mode: str, poll_seconds: int = 2,
+        store, cfg, position_mgr, broker, mode: str,
+        remote_sync_enabled: bool = True, poll_seconds: int = 2,
     ) -> None:
         self._producer = producer
         self._positions = position_provider
         self._store = store
         self._cfg = cfg
+        self._position_mgr = position_mgr
         self._broker = broker
         self._mode = mode  # producer | protect_shadow | protect_live
+        self._remote_sync_enabled = remote_sync_enabled
         self._poll_seconds = poll_seconds
         self._stop = threading.Event()
         self._thread: "threading.Thread | None" = None
@@ -1051,30 +1468,27 @@ class PriceProtectionWorker:
     def run_once(self) -> None:
         if self._mode not in ("protect_shadow", "protect_live"):
             return
+        execute = self._mode == "protect_live"
         for pos in self._positions():
             snap = self._producer.latest(pos.pair)
             if snap is None:
                 continue
-            current = snap.mid
             try:
-                update = compute_mfe_update(pos, current)
-                action = compute_profit_protection_action(pos, current, self._cfg)
+                res = apply_protection(
+                    pos, current=snap.mid, cfg=self._cfg,
+                    position_mgr=self._position_mgr, broker=self._broker,
+                    remote_sync_enabled=self._remote_sync_enabled, execute=execute,
+                )
             except Exception:
-                logger.exception("[PROT-WORKER] eval failed for %s", pos.order_id)
+                logger.exception("[PROT-WORKER] apply failed for %s", pos.order_id)
                 continue
 
             # 記録は両 mode で残す (比較用)。
             self._store.record_protection_decision(
                 ts=db_now(), pair=pos.pair, order_id=pos.order_id,
-                source="tick_worker", action=action.action, stage=action.stage,
-                target_sl=action.target_sl, mfe_r=update.max_favorable_r,
-                giveback_r=update.giveback_r,
+                source="tick_worker", action=res.action, stage=res.stage,
+                target_sl=res.target_sl, mfe_r=res.mfe_r, giveback_r=res.giveback_r,
             )
-
-            # 実行は protect_live かつ raise_sl のみ (close は実行しない, H4)。
-            if self._mode == "protect_live" and action.action == "raise_sl":
-                if self._broker is not None and action.target_sl is not None:
-                    self._broker.update_remote_sl(pos.order_id, action.target_sl)
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -1116,15 +1530,14 @@ git commit -m "feat: PriceProtectionWorker — 保護判定 tick 駆動 (記録�
 
 ---
 
-## Task 9: price_monitor に並走記録の薄い追記 (protect_shadow 以上のみ)
+## Task 9: price_monitor の並走記録を検証 (Task 7.5 helper 委譲で実装済み)
 
 **Files:**
-- Modify: `src/jobs/price_monitor.py` (`_apply_profit_protection` 周辺)
 - Test: `tests/test_price_monitor_protection_record.py`
 
-**Note:** `_apply_profit_protection(pos, current, cfg, position_mgr, broker, remote_sync_enabled)` (`price_monitor.py:73`) は `compute_mfe_update` と `compute_profit_protection_action` を既に呼んでいる (`price_monitor.py:82,89`)。**実行ロジックは変えず**、`compute_profit_protection_action` の結果を `protection_decisions` に `source="price_monitor"` で記録する 1 呼び出しを足すだけ。記録するか否かは引数で渡される store の有無 + stage で制御 (price_monitor は orchestrator config を直接持たないので、bootstrap/main で stage>=protect_shadow のとき store を渡す形にする)。
+**Note:** `_apply_profit_protection` の `decision_store` / `protection_mode` 引数と記録呼び出しは **Task 7.5 の helper 委譲で既に実装済み**。本タスクは記録挙動 (store 渡時のみ記録、未渡時は完全無改変) を回帰テストで固定する検証専用。
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the test**
 
 `tests/test_price_monitor_protection_record.py` を新規作成:
 
@@ -1160,7 +1573,7 @@ def _pos() -> Order:
 class _PosMgr:
     def update_protection_state(self, *a, **k): ...
     def clear_pending_protection_target(self, *a, **k): ...
-    def update_stop_loss(self, *a, **k): ...
+    def update_stop_loss(self, *a, **k): return True
 
 
 def test_records_to_store_when_store_provided():
@@ -1182,50 +1595,21 @@ def test_no_record_when_store_none():
     # 例外なく完了すれば OK (記録対象 store が無い)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run test to verify it passes**
 
 Run: `pytest tests/test_price_monitor_protection_record.py -v`
-Expected: FAIL — `_apply_profit_protection` が `decision_store` キーワードを受けない (`TypeError`)。
+Expected: PASS (2 passed) — Task 7.5 の helper 委譲で `decision_store` 引数と記録が組み込み済み。**FAIL するなら Task 7.5 の helper 委譲版 `_apply_profit_protection` のシグネチャ/記録呼び出しを確認**する。
 
-- [ ] **Step 3: Write minimal implementation**
-
-`src/jobs/price_monitor.py` の `_apply_profit_protection` シグネチャに `decision_store=None` を追加し、`action = compute_profit_protection_action(...)` (`price_monitor.py:89`) の直後に記録を挿入。**既存の実行ロジック (raise_sl 適用) は一切変えない:**
-
-```python
-    action = compute_profit_protection_action(pos, current, cfg)
-
-    # 並走比較用の記録 (spec §5.3)。decision_store が渡されたとき (stage>=protect_shadow)
-    # のみ記録する。実行ロジックは変えない。
-    if decision_store is not None:
-        from src.utils.clock import db_now
-        decision_store.record_protection_decision(
-            ts=db_now(), pair=pos.pair, order_id=pos.order_id,
-            source="price_monitor", action=action.action, stage=action.stage,
-            target_sl=action.target_sl, mfe_r=state.max_favorable_r,
-            giveback_r=state.giveback_r,
-        )
-
-    action_target = action.target_sl if action.action == "raise_sl" else None
-    # ...(以降は既存のまま)
-```
-
-> 呼び出し元 (`monitor_open_positions` 内の `_apply_profit_protection(...)` 呼び出し) には、stage>=protect_shadow のとき orchestrator store を `decision_store=` で渡すよう main/bootstrap 経路で配線する。off/producer では None のまま (完全無改変)。この配線は Task 11 (main 統合) で行う。
-
-- [ ] **Step 4: Run test to verify it passes**
-
-Run: `pytest tests/test_price_monitor_protection_record.py -v`
-Expected: PASS (2 passed)。
-
-- [ ] **Step 5: Run price_monitor regression**
+- [ ] **Step 3: Run price_monitor regression**
 
 Run: `pytest tests/test_price_monitor.py -v` (既存 price_monitor テスト)
 Expected: PASS (既存挙動が壊れていない = `decision_store` 既定 None で従来通り)。
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add src/jobs/price_monitor.py tests/test_price_monitor_protection_record.py
-git commit -m "feat: price_monitor に並走記録の薄い追記 (decision_store 渡時のみ, spec §5.3)"
+git add tests/test_price_monitor_protection_record.py
+git commit -m "test: price_monitor 並走記録の挙動を固定 (spec §5.3)"
 ```
 
 ---
@@ -1295,25 +1679,36 @@ runtime `__init__` に `protection_worker=None` キーワードを追加し `sel
             self._protection_worker.stop()
 ```
 
-bootstrap の Task 4 で producer を作るブロックを拡張し、stage>=protect_shadow のとき worker を生成:
+bootstrap の Task 4 で producer を作るブロックを拡張し、stage>=protect_shadow のとき worker を生成。
+
+**review H-c (production 配線):** `build_orchestrator_runtime` は `position_mgr`/`broker` を引数に持たない (`bootstrap.py:109`)。price_monitor は self-contained で、`_run_monitor_with_broker` 内で `PositionManager` を生成し `build_close_broker(config)` で broker を作る (`price_monitor.py:281-283`)。worker も**同じパターンで bootstrap 内に自前構築**すれば main の引数変更が不要。所有者は bootstrap で完結する:
 
 ```python
     protection_worker = None
     if stage in ("protect_shadow", "protect_live") and quote_producer is not None:
         from src.orchestrator.position_protection_worker import PriceProtectionWorker
+        from src.trading.position_manager import PositionManager
+        from src.trading.live_broker import build_close_broker
 
+        # price_monitor と同じく self-contained に構築 (price_monitor.py:281-283 と同パターン)。
+        # protect_shadow は execute=False なので副作用なし。protect_live で初めて
+        # broker.update_remote_sl / position_mgr.update_stop_loss が実発火する。
+        prot_position_mgr = PositionManager(config)
+        prot_broker = build_close_broker(config)
         protection_worker = PriceProtectionWorker(
             producer=quote_producer,
-            position_provider=lambda: position_mgr.get_account_state().open_positions,
-            store=orch_store, cfg=config.trading, broker=broker,
+            position_provider=lambda: prot_position_mgr.get_account_state().open_positions,
+            store=orch_store, cfg=config.trading,
+            position_mgr=prot_position_mgr, broker=prot_broker,
             mode=stage,
+            remote_sync_enabled=getattr(config.trading, "remote_sl_sync_enabled", False),
             poll_seconds=getattr(orch_cfg, "quote_stream_poll_seconds", 2),
         )
 ```
 
 `OrchestratorRuntime(...)` に `protection_worker=protection_worker` を渡す。
 
-> `position_provider` は `position_mgr.get_account_state().open_positions` で open positions (`list[Order]`) を返す (`position_manager.py:134,220`)。`position_mgr` / `broker` / `orch_store` / `config.trading` の正確な参照は bootstrap の既存変数に合わせる。bootstrap が `position_mgr`/`broker` を持たない場合は、`build_orchestrator_runtime` の引数に追加するか main から渡す経路を確認する (worker は本番 position_mgr/broker を要するため、この配線は shadow boundary を越える protect_live で初めて副作用を持つ点に注意)。
+> `PositionManager(config)` のコンストラクタ引数と `build_close_broker(config)` の正確なシグネチャは実装を確認して合わせる (`position_manager.py` / `live_broker.py:build_close_broker`)。`position_provider` は `get_account_state().open_positions` で `list[Order]` を返す (`position_manager.py:134,220`)。**注意:** worker 用 `PositionManager` は price_monitor が使うものと**別インスタンス**だが、同じ positions.json を読むので state は共有される (file-backed)。protect_live 移行時はこの二重 PositionManager の write 競合を再確認する (price_monitor 保護停止後は worker のみが SL write するので衝突しない設計)。
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1334,37 +1729,45 @@ git commit -m "feat: protect_shadow 以上で保護 worker を runtime に配線
 
 ---
 
-## Task 11: main 統合 — price_monitor へ decision_store を stage で渡す
+## Task 11: main 統合 — price_monitor へ decision_store / protection_mode を stage で渡す
 
 **Files:**
-- Modify: `main.py` (price_monitor 呼び出しに decision_store を条件付き注入)
-- Test: 手動確認 + 既存 e2e 回帰 (新規ユニットは Task 9 でカバー済み)
+- Modify: `main.py` (price_monitor 登録に stage 由来の store/mode を注入)
+- Modify: `src/jobs/price_monitor.py` (`run_price_monitor` → `_run_monitor_with_broker` → `monitor_open_positions` → `_apply_profit_protection` の経路に `decision_store` / `protection_mode` を伝播)
+- Test: `tests/test_orchestrator_e2e.py` 回帰 + `tests/test_price_monitor.py` 回帰
 
-**Note:** `main.py` で price_monitor は `run_price_monitor(config, price_provider, bridge_gate)` 経由でスケジュール登録される (`main.py:342-353` 近辺)。stage>=protect_shadow のとき orchestrator store を `_apply_profit_protection` まで届ける必要がある。`run_price_monitor` → `monitor_open_positions` → `_apply_profit_protection` の経路に `decision_store` を通すか、price_monitor が orchestrator store を参照できる形にする。
+**Note:** price_monitor は self-contained で、main は `run_price_monitor(config, price_provider, bridge_gate)` でスケジュール登録する (`main.py:352`)。`decision_store`/`protection_mode` を `run_price_monitor` から `_apply_profit_protection` まで引数で伝播する (各層デフォルト `None`/`"legacy"` で後方互換)。store は main で `OrchestratorStore(config.prices_db_path)` を作って渡す (bootstrap が作るものとは別インスタンスだが同 DB で記録先は同一)。
 
-- [ ] **Step 1: 経路を確認し decision_store を通す**
+- [ ] **Step 1: price_monitor の伝播チェーンに引数を足す**
 
-`main.py` で orchestrator store が構築される箇所を確認 (`OrchestratorStore(...)`)。`config.orchestrator.tick_migration_stage` が `protect_shadow`/`protect_live` のとき、その store を price_monitor 経路へ渡す。`run_price_monitor` / `monitor_open_positions` / `_apply_profit_protection` に `decision_store` 引数を順に通す (デフォルト None で後方互換)。
+`run_price_monitor` / `_run_monitor_with_broker` / `monitor_open_positions` に `decision_store=None, protection_mode="legacy"` を追加し、`monitor_open_positions` 内の `_apply_profit_protection(...)` 呼び出し (`price_monitor.py:156`) に `decision_store=decision_store, protection_mode=protection_mode` を渡す。
+
+- [ ] **Step 2: main で stage 由来の store/mode を注入**
+
+`main.py` の price_monitor スケジュール登録 (`main.py:342-353`) を修正:
 
 ```python
-# main.py 内、price_monitor スケジュール登録の引数に追加 (擬似):
-stage = config.orchestrator.tick_migration_stage
-prot_store = orch_store if stage in ("protect_shadow", "protect_live") else None
-# run_price_monitor(..., decision_store=prot_store) として渡す
+    stage = config.orchestrator.tick_migration_stage
+    if stage in ("protect_shadow", "protect_live"):
+        from src.data.orchestrator_store import OrchestratorStore
+        _prot_store = OrchestratorStore(config.prices_db_path)
+    else:
+        _prot_store = None
+    # run_price_monitor(..., decision_store=_prot_store, protection_mode=stage) を渡す
 ```
 
-`monitor_open_positions` 内の `_apply_profit_protection(...)` 呼び出しに `decision_store=decision_store` を追加。
+`schedule.every().day.at(...).do(_run_with_guard, ..., run_price_monitor, config, price_provider, bridge_gate, decision_store=_prot_store, protection_mode=stage)` のように config 由来の値を渡す。
 
-- [ ] **Step 2: 回帰テスト**
+- [ ] **Step 3: 回帰テスト**
 
 Run: `pytest tests/test_price_monitor.py tests/test_orchestrator_e2e.py -q`
-Expected: PASS (off 既定で従来通り、store 未注入)。
+Expected: PASS (off 既定で `decision_store=None`/`protection_mode="legacy"` → 従来通り)。
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add main.py src/jobs/price_monitor.py
-git commit -m "feat: stage>=protect_shadow で price_monitor に decision_store を注入 (spec §5.3)"
+git commit -m "feat: stage>=protect_shadow で price_monitor に decision_store/protection_mode を注入 (spec §5.3, review H-c)"
 ```
 
 ---
@@ -1427,19 +1830,22 @@ def test_price_monitor_and_worker_agree_on_same_position(tmp_path: Path):
     store = OrchestratorStore(tmp_path / "orch.db")
     now = db_now()
 
-    # price_monitor 経路 (実行はするが broker=None で副作用なし) + 記録
+    # price_monitor 経路 (legacy で実行するが broker=None で副作用なし) + 記録
     _apply_profit_protection(
         _pos(), 150.6, _cfg(), _PosMgr(), broker=None,
         remote_sync_enabled=False, decision_store=store,
     )
-    # tick worker 経路 (protect_shadow = 記録のみ)
+    # tick worker 経路 (protect_shadow = execute=False で記録のみ)
     worker = PriceProtectionWorker(
         producer=_Producer(), position_provider=lambda: [_pos()],
-        store=store, cfg=_cfg(), broker=None, mode="protect_shadow",
+        store=store, cfg=_cfg(), position_mgr=_PosMgr(), broker=None,
+        mode="protect_shadow",
     )
     worker.run_once()
 
-    rows = store.compare_protection_decisions(since=now - timedelta(minutes=5))
+    rows = store.compare_protection_decisions(
+        since=now - timedelta(minutes=5), max_delta_seconds=60
+    )
     assert len(rows) == 1
     assert rows[0]["action_match"] is True
 ```
@@ -1467,41 +1873,36 @@ git commit -m "test: price_monitor と tick_worker の並走比較一致を検�
 
 **本番保護に触れる。** 並走比較で一致を確認後の config 昇格で有効化。
 
-## Task 13: protect_live で worker が raise_sl を実行 + price_monitor 保護停止
+## Task 13: protect_live の検証 — worker が SL 適用 / price_monitor が停止
 
 **Files:**
-- Modify: `src/orchestrator/position_protection_worker.py` (実装は Task 8 で済 — `protect_live` 分岐は既にある)
-- Modify: `src/jobs/price_monitor.py` (`protect_live` のとき profit protection 実行をスキップ)
 - Test: `tests/test_protection_worker.py` (追記) + `tests/test_price_monitor_protection_record.py` (追記)
 
-**Note:** Task 8 の worker は既に `protect_live` かつ `raise_sl` で `broker.update_remote_sl` を呼ぶ。残りは price_monitor 側で `protect_live` のとき profit protection の**実行**を止めること (二重実行防止)。記録は続けてよいが SL 適用はしない。
+**Note:** worker の `protect_live`→`execute=True`→helper 副作用適用は **Task 8 で実装済み**、price_monitor の `protect_live`→`execute=False`→SL 適用 skip は **Task 7.5 の helper 委譲で実装済み** (`execute = protection_mode != "protect_live"`)。本タスクは protect_live の両側挙動を回帰テストで固定する検証専用。
 
-- [ ] **Step 1: Write the failing test (worker side)**
+- [ ] **Step 1: Write the test (worker side — SL 適用が走る)**
 
 `tests/test_protection_worker.py` に追記:
 
 ```python
-def test_protect_live_executes_raise_sl():
+def test_protect_live_applies_sl_via_helper():
+    """protect_live は execute=True で position_mgr.update_stop_loss が走る (helper 副作用)。"""
     store = _RecordingStore()
-    broker_calls = []
-    worker = PriceProtectionWorker(
-        producer=_Producer(mid=150.6), position_provider=lambda: [_pos()],
-        store=store, cfg=_cfg(),
-        broker=SimpleNamespace(
-            update_remote_sl=lambda order_id, sl: broker_calls.append((order_id, sl))
-        ),
+    mgr = _PosMgr()
+    worker = _worker(
+        _Producer(mid=150.6), [_pos()], store, mgr, broker=None,
         mode="protect_live",
     )
     worker.run_once()
-    assert len(broker_calls) == 1  # raise_sl が broker に届く
+    assert len(mgr.sl_updates) == 1  # +0.6R → breakeven raise_sl が helper 経由で適用
 ```
 
 - [ ] **Step 2: Run (should already pass from Task 8)**
 
-Run: `pytest tests/test_protection_worker.py::test_protect_live_executes_raise_sl -v`
-Expected: PASS (Task 8 実装で `protect_live` 分岐済み)。FAIL なら Task 8 の分岐を確認。
+Run: `pytest tests/test_protection_worker.py::test_protect_live_applies_sl_via_helper -v`
+Expected: PASS (Task 8 の `execute=True` 分岐で helper が SL 適用)。FAIL なら Task 8/7.5 の helper 連携を確認。
 
-- [ ] **Step 3: Write the failing test (price_monitor side)**
+- [ ] **Step 3: Write the test (price_monitor side — SL 適用が止まる)**
 
 `tests/test_price_monitor_protection_record.py` に追記:
 
@@ -1512,8 +1913,9 @@ def test_protect_live_skips_sl_application():
     applied = []
 
     class _PosMgrTrack(_PosMgr):
-        def update_stop_loss(self, *a, **k):
-            applied.append(a)
+        def update_stop_loss(self, order_id, new_sl, stage=None):
+            applied.append((order_id, new_sl, stage))
+            return True
 
     _apply_profit_protection(
         _pos(), 150.6, _cfg(), _PosMgrTrack(), broker=None,
@@ -1521,45 +1923,29 @@ def test_protect_live_skips_sl_application():
         protection_mode="protect_live",
     )
     assert len(store.records) == 1     # 記録はする
-    assert applied == []               # SL 適用はしない
+    assert applied == []               # SL 適用はしない (execute=False)
 ```
 
-- [ ] **Step 4: Run test to verify it fails**
+- [ ] **Step 4: Run (should already pass from Task 7.5)**
 
 Run: `pytest tests/test_price_monitor_protection_record.py::test_protect_live_skips_sl_application -v`
-Expected: FAIL — `_apply_profit_protection` が `protection_mode` を受けない or SL 適用を止めない。
+Expected: PASS (Task 7.5 の helper 委譲で `execute = protection_mode != "protect_live"` 済み)。FAIL なら Task 7.5 の `_apply_profit_protection` helper 委譲版を確認。
 
-- [ ] **Step 5: Implement price_monitor skip**
-
-`_apply_profit_protection` に `protection_mode="legacy"` 引数を追加。記録の後、`protection_mode == "protect_live"` なら **SL 適用をスキップして return** (記録は済んでいる):
-
-```python
-    # protect_live では実 SL 適用を worker 側に委譲し、price_monitor は記録のみで停止
-    # (single execution writer, spec §5.3)。
-    if protection_mode == "protect_live":
-        return False, False
-
-    action_target = action.target_sl if action.action == "raise_sl" else None
-    # ...(以降の SL 適用は legacy/protect_shadow のときだけ実行)
-```
-
-main の price_monitor 配線 (Task 11) で `protection_mode=stage` も渡す。
-
-- [ ] **Step 6: Run tests to verify pass**
+- [ ] **Step 5: Run both protect_live tests**
 
 Run: `pytest tests/test_protection_worker.py tests/test_price_monitor_protection_record.py -v`
-Expected: PASS (全て)。
+Expected: PASS (全て)。worker は execute=True で SL 適用、price_monitor は execute=False で skip。両側で single writer (worker のみが SL を書く) が成立。
 
-- [ ] **Step 7: Regression**
+- [ ] **Step 6: Regression**
 
 Run: `pytest tests/test_price_monitor.py -q`
 Expected: PASS (legacy 既定で従来 SL 適用が動く)。
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/orchestrator/position_protection_worker.py src/jobs/price_monitor.py tests/test_protection_worker.py tests/test_price_monitor_protection_record.py main.py
-git commit -m "feat: protect_live で worker が SL 更新、price_monitor 保護停止 (single writer, spec §5.3)"
+git add tests/test_protection_worker.py tests/test_price_monitor_protection_record.py
+git commit -m "test: protect_live の両側挙動 (worker 適用 / price_monitor 停止) を固定 (spec §5.3)"
 ```
 
 ---
@@ -1576,15 +1962,26 @@ Expected: 失敗ゼロ。新規テスト全 pass。
 Run: `pytest tests/test_quote_stream.py tests/test_protection_worker.py tests/test_mt5_get_quote.py -p no:randomly -v`
 Expected: PASS。
 
-- [ ] **Step 3: spec Review Checklist を 1 項目ずつ確認**
+- [ ] **Step 3: spec Review Checklist + レビュー finding を 1 項目ずつ確認**
 
-spec §8 の各チェック項目を、対応テストで満たしていることを確認:
-- H1 (observed_at naive) → Task 5
-- H2 (spread 価格差) → Task 2
+spec §8 の各チェック項目と 2 回のレビュー finding を、対応テストで満たしていることを確認:
+
+spec finding (codex 1 回目):
+- H1 (observed_at naive) → Task 2 / Task 5
+- H2 (spread 価格差、二重 pips 化回避) → Task 2 / Task 3
 - H3 (to_mt5_symbol) → Task 2
-- H4 (close 非実行) → Task 8
-- M5 (store) → Task 7
-- `off` 回帰 → Task 4 Step 5 / Task 6 / Task 9 Step 5
+- H4 (close 非実行) → Task 7.5 / Task 8
+- M5 (protection_decisions store) → Task 7
+
+plan finding (codex 2 回目):
+- H-a (tick_migration_stage が YAML から読まれる) → Task 1 (loader テスト)
+- H-b (worker が price_monitor と同等の副作用 = 共通 helper 共有) → Task 7.5 / Task 8
+- H-c (production 配線: bootstrap 内で PositionManager/broker 自前構築) → Task 10 / Task 11
+- M-d (api_key 伝播: producer 用 fetcher を api_key 付きで生成) → Task 2 / Task 4
+- M-e (compare の max_delta_seconds 近接 ts ペアリング) → Task 7
+
+回帰:
+- `off` 回帰 → Task 4 Step 5 / Task 6 / Task 9 Step 3
 
 - [ ] **Step 4: 最終コミット (もし未コミットの調整があれば)**
 
