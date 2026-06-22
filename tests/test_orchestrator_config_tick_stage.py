@@ -1,3 +1,4 @@
+"""tick_migration_stage / quote_stream_poll_seconds の schema + loader テスト (review H-a)。"""
 import pytest
 
 from src.config.schema import OrchestratorConfig
@@ -19,6 +20,11 @@ def test_tick_migration_stage_accepts_known_values():
 def test_invalid_stage_rejected():
     with pytest.raises(ValueError):
         OrchestratorConfig(tick_migration_stage="bogus")
+
+
+def test_invalid_poll_seconds_rejected():
+    with pytest.raises(ValueError):
+        OrchestratorConfig(quote_stream_poll_seconds=0)
 
 
 def test_loader_reads_stage_from_yaml():

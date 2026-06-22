@@ -17,6 +17,9 @@ LLM_PROVIDERS = ("ollama", "llamacpp", "claude-cli", "gemini", "openai", "claude
 # base_url が必須な provider (空欄なら起動時 ConfigError)
 LLM_PROVIDERS_REQUIRING_BASE_URL = ("ollama", "llamacpp")
 
+# tick migration の段階 (off→producer→protect_shadow→protect_live の単調列、順序維持)
+VALID_TICK_MIGRATION_STAGES = ("off", "producer", "protect_shadow", "protect_live")
+
 
 @dataclass
 class InstrumentConfig:
@@ -698,11 +701,15 @@ class OrchestratorConfig:
     agents: OrchestratorAgentsConfig = field(default_factory=OrchestratorAgentsConfig)
 
     def __post_init__(self) -> None:
-        valid_stages = {"off", "producer", "protect_shadow", "protect_live"}
-        if self.tick_migration_stage not in valid_stages:
+        if self.tick_migration_stage not in VALID_TICK_MIGRATION_STAGES:
             raise ValueError(
-                f"tick_migration_stage must be one of {valid_stages}, "
+                f"tick_migration_stage must be one of {VALID_TICK_MIGRATION_STAGES}, "
                 f"got {self.tick_migration_stage!r}"
+            )
+        if self.quote_stream_poll_seconds < 1:
+            raise ValueError(
+                f"quote_stream_poll_seconds must be >= 1, "
+                f"got {self.quote_stream_poll_seconds!r}"
             )
 
 
