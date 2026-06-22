@@ -15,22 +15,30 @@ from src.data.analysis_store import AnalysisStore
 from src.data.orchestrator_store import OrchestratorStore
 from src.orchestrator.context_builder import DecisionContextBuilder, QuoteSnapshot
 from src.orchestrator.runtime import OrchestratorRuntime
+from src.utils.clock import db_now
 
+# NOW は注入する評価時刻。quote age / plan expiry の基準に使う。実時刻 (db_now) とは
+# 独立 (テスト決定論性のため固定)。
 NOW = datetime(2026, 6, 21, 9, 0, 0)
 FUTURE = NOW + timedelta(days=1)
 PAST = NOW - timedelta(hours=1)
 
 
-def _seed_ok_technical(db: Path, *, analyzed_at: datetime) -> None:
+def _seed_ok_technical(db: Path, *, analyzed_at: datetime | None = None) -> None:
     """freshness final wall を通すため ok technical snapshot を 1 件入れる。
 
-    NOTE: AnalysisStore は get_recent_ok_snapshots を db_now() 基準の lookback で引く。
-    DecisionContextBuilder._build_technical は now 基準で age を判定するため、テストの
-    NOW (2026-06-21) と実時刻が離れると lookback 窓から外れる。本テストでは実時刻に
-    近い analyzed_at を渡したいが、context_builder は build(now=...) の now で age を見る
-    ので、ここでは NOW 近傍で seed しつつ get_recent_ok_snapshots の db_now lookback にも
-    入るよう、十分広い窓 (builder 既定 24h) を前提に直近で入れる。
+    NOTE: AnalysisStore.get_recent_ok_snapshots の lookback は **実 db_now() 基準**
+    (24h)。一方 _build_technical の age 判定は build(now=NOW) の NOW 基準。両者の時刻源が
+    異なるため、固定 NOW (過去日付) を analyzed_at に使うと、日付跨ぎで実 db_now() の
+    lookback 窓から外れて missing になる (date-coupling flake の原因)。
+
+    → seed は **db_now() 相対**で入れて必ず lookback 窓内に置く。age 判定 (now=NOW) では
+    analyzed_at(=db_now 近傍) > NOW となり age が負になるが、_build_technical は負の age を
+    fresh (ok) として扱う (直近未来の行は fresh とみなす設計) ため status=ok になる。
+    これで実時刻に依存せず安定して fresh technical を供給できる。
     """
+    if analyzed_at is None:
+        analyzed_at = db_now() - timedelta(seconds=60)
     AnalysisStore(db).add_snapshot(
         PriceAnalysis(
             pair="USDJPY=X",
@@ -50,7 +58,7 @@ def _make_runtime(
     db = tmp_path / "orch.db"
     orch = OrchestratorStore(db)
     if seed_technical:
-        _seed_ok_technical(db, analyzed_at=NOW - timedelta(seconds=60))
+        _seed_ok_technical(db)
     builder = DecisionContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
 
     def quote_provider(pair: str) -> QuoteSnapshot:
@@ -266,7 +274,7 @@ def test_news_conflict_invalidation_fires_for_long_plan(tmp_path: Path) -> None:
     """
     db = tmp_path / "orch.db"
     orch = OrchestratorStore(db)
-    _seed_ok_technical(db, analyzed_at=NOW - timedelta(seconds=60))
+    _seed_ok_technical(db)
 
     def news_provider(pair: str) -> dict:
         # 強い negative (long に逆行)。entry.news_impact_min=0.5 を超える。

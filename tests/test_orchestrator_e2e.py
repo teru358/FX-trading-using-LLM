@@ -25,6 +25,7 @@ from src.orchestrator.planner_agent import PlannerAgent
 from src.orchestrator.planning_pipeline import PlanningPipeline
 from src.orchestrator.risk_gate import RiskGateWorker
 from src.orchestrator.runtime import OrchestratorRuntime
+from src.utils.clock import db_now
 
 NOW = datetime(2026, 6, 21, 9, 0, 0)
 
@@ -80,11 +81,15 @@ class RecordingShadowNotifier:
 
 
 def _seed_ok_technical(db: Path, *, bias: float = 0.5) -> None:
+    # context_builder._build_technical が引く get_recent_ok_snapshots の lookback は実
+    # db_now() 相対 (24h)。seed を db_now() 相対で入れて窓内に置く (固定 NOW(2026-06-21) を
+    # 使うと日付跨ぎで窓外→missing→freshness block で trigger しない date-coupling flake)。
+    # age 判定 (now=NOW) では負の age = fresh 扱いで status=ok になる。
     AnalysisStore(db).add_snapshot(
         PriceAnalysis(
             pair="USDJPY=X", direction_bias="long", bias_score=bias, confidence=0.7,
             entry_zone=(149.0, 151.0), reasoning_summary="seed",
-            analyzed_at=NOW - timedelta(seconds=60),
+            analyzed_at=db_now() - timedelta(seconds=60),
         )
     )
 

@@ -18,17 +18,21 @@ from src.orchestrator.context_builder import DecisionContextBuilder, QuoteSnapsh
 from src.orchestrator.hindsight_evaluator import HindsightEvaluator
 from src.orchestrator.runtime import OrchestratorRuntime
 from src.analysis.price_analyzer import PriceAnalysis
+from src.utils.clock import db_now
 
 NOW = datetime(2026, 6, 21, 9, 0, 0)
 FUTURE = NOW + timedelta(days=1)
 
 
 def _seed_ok_technical(db: Path) -> None:
+    # seed は db_now() 相対で入れて get_recent_ok_snapshots の実 db_now lookback (24h) 窓内に
+    # 置く。age 判定 (now=NOW) では負の age = fresh 扱いになり status=ok になる。固定 NOW を
+    # 使うと日付跨ぎで lookback 窓から外れ missing になる (date-coupling flake 回避)。
     AnalysisStore(db).add_snapshot(
         PriceAnalysis(
             pair="USDJPY=X", direction_bias="long", bias_score=0.5, confidence=0.7,
             entry_zone=(149.0, 151.0), reasoning_summary="seed",
-            analyzed_at=NOW - timedelta(seconds=60),
+            analyzed_at=db_now() - timedelta(seconds=60),
         )
     )
 
