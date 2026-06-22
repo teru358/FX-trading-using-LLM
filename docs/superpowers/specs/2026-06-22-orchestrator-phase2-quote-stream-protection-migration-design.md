@@ -87,10 +87,13 @@ quote_stream_poll_seconds: int = 2     # producer の polling 周期
 bridge `/quote/{symbol}` を叩く finance 側メソッドを追加する (Windows 改修なし)。
 
 - **場所:** `src/data/mt5_ohlcv_fetcher.py`。既存 `_fetch_dataframe` と同じ httpx GET パターン (URL・timeout・`X-Bridge-Api-Key` ヘッダ流用)。
-- **シグネチャ:** `get_quote(self, symbol: str) -> Quote` (新規軽量 dataclass `Quote(bid, ask, mid, spread_pips, observed_at, source="mt5")`)。
-  - `mid = (bid + ask) / 2`。`spread_pips = (ask - bid) / pip_size(symbol)`。`observed_at` は bridge レスポンスの `time` (tick.time) を parse。
+- **symbol 変換 (必須):** bridge は受け取った文字列をそのまま `symbol_select()` に渡す (`mt5_bridge/mt5_client.py:143`)。内部 symbol は `USDJPY=X`、MT5 symbol は `USDJPY` なので、**`/ohlcv` と同じ `to_mt5_symbol(symbol)` 変換を必ずかけてから URL に入れる** (`mt5_ohlcv_fetcher.py:184` と同一)。変換漏れは `symbol_select` 失敗 → 404 になる。
+- **シグネチャ:** `get_quote(self, symbol: str) -> Quote` (新規軽量 dataclass `Quote(bid, ask, mid, spread, spread_pips, observed_at, source="mt5")`)。
+  - `mid = (bid + ask) / 2`。
+  - **`spread = ask - bid` (価格差)** ← producer が `QuoteSnapshot.spread` に入れるのはこの値 (§4.1)。`spread_pips = (ask - bid) / pip_size(symbol)` は **診断/ログ用の別フィールド**で、watch には渡さない (理由 §4.5)。
+  - **`observed_at` は naive local に正規化:** bridge の `time` は UTC aware ISO (`mt5_client.py:151`)。`fromisoformat` で parse 後、**既存 OHLCV 経路と同じ正規化 (UTC aware → `astimezone(local_tz)` → tzinfo を剥がす、DB 規約 = naive machine-local) を施してから `Quote.observed_at` に入れる**。OHLCV 側は Series 用 `_bridge_times_to_local_naive` を使っている (`mt5_ohlcv_fetcher.py:216`) ので、スカラ 1 件用の同等関数を足すか同ロジックをインライン化する。aware のまま渡すと runtime が `naive now - aware observed` で TypeError → `quote_age_sec=None` → freshness wall が "quote age unknown" で全 block する (`runtime.py:490`, `watch_evaluator.py:131`)。
 - **エラー:** MT5 未接続時 bridge は 503/404 を返す。`fetch_current_price` と同様 `Mt5UnreachableError` に倒す。
-- **bridge レスポンス形 (既存・確認済み):** `{symbol, bid: float, ask: float, spread_points: int, time: ISO8601}`。
+- **bridge レスポンス形 (既存・確認済み):** `{symbol, bid: float, ask: float, spread_points: int, time: ISO8601 (UTC aware)}`。
 
 ---
 
@@ -107,7 +110,7 @@ bridge `/quote/{symbol}` を叩く finance 側メソッドを追加する (Windo
 
 各 pair について以下の優先順で 1 件の `QuoteSnapshot` を作る:
 
-1. **MT5 enabled かつ trade pair:** `fetcher.get_quote(pair)` → bid/ask/mid/spread 実値の `QuoteSnapshot` (source=mt5)。
+1. **MT5 enabled かつ trade pair:** `fetcher.get_quote(pair)` → `QuoteSnapshot(bid, ask, mid, spread=ask-bid, observed_at=naive_local, source="mt5")` (source=mt5)。**`QuoteSnapshot.spread` は価格差 (ask-bid)** であり pips ではない (§4.5)。
 2. **`/quote` 失敗 (Mt5UnreachableError) or MT5 非対象 pair:** 既存 `price_provider.get_current_price(pair)` (`/ohlcv` 1分足 close or TD/yfinance) → `bid=ask=mid=price, spread=None` (現行 `make_quote_provider` と同じ安全側挙動)。
 
 degrade しても producer は最新値を「更新する」(古い値で固まらない)。ただし **取得自体が例外で失敗したら最新値を更新しない** → 古い `observed_at` が残り、watch の freshness wall が stale を検知して trigger を止める (既存安全機構を活用、§4.4)。
@@ -123,9 +126,11 @@ degrade しても producer は最新値を「更新する」(古い値で固ま�
 - watch loop 本体 (`_watch_loop` 固定 1s、`run_watch_cycle`、`_evaluate_plan`) は**不変**。quote の取得元だけが「毎回 fetch」→「producer がキャッシュした最新値」に変わる。
 - `off` (既定): 現行の `make_quote_provider` 経由 fetch を維持 (ロールバック先)。
 
-### 4.5 spread 実値化の効果
+### 4.5 spread 実値化の効果と単位の整合 (重要)
 
-producer が `/quote` 経由で `spread` を実値で埋めるため、`watch_evaluator.freshness_issues` の spread チェック (`spread is None → "spread unknown"`) が、実際の `spread_pips > spread_max_pips` 判定に変わる。**MT5 接続時のみ実値、MT5 未接続/非対象 pair は従来通り None で安全側 reject。** コード変更は不要 (既存 watch_evaluator のロジックがそのまま実値で機能する)。
+**`QuoteSnapshot.spread` は価格差 (ask-bid) であり pips ではない。** 既存 `QuoteSnapshot.spread` は価格差として定義され (`context_builder.py:51`)、watch 側 `freshness_issues` が `spread / pip_size` で pips 化して閾値比較する (`watch_evaluator.py:158-159`)。**producer が誤って pips 値 (spread_pips) を `QuoteSnapshot.spread` に入れると、watch 側がさらに `/pip` するため二重 pips 化で巨大化し、全 trigger が reject される。** よって producer が渡すのは必ず `spread = ask - bid` (価格差)。`spread_pips` は get_quote の診断フィールドに留め、`QuoteSnapshot` には載せない。
+
+この前提を守れば、producer が `/quote` 経由で `spread` を実値 (価格差) で埋めることで、`watch_evaluator.freshness_issues` の spread チェック (`spread is None → "spread unknown"`) が実際の `spread/pip > spread_max_pips` 判定に変わる。**MT5 接続時のみ実値、MT5 未接続/非対象 pair は従来通り None で安全側 reject。** watch_evaluator のコード変更は不要 (既存ロジックがそのまま価格差を pips 化して機能する)。
 
 ---
 
@@ -140,6 +145,14 @@ producer が `/quote` 経由で `spread` を実値で埋めるため、`watch_ev
 
 これらは副作用の無い純計算なので、駆動 (ポーリング→tick) を変えても結果は同一。**「駆動を変える」のが本質で、判定ロジックは変えない。**
 
+### 5.1.1 close アクションは D-2 では実行しない (現行挙動と一致させる)
+
+`compute_profit_protection_action` は giveback 条件で `action="close"` を返すことがある (`position_protection.py:116`)。**しかし既存 price_monitor の `_apply_profit_protection` は `action == "raise_sl"` のときだけ実行し、`close` を実質無視している** (`price_monitor.py:90` — `action_target` は raise_sl のときのみ非 None、close は SL 更新もクローズもしない)。
+
+「移設 = 既存ポーリングと同結果」を真に成立させるため、**D-2 の worker も `raise_sl` のみ実行し、`close` は price_monitor と同じく無視する** (記録は §5.4 のため両 source とも残してよいが、実クローズはしない)。これにより並走比較 (§5.4) が close 局面でも一致する。
+
+**giveback による close 実行の有効化は、移設ではなく意図的な挙動変更 (bug fix)** なので、本 spec のスコープ外とし別タスク (D-3 等) に切り出す。D-2 ではあくまで現行挙動を tick 駆動へ移すだけに限定する。
+
 ### 5.2 worker の構造
 
 - daemon スレッド (`PriceProtectionWorker` 相当)。`tick_migration_stage >= protect_shadow` のときだけ起動。
@@ -149,7 +162,7 @@ producer が `/quote` 経由で `spread` を実値で埋めるため、`watch_ev
 ### 5.3 stage による挙動分岐
 
 - **`protect_shadow` (並走比較期):** 保護判定 (`compute_profit_protection_action` の `action`/`target_sl` + `mfe_r`/`giveback_r`) を `protection_decisions` テーブルに **記録のみ**。**実クローズ/SL更新は一切しない。** 既存 price_monitor は従来通り 10 分ポーリングで実行する。**並走比較のため、price_monitor 側にも保護判定を `protection_decisions` に `source="price_monitor"` で記録する薄い追記が必要** (`_apply_profit_protection` 内で `compute_profit_protection_action` の結果を、実行とは別に記録する。実行ロジックは変えない)。この追記は `tick_migration_stage >= protect_shadow` のときだけ有効化し、`off`/`producer` では price_monitor を完全無改変に保つ。
-- **`protect_live` (切替後):** worker が実クローズ/SL更新を行う。**single execution writer:** クローズは `position_mgr.close_position`、SL 更新は `broker.update_remote_sl` の 1 経路に集約。この段では **price_monitor の保護経路 (profit protection / emergency close) を停止** (二重実行防止)。price_monitor の他機能 (アラート等) は残してよい。
+- **`protect_live` (切替後):** worker が SL 更新を実行する (§5.1.1 より `raise_sl` のみ、close は現行同様 D-2 では実行しない)。**single execution writer:** SL 更新は `broker.update_remote_sl` / `position_mgr.update_protection_state` の 1 経路に集約。この段では **price_monitor の保護経路 (profit protection) を停止** (二重実行防止)。price_monitor の他機能 (急変動アラート / emergency close 経路) は本 spec のスコープ外として現行のまま残す (emergency close は profit protection とは別経路であり、その移設は別タスク)。
 
 ### 5.4 比較検証 — `protection_decisions` テーブル
 
@@ -166,7 +179,12 @@ protection_decisions(
 )
 ```
 
-- `protect_shadow` 期は両 source が同テーブルに記録。同 `order_id`・近接 `ts` のレコードを突き合わせ、`action` と `target_sl` の一致率を出す比較クエリ (テスト or 簡易スクリプト)。
+**所有 store / ORM / migration (M5):** 既存 orchestrator 系テーブルは `OrchestratorStore` の SQLAlchemy ORM model + `_Base.metadata.create_all()` に乗っている (`orchestrator_store.py`)。protection_decisions も同パターンに従う:
+- **model:** `_ProtectionDecision(_Base)` を orchestrator_store の ORM 群に追加。`create_all()` で既存 DB に**自動追加される** (新規テーブルなので既存行への migration 不要)。保存先 DB は orchestrator store の DB (orch.db) に同居させる (比較が同一 store API で完結し、price_monitor / worker 双方から参照しやすい)。
+- **書込 API:** `OrchestratorStore.record_protection_decision(*, ts, pair, order_id, source, action, stage, target_sl, mfe_r, giveback_r) -> None`。worker (§5.3) と price_monitor 追記 (§5.3) の双方がこれを呼ぶ。
+- **比較クエリ API:** `OrchestratorStore.compare_protection_decisions(*, since) -> list[...]` (同 `order_id`・近接 `ts` で source をペアリングし、`action`/`target_sl` の一致/不一致を返す)。
+
+- `protect_shadow` 期は両 source が同テーブルに記録。比較クエリで `action` と `target_sl` の一致率を出す (テスト or 簡易スクリプト)。
 - Review Checklist「保護移設が既存ポーリングと並走比較で同結果か」をこの一致率で満たす。一致が確認できてから `protect_live` へ昇格する運用判断。
 
 ### 5.5 shadow 境界の越境 (protect_live のみ)
@@ -182,12 +200,16 @@ protection_decisions(
 ## 6. テスト (TDD)
 
 ### get_quote (§3)
-- `/quote` 成功で bid/ask/mid/spread_pips/observed_at が実値で埋まる。
+- `/quote` 成功で bid/ask/mid/spread(=ask-bid 価格差)/observed_at が実値で埋まる。
+- **observed_at が naive local に正規化される** (aware で返らない)。aware bridge time を入力し、出力が naive かつ local 値であることを検証。
+- **URL に `to_mt5_symbol` 変換後の symbol が入る** (`USDJPY=X` → `USDJPY`)。
+- `QuoteSnapshot.spread` が価格差 (ask-bid) であり pips でないこと。
 - bridge 503/404 で `Mt5UnreachableError`。
 
 ### D-1 producer (§4)
 - producer が poll で最新 `QuoteSnapshot` を保持し `latest(pair)` で返す。
-- `/quote` 成功で spread 実値、`/quote` 失敗で `/ohlcv` へ degrade (spread=None) する。
+- `/quote` 成功で spread 実値 (価格差)、`/quote` 失敗で `/ohlcv` へ degrade (spread=None) する。
+- **producer 経由 quote で watch の `quote_age_sec` が正しく算出される** (observed_at が naive local なので `naive now - observed` が成功し None にならない) — H1 回帰ガード。
 - 取得例外時に最新値を更新せず、古い `observed_at` が残る (freshness wall が止められる状態)。
 - poll 周期で値が更新される。
 
@@ -198,9 +220,11 @@ protection_decisions(
 
 ### D-2 保護移設 (§5)
 - 純関数流用で price_monitor と**同一入力同一 action/target_sl** (判定ロジック不変の確認)。
-- `protect_shadow`: 実クローズ/SL更新せず `protection_decisions` に記録のみ。
-- `protect_live`: single writer (`position_mgr.close_position`/`broker.update_remote_sl`) 経由でクローズ、price_monitor 保護経路は停止。
-- `stage = off` / `producer`: 保護 worker 不起動 (回帰)。
+- **`action="close"` 局面で worker が実クローズしない** (price_monitor と同じく raise_sl のみ実行) — H4 回帰ガード。close 実行は別タスク。
+- `protect_shadow`: 実 SL更新せず `protection_decisions` に記録のみ。price_monitor 側も `source="price_monitor"` で記録する追記が `protect_shadow` 以上でのみ有効。
+- `protect_live`: single writer (`broker.update_remote_sl`/`position_mgr.update_protection_state`) 経由で SL更新、price_monitor の profit protection 経路は停止。
+- `stage = off` / `producer`: 保護 worker 不起動 + price_monitor 完全無改変 (回帰)。
+- `record_protection_decision` / `compare_protection_decisions` の store API が動作し、`create_all()` で新テーブルが既存 orch.db に追加される。
 
 ### 比較検証 (§5.4)
 - 同局面で price_monitor と tick_worker の `action`/`target_sl` が一致 (並走比較クエリ)。
@@ -220,6 +244,11 @@ protection_decisions(
 ## 8. Review Checklist
 
 - [ ] §3 get_quote が bid/ask/spread 実値を返し、MT5 未接続で安全に `Mt5UnreachableError` に倒れるか。
+- [ ] §3 (H1) get_quote の observed_at が **naive local** に正規化され、watch の `quote_age_sec` が None にならないか。
+- [ ] §3 (H3) get_quote が **`to_mt5_symbol` 変換**を URL にかけているか (`USDJPY=X`→`USDJPY`)。
+- [ ] §4.5 (H2) producer が `QuoteSnapshot.spread` に **価格差 (ask-bid)** を入れ、pips 値を入れていないか (二重 pips 化で全 reject を防ぐ)。
+- [ ] §5.1.1 (H4) worker が `action="close"` を **実行せず** price_monitor と同一挙動か (close 実行は別タスク)。
+- [ ] §5.4 (M5) protection_decisions の ORM model / store API / `create_all()` 追加 / 比較クエリが定義され、保存先 DB が明確か。
 - [ ] §4 producer が最新 quote を保持し、`/quote` 失敗で `/ohlcv`+spread=None へ degrade するか。
 - [ ] §4 取得例外時に古い observed_at が残り、freshness wall が stale を検知して trigger を止めるか。
 - [ ] §4.4 watch loop が `stage>=producer` で producer 直読、`off` で現行 fetch を保つか (live 直読 / planning は snapshot 経由の 2 系統を壊さないか)。
