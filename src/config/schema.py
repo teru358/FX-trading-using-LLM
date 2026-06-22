@@ -677,6 +677,10 @@ class OrchestratorConfig:
     # market state 検知 (§4.8/§5.2, Phase1 Task C)。既定 false。enabled 時のみ state ループ
     # 起動 + cadence②/regime 接続。orchestrator.enabled とは独立に on/off できる。
     market_state_enabled: bool = False
+    # Phase 2/D: tick migration 段階導入。off→producer→protect_shadow→protect_live の単調列。
+    # producer 以上で quote-stream producer 起動 + watch 直読。protect_shadow 以上で保護 worker 起動。
+    tick_migration_stage: str = "off"
+    quote_stream_poll_seconds: int = 2
     policy: OrchestratorPolicyConfig = field(default_factory=OrchestratorPolicyConfig)
     market_state: OrchestratorMarketStateConfig = field(
         default_factory=OrchestratorMarketStateConfig
@@ -692,6 +696,14 @@ class OrchestratorConfig:
         default_factory=OrchestratorNotificationsConfig
     )
     agents: OrchestratorAgentsConfig = field(default_factory=OrchestratorAgentsConfig)
+
+    def __post_init__(self) -> None:
+        valid_stages = {"off", "producer", "protect_shadow", "protect_live"}
+        if self.tick_migration_stage not in valid_stages:
+            raise ValueError(
+                f"tick_migration_stage must be one of {valid_stages}, "
+                f"got {self.tick_migration_stage!r}"
+            )
 
 
 @dataclass
