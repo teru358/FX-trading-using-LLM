@@ -226,3 +226,63 @@ def test_mark_committed_consumes_technical_baseline():
     det.mark_committed("USDJPY=X", _t(200))   # 成功 → baseline 消費
     # 同じ technical のまま → material でない (floor まで起動しない)
     assert det.pairs_to_plan(_t(400)) == []
+
+
+# ── regime push 経路 (§5.4① / Task C-3) ──────────────────────
+
+def _regime_detector(pairs=("USDJPY=X",), **kw):
+    return MaterialLandingDetector(
+        get_latest_technical=lambda p: None,  # technical 無し (regime 経路を単離)
+        material_bias_delta_min=0.2,
+        pairs=list(pairs),
+        **kw,
+    )
+
+
+def test_regime_active_is_material():
+    det = _regime_detector()
+    det.mark_regime("USDJPY=X", "active")
+    assert det.regime_material("USDJPY=X") is True
+    assert det.is_material("USDJPY=X") is True
+
+
+def test_regime_calm_normal_not_material():
+    det = _regime_detector()
+    det.mark_regime("USDJPY=X", "normal")
+    assert det.regime_material("USDJPY=X") is False
+    det.mark_regime("USDJPY=X", "calm")
+    assert det.regime_material("USDJPY=X") is False
+
+
+def test_regime_consumed_then_not_material_until_higher():
+    det = _regime_detector()
+    det.mark_regime("USDJPY=X", "active")
+    assert det.regime_material("USDJPY=X") is True
+    # planning が消費 (commit) すると同じ active では再発火しない。
+    det.commit_seen("USDJPY=X")
+    assert det.regime_material("USDJPY=X") is False
+    # critical へさらに上がったら再び material (1 上昇 = 1 回)。
+    det.mark_regime("USDJPY=X", "critical")
+    assert det.regime_material("USDJPY=X") is True
+    det.commit_seen("USDJPY=X")
+    assert det.regime_material("USDJPY=X") is False
+
+
+def test_regime_downgrade_then_reupgrade_not_material():
+    det = _regime_detector()
+    det.mark_regime("USDJPY=X", "active")
+    det.commit_seen("USDJPY=X")  # active 消費
+    det.mark_regime("USDJPY=X", "normal")  # 下降 (material でない)
+    assert det.regime_material("USDJPY=X") is False
+    # 消費済み(active)と同ランクへ戻るだけでは再発火しない (連発防止・1上昇1回)。
+    det.mark_regime("USDJPY=X", "active")
+    assert det.regime_material("USDJPY=X") is False
+
+
+def test_regime_drives_pairs_to_plan_after_debounce():
+    det = _regime_detector(debounce_window_seconds=180)
+    t0 = datetime(2026, 6, 22, 12, 0, 0, tzinfo=timezone.utc)
+    det.mark_regime("USDJPY=X", "active")
+    assert det.pairs_to_plan(t0) == []  # debounce 窓開始
+    # 窓を抜けたら planning 対象に入る。
+    assert det.pairs_to_plan(t0 + timedelta(seconds=181)) == ["USDJPY=X"]

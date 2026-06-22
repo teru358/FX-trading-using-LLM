@@ -190,6 +190,33 @@ def test_build_market_state_shares_resolver(tmp_path):
     assert resolver.effective_interval("USDJPY=X", NOW) < 3600
 
 
+def test_build_market_state_regime_pushes_into_detector(tmp_path):
+    """bridge の regime 上昇が landing_detector.mark_regime を呼び planning 対象にする (C-3)。"""
+    from src.config.schema import AppConfig, InstrumentConfig
+    from src.orchestrator import bootstrap as bs
+    from src.orchestrator.material_landing import MaterialLandingDetector
+
+    cfg = AppConfig(instruments=[
+        InstrumentConfig(symbol="USDJPY=X", display_name="USD/JPY", asset_type="fx",
+                         mode="trade", base_currency="USD", quote_currency="JPY"),
+    ])
+    cfg.orchestrator.market_state_enabled = True
+    landing = MaterialLandingDetector(
+        get_latest_technical=lambda p: None, material_bias_delta_min=0.2,
+        debounce_window_seconds=0, pairs=["USDJPY=X"],
+    )
+    _det, bridge = bs._build_market_state(
+        cfg, cfg.orchestrator, ["USDJPY=X"],
+        cadence_resolver=None, landing_detector=landing,
+    )
+    # bridge が active を検知 → landing_detector に push される。
+    bridge.update("USDJPY=X", ACTIVE, NOW)
+    assert landing.regime_material("USDJPY=X") is True
+    # 1 回目で debounce 窓開始、2 回目 (debounce=0 経過) で planning 対象。
+    landing.pairs_to_plan(NOW)
+    assert landing.pairs_to_plan(NOW + timedelta(seconds=1)) == ["USDJPY=X"]
+
+
 def test_build_market_state_disabled_returns_none(tmp_path):
     from src.config.schema import AppConfig
     from src.orchestrator import bootstrap as bs

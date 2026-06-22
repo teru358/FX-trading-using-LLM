@@ -17,9 +17,14 @@ planning を起こしたら状態を確定する:
 """
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable
+
+
+# market state の序列 (regime 上昇判定用)。detector は state 文字列の順位だけ知ればよい。
+_REGIME_RANK = {"calm": 0, "normal": 1, "active": 2, "critical": 3}
 
 
 @dataclass
@@ -29,6 +34,8 @@ class _Seen:
     collect_status: str | None
     news_key: str | None
     event_key: str | None
+    # 最後に planning で消費した regime state (これより上に上がったら再度 material)。
+    regime_state: str | None = None
 
 
 class MaterialLandingDetector:
@@ -59,6 +66,11 @@ class MaterialLandingDetector:
         self._pairs = list(pairs or [])
         self._material_since: dict[str, datetime] = {}
         self._last_planned: dict[str, datetime] = {}
+        # regime push (§5.4① / Task C-3): market_state_loop が別スレッドから mark_regime() で
+        # 現在の market state を書き込む。planning_loop が pairs_to_plan() で読む。両スレッドが
+        # 触れるため lock で保護する。
+        self._regime_lock = threading.Lock()
+        self._regime: dict[str, str] = {}
 
     # ── 個別 material 判定 ──────────────────────────────────────────
 
@@ -105,12 +117,42 @@ class MaterialLandingDetector:
             return False
         return True
 
+    def mark_regime(self, pair: str, state: str) -> None:
+        """market_state_loop から現在の market state を push する (§5.4① / Task C-3)。
+
+        別スレッド (market_state_loop) から呼ばれるため lock で保護する。値の保存のみで、
+        material 判定は planning_loop 側の regime_material() / pairs_to_plan() で行う。
+        """
+        with self._regime_lock:
+            self._regime[pair] = state
+
+    def regime_material(self, pair: str) -> bool:
+        """push された market state が「前回 planning で消費した state より上昇」なら True。
+
+        1 回の上昇ごとに 1 回 material (normal→active で 1 回、active→critical でさらに 1 回)。
+        commit_seen() が消費済み state を _Seen.regime_state に記録し、それより上に上がった
+        ときだけ再び material になる。calm/normal への下降は material にしない (§5.2 執行非制御)。
+        """
+        with self._regime_lock:
+            current = self._regime.get(pair)
+        if current is None:
+            return False
+        cur_rank = _REGIME_RANK.get(current, 1)
+        # active 未満 (calm/normal) は regime landing として扱わない (急変局面のみ起こす)。
+        if cur_rank < _REGIME_RANK["active"]:
+            return False
+        prev = self._seen.get(pair)
+        consumed = prev.regime_state if prev is not None else None
+        consumed_rank = _REGIME_RANK.get(consumed, 0) if consumed is not None else 0
+        return cur_rank > consumed_rank
+
     def is_material(self, pair: str) -> bool:
         """いずれかの経路で material なら True。"""
         return (
             self.technical_material(pair)
             or self.news_material(pair)
             or self.event_window_material(pair)
+            or self.regime_material(pair)
         )
 
     # ── 状態確定 ────────────────────────────────────────────────────
@@ -124,12 +166,16 @@ class MaterialLandingDetector:
         snap = self._get_tech(pair)
         news_key = self._get_news_key(pair) if self._get_news_key is not None else None
         event_key = self._get_event_key(pair) if self._get_event_key is not None else None
+        with self._regime_lock:
+            regime_state = self._regime.get(pair)
         self._seen[pair] = _Seen(
             direction_bias=getattr(snap, "direction_bias", None) if snap is not None else None,
             bias_score=getattr(snap, "bias_score", None) if snap is not None else None,
             collect_status=getattr(snap, "collect_status", None) if snap is not None else None,
             news_key=news_key,
             event_key=event_key,
+            # 消費した regime state を記録 (これより上に上がるまで regime_material は False)。
+            regime_state=regime_state,
         )
 
     def mark_committed(self, pair: str, now: datetime) -> None:

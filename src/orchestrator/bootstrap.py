@@ -168,7 +168,8 @@ def build_orchestrator_runtime(
     notifier = create_shadow_notifier(orch_cfg.notifications)
 
     mstate, state_bridge = _build_market_state(
-        config, orch_cfg, pairs, cadence_resolver=cadence_resolver,
+        config, orch_cfg, pairs,
+        cadence_resolver=cadence_resolver, landing_detector=detector,
     )
 
     runtime = OrchestratorRuntime(
@@ -243,6 +244,7 @@ def _build_detector(
 def _build_market_state(
     config: "AppConfig", orch_cfg, pairs: list[str],
     *, cadence_resolver: "CadenceResolver | None" = None,
+    landing_detector: "MaterialLandingDetector | None" = None,
 ):
     """market state 検知器 + bridge を組む (Phase1 Task C-4 / code review High#2)。
 
@@ -262,9 +264,12 @@ def _build_market_state(
     detector = detector_with_horizon(orch_cfg.market_state, orch_cfg.policy.trade_horizon)
 
     def _on_regime(pair: str, state: str) -> None:
-        # regime 変化を log。planning 再計画への接続は material landing 経由 (§5.4①) に
-        # 委ねる前提で、ここでは観測ログに留める (執行は制御しない §5.2)。
+        # regime 変化を material landing detector に push する (§5.4① / Task C-3)。
+        # detector が次の planning 周期で material として拾い、debounce/floor/consumed-key の
+        # 既存機構経由で再計画する (執行は制御しない §5.2)。detector 未注入なら log のみ。
         logger.info("[ORCH] regime change %s → %s", pair, state)
+        if landing_detector is not None:
+            landing_detector.mark_regime(pair, state)
 
     bridge = MarketStateBridge(
         resolver=cadence_resolver,  # cadence_enabled 時のみ非None (boost を実反映)
