@@ -8,6 +8,7 @@ PriceStore (単一 SQLite) を共有して DB 差分取得をベースとする:
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
@@ -25,6 +26,22 @@ logger = logging.getLogger(__name__)
 
 class Mt5UnreachableError(Exception):
     """bridge への到達不可を示す例外 (上位で chain フォールバック判断)。"""
+
+
+@dataclass
+class Quote:
+    """bridge /quote 由来のリアルタイム bid/ask quote。
+
+    spread は価格差 (ask-bid)。spread_pips は診断/ログ用 (watch には渡さない、spec §4.5)。
+    observed_at は DB 規約 naive local。
+    """
+    bid: float
+    ask: float
+    mid: float
+    spread: float          # ask - bid (価格差)
+    spread_pips: float     # 診断用
+    observed_at: datetime
+    source: str = "mt5"
 
 
 def _to_utc(dt: datetime) -> datetime:
@@ -57,6 +74,21 @@ def _bridge_times_to_local_naive(times, local_tz) -> "pd.DatetimeIndex":
         .tz_convert(local_tz)
         .tz_localize(None)
     )
+
+
+def _bridge_time_to_local_naive(iso_str: str) -> datetime:
+    """bridge の UTC aware ISO 時刻 1 件を DB 規約 (naive machine-local) へ変換。
+
+    _bridge_times_to_local_naive の単一値版。aware のまま QuoteSnapshot に入れると
+    runtime が naive now との引き算で TypeError → quote_age_sec=None → freshness wall
+    が全 block する (spec §3 H1)。
+    """
+    aware = datetime.fromisoformat(iso_str)
+    if aware.tzinfo is None:
+        # 既に naive ならそのまま (bridge 仕様変更への保険)
+        return aware
+    local_tz = datetime.now().astimezone().tzinfo
+    return aware.astimezone(local_tz).replace(tzinfo=None)
 
 
 def _parse_period_days(period: str) -> int:
@@ -99,6 +131,38 @@ class Mt5OhlcvFetcher:
         return CurrentPrice(
             price=float(df["Close"].iloc[-1]),
             timestamp=datetime.now(),
+            source="mt5",
+        )
+
+    def get_quote(self, symbol: str) -> "Quote":
+        """bridge /quote/{symbol} からリアルタイム bid/ask を取得する (spec §3)。
+
+        symbol は to_mt5_symbol で MT5 形式に変換 (bridge は文字列をそのまま
+        symbol_select に使うため変換漏れは 404)。MT5 未接続 (503/404) は
+        Mt5UnreachableError に倒す。
+        """
+        from src.orchestrator.watch_evaluator import _pip_size_for
+
+        mt5_symbol = to_mt5_symbol(symbol)
+        try:
+            resp = httpx.get(
+                f"{self._url}/quote/{mt5_symbol}",
+                timeout=self._timeout, headers=self._headers,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise Mt5UnreachableError(
+                f"bridge /quote failed for {symbol}: {exc}"
+            ) from exc
+        data = resp.json()
+        bid = float(data["bid"])
+        ask = float(data["ask"])
+        spread = ask - bid
+        pip = _pip_size_for(symbol)
+        return Quote(
+            bid=bid, ask=ask, mid=(bid + ask) / 2.0,
+            spread=spread, spread_pips=spread / pip,
+            observed_at=_bridge_time_to_local_naive(data["time"]),
             source="mt5",
         )
 
