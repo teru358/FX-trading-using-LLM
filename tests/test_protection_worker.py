@@ -99,3 +99,15 @@ def test_off_or_producer_mode_does_nothing():
     )
     worker.run_once()
     assert store.records == []  # producer 段では保護 worker は何もしない
+
+
+def test_protect_live_applies_sl_via_helper():
+    """protect_live は execute=True で position_mgr.update_stop_loss が走る (helper 副作用)。"""
+    store = _RecordingStore()
+    mgr = _PosMgr()
+    worker = _worker(
+        _Producer(mid=150.6), [_pos()], store, mgr, broker=None,
+        mode="protect_live",
+    )
+    worker.run_once()
+    assert len(mgr.sl_updates) == 1  # +0.6R → breakeven raise_sl が helper 経由で適用

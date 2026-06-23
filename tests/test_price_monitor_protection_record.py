@@ -49,3 +49,22 @@ def test_no_record_when_store_none():
         remote_sync_enabled=False, decision_store=None,
     )
     # 例外なく完了すれば OK (記録対象 store が無い)
+
+
+def test_protect_live_skips_sl_application():
+    """protect_live では price_monitor は記録するが SL 適用を実行しない (二重防止)。"""
+    store = _RecStore()
+    applied = []
+
+    class _PosMgrTrack(_PosMgr):
+        def update_stop_loss(self, order_id, new_sl, stage=None):
+            applied.append((order_id, new_sl, stage))
+            return True
+
+    _apply_profit_protection(
+        _pos(), 150.6, _cfg(), _PosMgrTrack(), broker=None,
+        remote_sync_enabled=False, decision_store=store,
+        protection_mode="protect_live",
+    )
+    assert len(store.records) == 1     # 記録はする
+    assert applied == []               # SL 適用はしない (execute=False)
