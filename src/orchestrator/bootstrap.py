@@ -167,6 +167,15 @@ def build_orchestrator_runtime(
         )
         return None
 
+    # protection_pairs は planning scope (pairs) と分離する (Codex High)。pairs は
+    # orchestrator.pairs で subset に絞れる「能動的に plan/trigger する」スコープだが、
+    # protect_live では price_monitor の利益保護がペア無関係に OFF になるため
+    # (price_monitor.py:87 の execute は global)、保護スコープは「ポジションを持ち得る
+    # 全ペア」= tradeable 全体でなければならない。さもないと subset 外の tradeable ペア
+    # (例: orchestrator.pairs=USDJPY のときの EURUSD) で利益保護が完全に消える。
+    # よって producer / 保護 worker は protection_pairs (= tradeable 全体) をカバーする。
+    protection_pairs = tradeable
+
     context_builder = DecisionContextBuilder(
         orch_store, analysis_store, orch_cfg,
         news_provider=make_news_provider(config, store),
@@ -195,8 +204,13 @@ def build_orchestrator_runtime(
                 request_timeout=mt5_cfg.request_timeout_seconds,
                 api_key=getattr(mt5_cfg, "api_key", "") or "",
             )
+        # producer は protection_pairs (= tradeable 全体) を poll する。planning が使う
+        # のは subset の pairs だけだが、producer.latest は watch が問い合わせたペアしか
+        # 引かない (make_producer_quote_provider) ので、広い producer は planning に無害
+        # (余分なペアは poll されるが planning では未使用)。一方 protect_live の保護 worker
+        # は全 tradeable ペアの latest を必要とするため、広いカバレッジが必須 (Codex High)。
         quote_producer = QuoteStreamProducer(
-            pairs=pairs, fetcher=quote_fetcher, price_provider=price_provider,
+            pairs=protection_pairs, fetcher=quote_fetcher, price_provider=price_provider,
             mt5_enabled=mt5_enabled,
             poll_seconds=getattr(orch_cfg, "quote_stream_poll_seconds", 2),
         )
@@ -220,9 +234,21 @@ def build_orchestrator_runtime(
             StateStore(config.state_dir), context="ProtectionWorker"
         )
         prot_broker = build_close_broker(config)
+
+        # 保護 worker は bootstrap で一度だけ作る長命 instance なので、tick 毎に disk から
+        # reload してから positions を読む (Codex High)。さもないと daemon 起動後に trade
+        # cycle が別 PositionManager 経由で建てた新規ポジションが in-memory _open に反映
+        # されず、protect_live でその新規ポジションの利益保護が完全に欠落する (price_monitor
+        # も protect_live では OFF)。reload は positions.json/balance.json 読みのみで安価、
+        # poll cadence (quote_stream_poll_seconds, 既定2s) で走る。StateStore の RLock は
+        # 同一プロセス内 state_dir 単位なので trade cycle の書き込みと整合する。
+        def _fresh_open_positions():
+            prot_position_mgr.reload()
+            return prot_position_mgr.get_account_state().open_positions
+
         protection_worker = PriceProtectionWorker(
             producer=quote_producer,
-            position_provider=lambda: prot_position_mgr.get_account_state().open_positions,
+            position_provider=_fresh_open_positions,
             store=orch_store, cfg=config.trading,
             position_mgr=prot_position_mgr, broker=prot_broker,
             mode=stage,

@@ -180,6 +180,39 @@ def test_enabled_but_no_tradeable_returns_none(tmp_path: Path, monkeypatch) -> N
     assert rt is None
 
 
+# ── producer / protection scope (Codex High FIX 1) ────────────
+
+
+def test_producer_covers_all_tradeable_even_with_pairs_subset(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """producer は planning subset (orchestrator.pairs) ではなく tradeable 全体を poll する。
+
+    protect_live で price_monitor の利益保護がペア無関係に OFF になるため、保護スコープ
+    (producer + 保護 worker) は subset 外の tradeable ペアも必ずカバーしなければならない。
+    """
+    _patch_heavy(monkeypatch, tmp_path)
+    trade1 = InstrumentConfig(symbol="USDJPY=X", display_name="USD/JPY", asset_type="fx",
+                              mode="trade", base_currency="USD", quote_currency="JPY")
+    trade2 = InstrumentConfig(symbol="EURUSD=X", display_name="EUR/USD", asset_type="fx",
+                              mode="trade", base_currency="EUR", quote_currency="USD")
+    cfg = AppConfig(instruments=[trade1, trade2])
+    cfg.orchestrator.enabled = True
+    cfg.orchestrator.pairs = ["USDJPY=X"]  # planning は USDJPY のみに絞る (subset)
+    cfg.orchestrator.tick_migration_stage = "producer"  # producer を立てる最小 stage
+
+    rt = bs.build_orchestrator_runtime(
+        cfg, store=object(), price_store=object(),
+        analysis_store=_FakeAnalysisStore(), price_provider=_FakePriceProvider(),
+    )
+    assert isinstance(rt, OrchestratorRuntime)
+    # planning scope は subset のまま (planning 挙動は不変)
+    assert rt._pairs == ["USDJPY=X"]
+    # producer は tradeable 全体を poll する (保護スコープ = 全 tradeable)
+    assert rt._quote_producer is not None
+    assert sorted(rt._quote_producer._pairs) == ["EURUSD=X", "USDJPY=X"]
+
+
 # ── quote provider ────────────────────────────────────────────
 
 

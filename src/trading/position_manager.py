@@ -205,6 +205,15 @@ class PositionManager:
                 f"open={len(self._open)}, closed={len(self._closed)}"
             )
 
+    def reload(self) -> None:
+        """disk (positions.json / trades.json / balance.json) から再読込する公開 API。
+
+        長命な PositionManager (例: 保護 worker) が、別インスタンス (trade cycle) の
+        書き込みを mutation を介さず読みたいときに使う。in-memory state を捨て disk を
+        単一のソースオブトゥルースとして再構築する。
+        """
+        self._reload_from_disk()
+
     def _save(self) -> None:
         # positions.json には open_positions のみ書く (balance は balance.json 担当)
         self._store.save_positions(
