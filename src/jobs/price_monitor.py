@@ -111,6 +111,8 @@ async def monitor_open_positions(
     position_mgr: PositionManager,
     price_provider: PriceProvider,
     broker: "BrokerAdapter",
+    decision_store=None,
+    protection_mode: str = "legacy",
 ) -> None:
     """オープンポジションを確認し、急変動があれば通知・緊急損切りを実行する。"""
     cfg = config.price_monitor
@@ -140,6 +142,8 @@ async def monitor_open_positions(
                     pos, current, config.trading, position_mgr,
                     broker=broker,
                     remote_sync_enabled=remote_sync_enabled,
+                    decision_store=decision_store,
+                    protection_mode=protection_mode,
                 )
             if remote_failed:
                 # rate-limited alert: (pair, hour) で 1 回のみ
@@ -256,6 +260,8 @@ async def _run_monitor_with_broker(
     config: AppConfig,
     position_mgr: PositionManager,
     price_provider: PriceProvider,
+    decision_store=None,
+    protection_mode: str = "legacy",
 ) -> None:
     """broker を構築して monitor_open_positions を呼ぶ内部 async ラッパー。
 
@@ -264,13 +270,18 @@ async def _run_monitor_with_broker(
     """
     from src.trading.live_broker import build_close_broker
     broker = build_close_broker(config)
-    await monitor_open_positions(config, position_mgr, price_provider, broker)
+    await monitor_open_positions(
+        config, position_mgr, price_provider, broker,
+        decision_store=decision_store, protection_mode=protection_mode,
+    )
 
 
 def run_price_monitor(
     config: AppConfig,
     price_provider: PriceProvider,
     gate: "BridgeHealthGate | None" = None,
+    decision_store=None,
+    protection_mode: str = "legacy",
 ) -> None:
     """schedule ライブラリから呼び出す同期ラッパー。
 
@@ -287,4 +298,7 @@ def run_price_monitor(
         return
     if gate is not None:
         gate.probe(caller="monitor", sync_balance=False)
-    asyncio.run(_run_monitor_with_broker(config, position_mgr, price_provider))
+    asyncio.run(_run_monitor_with_broker(
+        config, position_mgr, price_provider,
+        decision_store=decision_store, protection_mode=protection_mode,
+    ))

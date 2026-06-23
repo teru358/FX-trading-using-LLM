@@ -340,6 +340,15 @@ def main() -> None:
 
     # 1. 価格監視（5分ごと・LLMなし・最優先）
     if config.price_monitor.enabled:
+        # stage >= protect_shadow なら同じ orchestrator DB (prices_db_path) に
+        # 判定を記録する store を注入する (spec §5.3, review H-c)。bootstrap worker と
+        # 同一 DB に書くため別インスタンスでも records は 1 箇所に集約される。
+        stage = config.orchestrator.tick_migration_stage
+        if stage in ("protect_shadow", "protect_live"):
+            from src.data.orchestrator_store import OrchestratorStore
+            _prot_store = OrchestratorStore(config.prices_db_path)
+        else:
+            _prot_store = None
         monitor_interval = config.price_monitor.interval_minutes
         monitor_times = [
             f"{h:02d}:{m:02d}"
@@ -350,6 +359,7 @@ def main() -> None:
             schedule.every().day.at(t, tz).do(
                 _run_with_guard, _guards["price_monitor"],
                 run_price_monitor, config, price_provider, bridge_gate,
+                decision_store=_prot_store, protection_mode=stage,
             )
 
     # 2. SL/TP確認・ポジション再評価（毎時:00・LLMなし）

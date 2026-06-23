@@ -163,6 +163,60 @@ async def test_monitor_applies_and_clears_pending_protection_target(tmp_state_st
 
 
 @pytest.mark.asyncio
+async def test_monitor_forwards_decision_store_and_mode_to_protection(tmp_state_store) -> None:
+    """monitor_open_positions が decision_store / protection_mode を
+    _apply_profit_protection へ素通しすることを確認する (stage 注入の配管)。"""
+    from src.jobs import price_monitor
+
+    cfg = _make_config(mode="paper")
+    order = Order.new("USDJPY=X", "buy", 160.0, 159.0, 162.0, 1000.0)
+    pm = _manager_with_order(tmp_state_store, order)
+    pp = MagicMock()
+    pp.get_current_price.return_value = _current_price(160.2)
+    broker = MagicMock()
+    sentinel_store = MagicMock()
+
+    with patch("src.jobs.price_monitor.is_market_open", return_value=True), \
+         patch("src.jobs.price_monitor.create_notifier", return_value=AsyncMock()), \
+         patch("src.jobs.price_monitor._apply_profit_protection",
+               return_value=(False, False)) as mock_apply:
+        await price_monitor.monitor_open_positions(
+            cfg, pm, pp, broker,
+            decision_store=sentinel_store, protection_mode="protect_shadow",
+        )
+
+    mock_apply.assert_called_once()
+    kwargs = mock_apply.call_args.kwargs
+    assert kwargs["decision_store"] is sentinel_store
+    assert kwargs["protection_mode"] == "protect_shadow"
+
+
+@pytest.mark.asyncio
+async def test_monitor_defaults_no_store_legacy_mode(tmp_state_store) -> None:
+    """既定呼び出し (store/mode 未指定) では decision_store=None /
+    protection_mode='legacy' が下流に渡る (off path 後方互換)。"""
+    from src.jobs import price_monitor
+
+    cfg = _make_config(mode="paper")
+    order = Order.new("USDJPY=X", "buy", 160.0, 159.0, 162.0, 1000.0)
+    pm = _manager_with_order(tmp_state_store, order)
+    pp = MagicMock()
+    pp.get_current_price.return_value = _current_price(160.2)
+    broker = MagicMock()
+
+    with patch("src.jobs.price_monitor.is_market_open", return_value=True), \
+         patch("src.jobs.price_monitor.create_notifier", return_value=AsyncMock()), \
+         patch("src.jobs.price_monitor._apply_profit_protection",
+               return_value=(False, False)) as mock_apply:
+        await price_monitor.monitor_open_positions(cfg, pm, pp, broker)
+
+    mock_apply.assert_called_once()
+    kwargs = mock_apply.call_args.kwargs
+    assert kwargs["decision_store"] is None
+    assert kwargs["protection_mode"] == "legacy"
+
+
+@pytest.mark.asyncio
 async def test_monitor_profit_protection_remote_failure_alert_dedup(tmp_state_store) -> None:
     from src.jobs.price_monitor import monitor_open_positions, _remote_sl_alert_dedup
 
