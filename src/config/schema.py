@@ -706,6 +706,14 @@ class OrchestratorConfig:
                 f"tick_migration_stage must be one of {VALID_TICK_MIGRATION_STAGES}, "
                 f"got {self.tick_migration_stage!r}"
             )
+        protect_stages = ("protect_shadow", "protect_live")
+        if self.tick_migration_stage in protect_stages and not self.enabled:
+            raise ValueError(
+                f"tick_migration_stage={self.tick_migration_stage!r} requires "
+                f"orchestrator.enabled=True (protection worker is built only when "
+                f"the orchestrator runtime is enabled; otherwise SL protection would "
+                f"be silently disabled)"
+            )
         if self.quote_stream_poll_seconds < 1:
             raise ValueError(
                 f"quote_stream_poll_seconds must be >= 1, "

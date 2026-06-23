@@ -1189,6 +1189,15 @@ class OrchestratorStore:
             ))
             session.commit()
 
+    @staticmethod
+    def _sl_close(a: "float | None", b: "float | None", tol: float = 1e-5) -> bool:
+        """target_sl の一致判定。両方 None は一致 (共に SL なし)、片方のみ None は不一致、
+        両方数値は tol 以内なら一致 (price_monitor と tick_worker は別 current 由来で
+        bit 完全一致しないため浮動小数許容、Task 3 の pytest.approx と同方針)。"""
+        if a is None or b is None:
+            return a is None and b is None
+        return abs(a - b) <= tol
+
     def compare_protection_decisions(
         self, *, since: datetime, max_delta_seconds: int = 60,
     ) -> list[dict]:
@@ -1223,7 +1232,7 @@ class OrchestratorStore:
                 "order_id": pm.order_id,
                 "pair": pm.pair,
                 "action_match": pm.action == tw.action,
-                "target_sl_match": pm.target_sl == tw.target_sl,
+                "target_sl_match": self._sl_close(pm.target_sl, tw.target_sl),
                 "price_monitor_action": pm.action,
                 "tick_worker_action": tw.action,
                 "delta_seconds": abs((tw.ts - pm.ts).total_seconds()),

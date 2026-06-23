@@ -23,13 +23,19 @@ class PriceProtectionWorker:
         store, cfg, position_mgr, broker, mode: str,
         remote_sync_enabled: bool = True, poll_seconds: int = 2,
     ) -> None:
+        if mode not in ("protect_shadow", "protect_live"):
+            raise ValueError(
+                f"PriceProtectionWorker.mode must be 'protect_shadow' or "
+                f"'protect_live', got {mode!r} (the worker is only built for "
+                f"protect stages; other modes would silently no-op)"
+            )
         self._producer = producer
         self._positions = position_provider
         self._store = store
         self._cfg = cfg
         self._position_mgr = position_mgr
         self._broker = broker
-        self._mode = mode  # producer | protect_shadow | protect_live
+        self._mode = mode  # protect_shadow | protect_live
         self._remote_sync_enabled = remote_sync_enabled
         self._poll_seconds = poll_seconds
         self._stop = threading.Event()

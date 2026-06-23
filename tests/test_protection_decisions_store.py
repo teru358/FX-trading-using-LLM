@@ -94,3 +94,40 @@ def test_compare_pairs_nearest_within_delta(tmp_path: Path):
     )
     assert len(rows) == 1
     assert rows[0]["action_match"] is True  # 近接ペア (raise_sl vs raise_sl)
+
+
+def test_target_sl_match_tolerates_float_noise(tmp_path):
+    from datetime import timedelta
+    from src.data.orchestrator_store import OrchestratorStore
+    from src.utils.clock import db_now
+    orch = OrchestratorStore(tmp_path / "orch.db")
+    now = db_now()
+    orch.record_protection_decision(
+        ts=now, pair="USDJPY=X", order_id="oF", source="price_monitor",
+        action="raise_sl", stage="half", target_sl=150.0, mfe_r=0.4, giveback_r=0.0,
+    )
+    orch.record_protection_decision(
+        ts=now, pair="USDJPY=X", order_id="oF", source="tick_worker",
+        action="raise_sl", stage="half", target_sl=150.0 + 1e-9, mfe_r=0.4, giveback_r=0.0,
+    )
+    rows = orch.compare_protection_decisions(since=now - timedelta(minutes=5))
+    assert len(rows) == 1
+    assert rows[0]["target_sl_match"] is True  # 1e-9 差は許容
+
+
+def test_target_sl_match_both_none_is_match(tmp_path):
+    from datetime import timedelta
+    from src.data.orchestrator_store import OrchestratorStore
+    from src.utils.clock import db_now
+    orch = OrchestratorStore(tmp_path / "orch.db")
+    now = db_now()
+    orch.record_protection_decision(
+        ts=now, pair="USDJPY=X", order_id="oN", source="price_monitor",
+        action="none", stage=None, target_sl=None, mfe_r=0.1, giveback_r=0.0,
+    )
+    orch.record_protection_decision(
+        ts=now, pair="USDJPY=X", order_id="oN", source="tick_worker",
+        action="none", stage=None, target_sl=None, mfe_r=0.1, giveback_r=0.0,
+    )
+    rows = orch.compare_protection_decisions(since=now - timedelta(minutes=5))
+    assert rows[0]["target_sl_match"] is True

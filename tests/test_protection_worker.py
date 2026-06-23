@@ -91,14 +91,12 @@ def test_close_action_is_not_executed():
     assert mgr.sl_updates == []  # close は SL 適用ゼロ
 
 
-def test_off_or_producer_mode_does_nothing():
+def test_off_or_producer_mode_rejected():
+    import pytest
     store = _RecordingStore()
     mgr = _PosMgr()
-    worker = _worker(
-        _Producer(mid=150.6), [_pos()], store, mgr, broker=None, mode="producer",
-    )
-    worker.run_once()
-    assert store.records == []  # producer 段では保護 worker は何もしない
+    with pytest.raises(ValueError):
+        _worker(_Producer(mid=150.6), [_pos()], store, mgr, broker=None, mode="producer")
 
 
 def test_protect_live_applies_sl_via_helper():
