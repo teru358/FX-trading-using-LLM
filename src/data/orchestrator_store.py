@@ -289,6 +289,22 @@ class _ShadowHindsightEvaluation(_Base):
     )
 
 
+class _ProtectionDecision(_Base):
+    """保護判定の記録 (price_monitor / tick_worker 並走比較用、spec §5.4)。"""
+    __tablename__ = "protection_decisions"
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    ts         = Column(DateTime, nullable=False, index=True)
+    pair       = Column(String, nullable=False, index=True)
+    order_id   = Column(String, nullable=False, index=True)
+    source     = Column(String, nullable=False)  # price_monitor | tick_worker
+    action     = Column(String, nullable=False)  # none | raise_sl | close
+    stage      = Column(String)                  # half | breakeven | lock | null
+    target_sl  = Column(Float)
+    mfe_r      = Column(Float)
+    giveback_r = Column(Float)
+
+
 class OrchestratorStore:
     """spec §8 のテーブル群を 1 つの DB で管理するストア。"""
 
@@ -1148,3 +1164,68 @@ class OrchestratorStore:
             f"[ORCH] superseded {len(ids)} active plan(s) for {pair}: {reason}"
         )
         return ids
+
+    # ── protection_decisions (§5.4) ────────────────────────────
+
+    def record_protection_decision(
+        self,
+        *,
+        ts: datetime,
+        pair: str,
+        order_id: str,
+        source: str,
+        action: str,
+        stage: str | None,
+        target_sl: float | None,
+        mfe_r: float | None,
+        giveback_r: float | None,
+    ) -> None:
+        """保護判定を 1 件記録する (spec §5.4)。実クローズ/SL更新とは独立。"""
+        with Session(self._engine) as session:
+            session.add(_ProtectionDecision(
+                ts=ts, pair=pair, order_id=order_id, source=source,
+                action=action, stage=stage, target_sl=target_sl,
+                mfe_r=mfe_r, giveback_r=giveback_r,
+            ))
+            session.commit()
+
+    def compare_protection_decisions(
+        self, *, since: datetime, max_delta_seconds: int = 60,
+    ) -> list[dict]:
+        """同 pair+order_id の price_monitor / tick_worker 判定を近接 ts でペアリングし
+        一致を返す (review M-e)。
+
+        各 price_monitor 行に対し、同 order_id・|ts差| <= max_delta_seconds の中で
+        最も近い tick_worker 行を選ぶ。tick_worker は 2s 毎・price_monitor は数分毎で
+        頻度が違うため、時間が離れた別局面を突き合わせて false match/mismatch を出さない。
+        """
+        with Session(self._engine) as session:
+            rows = session.execute(
+                select(_ProtectionDecision)
+                .where(_ProtectionDecision.ts >= since)
+                .order_by(_ProtectionDecision.ts)
+            ).scalars().all()
+
+        pm_rows = [r for r in rows if r.source == "price_monitor"]
+        tw_rows = [r for r in rows if r.source == "tick_worker"]
+
+        out: list[dict] = []
+        for pm in pm_rows:
+            candidates = [
+                tw for tw in tw_rows
+                if tw.order_id == pm.order_id
+                and abs((tw.ts - pm.ts).total_seconds()) <= max_delta_seconds
+            ]
+            if not candidates:
+                continue
+            tw = min(candidates, key=lambda x: abs((x.ts - pm.ts).total_seconds()))
+            out.append({
+                "order_id": pm.order_id,
+                "pair": pm.pair,
+                "action_match": pm.action == tw.action,
+                "target_sl_match": pm.target_sl == tw.target_sl,
+                "price_monitor_action": pm.action,
+                "tick_worker_action": tw.action,
+                "delta_seconds": abs((tw.ts - pm.ts).total_seconds()),
+            })
+        return out
