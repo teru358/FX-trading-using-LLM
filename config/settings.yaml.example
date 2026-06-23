@@ -363,6 +363,10 @@ orchestrator:
   enabled: false
   mode: shadow  # observe | shadow | live
   pairs: [USDJPY=X, EURUSD=X]  # 空なら tradeable instruments を使う
+  # Phase 2/D: tick migration 段階導入 (off→producer→protect_shadow→protect_live)。
+  # producer 以上で quote-stream producer 起動 + watch 直読 + spread 実値化。
+  tick_migration_stage: "off"
+  quote_stream_poll_seconds: 2
   policy:
     trade_horizon: swing    # day | swing
     advice_memo: ""         # 自然文助言メモ (参考程度・hard gate 不可侵)
