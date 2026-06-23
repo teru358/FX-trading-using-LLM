@@ -202,6 +202,34 @@ def build_orchestrator_runtime(
         )
         quote_provider = make_producer_quote_provider(quote_producer, quote_provider)
 
+    # protect_shadow 以上では tick 駆動の保護 worker を立てる (spec §5.2)。producer 直読の
+    # mid で MFE/R protection を判定し protection_decisions に記録する。protect_shadow は
+    # execute=False なので副作用なし、protect_live で初めて remote SL 適用 + state 更新が発火。
+    protection_worker = None
+    if stage in ("protect_shadow", "protect_live") and quote_producer is not None:
+        from src.orchestrator.position_protection_worker import PriceProtectionWorker
+        from src.persistence.state_store import StateStore
+        from src.trading.live_broker import build_close_broker
+        from src.trading.position_manager import PositionManager
+
+        # price_monitor (run_price_monitor) と同じく self-contained に PositionManager /
+        # close broker を構築する: PositionManager(StateStore(config.state_dir), context=...)、
+        # broker は build_close_broker(config)。worker 専用 instance なので trading cycle と
+        # 干渉しない (state は disk 共有・mutation 直前に reload される)。
+        prot_position_mgr = PositionManager(
+            StateStore(config.state_dir), context="ProtectionWorker"
+        )
+        prot_broker = build_close_broker(config)
+        protection_worker = PriceProtectionWorker(
+            producer=quote_producer,
+            position_provider=lambda: prot_position_mgr.get_account_state().open_positions,
+            store=orch_store, cfg=config.trading,
+            position_mgr=prot_position_mgr, broker=prot_broker,
+            mode=stage,
+            remote_sync_enabled=getattr(config.trading, "remote_sl_sync_enabled", False),
+            poll_seconds=getattr(orch_cfg, "quote_stream_poll_seconds", 2),
+        )
+
     detector = _build_detector(config, orch_cfg, analysis_store, pairs, store=store)
     pipeline = _build_pipeline(config, orch_store)
     hindsight = make_hindsight_evaluator(price_store)
@@ -219,6 +247,7 @@ def build_orchestrator_runtime(
         pairs=pairs,
         quote_provider=quote_provider,
         quote_producer=quote_producer,
+        protection_worker=protection_worker,
         detector=detector,
         pipeline=pipeline,
         hindsight_evaluator=hindsight,
