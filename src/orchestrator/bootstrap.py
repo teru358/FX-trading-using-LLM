@@ -66,6 +66,19 @@ def make_quote_provider(price_provider: "PriceProvider") -> QuoteProvider:
     return provider
 
 
+def make_producer_quote_provider(producer, fallback: QuoteProvider) -> QuoteProvider:
+    """producer.latest を読む quote provider。latest が None (起動直後の過渡期) のみ
+    従来 fetch にフォールバックする (spec §4.4)。"""
+
+    def provider(pair: str) -> QuoteSnapshot:
+        snap = producer.latest(pair)
+        if snap is None:
+            return fallback(pair)
+        return snap
+
+    return provider
+
+
 def _read_halt(config: "AppConfig") -> tuple[bool, str, str]:
     """halt 状態を (halted, halt_level, bridge_health) に正規化する。
 
@@ -162,6 +175,33 @@ def build_orchestrator_runtime(
 
     quote_provider = make_quote_provider(price_provider)
 
+    # Phase 2/D: tick_migration_stage が producer 以上なら quote-stream producer を立て
+    # watch を producer 直読に切り替える (spec §4.4)。off は従来 fetch 維持。
+    quote_producer = None
+    stage = getattr(orch_cfg, "tick_migration_stage", "off")
+    if stage in ("producer", "protect_shadow", "protect_live"):
+        from src.data.mt5_ohlcv_fetcher import Mt5OhlcvFetcher
+        from src.data.quote_stream import QuoteStreamProducer
+
+        # review M-d: price_provider の内部 fetcher は api_key 無しで生成される
+        # (price_provider.py:71-74)。producer 用に config から api_key 付きで作り直す。
+        # bridge 認証有効環境で /quote が 401 → 常時 degrade するのを防ぐ。
+        mt5_enabled = getattr(price_provider, "_mt5_enabled", False)
+        mt5_cfg = config.providers.mt5
+        quote_fetcher = None
+        if mt5_enabled and mt5_cfg is not None:
+            quote_fetcher = Mt5OhlcvFetcher(
+                bridge_url=mt5_cfg.bridge_url,
+                request_timeout=mt5_cfg.request_timeout_seconds,
+                api_key=getattr(mt5_cfg, "api_key", "") or "",
+            )
+        quote_producer = QuoteStreamProducer(
+            pairs=pairs, fetcher=quote_fetcher, price_provider=price_provider,
+            mt5_enabled=mt5_enabled,
+            poll_seconds=getattr(orch_cfg, "quote_stream_poll_seconds", 2),
+        )
+        quote_provider = make_producer_quote_provider(quote_producer, quote_provider)
+
     detector = _build_detector(config, orch_cfg, analysis_store, pairs, store=store)
     pipeline = _build_pipeline(config, orch_store)
     hindsight = make_hindsight_evaluator(price_store)
@@ -178,6 +218,7 @@ def build_orchestrator_runtime(
         context_builder=context_builder,
         pairs=pairs,
         quote_provider=quote_provider,
+        quote_producer=quote_producer,
         detector=detector,
         pipeline=pipeline,
         hindsight_evaluator=hindsight,

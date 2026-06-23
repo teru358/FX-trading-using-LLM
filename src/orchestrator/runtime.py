@@ -63,6 +63,7 @@ class OrchestratorRuntime:
         context_builder: DecisionContextBuilder,
         pairs: list[str],
         quote_provider: QuoteProvider,
+        quote_producer=None,
         detector: "MaterialLandingDetector | None" = None,
         pipeline: "PlanningPipeline | None" = None,
         evaluator: WatchEvaluator | None = None,
@@ -77,6 +78,9 @@ class OrchestratorRuntime:
         self._ctx = context_builder
         self._pairs = pairs
         self._quote_provider = quote_provider
+        # Phase 2/D: quote-stream producer (stage>=producer 時のみ注入)。注入時は
+        # ループ起動前に start し、停止時に stop する。None なら従来 fetch 経路で無影響。
+        self._quote_producer = quote_producer
         self._detector = detector
         self._pipeline = pipeline
         # shadow 専用通知 (Phase 5)。未注入なら通知しない (後方互換・shadow 境界不変)。
@@ -782,6 +786,10 @@ class OrchestratorRuntime:
             logger.warning("[ORCH] start() called while already running — ignored")
             return
         self._stop.clear()
+        # quote-stream producer を最初に起こす: watch/planning ループが latest を読む前に
+        # poll を開始しておく (consumer より先に起動)。未注入なら no-op。
+        if self._quote_producer is not None:
+            self._quote_producer.start()
         # 通知 worker を先に起こす: ループが enqueue する前に worker を立てておく。
         self._start_notify_worker()
         self._planning_thread = threading.Thread(
@@ -828,6 +836,9 @@ class OrchestratorRuntime:
         self._mstate_thread = None
         # ループ停止後に通知 worker を drain して止める (in-flight 通知を取りこぼさない)。
         self._stop_notify_worker()
+        # consumer (watch/planning) 停止後に producer を止める (最後に停止)。未注入なら no-op。
+        if self._quote_producer is not None:
+            self._quote_producer.stop()
 
     def _planning_loop(self) -> None:
         wait = self._config.market_state.normal_seconds
