@@ -93,3 +93,18 @@ def test_latest_unknown_pair_is_none():
         price_provider=_FakePriceProvider(150.0), mt5_enabled=True, poll_seconds=2,
     )
     assert prod.latest("EURUSD=X") is None
+
+
+def test_producer_snapshot_observed_at_subtractable_with_naive_now():
+    """producer の observed_at が naive なので naive now と引き算でき age が出る (H1 回帰)。"""
+    from src.utils.clock import db_now
+
+    fetcher = _FakeFetcher({"USDJPY=X": _quote(150.00, 150.02)})
+    prod = QuoteStreamProducer(
+        pairs=["USDJPY=X"], fetcher=fetcher,
+        price_provider=_FakePriceProvider(150.0), mt5_enabled=True, poll_seconds=2,
+    )
+    prod.poll_once()
+    snap = prod.latest("USDJPY=X")
+    age = (db_now() - snap.observed_at).total_seconds()  # TypeError なら H1 退行
+    assert age >= 0
