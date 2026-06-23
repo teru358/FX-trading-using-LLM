@@ -77,41 +77,25 @@ def _apply_profit_protection(
     position_mgr: PositionManager,
     broker: "BrokerAdapter | None",
     remote_sync_enabled: bool,
+    decision_store=None,
+    protection_mode: str = "legacy",
 ) -> tuple[bool, bool]:
-    """Update MFE state and apply R/giveback based SL protection."""
-    state = compute_mfe_update(pos, current)
-    position_mgr.update_protection_state(
-        pos.order_id,
-        max_favorable_price=state.max_favorable_price,
-        max_favorable_r=state.max_favorable_r,
-    )
+    """Update MFE state and apply R/giveback based SL protection (helper 委譲)。"""
+    from src.trading.protection_apply import apply_protection
 
-    action = compute_profit_protection_action(pos, current, cfg)
-    action_target = action.target_sl if action.action == "raise_sl" else None
-    pending_target = getattr(pos, "pending_protection_sl", None)
-    target_sl = more_protective_sl(pos, action_target, pending_target)
-    if target_sl is None:
-        return False, False
-
-    stage = action.stage if target_sl == action_target else "pending"
-    updated, remote_failed = _apply_sl_target(
-        pos, target_sl, stage, position_mgr, broker, remote_sync_enabled,
+    # protect_live では実適用を worker に委譲、price_monitor は判定記録のみ (single writer)。
+    execute = protection_mode != "protect_live"
+    res = apply_protection(
+        pos, current=current, cfg=cfg, position_mgr=position_mgr,
+        broker=broker, remote_sync_enabled=remote_sync_enabled, execute=execute,
     )
-    if updated:
-        if pending_target is not None:
-            position_mgr.clear_pending_protection_target(pos.order_id)
-        position_mgr.update_protection_state(
-            pos.order_id,
-            max_favorable_price=state.max_favorable_price,
-            max_favorable_r=state.max_favorable_r,
-            last_protection_stage=stage,
+    if decision_store is not None:
+        decision_store.record_protection_decision(
+            ts=db_now(), pair=pos.pair, order_id=pos.order_id,
+            source="price_monitor", action=res.action, stage=res.stage,
+            target_sl=res.target_sl, mfe_r=res.mfe_r, giveback_r=res.giveback_r,
         )
-        logger.info(
-            f"[POSITION] {pos.pair} r={state.current_r:+.2f} "
-            f"mfe_r={state.max_favorable_r:+.2f} giveback_r={state.giveback_r:.2f} "
-            f"stage={stage} sl={target_sl:.5f} remote={'ok' if not remote_failed else 'failed'}"
-        )
-    return updated, remote_failed
+    return res.updated, res.remote_failed
 
 
 def _adverse_move_pct(direction: str, entry: float, current: float) -> float:
