@@ -286,7 +286,7 @@ git commit -m "feat: OrchestratorConfig.mode validation + AppConfig cross-field 
 - Modify: `src/data/orchestrator_store.py` (新メソッド `get_stale_or_unconfirmed_intents` + `set_recovery_status`)
 - Test: `tests/test_taskf_recovery_query.py`
 
-**Note (codex #1):** `mark_order_submitted` は `submitted_at` を埋めると同時に `status="submitted"` にする (`orchestrator_store.py:613-614`)。だが既存 `get_stale_pending_intents` は `status=="pending"` のみ拾う (`:597`)。よって最重要の「送信直後クラッシュ」(`status=submitted` かつ `order_id is null`) が拾われない。新メソッドで `status=="pending"` OR (`status=="submitted"` AND `order_id is null`) を lease 超過で拾う。既存 `get_stale_pending_intents` は他から参照されている可能性があるので**変更せず新メソッドを追加**する (実装時に呼出元を grep 確認)。
+**Note (codex #1 + Medium 3分岐):** `mark_order_submitted` は `submitted_at` を埋めると同時に `status="submitted"` にする (`orchestrator_store.py:613-614`)。だが既存 `get_stale_pending_intents` は `status=="pending"` のみ拾う (`:597`)。よって「送信直後クラッシュ」(`status=submitted`) が拾われない。新メソッドで lease 超過の `status=="pending"` OR `status=="submitted"` を拾う (= recovery 3 分岐すべて: pending / submitted+order_id無 / submitted+order_id有 を Task 6 の job が order_id 有無で分岐)。terminal (filled/rejected/failed/abandoned) は対象外。既存 `get_stale_pending_intents` は他参照があり得るので**変更せず新メソッドを追加** (実装時に呼出元 grep)。
 
 - [ ] **Step 1: Write the failing test**
 
@@ -325,13 +325,24 @@ def test_picks_submitted_without_order_id(tmp_path: Path):
     assert [r.plan_id for r in rows] == [2]
 
 
-def test_skips_submitted_with_order_id(tmp_path: Path):
-    """order_id 付き submitted (正常約定) は recovery 対象外。"""
+def test_picks_submitted_with_order_id_for_correction(tmp_path: Path):
+    """order_id 付き submitted (status 補正前) も recovery 対象 (job が filled 補正、3 分岐目)。"""
     orch = OrchestratorStore(tmp_path / "orch.db")
     now = db_now()
     _insert(orch, plan_id=3, lease_offset_sec=-60)
     orch.mark_order_submitted(plan_id=3, submitted_at=now)
-    orch.record_order_result(plan_id=3, status="filled", order_id="mt5:111")
+    orch.record_order_result(plan_id=3, status="submitted", order_id="mt5:111")
+    rows = orch.get_stale_or_unconfirmed_intents(now=now)
+    assert [r.plan_id for r in rows] == [3]
+
+
+def test_skips_terminal_filled(tmp_path: Path):
+    """既に filled (terminal) は recovery 対象外。"""
+    orch = OrchestratorStore(tmp_path / "orch.db")
+    now = db_now()
+    _insert(orch, plan_id=6, lease_offset_sec=-60)
+    orch.mark_order_submitted(plan_id=6, submitted_at=now)
+    orch.record_order_result(plan_id=6, status="filled", order_id="mt5:222")
     rows = orch.get_stale_or_unconfirmed_intents(now=now)
     assert rows == []
 
@@ -362,9 +373,11 @@ Expected: FAIL — `get_stale_or_unconfirmed_intents` / `set_recovery_status` �
 
 ```python
     def get_stale_or_unconfirmed_intents(self, *, now: datetime) -> list["_OrderIntent"]:
-        """recovery 候補を返す (Task F, codex #1)。lease 超過のうち未完了:
-        status=="pending" (未送信) OR (status=="submitted" AND order_id is null)
-        (送信直後クラッシュ=建玉不明)。後者を拾わないと needs_reconcile を取りこぼす。
+        """recovery 候補を返す (Task F, codex #1)。lease 超過のうち未完了 = recovery 3 分岐:
+        status=="pending" (未送信) OR status=="submitted" (送信後)。後者は order_id 有無で
+        recovery job が needs_reconcile / filled 補正に分岐する。terminal (filled/rejected/
+        failed/abandoned) は対象外。'pending only' の既存 get_stale_pending_intents だと
+        submitted (送信直後クラッシュ) を取りこぼすため別メソッドにする。
         """
         from sqlalchemy import or_
 
@@ -375,8 +388,7 @@ Expected: FAIL — `get_stale_or_unconfirmed_intents` / `set_recovery_status` �
                 .where(
                     or_(
                         _OrderIntent.status == "pending",
-                        (_OrderIntent.status == "submitted")
-                        & (_OrderIntent.order_id.is_(None)),
+                        _OrderIntent.status == "submitted",
                     )
                 )
             )
@@ -568,12 +580,11 @@ Expected: FAIL — runtime が `execution_broker`/`mode` を受けない / `_exe
         """
         from datetime import timedelta
 
-        from src.orchestrator.order_intent_lock import EXECUTION_LEASE_SECONDS  # later task が無ければ定数直書き
-        from src.signals.signal_combiner import TradeSignal
         from src.trading.order_intent_status import (
             intent_status_for_outcome, is_alertable_outcome,
         )
         from src.utils.clock import db_now
+        # _trade_signal_from_plan は Task 4.5 で同 module (runtime.py) に定義する module-level helper。
 
         action = plan.action_json or {}
         try:
@@ -591,7 +602,9 @@ Expected: FAIL — runtime が `execution_broker`/`mode` を受けない / `_exe
             # 1.5 material recheck (spec §2 step2、既定 OFF)。ON 時のみ ExecutionOpinionAgent
             #     を再点火する分岐をここに置く。F では flag 既定 False で常に skip
             #     (ON 時の実装は将来 task — 配線のプレースのみ)。
-            if self._config.orchestrator.execution_opinion_recheck_enabled:
+            #     注意: self._config は OrchestratorConfig そのもの (bootstrap が config=orch_cfg
+            #     で渡す, runtime.py:61/bootstrap.py:270)。.orchestrator は付けない (codex Medium)。
+            if self._config.execution_opinion_recheck_enabled:
                 logger.debug("[ORCH] material recheck flag on — (future) ExecutionOpinion 再点火")
                 # 将来: material change なら ExecutionOpinionAgent 再点火 / timeout 超過なら保留
 
@@ -613,13 +626,10 @@ Expected: FAIL — runtime が `execution_broker`/`mode` を受けない / `_exe
             # 3. submit マーキング (復旧分岐点)
             self._orch.mark_order_submitted(plan_id=plan.plan_id, submitted_at=db_now())
 
-            # 4. 発注 (single writer)
-            signal = TradeSignal(
-                pair=pair, action=_side_of(plan.direction),
-                confidence=float(action.get("confidence", 1.0)),
-                entry_price=quote.mid,
-                stop_loss=float(action["sl"]), take_profit=float(action["tp"]),
-            )
+            # 4. 発注 (single writer)。TradeSignal は全必須フィールドを満たす helper で構築
+            #    (codex High: 現行 dataclass は predicted_direction/combined_score/position_size/
+            #     signal_reason/detail_reason/news/price/generated_at も必須)。
+            signal = _trade_signal_from_plan(plan, pair, quote)
             result = self._execution_broker.execute_signal(
                 signal, self._execution_position_mgr,
             )
@@ -678,6 +688,138 @@ git add src/orchestrator/runtime.py tests/test_taskf_execute_live_trigger.py
 git commit -m "feat: _execute_live_trigger 執行段 (claim→gate→submit→execute→反映) (Task F F-1/F-3)"
 ```
 
+> 注意: この task の `_execute_live_trigger` は `_trade_signal_from_plan` を呼ぶが、その helper は **Task 4.5** で定義する。Task 4 のテストを通すには Task 4.5 の helper が先に必要なので、**Task 4.5 を Task 4 と同時に実装**してよい (テスト RED→GREEN の順は: Task 4.5 helper の単体テスト → Task 4 の execute テスト)。subagent-driven 実行時は Task 4 dispatch 内で helper も書く形でよい。
+
+---
+
+## Task 4.5: `_trade_signal_from_plan` — plan から完全な TradeSignal を構築 (codex High)
+
+**Files:**
+- Modify: `src/orchestrator/runtime.py` (module-level helper `_trade_signal_from_plan`)
+- Test: `tests/test_taskf_trade_signal_from_plan.py`
+
+**Note (codex High):** 現行 `TradeSignal` は 15 フィールド: `pair, action, predicted_direction, combined_score, confidence, entry_price, stop_loss, take_profit, position_size, signal_reason, detail_reason, news (NewsSentiment), price (PriceAnalysis), generated_at, tv_recommendation=""` (`signal_combiner.py:21`)。broker (`mt5_bridge_broker.execute_signal`) が読むのは `action / pair / position_size (→volume_lots) / stop_loss / take_profit / signal_reason (→comment) / confidence` (`mt5_bridge_broker.py:96-136`)。helper は plan の `action_json` (sl/tp/rr/confidence/position_size) と quote から broker 関連フィールドを埋め、provenance フィールド (news/price/predicted_direction 等) は orchestrator 由来と分かる最小有効値で埋める。`NewsSentiment(pair, sentiment_score, confidence, ...)` (`news_analyzer.py:45`) と `PriceAnalysis(pair, direction_bias, bias_score, confidence, entry_zone, reasoning_summary, analyzed_at, ...)` (`price_analyzer.py:36`) は必須フィールドのみ渡して最小構築する。
+
+- [ ] **Step 1: Write the failing test**
+
+`tests/test_taskf_trade_signal_from_plan.py` を新規作成:
+
+```python
+from datetime import datetime
+from types import SimpleNamespace
+
+from src.orchestrator.runtime import _trade_signal_from_plan
+from src.signals.signal_combiner import TradeSignal
+
+
+def _plan():
+    return SimpleNamespace(
+        plan_id=1, pair="USDJPY=X", direction="long",
+        action_json={"sl": 149.0, "tp": 152.0, "rr": 2.0,
+                     "confidence": 0.7, "position_size": 1000.0},
+    )
+
+
+def _quote():
+    return SimpleNamespace(mid=150.0, bid=150.0, ask=150.02, spread=0.02,
+                           source="mt5", observed_at=datetime.now())
+
+
+def test_builds_valid_tradesignal_with_all_fields():
+    sig = _trade_signal_from_plan(_plan(), "USDJPY=X", _quote())
+    assert isinstance(sig, TradeSignal)        # 全必須フィールドが揃い construct 成功
+    assert sig.pair == "USDJPY=X"
+    assert sig.action == "buy"                 # long → buy
+    assert sig.stop_loss == 149.0
+    assert sig.take_profit == 152.0
+    assert sig.position_size == 1000.0
+    assert sig.confidence == 0.7
+    assert sig.entry_price == 150.0            # quote.mid
+    # broker が comment に使う signal_reason が空でない
+    assert sig.signal_reason
+    # provenance フィールドも有効値 (news/price は dataclass インスタンス)
+    assert sig.news is not None and sig.price is not None
+
+
+def test_short_direction_maps_to_sell():
+    plan = _plan()
+    plan.direction = "short"
+    sig = _trade_signal_from_plan(plan, "USDJPY=X", _quote())
+    assert sig.action == "sell"
+
+
+def test_missing_position_size_falls_back():
+    plan = _plan()
+    plan.action_json = {"sl": 149.0, "tp": 152.0}  # position_size 無し
+    sig = _trade_signal_from_plan(plan, "USDJPY=X", _quote())
+    # 既定 lot にフォールバック (0 や None でない)
+    assert sig.position_size and sig.position_size > 0
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/test_taskf_trade_signal_from_plan.py -v`
+Expected: FAIL — `_trade_signal_from_plan` が無い (ImportError)。
+
+- [ ] **Step 3: Write minimal implementation**
+
+`src/orchestrator/runtime.py` の module-level (クラス外、import 群の下) に追加:
+
+```python
+def _trade_signal_from_plan(plan, pair: str, quote) -> "TradeSignal":
+    """plan の action_json + quote から発注用 TradeSignal を構築する (Task F)。
+
+    broker が読むフィールド (action/pair/position_size/stop_loss/take_profit/
+    signal_reason/confidence) を plan から埋め、provenance フィールド (news/price/
+    predicted_direction 等) は orchestrator 由来と分かる最小有効値で埋める。
+    TradeSignal は 15 フィールド必須 (signal_combiner.py:21) なので全て渡す。
+    """
+    from src.analysis.news_analyzer import NewsSentiment
+    from src.analysis.price_analyzer import PriceAnalysis
+    from src.signals.signal_combiner import TradeSignal
+    from src.utils.clock import db_now
+
+    action = plan.action_json or {}
+    side = "buy" if plan.direction == "long" else "sell"
+    bias = "bullish" if plan.direction == "long" else "bearish"
+    pbias = "long" if plan.direction == "long" else "short"
+    sl = float(action["sl"])
+    tp = float(action["tp"])
+    conf = float(action.get("confidence", 1.0))
+    size = float(action.get("position_size") or 1000.0)  # 既定 1 lot 相当
+    now = db_now()
+
+    news = NewsSentiment(pair=pair, sentiment_score=0.0, confidence=conf)
+    price = PriceAnalysis(
+        pair=pair, direction_bias=pbias, bias_score=0.0, confidence=conf,
+        entry_zone=(quote.mid, quote.mid), reasoning_summary="orchestrator plan",
+        analyzed_at=now, stop_loss=sl, take_profit=tp,
+        risk_reward_ratio=float(action.get("rr", 0.0)),
+    )
+    return TradeSignal(
+        pair=pair, action=side, predicted_direction=bias,
+        combined_score=0.0, confidence=conf, entry_price=quote.mid,
+        stop_loss=sl, take_profit=tp, position_size=size,
+        signal_reason=f"orchestrator plan {plan.plan_id}",
+        detail_reason="orchestrator watch trigger (Task F live execute)",
+        news=news, price=price, generated_at=now,
+    )
+```
+
+> `NewsSentiment` / `PriceAnalysis` の必須フィールドは実装時に再確認 (`news_analyzer.py:45` / `price_analyzer.py:36`)。本番発注で broker が実際に使うのは sl/tp/size/comment/confidence なので、provenance は最小有効値でよい (発注の意思決定は既に plan で確定済)。
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `pytest tests/test_taskf_trade_signal_from_plan.py -v`
+Expected: PASS (3 passed)。
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/orchestrator/runtime.py tests/test_taskf_trade_signal_from_plan.py
+git commit -m "feat: _trade_signal_from_plan で完全な TradeSignal を構築 (Task F, codex High)"
+```
+
 ---
 
 ## Task 5: reject/failed/halted 後の plan/intent 遷移 (codex #4)
@@ -686,12 +828,17 @@ git commit -m "feat: _execute_live_trigger 執行段 (claim→gate→submit→ex
 - Modify: `src/orchestrator/runtime.py` (`_execute_live_trigger` の reject/非executed 分岐に plan 遷移を追加)
 - Test: `tests/test_taskf_reject_transitions.py`
 
-**Note (codex #4):** trigger 時に plan は active→triggered に claim される (`runtime.py:569`)。`get_active_plans` は active のみ再評価 (`orchestrator_store.py:514`)。order_intent は plan_id UNIQUE。何もしないと plan は triggered のまま再評価されず order_intent が UNIQUE を握り**永久ブロック**。spec §4 の遷移表を実装する:
-- **恒久的 (structural reject)** → plan を `invalidated`、order_intent は `rejected` のまま。再 trigger しない。
-- **一時的 (fixable reject / failed / halted)** → order_intent を `abandoned` (UNIQUE 解放)、plan を `invalidated` (replan 既定 — 同一 plan の再 trigger ではなく新しい plan で発注。spec §4 の「replan 既定」)。
-- **executed/skipped** → plan は triggered のまま (発注完了 or 用済み)。
+**Note (codex #4 + High#2):** trigger 時に plan は active→triggered に claim される (`runtime.py:569`)。`get_active_plans` は active のみ再評価 (`orchestrator_store.py:514`)。order_intent は plan_id UNIQUE で、**行が存在する限り UNIQUE を握り続ける (status を `abandoned` 等に変えても解放されない、codex High#2)**。何もしないと plan は triggered のまま再評価されず永久ブロック。
 
-> spec §4 確定方針: 一時的失敗でも**同一 plan の再 trigger はしない (replan 既定)**。よって plan は両 reject とも `invalidated` に倒し、order_intent の status のみ恒久=rejected / 一時=abandoned で区別する。これにより「永久ブロック」も「同一 plan_id 再 insert と UNIQUE の衝突」も避ける。
+**確定モデル (spec §4 の replan、同一 plan を蘇生させない):** reject/非executed はすべて旧 plan を `invalidated` (terminal) にし、旧 intent も terminal status にする。**再発注は「同一 plan_id を再利用」ではなく、次の planning サイクルが新しい plan (= 新 plan_id → 新 order_intent) を作る**ことで行う (旧 intent 行は残るが新 plan_id なので UNIQUE 衝突しない)。`reject_class` で intent.status のみ区別する:
+- **恒久的 (structural)** → intent `rejected` / plan `invalidated`。
+- **一時的 (fixable)** → intent `abandoned` / plan `invalidated`。
+- **failed (broker 技術失敗)** → intent `failed` / plan `invalidated`。
+- **halted** → intent `rejected` / plan `invalidated`。
+- **skipped** → intent `abandoned` / plan `invalidated`。
+- **executed** → intent `filled` / plan `triggered` のまま。
+
+> どの reject/非executed でも plan は `invalidated`。intent status は provenance のため区別するが、UNIQUE は行の存在で握り続ける (status では解放されない) — 再発注は新 plan_id で行うのでこれで問題ない。テストは「plan=invalidated かつ次 watch で再 trigger されない」を pin する (intent status は区別を確認する程度)。
 
 - [ ] **Step 1: Write the failing test**
 
@@ -709,36 +856,34 @@ def test_structural_reject_invalidates_plan_and_keeps_rejected(tmp_path):
     plan_id = rt._seed_active_plan_ready_to_trigger()
     rt.run_watch_cycle()
     assert rt._orch.get_order_intent(plan_id).status == "rejected"
-    plan = rt._orch.get_plan(plan_id)         # 既存 getter (無ければ get_active/all で確認)
+    plan = rt._orch.get_trade_plan(plan_id)   # 実 API は get_trade_plan (orchestrator_store.py:464)
     assert plan.status == "invalidated"
-    # 再度 watch しても active でないので再評価されない
+    # 再度 watch しても active でないので再評価されない (同一 plan は蘇生しない)
     rt.run_watch_cycle()
     assert rt._orch.get_order_intent(plan_id).status == "rejected"  # 変化なし
 
 
 def test_fixable_reject_abandons_intent_and_invalidates_plan(tmp_path):
-    """一時 reject: intent=abandoned (UNIQUE 解放), plan=invalidated (replan 既定)。"""
+    """一時 reject: intent=abandoned (provenance 区別), plan=invalidated。再発注は新 plan で。"""
     rt = _runtime_with_execution(tmp_path, _FakeBroker(None), _GateReject("fixable"))
     plan_id = rt._seed_active_plan_ready_to_trigger()
     rt.run_watch_cycle()
     assert rt._orch.get_order_intent(plan_id).status == "abandoned"
-    assert rt._orch.get_plan(plan_id).status == "invalidated"
+    assert rt._orch.get_trade_plan(plan_id).status == "invalidated"
 
 
-def test_failed_execution_abandons_intent(tmp_path):
-    """broker failed (技術失敗) → intent=failed→abandoned 化で UNIQUE 解放 + plan invalidated。"""
+def test_failed_execution_invalidates_plan(tmp_path):
+    """broker failed (技術失敗) → intent=failed, plan=invalidated。再発注は新 plan で。"""
     rt = _runtime_with_execution(
         tmp_path, _FakeBroker(ExecutionResult.failed("bridge down")), _GatePass(),
     )
     plan_id = rt._seed_active_plan_ready_to_trigger()
     rt.run_watch_cycle()
-    intent = rt._orch.get_order_intent(plan_id)
-    # 一時失敗扱い: replan で再発注できるよう UNIQUE を解放
-    assert intent.status in ("failed", "abandoned")
-    assert rt._orch.get_plan(plan_id).status == "invalidated"
+    assert rt._orch.get_order_intent(plan_id).status == "failed"
+    assert rt._orch.get_trade_plan(plan_id).status == "invalidated"
 ```
 
-> `_GateReject`/`_GatePass`/`_FakeBroker`/`_runtime_with_execution`/`_seed_active_plan_ready_to_trigger` は Task 4 のテスト helper を共有 (共通 conftest か module 複製 — 実装時に整理)。`get_plan(plan_id)` 相当の getter が無ければ既存 `get_active_plans` / 全件取得で plan status を確認する。
+> `_GateReject`/`_GatePass`/`_FakeBroker`/`_runtime_with_execution`/`_seed_active_plan_ready_to_trigger` は Task 4 のテスト helper を共有 (共通 conftest か module 複製 — 実装時に整理)。`get_trade_plan(plan_id)` が実 API (`orchestrator_store.py:464`)。**注意:** intent.status を `abandoned` 等にしても UNIQUE 行は残る (解放されない) — 再発注は新 plan_id で行う前提なので問題ない (codex High#2)。
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -751,13 +896,12 @@ Expected: FAIL — 現状 reject 後に plan を invalidated にせず intent �
 
 ```python
             if not gate.passed:
-                permanent = gate.reject_class == "structural"
-                if permanent:
-                    self._orch.record_order_result(plan_id=plan.plan_id, status="rejected")
-                else:
-                    # 一時的: UNIQUE を解放して replan で再発注できるようにする
-                    self._orch.record_order_result(plan_id=plan.plan_id, status="abandoned")
-                self._orch.update_plan_status(plan.plan_id, "invalidated")  # replan 既定
+                # 恒久 (structural)=rejected / 一時 (fixable)=abandoned で intent.status を区別。
+                # どちらも plan は invalidated (terminal)。再発注は新 plan_id で行う (replan)
+                # ため UNIQUE 行は残ってよい (codex High#2: status では UNIQUE は解放されない)。
+                intent_status = "rejected" if gate.reject_class == "structural" else "abandoned"
+                self._orch.record_order_result(plan_id=plan.plan_id, status=intent_status)
+                self._orch.update_plan_status(plan.plan_id, "invalidated")  # terminal (replan で再発注)
                 self._orch.record_decision(
                     run_id=run_id, snapshot_id=0, pair=pair,
                     decision_type="plan_invalidate", plan_id=plan.plan_id,
@@ -777,13 +921,13 @@ Expected: FAIL — 現状 reject 後に plan を invalidated にせず intent �
                 broker_result_json={"outcome": result.outcome, "reason": result.reason},
             )
             if not result.is_executed:
-                # 発注に至らなかった: 一時失敗 (halted/failed) は replan 可能にするため
-                # plan を invalidated にして UNIQUE は status で解放済 (abandoned/failed)。
-                # skipped (想定内) も plan は用済み → invalidated。
+                # 発注に至らなかった (skipped/halted/rejected/failed): plan を terminal 化。
+                # 再発注は次 planning が新 plan を作る (replan)。UNIQUE 行は残るが新 plan_id
+                # なので衝突しない (codex High#2: status 変更では UNIQUE 解放されない)。
                 self._orch.update_plan_status(plan.plan_id, "invalidated")
 ```
 
-> `decision_type="plan_invalidate"` が `DECISION_TYPES` (`orchestrator_store.py:137`) に含まれるか確認 (含まれる)。`failed→abandoned` への正規化が必要なら (UNIQUE 解放を確実にするため) record_order_result に `abandoned` を渡す方針も可 — テストは `("failed","abandoned")` を許容しているので、実装は「一時失敗は UNIQUE を解放する」意図が満たせればどちらでもよい。recovery job (Task 6) との整合: ここで invalidated + status 確定した plan は lease 超過前に解決済なので recovery 対象にならない。
+> `decision_type="plan_invalidate"` が `DECISION_TYPES` (`orchestrator_store.py:137`) に含まれるか確認 (含まれる)。intent.status は `intent_status_for_outcome` の mapping (executed→filled / skipped→abandoned / rejected→rejected / halted→rejected / failed→failed) をそのまま使う — terminal status であればよく、UNIQUE は行存在で握り続けるが再発注は新 plan_id なので問題ない (codex High#2)。recovery job (Task 6) との整合: ここで invalidated + terminal status を確定した intent は lease 超過しても terminal なので recovery 対象 (`get_stale_or_unconfirmed_intents` は pending/submitted のみ) にならない。
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -799,7 +943,7 @@ Expected: PASS (Task 4 の正常系 + 既存が壊れていない)。
 
 ```bash
 git add src/orchestrator/runtime.py tests/test_taskf_reject_transitions.py
-git commit -m "feat: reject/failed 後の plan invalidate + intent UNIQUE 解放 (Task F, codex #4)"
+git commit -m "feat: reject/failed 後の plan invalidate + intent terminal 化 (Task F, codex #4)"
 ```
 
 ---
@@ -811,7 +955,15 @@ git commit -m "feat: reject/failed 後の plan invalidate + intent UNIQUE 解放
 - Modify: `src/orchestrator/bootstrap.py` (起動時に recovery job を 1 回実行)
 - Test: `tests/test_taskf_recovery_job.py`
 
-**Note:** spec §3 の3分岐を Task 3 の `get_stale_or_unconfirmed_intents` の結果に対して実行する。`status=pending` → `retryable`、`status=submitted & order_id null` → `needs_reconcile` (再 trigger 禁止 + alert)、`status=submitted & order_id あり` → `filled` 補正。recovery job は純関数的に store API を叩くだけ (broker には触れない = 自動照合は F 外)。
+**Note (spec §3、codex High + Medium):** spec §3 の **3 分岐** を Task 3 の `get_stale_or_unconfirmed_intents` の結果に対して実行する。recovery_status を更新するだけでは plan は再 trigger されない (plan は triggered claim 済、`get_active_plans` は active のみ — codex High)。よって §4 と同じ **replan モデル**: 旧 plan/intent を terminal 化し、再発注は次 planning が新 plan を作る。
+
+| 状態 | recovery_status | intent.status | plan 状態 | 備考 |
+|---|---|---|---|---|
+| `status=pending` (未送信クラッシュ) | `retryable` | `abandoned` (terminal) | `invalidated` | 未発注。新 plan で再発注 |
+| `status=submitted` & `order_id` null (送信直後クラッシュ・建玉不明) | `needs_reconcile` | `submitted` のまま (触らない) | `triggered` のまま (隔離) | **再 trigger 禁止 + alert**。建玉あるかもしれず terminal 化しない。手動/既存 reconciliation |
+| `status=submitted` & `order_id` あり (約定確定・status 補正前) | (なし) | `filled` に補正 | `triggered` のまま | 正常約定 |
+
+recovery job は store API を叩くだけ (broker には触れない = 自動照合は F 外)。`get_trade_plan` で plan を引き `update_plan_status` で遷移。
 
 - [ ] **Step 1: Write the failing test**
 
@@ -826,45 +978,59 @@ from src.orchestrator.order_recovery import recover_pending_intents
 from src.utils.clock import db_now
 
 
-def _stale_intent(orch, *, plan_id):
+def _stale_intent_with_plan(orch, *, plan_id):
+    """triggered 済 plan + lease 超過 intent を作る (クラッシュ状況を模擬)。
+
+    実装時: 既存 plan 作成 helper で plan を作り update_plan_status(triggered) し、
+    try_insert_order_intent で intent を入れる。plan 作成 API は orchestrator_store の
+    既存テストに倣う (record_trade_plan 等)。
+    """
+    # ... 既存 plan 作成 + triggered 化 + intent insert (実装時に既存テストパターン流用)
     orch.try_insert_order_intent(
         plan_id=plan_id, pair="USDJPY=X", intended_action="buy",
         owner_run_id=1, lease_until=db_now() - timedelta(seconds=60),
     )
 
 
-def test_pending_becomes_retryable(tmp_path: Path):
+def test_pending_becomes_retryable_and_invalidates_plan(tmp_path: Path):
+    """未送信クラッシュ: recovery_status=retryable, intent=abandoned, plan=invalidated。"""
     orch = OrchestratorStore(tmp_path / "orch.db")
-    _stale_intent(orch, plan_id=1)
+    _stale_intent_with_plan(orch, plan_id=1)
     summary = recover_pending_intents(orch, now=db_now())
-    assert orch.get_order_intent(plan_id=1).recovery_status == "retryable"
+    intent = orch.get_order_intent(plan_id=1)
+    assert intent.recovery_status == "retryable"
+    assert intent.status == "abandoned"             # terminal 化 (新 plan で再発注)
+    assert orch.get_trade_plan(1).status == "invalidated"
     assert summary["retryable"] == 1
 
 
 def test_submitted_without_order_id_becomes_needs_reconcile(tmp_path: Path):
+    """送信直後クラッシュ: needs_reconcile, plan は triggered のまま隔離 (terminal 化しない)。"""
     orch = OrchestratorStore(tmp_path / "orch.db")
     now = db_now()
-    _stale_intent(orch, plan_id=2)
+    _stale_intent_with_plan(orch, plan_id=2)
     orch.mark_order_submitted(plan_id=2, submitted_at=now)  # order_id まだ null
     summary = recover_pending_intents(orch, now=now)
     intent = orch.get_order_intent(plan_id=2)
     assert intent.recovery_status == "needs_reconcile"
+    assert intent.status == "submitted"             # 触らない (建玉あるかもしれない)
+    assert orch.get_trade_plan(2).status == "triggered"  # terminal 化しない (隔離)
     assert summary["needs_reconcile"] == 1
 
 
 def test_submitted_with_order_id_corrected_to_filled(tmp_path: Path):
+    """約定確定だが status 補正前: status を filled に補正 (3 分岐目、codex Medium)。"""
     orch = OrchestratorStore(tmp_path / "orch.db")
     now = db_now()
-    _stale_intent(orch, plan_id=3)
+    _stale_intent_with_plan(orch, plan_id=3)
     orch.mark_order_submitted(plan_id=3, submitted_at=now)
-    # order_id を直接持たせる (約定済だが status 補正前を模擬)
-    orch.record_order_result(plan_id=3, status="submitted", order_id="mt5:1")
-    # ただし lease 超過のまま (status=submitted, order_id あり) → 正常補正対象
+    orch.record_order_result(plan_id=3, status="submitted", order_id="mt5:1")  # 約定済模擬
     summary = recover_pending_intents(orch, now=now + timedelta(seconds=120))
     assert orch.get_order_intent(plan_id=3).status == "filled"
+    assert summary["corrected_filled"] == 1
 ```
 
-> 3 番目のテストは `get_stale_or_unconfirmed_intents` が `order_id あり submitted` を**拾わない** (Task 3) ため、別途 lease 超過 submitted+order_id を補正する経路が必要。実装時、recovery job は「status=submitted & order_id あり & lease 超過」も含めて `filled` 補正するなら、Task 3 の query にこのケースも足すか recovery job 内で別 query する。**簡潔さ優先:** 3 番目のケース (order_id あり) は「既に約定確定なので害は無い (UNIQUE は握るが正常)」とし、F の recovery job は **pending→retryable / submitted+null→needs_reconcile の 2 分岐のみ**に絞ってもよい (spec の3番目「正常 status 補正」は nice-to-have)。その場合 3 番目のテストは削除し、2 分岐で plan を作る。**実装者判断: まず 2 分岐 (retryable / needs_reconcile) を確実に。order_id あり補正は余裕があれば。**
+> Task 3 で `get_stale_or_unconfirmed_intents` は `status=submitted & order_id あり` も拾う形に拡張済 (3 分岐すべてを recovery job が見る)。`_stale_intent_with_plan` は plan を triggered で作る必要がある (plan 遷移を検証するため) — 既存 orchestrator_store テストの plan 作成 API を流用。`needs_reconcile` だけ plan を triggered のまま残す (隔離) ことに注意。
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -878,10 +1044,12 @@ Expected: FAIL — `src.orchestrator.order_recovery` が無い。
 ```python
 """起動時 order_intent recovery job (spec §3, F-2)。
 
-クラッシュで lease 超過した未完了 order_intent を 3 分岐で処理する:
-- status=pending (未送信) → retryable (reconciliation 後に replan 可)
-- status=submitted & order_id null (送信直後クラッシュ・建玉不明) → needs_reconcile
-  (再 trigger 禁止 + alert。broker 自動照合は F 外 = 手動 / 既存 reconciliation)
+クラッシュで lease 超過した未完了 order_intent を 3 分岐で処理する (replan モデル:
+旧 plan/intent を terminal 化し、再発注は次 planning が新 plan を作る)。
+- status=pending (未送信) → retryable: intent=abandoned + plan=invalidated (新 plan で再発注)
+- status=submitted & order_id null (送信直後クラッシュ・建玉不明) → needs_reconcile:
+  intent/plan は触らず隔離 + alert (建玉あるかもしれない。再 trigger 禁止、自動照合は F 外)
+- status=submitted & order_id あり (約定確定・status 補正前) → intent=filled に補正
 
 broker には触れない (自動照合しない = スコープ境界)。
 """
@@ -894,32 +1062,42 @@ logger = logging.getLogger(__name__)
 
 
 def recover_pending_intents(orch, *, now: datetime) -> dict[str, int]:
-    """recovery 候補を列挙し recovery_status を確定する。集計 dict を返す。"""
-    summary = {"retryable": 0, "needs_reconcile": 0}
+    """recovery 候補を 3 分岐で処理する。集計 dict を返す。"""
+    summary = {"retryable": 0, "needs_reconcile": 0, "corrected_filled": 0}
     for intent in orch.get_stale_or_unconfirmed_intents(now=now):
         if intent.status == "pending":
+            # 未送信クラッシュ: terminal 化して新 plan で再発注 (同一 plan は蘇生しない)。
             orch.set_recovery_status(plan_id=intent.plan_id, recovery_status="retryable")
+            orch.record_order_result(plan_id=intent.plan_id, status="abandoned")
+            orch.update_plan_status(intent.plan_id, "invalidated")
             summary["retryable"] += 1
         elif intent.status == "submitted" and intent.order_id is None:
+            # 送信直後クラッシュ: 建玉あるかもしれない → 隔離 (terminal 化しない) + alert。
             orch.set_recovery_status(
                 plan_id=intent.plan_id, recovery_status="needs_reconcile",
             )
             summary["needs_reconcile"] += 1
             logger.warning(
                 "[ORCH-RECOVERY] needs_reconcile: plan %s submitted but order_id "
-                "unknown — 再 trigger 禁止・要手動確認", intent.plan_id,
+                "unknown — 再 trigger 禁止・要手動確認 (建玉照合が必要)", intent.plan_id,
             )
-    if summary["retryable"] or summary["needs_reconcile"]:
+        elif intent.status == "submitted" and intent.order_id is not None:
+            # 約定確定だが status 補正前: filled に補正 (plan は triggered のまま)。
+            orch.record_order_result(
+                plan_id=intent.plan_id, status="filled", order_id=intent.order_id,
+            )
+            summary["corrected_filled"] += 1
+    if any(summary.values()):
         logger.info("[ORCH-RECOVERY] %s", summary)
     return summary
 ```
 
-> 上記は 2 分岐版 (実装者推奨)。order_id あり submitted の `filled` 補正を含めるなら、Task 3 の query を別途呼ぶか query を拡張し、3 番目の elif を足す。その場合 3 番目のテストを残す。2 分岐で進めるなら 3 番目のテストは削除。
+> `get_stale_or_unconfirmed_intents` (Task 3) が 3 ケースすべてを拾う前提。`needs_reconcile` のみ plan/intent を触らず隔離する (建玉照合まで宙吊り=安全側)。他 2 ケースは terminal 化。
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `pytest tests/test_taskf_recovery_job.py -v`
-Expected: PASS (2 分岐版なら 2 passed、3 分岐版なら 3 passed)。
+Expected: PASS (3 passed)。
 
 - [ ] **Step 5: bootstrap で起動時に 1 回実行**
 
@@ -1162,6 +1340,6 @@ git commit -m "docs: settings.yaml.example に orchestrator.mode=live (Task F) �
 - `OrchestratorConfig.mode=shadow` (既定) で全既存挙動が無改変 (回帰グリーン)。
 - `mode=live` (+ AppConfig.mode=live + live_broker) で orchestrator 執行段が trigger→final gate→execute を single writer 実行。
 - order_intents UNIQUE で二重発注を防ぎ、起動時 recovery が pending→retryable / submitted+null→needs_reconcile を分類 (送信直後クラッシュを取りこぼさない)。
-- gate reject / 非 executed 後に plan が invalidated + intent UNIQUE 解放で永久ブロックしない。
+- gate reject / 非 executed 後に plan が invalidated + intent terminal 化し、再発注は新 plan_id (replan) で行うため永久ブロックしない。
 - 旧 trading cycle の新規 entry が全 entry point (main/API/CLI/TUI) で停止 (single writer)。
 - 旧経路コード削除 (omit) / needs_reconcile 自動照合 / material recheck ON 化は本 plan のスコープ外 (将来課題)。
