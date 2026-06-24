@@ -88,6 +88,11 @@ def test_build_agent_llms_from_yaml(tmp_path) -> None:
         "    model: claude-sonnet-4-6\n"
         "    temperature: 0.15\n",
     )
+    # cross-provider (top-level=llamacpp) なので provider_configs に claude-cli を登録
+    data = yaml.safe_load(settings.read_text(encoding="utf-8")) or {}
+    data.setdefault("llm", {})["provider_configs"] = {"claude-cli": {}}
+    settings.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
     cfg = load_config(settings)
     assert cfg.agent_llms.planner.provider == "claude-cli"
     assert cfg.agent_llms.planner.model == "claude-sonnet-4-6"
@@ -179,3 +184,59 @@ def test_provider_configs_llamacpp_missing_base_url_raises(tmp_path) -> None:
 
     with pytest.raises(ConfigError, match="base_url is required"):
         load_config(settings_path)
+
+
+def test_agent_cross_provider_requires_provider_config(tmp_path) -> None:
+    """agent.provider が top-level と異なり provider_configs に無ければ起動時 ConfigError。
+
+    本番 settings の top-level provider は llamacpp。technical に claude-cli を
+    指定しても provider_configs に claude-cli が無ければ弾く (未配線 agent でも検証)。
+    """
+    settings = _write_with_agents(
+        tmp_path,
+        "agents:\n"
+        "  technical:\n"
+        "    provider: claude-cli\n"   # top-level (llamacpp) と異なる
+        "    model: claude-sonnet-4-6\n"
+        "    temperature: 0.1\n",
+    )
+    # settings.yaml の top-level provider は llamacpp。provider_configs に claude-cli は未定義。
+    with pytest.raises(ConfigError, match="provider_configs"):
+        load_config(settings)
+
+
+def test_agent_cross_provider_ok_when_provider_config_present(tmp_path) -> None:
+    """provider_configs に該当 provider があれば cross-provider agent も通る。"""
+    src_config_dir = BASE_DIR / "config"
+    dst = tmp_path / "config"
+    shutil.copytree(src_config_dir, dst)
+    settings_path = dst / "settings.yaml"
+    data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
+    # top-level は llamacpp。cross-provider の claude-cli を provider_configs に追加。
+    # claude-cli は base_url 不要、command 空欄は "claude" 補完されるので空 dict で valid。
+    data.setdefault("llm", {})["provider_configs"] = {
+        "claude-cli": {},
+    }
+    settings_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    (dst / "agents.yaml").write_text(
+        "agents:\n"
+        "  technical:\n"
+        "    provider: claude-cli\n"
+        "    model: claude-sonnet-4-6\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(settings_path)
+    assert cfg.agent_llms.technical.provider == "claude-cli"
+
+
+def test_agent_same_provider_as_top_level_needs_no_provider_config(tmp_path) -> None:
+    """agent.provider == top-level provider なら provider_configs 不要 (既存設定流用)。"""
+    settings = _write_with_agents(
+        tmp_path,
+        "agents:\n"
+        "  planner:\n"
+        "    provider: llamacpp\n"   # top-level と同じ (本番は llamacpp)
+        "    model: plutus\n",
+    )
+    cfg = load_config(settings)
+    assert cfg.agent_llms.planner.provider == "llamacpp"

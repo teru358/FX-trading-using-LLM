@@ -333,6 +333,28 @@ def _build_agent_llms(raw_agents: dict) -> OrchestratorAgentsLlmConfig:
     return OrchestratorAgentsLlmConfig(**kwargs)
 
 
+def _validate_agent_provider_configs(
+    agent_llms: OrchestratorAgentsLlmConfig, llm_cfg: LLMConfig
+) -> None:
+    """各 agent の provider が top-level と異なる場合、provider_configs に接続設定が必須。
+
+    factory.create_agent_llm と同じ規則を load 時に全 agent へ適用する
+    (未配線 News/Technical/ContextSummary も含め起動時に弾く)。
+    """
+    for name in _AGENT_LLM_NAMES:
+        agent_cfg = getattr(agent_llms, name)
+        if not agent_cfg.provider:
+            continue  # fallback (役割 LLM) — provider_configs 不要
+        if agent_cfg.provider == llm_cfg.provider:
+            continue  # top-level と同一 provider — 既存 provider_config 流用
+        if agent_cfg.provider not in llm_cfg.provider_configs:
+            raise ConfigError(
+                f"agent {name!r} provider {agent_cfg.provider!r} is not defined in "
+                f"llm.provider_configs (top-level provider is {llm_cfg.provider!r}). "
+                f"Add a connection config under llm.provider_configs.{agent_cfg.provider}."
+            )
+
+
 def _build_provider_config(provider: str, raw: dict) -> ProviderConfig:
     """provider_config セクションを ProviderConfig に組み立て、provider 別の補完/検証を行う。
 
@@ -583,6 +605,10 @@ def load_config(config_path: Path | None = None) -> AppConfig:
 
     # ── AppConfig 組み立て ────────────────────────────────────────
 
+    # agent_llms を先に構築・検証 (provider_configs クロスチェックは llm_cfg が必要)
+    agent_llms_cfg = _build_agent_llms(raw.get("agents", {}) or {})
+    _validate_agent_provider_configs(agent_llms_cfg, llm_cfg)
+
     return AppConfig(
         mode=mode,
         paper_provider=paper_provider,
@@ -605,5 +631,5 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         weekly_diagnosis=weekly_diagnosis_cfg,
         data_backup=data_backup_cfg,
         orchestrator=_build_orchestrator_config(raw.get("orchestrator", {}) or {}),
-        agent_llms=_build_agent_llms(raw.get("agents", {}) or {}),
+        agent_llms=agent_llms_cfg,
     )
