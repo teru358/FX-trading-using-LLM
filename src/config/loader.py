@@ -406,9 +406,21 @@ def _build_llm_config(lc: dict) -> LLMConfig:
 
     provider_config = _build_provider_config(provider, lc.get("provider_config", {}) or {})
 
+    # provider 別接続設定 (orchestrator agent 用)。各エントリを provider 名で検証付き構築。
+    raw_provider_configs = lc.get("provider_configs", {}) or {}
+    provider_configs: dict[str, ProviderConfig] = {}
+    for pname, praw in raw_provider_configs.items():
+        if pname not in LLM_PROVIDERS:
+            raise ConfigError(
+                f"Unknown provider '{pname}' in llm.provider_configs. "
+                f"Must be one of {LLM_PROVIDERS}."
+            )
+        provider_configs[pname] = _build_provider_config(pname, praw or {})
+
     return LLMConfig(
         provider=provider,
         provider_config=provider_config,
+        provider_configs=provider_configs,
         news_analysis=_build_role_config(
             lc.get("news_analysis", {}), 0.3, provider=provider, role="news_analysis",
         ),

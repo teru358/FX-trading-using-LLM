@@ -140,3 +140,42 @@ def test_agent_provider_without_model_raises(tmp_path) -> None:
     )
     with pytest.raises(ConfigError, match="model is required"):
         load_config(settings)
+
+
+def test_provider_configs_built_per_provider(tmp_path) -> None:
+    """llm.provider_configs の各エントリが ProviderConfig に構築される。"""
+    src_config_dir = BASE_DIR / "config"
+    dst = tmp_path / "config"
+    shutil.copytree(src_config_dir, dst)
+    settings_path = dst / "settings.yaml"
+    data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
+    data.setdefault("llm", {})["provider_configs"] = {
+        "claude-cli": {"command": "", "timeout_seconds": 90},
+        "llamacpp": {"base_url": "http://localhost:8080/v1"},
+    }
+    settings_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+    cfg = load_config(settings_path)
+    assert "llamacpp" in cfg.llm.provider_configs
+    assert cfg.llm.provider_configs["llamacpp"].base_url == "http://localhost:8080/v1"
+    # claude-cli の command 空欄は "claude" 補完される
+    assert cfg.llm.provider_configs["claude-cli"].command == "claude"
+    assert cfg.llm.provider_configs["claude-cli"].timeout_seconds == 90
+
+
+def test_provider_configs_llamacpp_missing_base_url_raises(tmp_path) -> None:
+    """provider_configs.llamacpp に base_url が無ければ起動時 ConfigError。"""
+    from src.config import ConfigError
+
+    src_config_dir = BASE_DIR / "config"
+    dst = tmp_path / "config"
+    shutil.copytree(src_config_dir, dst)
+    settings_path = dst / "settings.yaml"
+    data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
+    data.setdefault("llm", {})["provider_configs"] = {
+        "llamacpp": {"base_url": ""},   # 欠落
+    }
+    settings_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="base_url is required"):
+        load_config(settings_path)
