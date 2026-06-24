@@ -22,3 +22,21 @@ def test_orchestrator_agents_llm_config_defaults() -> None:
         agent = getattr(cfg, name)
         assert isinstance(agent, AgentLlmConfig)
         assert agent.provider == ""
+
+
+def test_llm_config_has_empty_provider_configs_by_default() -> None:
+    from src.config.schema import LLMConfig
+
+    cfg = LLMConfig()
+    assert cfg.provider_configs == {}        # 既定は空 dict (後方互換)
+    # 既存 provider_config (単一) は維持
+    assert cfg.provider_config is not None
+
+
+def test_app_config_has_default_agent_llms() -> None:
+    from src.config.schema import AppConfig, OrchestratorAgentsLlmConfig
+
+    cfg = AppConfig()
+    assert isinstance(cfg.agent_llms, OrchestratorAgentsLlmConfig)
+    # 既定では全 agent が fallback (provider 空)
+    assert cfg.agent_llms.planner.provider == ""

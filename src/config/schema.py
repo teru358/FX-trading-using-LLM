@@ -494,6 +494,9 @@ class LLMConfig:
     reflection: LLMRoleConfig = field(
         default_factory=lambda: LLMRoleConfig(temperature=0.3)
     )
+    # provider 名 → 接続設定 (orchestrator agent 用)。既存 provider_config (単一) は
+    # 後方互換 fallback として維持。agents.yaml で別 provider を使う agent がこれを参照。
+    provider_configs: dict[str, ProviderConfig] = field(default_factory=dict)
 
 
 @dataclass
@@ -773,6 +776,11 @@ class AppConfig:
     weekly_diagnosis: WeeklyDiagnosisConfig = field(default_factory=WeeklyDiagnosisConfig)
     data_backup: DataBackupConfig = field(default_factory=DataBackupConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
+    # 5-agent 個別 LLM 設定 (config/agents.yaml)。別ファイル top-level merge のため
+    # instruments / news_sources と同じく AppConfig top-level に持つ。
+    agent_llms: OrchestratorAgentsLlmConfig = field(
+        default_factory=OrchestratorAgentsLlmConfig
+    )
 
     # ── プロバイダー別設定 (旧 price_provider + mt5_bridge を統合) ──
     providers: ProvidersConfig = field(default_factory=ProvidersConfig)
