@@ -449,6 +449,33 @@ class LLMRoleConfig:
 
 
 @dataclass
+class AgentLlmConfig:
+    """1 agent の LLM 設定 (config/agents.yaml の agents.<name>)。
+
+    provider 空欄なら fallback (既存役割 model)。provider 指定時は
+    LLMConfig.provider_configs[provider] から接続設定を引く。
+    """
+    provider: str = ""        # 空欄 = fallback
+    model: str = ""
+    temperature: float = 0.2
+
+
+@dataclass
+class OrchestratorAgentsLlmConfig:
+    """5 agent の LLM 設定 (config/agents.yaml の agents:)。
+
+    未指定 agent は AgentLlmConfig 既定 (provider 空 = fallback)。
+    既存 OrchestratorAgentsConfig (*_enabled = 「動かすか」) とは別物で、
+    こちらは「どの LLM を使うか」を表す。
+    """
+    planner: AgentLlmConfig = field(default_factory=AgentLlmConfig)
+    news: AgentLlmConfig = field(default_factory=AgentLlmConfig)
+    technical: AgentLlmConfig = field(default_factory=AgentLlmConfig)
+    execution_opinion: AgentLlmConfig = field(default_factory=AgentLlmConfig)
+    context_summary: AgentLlmConfig = field(default_factory=AgentLlmConfig)
+
+
+@dataclass
 class LLMConfig:
     """LLM 設定の単一エントリポイント。
 
