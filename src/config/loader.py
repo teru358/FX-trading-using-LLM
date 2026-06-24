@@ -63,6 +63,8 @@ from src.config.schema import (
     OrchestratorHindsightConfig,
     OrchestratorNotificationsConfig,
     OrchestratorAgentsConfig,
+    AgentLlmConfig,
+    OrchestratorAgentsLlmConfig,
 )
 
 
@@ -285,6 +287,51 @@ def _strip_deprecated_keys(trading_dict: dict) -> dict:
 
 
 # ── LLM 設定の構築とバリデーション ──────────────────────────────
+
+_AGENT_LLM_NAMES = (
+    "planner", "news", "technical", "execution_opinion", "context_summary",
+)
+
+
+def _build_agent_llms(raw_agents: dict) -> OrchestratorAgentsLlmConfig:
+    """config/agents.yaml の agents: ブロックを OrchestratorAgentsLlmConfig に組み立てる。
+
+    起動時に検証する (typo/欠落を silent fallback させない):
+      - 未知 agent キー (typo) → ConfigError
+      - 各 agent: provider 指定時は provider ∈ LLM_PROVIDERS、かつ model 必須
+    provider != top-level provider のときの provider_configs 必須チェックは
+    provider_configs 構築後 (load_config で _validate_agent_provider_configs) に行う。
+    """
+    raw_agents = raw_agents or {}
+    for key in raw_agents:
+        if key not in _AGENT_LLM_NAMES:
+            raise ConfigError(
+                f"config/agents.yaml: unknown agent key {key!r} "
+                f"(expected one of {_AGENT_LLM_NAMES}). "
+                f"Fix the typo — an unknown key would silently fall back to the "
+                f"default role LLM instead of using the intended per-agent config."
+            )
+    kwargs = {}
+    for name in _AGENT_LLM_NAMES:
+        entry = raw_agents.get(name)
+        if not isinstance(entry, dict):
+            continue
+        agent_cfg = _from_dict(AgentLlmConfig, entry)
+        if agent_cfg.provider:
+            if agent_cfg.provider not in LLM_PROVIDERS:
+                raise ConfigError(
+                    f"Unknown provider {agent_cfg.provider!r} for agent {name!r} "
+                    f"in config/agents.yaml. Must be one of {LLM_PROVIDERS}."
+                )
+            if not agent_cfg.model:
+                raise ConfigError(
+                    f"agents.{name}.model is required when a provider is set "
+                    f"(provider={agent_cfg.provider!r}). "
+                    f"Set a model name appropriate for the provider in config/agents.yaml."
+                )
+        kwargs[name] = agent_cfg
+    return OrchestratorAgentsLlmConfig(**kwargs)
+
 
 def _build_provider_config(provider: str, raw: dict) -> ProviderConfig:
     """provider_config セクションを ProviderConfig に組み立て、provider 別の補完/検証を行う。
@@ -546,4 +593,5 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         weekly_diagnosis=weekly_diagnosis_cfg,
         data_backup=data_backup_cfg,
         orchestrator=_build_orchestrator_config(raw.get("orchestrator", {}) or {}),
+        agent_llms=_build_agent_llms(raw.get("agents", {}) or {}),
     )
