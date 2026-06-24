@@ -55,11 +55,11 @@ watch loop (run_watch_cycle)
                  6. order_intent 更新 (status/order_id/broker_result) + ExecutionResult を decision 反映
 ```
 
-mode 分岐:
-- `mode=shadow` (既定): 従来通り。broker 未結線、shadow_trigger 記録のみ。**完全な後方互換・回帰維持。**
-- `mode=live`: 上記 F 経路が有効。bootstrap が live 時のみ execution broker + execution position_mgr を runtime に注入。
+mode 分岐 (`OrchestratorConfig.mode`):
+- `shadow` (既定): 従来通り。broker 未結線、shadow_trigger 記録のみ。**完全な後方互換・回帰維持。**
+- `live`: 上記 F 経路が有効。bootstrap が live 時のみ execution broker + execution position_mgr を runtime に注入。**ただし本番発注には top-level `AppConfig.mode=live` + `live_broker` が前提** (§5 の cross-field validation 参照)。
 
-**Phase 2/D との独立性:** `tick_migration_stage` (保護移設の段階) と `mode` (発注の段階) は独立した2軸。`protect_live` (保護を worker が適用) と `mode=live` (entry を orchestrator が発注) は別概念。F は `mode` のみ扱う。
+**Phase 2/D との独立性:** `tick_migration_stage` (保護移設の段階) と `OrchestratorConfig.mode` (発注の段階) は独立した2軸。`protect_live` (保護を worker が適用) と `mode=live` (entry を orchestrator が発注) は別概念。F は `OrchestratorConfig.mode` のみ扱う。
 
 ---
 
@@ -79,15 +79,24 @@ mode 分岐:
 3. **二段ゲート (F-3)** — §4 参照。reject なら発注せず order_intent を rejected + decision 反映 + alert。
 
 4. **submit マーキング (復旧分岐点)**
-   broker 送信の**直前**に `mark_order_submitted(plan_id, submitted_at=now)`。これ以降のクラッシュは `needs_reconcile`。
+   broker 送信の**直前**に `mark_order_submitted(plan_id, submitted_at=now)`。**注意 (codex High #1):** 既存 `mark_order_submitted` は `submitted_at` を埋めると同時に `status="submitted"` にする (`orchestrator_store.py:613-614`)。よって「送信直後クラッシュ」は `status="submitted"` かつ `order_id is null` の状態になる。recovery query (§3) はこれを拾う必要がある (現状 `get_stale_pending_intents` は `status=="pending"` のみ — §3 で拡張する)。
 
 5. **発注 (single writer)**
    `result = broker.execute_signal(signal, position_mgr, macro_context)`。signal は plan の `action_json` (direction/sl/tp/rr) + ロット設定から `TradeSignal` を構築。
 
-6. **結果反映**
-   - `executed` → order_intent を `status=submitted, order_id, broker_result` 更新。`ExecutionResult` を `orchestrator_decisions` (order_id / risk_gate_result) に反映。
-   - `skipped` → 想定内抑制。order_intent に記録 (alert なし)。
-   - `rejected` / `halted` / `failed` → order_intent に結果記録 + decision 反映 + **alert** (要注意分類)。
+6. **結果反映 (ExecutionResult.outcome → order_intent.status の明示 mapping、codex High #2)**
+   既存 status enum は `pending/submitted/filled/rejected/failed/needs_reconcile/abandoned` (`ORDER_INTENT_STATUSES`, `orchestrator_store.py:105`)。`record_order_result` は enum 外を ValueError にする。`ExecutionResult.outcome` (executed/skipped/halted/rejected/failed) を以下へ mapping して `record_order_result` に渡す:
+
+   | ExecutionResult.outcome | order_intent.status | order_id | alert | 備考 |
+   |---|---|---|---|---|
+   | `executed` | `filled` | あり | なし | 約定。既存テスト (`test_orchestrator_store.py:120`) と整合 |
+   | `skipped` | `abandoned` | null | なし | 想定内抑制 (既存ポジ/hold/リスク制限)。plan は終了扱い |
+   | `rejected` | `rejected` | null | **あり** | gate/broker 拒否 |
+   | `halted` | `rejected` | null | **あり** | halt 状態。reject 同様に発注見送り |
+   | `failed` | `failed` | null | **あり** | 技術的失敗 (bridge 不通等) |
+
+   `ExecutionResult` (outcome / order_id / reason) は併せて `orchestrator_decisions` (order_id / reject 理由 / risk_gate_result) に反映する。
+   > `skipped→abandoned` / `halted→rejected` の mapping は実装時に既存テストと突き合わせて最終確定 (この表が plan の起点)。
 
 ### エラー隔離
 
@@ -101,26 +110,27 @@ plan の `action_json` から `TradeSignal` を組む。ロットは既存 `trad
 
 ## 3. F-2: durable order lock + クラッシュ復旧
 
-### 既存実装 (再利用)
+### 既存実装 (再利用) — 実 API 名で記載
 
-- `_OrderIntent` ORM (`order_intents` テーブル、`plan_id` UNIQUE、カラム: `owner_run_id` / `lease_until` / `submitted_at` / `recovery_status` / `status` / `order_id` / `broker_result`)
-- store API: `try_insert_order_intent` / `get_order_intent` / `mark_order_submitted` / `find_expired_pending`
+- `_OrderIntent` ORM (`order_intents` テーブル、`plan_id` UNIQUE、カラム: `plan_id` / `trigger_id` / `decision_id` / `pair` / `intended_action` / `status` / `owner_run_id` / `lease_until` / `submitted_at` / `recovery_status` / `order_id` / `broker_result_json` / `created_at` / `updated_at`、`orchestrator_store.py:111`)
+- status enum: `ORDER_INTENT_STATUSES = pending/submitted/filled/rejected/failed/needs_reconcile/abandoned` (`orchestrator_store.py:105`)
+- store API: `try_insert_order_intent` (`:527`) / `get_order_intent` (`:579`) / `get_stale_pending_intents` (`:587`) / `mark_order_submitted` (`:605`) / `record_order_result` (`:618`)
 
 ### F で追加
 
-1. **store API 補完** (既存に無い分のみ — 実装時に既存メソッドを確認し不足分のみ追加)
-   - `mark_order_result(plan_id, status, order_id, broker_result)` — 発注応答反映
-   - `mark_order_rejected(plan_id, reason)` — ゲート/broker reject 記録
-   - `set_recovery_status(plan_id, recovery_status)` — recovery job 用
+1. **store API 補完**
+   - **recovery query の拡張 (codex High #1):** 既存 `get_stale_pending_intents` は `status=="pending"` のみ拾う (`orchestrator_store.py:597`)。だが `mark_order_submitted` は `status="submitted"` にしてしまうため (`:614`)、最重要の「送信直後クラッシュ」(`status=submitted` かつ `order_id is null`) が拾われない。**recovery 候補取得を `status=="pending"` OR (`status=="submitted"` AND `order_id is null`) の両方を lease 超過で拾う形に拡張する** (既存メソッド拡張 or 新メソッド追加 — 実装時に既存呼出側との互換を確認)。
+   - `record_order_result(plan_id, status, order_id, broker_result_json)` は**既存** (`:618`)。reject/failed もこれで記録 (status を enum 値で渡す)。専用 `mark_order_rejected` は不要 (record_order_result に reject を渡す)。
+   - `set_recovery_status(plan_id, recovery_status)` — recovery job 用に**新規追加** (`recovery_status` カラムは既存だが更新 API が無い)。
 
 2. **起動時 recovery job (§8.8 の3分岐)**
-   起動時に `find_expired_pending(now)` を列挙し、`submitted_at` の有無で判定:
+   起動時に拡張した recovery query で lease 超過の未完了 intent を列挙し、`status` + `submitted_at` + `order_id` で判定:
 
    | 状態 | recovery_status | アクション |
    |---|---|---|
-   | `submitted_at` null | `retryable` | 未発注。reconciliation 後に plan 再 trigger 可 (plan を active に戻す等) |
-   | `submitted_at` あり・`order_id` なし | `needs_reconcile` | broker に建玉したか不明。**当該 plan の再 trigger を禁止** + **alert**。自動照合はしない (手動 / 既存 reconciliation) |
-   | `submitted_at` あり・`order_id` あり | (正常) | status を `submitted` に補正のみ |
+   | `status=pending` (submitted_at null) | `retryable` | 未発注。reconciliation 後に plan 再 trigger 可 (§4 の reject 同様 plan を active に戻す) |
+   | `status=submitted` かつ `order_id` null | `needs_reconcile` | broker に建玉したか不明。**当該 plan の再 trigger を禁止** + **alert**。自動照合はしない (手動 / 既存 reconciliation) |
+   | `status=submitted` かつ `order_id` あり | (正常) | status を `filled` に補正のみ (約定済とみなす) |
 
 3. **再 trigger 禁止の担保**
    `needs_reconcile` の plan は watch loop が trigger 対象から除外 (order_intents 参照 or plan 状態)。`try_insert_order_intent` の UNIQUE が残るため、仮に再評価されても二重 insert は弾かれる (多層防御)。
@@ -142,35 +152,56 @@ plan の `action_json` から `TradeSignal` を組む。ロットは既存 `trad
 3. **decision 反映**
    broker `ExecutionResult` (outcome / order_id / reason) を必ず `orchestrator_decisions` に反映 (order_id / reject 理由 / risk_gate_result)。両 gate (pre-check と final) の結果を残し**不一致を検出可能**にする。
 
-ゲート reject 時: 発注しない + order_intent rejected + decision 反映 + alert。plan を再評価対象に戻すか終了させるか (一時的 reject=再評価可 / 恒久的=終了) は plan で詳細化。
+### reject/failed/halted 後の plan / order_intent 状態遷移 (codex High #4 — 必須確定)
+
+**問題:** `_record_shadow_trigger` は trigger 時点で plan を `active`→`triggered` に claim する (`runtime.py:569` `try_mark_plan_triggered`)。`get_active_plans` は `active` のみ再評価する (`orchestrator_store.py:514`)。さらに order_intent は `plan_id` UNIQUE。よって final gate reject 後に何もしないと、plan は `triggered` のまま再評価されず、order_intent が UNIQUE を握り**永久ブロック**になる。これを spec で固定する:
+
+| ケース | order_intent.status | plan 状態 | 再発注可否 |
+|---|---|---|---|
+| **一時的** reject / `halted` / `failed` (halt 一時 / 一時的拒否 / bridge 不通) | `rejected` or `failed` | plan を **`active` に戻す** (`update_plan_status(active)`) **かつ order_intent を削除 or abandoned 化** して UNIQUE を解放 | 次 tick で再 trigger 可 (entry 条件がまだ成立していれば) |
+| **恒久的** reject (invalid stops / 証拠金恒久不足 / risk hard veto) | `rejected` | plan を **`invalidated`** にする | 再 trigger しない (plan 終了) |
+| `skipped` (想定内抑制) | `abandoned` | plan を `invalidated` (想定内に発注見送り = この plan は用済み) | 再 trigger しない |
+
+**UNIQUE 解放の方針 (重要):** 一時的失敗で再発注を許すには、`triggered`→`active` に戻すだけでなく **order_intent の UNIQUE 制約を解放する必要がある** (同 plan_id で再 insert できないと §2 step1 で必ず中止になる)。F では「一時的失敗時は order_intent を `abandoned` にし、recovery/再 trigger 経路は **新しい plan** (replan) で発注する」方針を既定とする — 同一 plan_id の再 insert を避け UNIQUE 設計を壊さない。`triggered`→`active` 復帰 + 同 plan_id 再 insert を許す案は UNIQUE と衝突するため採らない。
+> 一時的 reject の「再評価」を同一 plan で行うか replan で行うかは、上記「replan 既定」で固定。plan 作成時にこの遷移をテストで pin する。
+
+reject/failed/halted いずれも: 発注しない + order_intent に上記 status + decision 反映 + alert (skipped 除く)。
 
 ---
 
 ## 5. F-4: mode 昇格 + bootstrap 結線
 
-### config
+### config — 2つの mode の関係 (codex 追加確認 — 必須)
 
-- `OrchestratorConfig.mode` (既存フィールド `mode: str = "shadow"`、コメント "observe | shadow | live") を扱う。**F が執行を有効化するのは `mode=live` のときのみ。** `shadow` (既定) は従来の shadow 経路。`observe` は現状未使用であり F の執行段は起動しない (= shadow と同じく非 live 扱い、broker 未結線)。`__post_init__` の許容値 validation は実装時に既存実態を確認して追加 (shadow/live を最低限サポートし、observe は非 live として安全側)。
-- 限定発注は既存 config で表現:
-  - 限定銘柄 → `orchestrator.pairs` (planning scope)
-  - 小ロット → `trading` のロット設定
-- 新しい mode 軸は増やさない。
-- material recheck: `OrchestratorConfig` に `execution_opinion_recheck_enabled: bool = False` + `execution_recheck_timeout_seconds`(既存があれば再利用) を追加。
+**重要:** `OrchestratorConfig.mode` (`shadow`/`live`、`schema.py:678`) と トップレベル `AppConfig.mode` (`paper`/`live`/`live_test`、`schema.py:727`) は**別物**。発注 broker は **トップレベル `AppConfig.mode` + `live_broker`** で選ばれる (`create_broker(mode, live_broker, ...)`, `live_broker.py:140`)。`OrchestratorConfig.mode=live` だけでは本番 broker にならない。
+
+- **cross-field validation を追加 (必須):** `OrchestratorConfig.mode=="live"` のとき、`AppConfig.__post_init__` (または loader) で **`AppConfig.mode=="live"` かつ `live_broker` が設定済 (mt5 等)** を要求し、満たさなければ `ValueError`。orchestrator が本番発注すると言いながら top-level が paper だと、執行段が paper broker を握る (本番発注にならない) か矛盾するため。`OrchestratorConfig` 単体の `__post_init__` では AppConfig を参照できないので、この検証は AppConfig レベルに置く。
+- `OrchestratorConfig.mode` の許容値: F では `shadow`/`live` を扱う。`observe` は現状未使用で F の執行段を起動しない (= 非 live 扱い、broker 未結線)。許容値 validation は実装時に既存実態を確認して追加。
+- 限定発注は既存 config で表現: 限定銘柄 → `orchestrator.pairs` (planning scope) / 小ロット → `trading` のロット設定。新しい mode 軸は増やさない。
+- material recheck: `OrchestratorConfig` に `execution_opinion_recheck_enabled: bool = False` + `execution_recheck_timeout_seconds` (既存があれば再利用) を追加。
 
 ### bootstrap 結線
 
-- `mode=live` のときのみ、execution 用 `BrokerAdapter` (発注可能な broker = `create_broker(...)` / 既存の発注用ファクトリ。`build_close_broker` は close 専用ラッパなので発注には execution 用を使う — 実装時に trading cycle の broker 構築 `src/cycles/trading.py` の `create_broker` 呼び出しに倣う) と execution 用 `PositionManager` を構築し runtime に注入。
-- `mode=shadow` では broker 未注入 → runtime は broker None なら live 分岐に入らないガード → `_execute_live_trigger` は呼ばれない (回帰維持)。
-- 旧 trading cycle の新規発注: live 時は main.py で停止 (mode=live なら旧 cycle の entry 登録 skip or 既存 disable フラグ)。**コード削除は別 cleanup task。**
+- `OrchestratorConfig.mode=live` のときのみ、execution 用 `BrokerAdapter` を構築し runtime に注入。**broker は trading cycle と同じファクトリ `create_broker(mode=AppConfig.mode, live_broker=..., ...)` を使う** (`src/cycles/trading.py:1026` に倣う。`build_close_broker` は close 専用ラッパなので発注には execution 用を使う)。execution 用 `PositionManager` も構築。
+- `OrchestratorConfig.mode=shadow` では broker 未注入 → runtime は broker None なら live 分岐に入らないガード → `_execute_live_trigger` は呼ばれない (回帰維持)。
+
+### single execution writer の担保 (codex High #3 — main.py 停止だけでは不十分)
+
+旧 `run_trading_cycle` は **4 つの entry point** から起動できる: `main.py:414` (scheduler) / `api/routes/trading.py:70` (API) / `cli.py:369` (CLI) / `tui.py:322` (TUI)。旧 cycle は内部で `create_broker` し (`trading.py:1026`) `execute_signal` を呼ぶ (`trading.py:754`)。**main.py のスケジュール登録を止めるだけでは API/CLI/TUI 経由の発注が残り、single execution writer が崩れる (二重発注リスク)。**
+
+**F の方針 (統一ガード):** `run_trading_cycle` の**内部で entry phase をガードする**。`OrchestratorConfig.mode=="live"` のとき、`run_trading_cycle` は新規 entry (`execute_signal` 呼出) を skip する (exit/position 管理/reconciliation は継続)。これにより呼出元 (main/API/CLI/TUI) に関わらず**新規発注は orchestrator 執行段 1 経路に集約**される。
+- ガードは `run_trading_cycle` の entry phase 直前に 1 箇所追加 (全 entry point を一括カバー)。
+- 旧 cycle の exit/close/reconciliation は触らない (既存系の再利用は維持)。
+- **コード削除 (旧 entry phase の omit) は別 cleanup task** (live 安定後の version2 完全移行)。F では「フラグで entry を停止」まで。
 
 ---
 
 ## 6. テスト方針 (TDD)
 
-- **F-1:** trigger→gate→execute フロー (gate pass で発注 / reject で不発注)。executed/skipped/rejected/failed の各 ExecutionResult が order_intent + decision に正しく反映されるか。
-- **F-2:** order_intents UNIQUE で二重発注防止。recovery 3分岐それぞれ (retryable / needs_reconcile が再 trigger 禁止 + alert / 正常 status 補正)。`submitted_at` 前後でのクラッシュ模擬。
-- **F-3:** broker reject が decision に反映されるか。pre-check pass + final reject の不一致が記録されるか。
-- **F-4:** `mode=shadow` で broker 未結線 (回帰)。`mode=live` で broker 注入され執行段が動く。mode validation。
+- **F-1:** trigger→gate→execute フロー (gate pass で発注 / reject で不発注)。`ExecutionResult.outcome → order_intent.status` mapping (executed→filled / skipped→abandoned / rejected→rejected / halted→rejected / failed→failed) が正しく `record_order_result` に渡るか。
+- **F-2:** order_intents UNIQUE で二重発注防止。**recovery query が `status=submitted` かつ `order_id is null` (送信直後クラッシュ) を拾うか** (codex #1 回帰)。recovery 3分岐それぞれ (retryable / needs_reconcile が再 trigger 禁止 + alert / 正常 filled 補正)。`submitted_at` 前後 (status=pending vs submitted) のクラッシュ模擬。
+- **F-3:** broker reject が decision に反映されるか。pre-check pass + final reject の不一致が記録されるか。**reject/failed/halted 後の plan/order_intent 遷移** (一時的→abandoned+replan / 恒久的→invalidated) で永久ブロックが起きないか (codex #4 回帰)。
+- **F-4:** `OrchestratorConfig.mode=shadow` で broker 未結線 (回帰)。`mode=live` で broker 注入され執行段が動く。**`mode=live` かつ `AppConfig.mode!=live` で ValueError** (codex 追加確認 回帰)。**`OrchestratorConfig.mode=live` のとき `run_trading_cycle` が entry phase を skip するか** (全 entry point カバー、codex #3 回帰)。
 
 実 broker / LLM はテストで mock (コスト抑制・本番発注を起こさない)。
 
@@ -181,11 +212,15 @@ plan の `action_json` から `TradeSignal` を組む。ロットは既存 `trad
 - [ ] F-1: 発注前に RiskGateWorker final + broker gate を必ず通るか。
 - [ ] F-1: single execution writer — `broker.execute_signal` を呼ぶのは `_execute_live_trigger` 1箇所のみか。
 - [ ] F-1: material recheck が既定 OFF で、決定的・高速執行 (LLM なし) が既定経路か。
+- [ ] F-1: `ExecutionResult.outcome → order_intent.status` mapping が enum (`ORDER_INTENT_STATUSES`) 内に収まるか (executed→filled 等、codex #2)。
 - [ ] F-2: `order_intents.plan_id` UNIQUE で二重発注を防ぎ、クラッシュ復旧3分岐が動くか。
+- [ ] F-2: recovery query が `status=pending` だけでなく `status=submitted & order_id is null` (送信直後クラッシュ) を拾うか (codex #1)。
 - [ ] F-2: needs_reconcile が再 trigger 禁止 + alert で、自動照合はしない (スコープ境界) か。
 - [ ] F-3: broker reject / 両 gate 不一致が decision に反映されるか。
+- [ ] F-3: reject/failed/halted 後の plan/order_intent 遷移が定義され、永久ブロック・再評価不能が起きないか (codex #4)。
 - [ ] F-4: `mode=shadow` (既定) で broker 未結線・shadow 全テスト回帰グリーンか。
-- [ ] F-4: 旧 trading cycle 発注が live 時に停止し、コード削除は行っていない (omit は別 task) か。
+- [ ] F-4: `OrchestratorConfig.mode=live` が `AppConfig.mode=live` + `live_broker` を要求する validation があるか (codex 追加確認)。
+- [ ] F-4: `OrchestratorConfig.mode=live` 時、`run_trading_cycle` の entry phase が全 entry point (main/API/CLI/TUI) で停止し、コード削除は行っていない (omit は別 task) か (codex #3)。
 
 ---
 
