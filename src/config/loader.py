@@ -131,7 +131,7 @@ def _build_orchestrator_config(data: dict) -> OrchestratorConfig:
 
 def _merge_split_configs(base: dict, config_dir: Path) -> dict:
     """分割設定ファイルをメイン設定にマージする。"""
-    for fname in ("instruments.yaml", "news_sources.yaml"):
+    for fname in ("instruments.yaml", "news_sources.yaml", "agents.yaml"):
         fpath = config_dir / fname
         if fpath.exists():
             with open(fpath, encoding="utf-8") as f:

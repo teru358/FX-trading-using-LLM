@@ -40,3 +40,20 @@ def test_app_config_has_default_agent_llms() -> None:
     assert isinstance(cfg.agent_llms, OrchestratorAgentsLlmConfig)
     # 既定では全 agent が fallback (provider 空)
     assert cfg.agent_llms.planner.provider == ""
+
+
+def test_merge_split_configs_picks_up_agents_yaml(tmp_path) -> None:
+    """config/agents.yaml があれば base['agents'] に top-level merge される。"""
+    from src.config.loader import _merge_split_configs
+
+    (tmp_path / "agents.yaml").write_text(
+        "agents:\n"
+        "  planner:\n"
+        "    provider: claude-cli\n"
+        "    model: claude-sonnet-4-6\n"
+        "    temperature: 0.1\n",
+        encoding="utf-8",
+    )
+    merged = _merge_split_configs({}, tmp_path)
+    assert "agents" in merged
+    assert merged["agents"]["planner"]["model"] == "claude-sonnet-4-6"
