@@ -119,21 +119,21 @@ plan の `action_json` から `TradeSignal` を組む。ロットは既存 `trad
 ### F で追加
 
 1. **store API 補完**
-   - **recovery query の拡張 (codex High #1):** 既存 `get_stale_pending_intents` は `status=="pending"` のみ拾う (`orchestrator_store.py:597`)。だが `mark_order_submitted` は `status="submitted"` にしてしまうため (`:614`)、最重要の「送信直後クラッシュ」(`status=submitted` かつ `order_id is null`) が拾われない。**recovery 候補取得を `status=="pending"` OR (`status=="submitted"` AND `order_id is null`) の両方を lease 超過で拾う形に拡張する** (既存メソッド拡張 or 新メソッド追加 — 実装時に既存呼出側との互換を確認)。
-   - `record_order_result(plan_id, status, order_id, broker_result_json)` は**既存** (`:618`)。reject/failed もこれで記録 (status を enum 値で渡す)。専用 `mark_order_rejected` は不要 (record_order_result に reject を渡す)。
+   - **recovery query の拡張 (codex High #1):** 既存 `get_stale_pending_intents` は `status=="pending"` のみ拾う (`orchestrator_store.py:597`)。だが `mark_order_submitted` は `status="submitted"` にしてしまうため (`:614`)、最重要の「送信直後クラッシュ」(`status=submitted` かつ `order_id is null`) が拾われない。**新メソッド `get_stale_or_unconfirmed_intents(now)` を追加**し、lease 超過のうち `status=="pending"` OR (`status=="submitted"` AND `order_id is null`) **OR (`status=="submitted"` AND `order_id is not null`)** を拾う (3分岐すべてを recovery job が見るため、order_id 付き submitted も対象に含める)。既存 `get_stale_pending_intents` は他参照があり得るので変更せず別メソッドにする (実装時に呼出元 grep)。
+   - `record_order_result(plan_id, status, order_id, broker_result_json)` は**既存** (`:618`)。reject/failed もこれで記録 (status を enum 値で渡す)。専用 `mark_order_rejected` は不要。
    - `set_recovery_status(plan_id, recovery_status)` — recovery job 用に**新規追加** (`recovery_status` カラムは既存だが更新 API が無い)。
 
-2. **起動時 recovery job (§8.8 の3分岐)**
-   起動時に拡張した recovery query で lease 超過の未完了 intent を列挙し、`status` + `submitted_at` + `order_id` で判定:
+2. **起動時 recovery job (§8.8 の3分岐 — 確定)**
+   起動時に `get_stale_or_unconfirmed_intents(now)` で lease 超過の未完了 intent を列挙し、`status` + `order_id` で 3 分岐。**重要 (codex High):** plan は trigger 時に `triggered` に claim 済で `get_active_plans` は active のみ見るため、`recovery_status` を更新するだけでは plan は再 trigger されない。再発注は §4 と同じ **replan モデル** (旧 plan/intent を terminal 化 → 次 planning サイクルが新 plan を作る) に従う。recovery job は旧 plan/intent を terminal 化し、新 plan の生成は通常 planning に委ねる。
 
-   | 状態 | recovery_status | アクション |
-   |---|---|---|
-   | `status=pending` (submitted_at null) | `retryable` | 未発注。reconciliation 後に plan 再 trigger 可 (§4 の reject 同様 plan を active に戻す) |
-   | `status=submitted` かつ `order_id` null | `needs_reconcile` | broker に建玉したか不明。**当該 plan の再 trigger を禁止** + **alert**。自動照合はしない (手動 / 既存 reconciliation) |
-   | `status=submitted` かつ `order_id` あり | (正常) | status を `filled` に補正のみ (約定済とみなす) |
+   | 状態 | recovery_status | intent.status | plan 状態 | 再発注 |
+   |---|---|---|---|---|
+   | `status=pending` (未送信でクラッシュ) | `retryable` | `abandoned` (terminal 化) | `invalidated` | 次 planning サイクルが新 plan を作れば発注 (新 plan_id) |
+   | `status=submitted` かつ `order_id` null (送信直後クラッシュ・建玉不明) | `needs_reconcile` | `submitted` のまま (触らない) | `triggered` のまま (blocked) | **しない** (建玉があるかもしれない)。alert + 手動/既存 reconciliation で確認 |
+   | `status=submitted` かつ `order_id` あり (約定確定だが status 補正前) | (なし) | `filled` に補正 | `triggered` のまま | — (正常約定) |
 
-3. **再 trigger 禁止の担保**
-   `needs_reconcile` の plan は watch loop が trigger 対象から除外 (order_intents 参照 or plan 状態)。`try_insert_order_intent` の UNIQUE が残るため、仮に再評価されても二重 insert は弾かれる (多層防御)。
+3. **needs_reconcile の隔離 (再 trigger 禁止)**
+   `needs_reconcile` は plan を terminal 化しない (建玉があるかもしれず、勝手に invalidate すると保護対象から外れる)。plan は `triggered` のまま (=再 trigger されない) + intent は `submitted`+`needs_reconcile` のまま握る。`try_insert_order_intent` UNIQUE が残るので、仮に同 plan_id が再評価されても二重発注は弾かれる (多層防御)。手動/既存 reconciliation で建玉有無を確定し intent を terminal 化するまで、この plan は宙吊り (安全側)。
 
 **スコープ境界:** `needs_reconcile` は検出・隔離・alert まで。broker 自動照合は F 外。
 
@@ -154,16 +154,21 @@ plan の `action_json` から `TradeSignal` を組む。ロットは既存 `trad
 
 ### reject/failed/halted 後の plan / order_intent 状態遷移 (codex High #4 — 必須確定)
 
-**問題:** `_record_shadow_trigger` は trigger 時点で plan を `active`→`triggered` に claim する (`runtime.py:569` `try_mark_plan_triggered`)。`get_active_plans` は `active` のみ再評価する (`orchestrator_store.py:514`)。さらに order_intent は `plan_id` UNIQUE。よって final gate reject 後に何もしないと、plan は `triggered` のまま再評価されず、order_intent が UNIQUE を握り**永久ブロック**になる。これを spec で固定する:
+**問題:** `_record_shadow_trigger` は trigger 時点で plan を `active`→`triggered` に claim する (`runtime.py:569` `try_mark_plan_triggered`)。`get_active_plans` は `active` のみ再評価する (`orchestrator_store.py:514`)。さらに order_intent は `plan_id` UNIQUE で、**行が存在する限り UNIQUE を握り続ける (status を変えても解放されない)**。よって final gate reject 後に何もしないと plan は `triggered` のまま再評価されず永久ブロックになる。
 
-| ケース | order_intent.status | plan 状態 | 再発注可否 |
+**確定した再発注モデル (replan、同一 plan を蘇生させない):**
+再発注は「triggered 済 plan を active に戻して同一 plan_id で再 insert」ではなく、**通常の planning サイクルが新しい plan (= 新 plan_id → 新 order_intent) を作る**ことで行う。旧 plan と旧 intent は terminal 化するだけ。これにより UNIQUE 衝突も「同一 plan 蘇生」の複雑さも避ける。`requires_replan` plan status は planning_pipeline が「未昇格 plan」を作るための内部 transient であり「再 plan してほしい」シグナルではない (`planning_pipeline.py:247`) ため、ここでは使わない。
+
+| ケース | order_intent.status (terminal) | plan 状態 (terminal) | 再発注 |
 |---|---|---|---|
-| **一時的** reject / `halted` / `failed` (halt 一時 / 一時的拒否 / bridge 不通) | `rejected` or `failed` | plan を **`active` に戻す** (`update_plan_status(active)`) **かつ order_intent を削除 or abandoned 化** して UNIQUE を解放 | 次 tick で再 trigger 可 (entry 条件がまだ成立していれば) |
-| **恒久的** reject (invalid stops / 証拠金恒久不足 / risk hard veto) | `rejected` | plan を **`invalidated`** にする | 再 trigger しない (plan 終了) |
-| `skipped` (想定内抑制) | `abandoned` | plan を `invalidated` (想定内に発注見送り = この plan は用済み) | 再 trigger しない |
+| **恒久的** reject (structural: halt / 必須データ stale / risk hard veto) | `rejected` | `invalidated` | しない (この局面では発注不可) |
+| **一時的** reject (fixable: missing/invalid sl-tp 等) | `abandoned` | `invalidated` | 次 planning サイクルが新 plan を作れば発注 (新 plan_id) |
+| `failed` (broker 技術失敗: bridge 不通等) | `failed` | `invalidated` | 同上 (新 plan で再発注) |
+| `halted` (halt 状態) | `rejected` | `invalidated` | 同上 |
+| `skipped` (想定内抑制: 既存ポジ/hold/リスク制限) | `abandoned` | `invalidated` | しない (この plan は用済み) |
+| `executed` | `filled` | `triggered` のまま (発注完了) | — |
 
-**UNIQUE 解放の方針 (重要):** 一時的失敗で再発注を許すには、`triggered`→`active` に戻すだけでなく **order_intent の UNIQUE 制約を解放する必要がある** (同 plan_id で再 insert できないと §2 step1 で必ず中止になる)。F では「一時的失敗時は order_intent を `abandoned` にし、recovery/再 trigger 経路は **新しい plan** (replan) で発注する」方針を既定とする — 同一 plan_id の再 insert を避け UNIQUE 設計を壊さない。`triggered`→`active` 復帰 + 同 plan_id 再 insert を許す案は UNIQUE と衝突するため採らない。
-> 一時的 reject の「再評価」を同一 plan で行うか replan で行うかは、上記「replan 既定」で固定。plan 作成時にこの遷移をテストで pin する。
+**要点:** reject/非executed はすべて旧 plan を `invalidated` (terminal) にし、旧 intent も terminal status にする (UNIQUE 行は残るが、新 plan は別 plan_id なので衝突しない)。「同一 plan_id 再 insert」「triggered→active 復帰」は採らない (UNIQUE 設計と衝突)。plan 作成時にこの遷移をテストで pin する。
 
 reject/failed/halted いずれも: 発注しない + order_intent に上記 status + decision 反映 + alert (skipped 除く)。
 
