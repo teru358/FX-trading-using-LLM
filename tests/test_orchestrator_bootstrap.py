@@ -70,6 +70,21 @@ def _patch_heavy(monkeypatch, tmp_path: Path) -> None:
     )
 
 
+def _patch_orch_store(monkeypatch, tmp_path: Path) -> None:
+    """OrchestratorStore / news provider のみ stub (LLM factory は patch しない)。"""
+    from src.data.orchestrator_store import OrchestratorStore
+
+    real_init = OrchestratorStore.__init__
+
+    def fake_init(self, db_path):
+        real_init(self, tmp_path / "orch.db")
+
+    monkeypatch.setattr(OrchestratorStore, "__init__", fake_init)
+    monkeypatch.setattr(
+        bs, "make_news_provider", lambda config, store: (lambda pair: {})
+    )
+
+
 class _FakeAnalysisStore:
     def get_recent_ok_snapshots(self, symbol, *a, **k):
         return []
@@ -276,3 +291,62 @@ def test_risk_state_provider_all_clear(tmp_path: Path, monkeypatch) -> None:
     assert rs == {
         "halt": "none", "bridge_health": "ok", "market_open": True, "cooldown": False,
     }
+
+
+# ── per-agent LLM 配線 (2026-06-24 per-agent llm config) ──────
+
+
+def test_planner_and_exec_get_separate_agent_llms(tmp_path: Path, monkeypatch) -> None:
+    """agents.yaml で Planner / ExecutionOpinion に別 provider/temperature を指定すると、
+    別 client + 別 temperature の AgentLlm が配線される。"""
+    from src.config.schema import AgentLlmConfig
+
+    # 実 client 生成を避けるため _build_client を stub (provider/model/temperature を運ぶ)。
+    monkeypatch.setattr(
+        "src.llm.factory._build_client",
+        lambda provider, pc, model: ("client", provider, model),
+    )
+    _patch_orch_store(monkeypatch, tmp_path)
+
+    cfg = _config(enabled=True, tmp_path=tmp_path)
+    cfg.llm.provider = "claude-cli"
+    cfg.llm.price_analysis.model = "price-model"
+    # provider == top-level → 既存 provider_config 流用 (provider_configs 不要)
+    cfg.agent_llms.planner = AgentLlmConfig(
+        provider="claude-cli", model="planner-model", temperature=0.11)
+    cfg.agent_llms.execution_opinion = AgentLlmConfig(
+        provider="claude-cli", model="exec-model", temperature=0.22)
+
+    rt = bs.build_orchestrator_runtime(
+        cfg, store=object(), price_store=object(),
+        analysis_store=_FakeAnalysisStore(), price_provider=_FakePriceProvider(),
+    )
+    pipeline = rt._pipeline
+    # Planner と ExecutionOpinion が別 client + 別 temperature
+    assert pipeline._planner._temperature == 0.11
+    assert pipeline._exec._temperature == 0.22
+    assert pipeline._planner._llm == ("client", "claude-cli", "planner-model")
+    assert pipeline._exec._llm == ("client", "claude-cli", "exec-model")
+
+
+def test_no_agents_yaml_falls_back_to_price_analysis(tmp_path: Path, monkeypatch) -> None:
+    """agents.yaml 無し → 両 agent が price_analysis client + 役割 temperature (従来動作)。"""
+    monkeypatch.setattr(
+        "src.llm.factory._build_client",
+        lambda provider, pc, model: ("client", provider, model),
+    )
+    _patch_orch_store(monkeypatch, tmp_path)
+
+    cfg = _config(enabled=True, tmp_path=tmp_path)  # agent_llms 全 fallback
+    cfg.llm.provider = "claude-cli"
+    cfg.llm.price_analysis.model = "price-model"
+    cfg.llm.price_analysis.temperature = 0.1
+
+    rt = bs.build_orchestrator_runtime(
+        cfg, store=object(), price_store=object(),
+        analysis_store=_FakeAnalysisStore(), price_provider=_FakePriceProvider(),
+    )
+    pipeline = rt._pipeline
+    # 両方 price_analysis の temperature (役割 temperature)
+    assert pipeline._planner._temperature == 0.1
+    assert pipeline._exec._temperature == 0.1

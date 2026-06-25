@@ -382,21 +382,23 @@ def _build_market_state(
 def _build_pipeline(config: "AppConfig", orch_store: "OrchestratorStore"):
     """planning loop の LLM パイプラインを組む。
 
-    LLM クライアントは既存 factory (price_analysis ロール) を流用。PlannerAgent /
-    ExecutionOpinionAgent は同一 LLM を共有する (逐次・worker=1, §4.2)。RiskGateWorker は
-    spread 閾値のみ config から取る (pre-check, shadow は hard veto しない)。
+    PlannerAgent / ExecutionOpinionAgent はそれぞれ独立した AgentLlm
+    (client + temperature) を受け取る (per-agent llm config)。agents.yaml に
+    設定が無ければ両者とも price_analysis 役割 client + 役割 temperature に
+    fallback し従来動作 (逐次・worker=1, §4.2)。RiskGateWorker は spread 閾値のみ。
     """
-    from src.llm.factory import create_llm_client
+    from src.llm.factory import create_agent_llm
     from src.orchestrator.execution_opinion_agent import ExecutionOpinionAgent
     from src.orchestrator.planner_agent import PlannerAgent
     from src.orchestrator.planning_pipeline import PlanningPipeline
     from src.orchestrator.risk_gate import RiskGateWorker
 
-    llm = create_llm_client(config, "price_analysis")
+    planner_llm = create_agent_llm(config, "planner")
+    exec_llm = create_agent_llm(config, "execution_opinion")
     return PlanningPipeline(
         orch_store=orch_store,
-        planner=PlannerAgent(llm),
-        execution_agent=ExecutionOpinionAgent(llm),
+        planner=PlannerAgent(planner_llm),
+        execution_agent=ExecutionOpinionAgent(exec_llm),
         risk_gate=RiskGateWorker(
             spread_max_pips=config.orchestrator.entry.spread_max_pips
         ),
