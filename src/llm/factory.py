@@ -101,6 +101,9 @@ def create_llm_client(config: AppConfig, role: str) -> LLMClient:
     return _build_client(provider, pc, model)
 
 
+# 5 agent 名。authoritative source は schema.OrchestratorAgentsLlmConfig の field 集合。
+# 同名の tuple が src/config/loader.py:_AGENT_LLM_NAMES にもある (層が違う: loader は
+# agents.yaml キー検証、ここは runtime dispatch ガード)。agent を増減したら両方+schema を更新。
 AGENT_NAMES = ("planner", "news", "technical", "execution_opinion", "context_summary")
 
 _AGENT_FALLBACK_ROLE = {

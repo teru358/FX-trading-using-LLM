@@ -288,6 +288,8 @@ def _strip_deprecated_keys(trading_dict: dict) -> dict:
 
 # ── LLM 設定の構築とバリデーション ──────────────────────────────
 
+# 5 agent 名。authoritative source は schema.OrchestratorAgentsLlmConfig の field 集合。
+# 同名の tuple が src/llm/factory.py:AGENT_NAMES にもある (層が違う)。両方+schema を同期。
 _AGENT_LLM_NAMES = (
     "planner", "news", "technical", "execution_opinion", "context_summary",
 )
