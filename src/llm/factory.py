@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.config import AppConfig, ProviderConfig
+from src.config.schema import AgentLlm
 from src.llm.claude_cli_client import ClaudeCliClient
 from src.llm.claude_client import ClaudeClient
 from src.llm.client import LLMClient
@@ -98,3 +99,37 @@ def create_llm_client(config: AppConfig, role: str) -> LLMClient:
     model = role_cfg.model
 
     return _build_client(provider, pc, model)
+
+
+AGENT_NAMES = ("planner", "news", "technical", "execution_opinion", "context_summary")
+
+_AGENT_FALLBACK_ROLE = {
+    "planner": "price_analysis",
+    "news": "news_analysis",
+    "technical": "price_analysis",
+    "execution_opinion": "price_analysis",
+    "context_summary": "reflection",
+}
+
+
+def create_agent_llm(config: AppConfig, agent_name: str) -> AgentLlm:
+    """agent 専用 LLM ハンドル (client + temperature) を作る。
+
+    config.agent_llms.<agent_name>.provider が指定されていればその provider/model/
+    temperature、空欄なら既存役割 (price_analysis 等) の client + 役割 temperature に
+    fallback する (後方互換)。
+    """
+    if agent_name not in AGENT_NAMES:
+        raise ValueError(f"unknown agent '{agent_name}', expected {AGENT_NAMES}")
+
+    agent_cfg = getattr(config.agent_llms, agent_name)  # AgentLlmConfig
+    if not agent_cfg.provider:
+        role = _AGENT_FALLBACK_ROLE[agent_name]
+        role_cfg = getattr(config.llm, role)  # LLMRoleConfig (model + temperature)
+        return AgentLlm(
+            client=create_llm_client(config, role),
+            temperature=role_cfg.temperature,
+        )
+
+    # provider 指定 path は Task 9 で実装。
+    raise NotImplementedError("agent provider path not yet implemented")

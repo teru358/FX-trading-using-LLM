@@ -26,3 +26,55 @@ def test_agent_llm_bundle_holds_client_and_temperature() -> None:
     bundle = AgentLlm(client=sentinel_client, temperature=0.4)
     assert bundle.client is sentinel_client
     assert bundle.temperature == 0.4
+
+
+import src.llm.factory as factory_mod
+from src.config.schema import AgentLlm
+
+
+def _fallback_config() -> AppConfig:
+    """agent_llms 未設定 (全 fallback) の AppConfig。"""
+    cfg = AppConfig()
+    # 既定 LLMConfig は3役割の model 空。fallback client 生成のため model を埋める。
+    cfg.llm.news_analysis.model = "news-model"
+    cfg.llm.price_analysis.model = "price-model"
+    cfg.llm.reflection.model = "reflect-model"
+    return cfg
+
+
+@pytest.mark.parametrize(
+    "agent_name,expected_role",
+    [
+        ("planner", "price_analysis"),
+        ("news", "news_analysis"),
+        ("technical", "price_analysis"),
+        ("execution_opinion", "price_analysis"),
+        ("context_summary", "reflection"),
+    ],
+)
+def test_create_agent_llm_fallback_maps_to_role(
+    monkeypatch, agent_name, expected_role
+) -> None:
+    """provider 空の agent は既存役割 client + 役割 temperature に落ちる。"""
+    captured = {}
+
+    def fake_create_llm_client(config, role):
+        captured["role"] = role
+        return object()
+
+    monkeypatch.setattr(factory_mod, "create_llm_client", fake_create_llm_client)
+
+    cfg = _fallback_config()
+    bundle = factory_mod.create_agent_llm(cfg, agent_name)
+
+    assert isinstance(bundle, AgentLlm)
+    assert captured["role"] == expected_role
+    # temperature は fallback 役割の temperature
+    expected_temp = getattr(cfg.llm, expected_role).temperature
+    assert bundle.temperature == expected_temp
+
+
+def test_create_agent_llm_unknown_agent_raises() -> None:
+    cfg = _fallback_config()
+    with pytest.raises(ValueError, match="unknown agent"):
+        factory_mod.create_agent_llm(cfg, "nonexistent")
