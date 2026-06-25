@@ -14,8 +14,12 @@
 # context_summary は agent 未実装のため同じく設定枠のみ。
 
 agents:
-  # 実配線される 2 agent。top-level llm.provider と同じ claude-cli を使うため
-  # provider_configs は不要 (既存 provider_config を流用)。
+  # 実配線される 2 agent。下記は top-level llm.provider が claude-cli の前提の例。
+  # 【重要】このファイルをコピーする場合、provider は自分の settings.yaml の
+  #   top-level llm.provider と揃えること。揃えれば provider_configs 不要
+  #   (既存 provider_config を流用)。異なる provider にするなら settings.yaml の
+  #   llm.provider_configs.<provider> に接続設定が必須 (未定義は起動時 ConfigError)。
+  #   例: top-level が llamacpp なら provider を "llamacpp"、model を llama 系に変える。
   planner:
     provider: "claude-cli"
     model: "claude-sonnet-4-6"
