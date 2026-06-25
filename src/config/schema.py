@@ -461,6 +461,18 @@ class AgentLlmConfig:
 
 
 @dataclass
+class AgentLlm:
+    """agent に注入する LLM ハンドル (client + 解決済 temperature)。
+
+    temperature は agent の chat() 呼出ごとの引数なので、client 単体では
+    agent 別 temperature が届かない。factory が解決済 temperature を束ねて渡す。
+    client の型は llm パッケージ依存を避けるため文字列注釈 ("LLMClient")。
+    """
+    client: "LLMClient"        # noqa: F821  (実体は src.llm.client.LLMClient)
+    temperature: float
+
+
+@dataclass
 class OrchestratorAgentsLlmConfig:
     """5 agent の LLM 設定 (config/agents.yaml の agents:)。
 

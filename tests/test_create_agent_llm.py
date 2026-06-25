@@ -17,3 +17,12 @@ def test_build_client_llamacpp() -> None:
     assert isinstance(client, LlamaCppClient)
     # LlamaCppClient は model を .model_name プロパティで公開する (private は self._model)
     assert client.model_name == "plutus"
+
+
+def test_agent_llm_bundle_holds_client_and_temperature() -> None:
+    from src.config.schema import AgentLlm
+
+    sentinel_client = object()
+    bundle = AgentLlm(client=sentinel_client, temperature=0.4)
+    assert bundle.client is sentinel_client
+    assert bundle.temperature == 0.4
