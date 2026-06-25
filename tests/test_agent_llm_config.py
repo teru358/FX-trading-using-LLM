@@ -240,3 +240,13 @@ def test_agent_same_provider_as_top_level_needs_no_provider_config(tmp_path) -> 
     )
     cfg = load_config(settings)
     assert cfg.agent_llms.planner.provider == "llamacpp"
+
+
+def test_new_dataclasses_reexported_from_package_root() -> None:
+    """from src.config import ... で新 dataclass が import できる (入口の整合)。"""
+    import src.config as cfg_pkg
+
+    from src.config import AgentLlm, AgentLlmConfig, OrchestratorAgentsLlmConfig
+
+    for name in ("AgentLlm", "AgentLlmConfig", "OrchestratorAgentsLlmConfig"):
+        assert name in cfg_pkg.__all__
