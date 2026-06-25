@@ -14,7 +14,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.analysis.price_analyzer import PriceAnalysis
-from src.config.schema import OrchestratorConfig
+from src.config.schema import AgentLlm, OrchestratorConfig
 from src.data.analysis_store import AnalysisStore
 from src.data.orchestrator_store import OrchestratorStore
 from src.orchestrator.context_builder import DecisionContextBuilder, QuoteSnapshot
@@ -140,10 +140,11 @@ def _build_runtime(
         )
 
     llm = _ScriptedLLM([OPP_YES, DRAFT, FINAL_ACCEPT])
+    bundle = AgentLlm(client=llm, temperature=0.1)
     pipeline = PlanningPipeline(
         orch_store=orch,
-        planner=PlannerAgent(llm),
-        execution_agent=ExecutionOpinionAgent(llm),
+        planner=PlannerAgent(bundle),
+        execution_agent=ExecutionOpinionAgent(bundle),
         risk_gate=RiskGateWorker(min_rr=1.5, spread_max_pips=2.0, pip_size=0.01),
         config=OrchestratorConfig(),
     )

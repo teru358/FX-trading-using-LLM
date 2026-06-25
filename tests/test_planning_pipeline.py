@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from src.config.schema import OrchestratorConfig
+from src.config.schema import AgentLlm, OrchestratorConfig
 from src.data.orchestrator_store import OrchestratorStore
 from src.llm.client import CircuitOpenError
 from src.orchestrator.execution_opinion_agent import ExecutionOpinionAgent
@@ -103,10 +103,11 @@ def store(tmp_path: Path) -> OrchestratorStore:
 
 
 def _make_pipeline(store: OrchestratorStore, llm) -> PlanningPipeline:
+    bundle = AgentLlm(client=llm, temperature=0.1)
     return PlanningPipeline(
         orch_store=store,
-        planner=PlannerAgent(llm),
-        execution_agent=ExecutionOpinionAgent(llm),
+        planner=PlannerAgent(bundle),
+        execution_agent=ExecutionOpinionAgent(bundle),
         risk_gate=RiskGateWorker(min_rr=1.5, spread_max_pips=2.0, pip_size=0.01),
         config=OrchestratorConfig(),
     )
