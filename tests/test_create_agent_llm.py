@@ -78,3 +78,67 @@ def test_create_agent_llm_unknown_agent_raises() -> None:
     cfg = _fallback_config()
     with pytest.raises(ValueError, match="unknown agent"):
         factory_mod.create_agent_llm(cfg, "nonexistent")
+
+
+from src.config import ConfigError
+from src.config.schema import AgentLlmConfig, ProviderConfig
+
+
+def _config_with_agent(agent_name, agent_cfg: AgentLlmConfig, *, top_provider="claude-cli",
+                       provider_configs=None) -> AppConfig:
+    cfg = AppConfig()
+    cfg.llm.provider = top_provider
+    cfg.llm.price_analysis.model = "price-model"
+    cfg.llm.news_analysis.model = "news-model"
+    cfg.llm.reflection.model = "reflect-model"
+    if provider_configs:
+        cfg.llm.provider_configs = provider_configs
+    setattr(cfg.agent_llms, agent_name, agent_cfg)
+    return cfg
+
+
+def test_create_agent_llm_uses_provider_configs(monkeypatch) -> None:
+    """agent provider != top-level → provider_configs[provider] を使い AgentLlm を返す。"""
+    captured = {}
+
+    def fake_build_client(provider, pc, model):
+        captured.update(provider=provider, pc=pc, model=model)
+        return object()
+
+    monkeypatch.setattr(factory_mod, "_build_client", fake_build_client)
+
+    agent_cfg = AgentLlmConfig(provider="llamacpp", model="plutus", temperature=0.05)
+    pc = ProviderConfig(base_url="http://localhost:8080/v1")
+    cfg = _config_with_agent(
+        "technical", agent_cfg, top_provider="claude-cli",
+        provider_configs={"llamacpp": pc},
+    )
+
+    bundle = factory_mod.create_agent_llm(cfg, "technical")
+    assert bundle.temperature == 0.05            # agent 設定の temperature
+    assert captured["provider"] == "llamacpp"
+    assert captured["model"] == "plutus"
+    assert captured["pc"] is pc
+
+
+def test_create_agent_llm_same_provider_reuses_single_provider_config(monkeypatch) -> None:
+    """agent provider == top-level provider → 既存 provider_config を流用。"""
+    captured = {}
+    monkeypatch.setattr(
+        factory_mod, "_build_client",
+        lambda provider, pc, model: captured.update(pc=pc) or object(),
+    )
+    agent_cfg = AgentLlmConfig(provider="claude-cli", model="claude-sonnet-4-6", temperature=0.1)
+    cfg = _config_with_agent("planner", agent_cfg, top_provider="claude-cli")
+    factory_mod.create_agent_llm(cfg, "planner")
+    assert captured["pc"] is cfg.llm.provider_config   # 単一設定を流用
+
+
+def test_create_agent_llm_missing_provider_config_raises(monkeypatch) -> None:
+    """agent provider != top-level かつ provider_configs に該当無し → ConfigError。"""
+    agent_cfg = AgentLlmConfig(provider="llamacpp", model="plutus", temperature=0.1)
+    cfg = _config_with_agent(
+        "technical", agent_cfg, top_provider="claude-cli", provider_configs={},  # 該当無し
+    )
+    with pytest.raises(ConfigError, match="provider_configs"):
+        factory_mod.create_agent_llm(cfg, "technical")

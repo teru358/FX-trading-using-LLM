@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.config import AppConfig, ProviderConfig
+from src.config import AppConfig, ConfigError, ProviderConfig
 from src.config.schema import AgentLlm
 from src.llm.claude_cli_client import ClaudeCliClient
 from src.llm.claude_client import ClaudeClient
@@ -134,5 +134,22 @@ def create_agent_llm(config: AppConfig, agent_name: str) -> AgentLlm:
             temperature=role_cfg.temperature,
         )
 
-    # provider 指定 path は Task 9 で実装。
-    raise NotImplementedError("agent provider path not yet implemented")
+    # provider 別接続設定を解決 (spec High #3: 危険な空 fallback を禁止)。
+    # この解決規則は loader._validate_agent_provider_configs (起動時検証) と同じ不変条件:
+    # top-level と同一 provider → 単一 provider_config 流用 / 異なる → provider_configs[provider]
+    # 必須・無ければ ConfigError。両者がドリフトしないこと。
+    if agent_cfg.provider == config.llm.provider:
+        pc = config.llm.provider_config           # top-level と同一 provider なら既存設定を流用
+    else:
+        pc = config.llm.provider_configs.get(agent_cfg.provider)
+        if pc is None:
+            raise ConfigError(
+                f"agent '{agent_name}' provider '{agent_cfg.provider}' is not defined "
+                f"in llm.provider_configs. Add a connection config for it "
+                f"(implicit fallback to an empty provider_config is forbidden: "
+                f"a missing base_url would silently produce a broken client)."
+            )
+    return AgentLlm(
+        client=_build_client(agent_cfg.provider, pc, agent_cfg.model),
+        temperature=agent_cfg.temperature,
+    )
