@@ -134,3 +134,33 @@ def test_settings_do_not_carry_removed_position_management_keys() -> None:
         data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
         trading = data.get("trading", {}) or {}
         assert not (removed & set(trading)), f"{path} still has removed keys: {removed & set(trading)}"
+
+
+def test_agents_example_loads_with_settings_example(tmp_path) -> None:
+    """agents.yaml.example をそのままコピーしても既定 settings.yaml.example で load できる。
+
+    Task 5.5 の strict 検証 (cross-provider は provider_configs 必須) に対し、
+    .example が内部整合していることを保証する (有効行は claude-cli = top-level 同一)。
+    """
+    from src.config import load_config
+
+    examples = [
+        ("settings.yaml.example", "settings.yaml"),
+        ("instruments.yaml.example", "instruments.yaml"),
+        ("news_sources.yaml.example", "news_sources.yaml"),
+        ("agents.yaml.example", "agents.yaml"),
+    ]
+    for example_name, dst_name in examples:
+        src = CONFIG_DIR / example_name
+        if not src.exists():
+            pytest.skip(f"{example_name} not found")
+        shutil.copy2(src, tmp_path / dst_name)
+
+    cfg = load_config(tmp_path / "settings.yaml")
+    # 有効化されている 2 agent が読める (claude-cli = top-level provider)
+    assert cfg.agent_llms.planner.provider == "claude-cli"
+    assert cfg.agent_llms.execution_opinion.provider == "claude-cli"
+    # コメントアウトされた 3 agent は fallback (provider 空)
+    assert cfg.agent_llms.news.provider == ""
+    assert cfg.agent_llms.technical.provider == ""
+    assert cfg.agent_llms.context_summary.provider == ""

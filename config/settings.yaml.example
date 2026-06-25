@@ -75,6 +75,19 @@ llm:
     # 共通: 同時呼び出し上限 (Semaphore に渡る)
     max_concurrent: 2
 
+  # orchestrator agent 用: provider 名ごとの接続設定 (config/agents.yaml で参照)。
+  # 空 dict なら未使用 (既存 provider_config に fallback)。agents.yaml で
+  # top-level provider と異なる provider を使う agent はここに接続設定が必須。
+  provider_configs: {}
+  # 例:
+  #   claude-cli:
+  #     command: ""
+  #     isolated_cwd: ""
+  #     timeout_seconds: 120
+  #   llamacpp:
+  #     base_url: "http://localhost:8080/v1"
+  #     timeout_seconds: 120
+
   # 各役割で使うモデルと温度
   news_analysis:
     model: "claude-haiku-4-5"

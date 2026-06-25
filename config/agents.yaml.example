@@ -1,0 +1,44 @@
+# orchestrator 5-agent の個別 LLM 設定 (任意)。
+#
+# このファイル (config/agents.yaml) が存在しない場合、全 agent は既存の
+# 役割 LLM に fallback する (planner/execution_opinion/technical → price_analysis、
+# news → news_analysis、context_summary → reflection)。後方互換のため、
+# 本番では作らず fallback に任せても良い。
+#
+# provider は settings.yaml の llm.provider と異なる値を指定する場合、
+# llm.provider_configs[provider] に接続設定が必須 (未定義は起動時 ConfigError)。
+#
+# 現状の実配線: planner / execution_opinion のみが実 LLM client を受け取る。
+# news / technical は既存 collector が役割 LLM を使うため、ここの設定は
+# 「設定枠」であり現時点では LLM 呼出に効かない (将来 collector refactor で接続予定)。
+# context_summary は agent 未実装のため同じく設定枠のみ。
+
+agents:
+  # 実配線される 2 agent。top-level llm.provider と同じ claude-cli を使うため
+  # provider_configs は不要 (既存 provider_config を流用)。
+  planner:
+    provider: "claude-cli"
+    model: "claude-sonnet-4-6"
+    temperature: 0.1
+  execution_opinion:
+    provider: "claude-cli"
+    model: "claude-sonnet-4-6"
+    temperature: 0.1
+
+  # ↓ 設定枠のみ (現時点では LLM 呼出に未使用)。コメントアウトのまま = fallback。
+  #   有効化して別 provider (例: llamacpp) を使う場合は settings.yaml の
+  #   llm.provider_configs.llamacpp に接続設定 (base_url) が必須。未定義だと
+  #   起動時 ConfigError になる (このファイルをそのままコピーしても、provider_configs
+  #   が空の既定 settings.yaml では llamacpp 行が弾かれるため、コメントのままにしておく)。
+  # news:
+  #   provider: "llamacpp"
+  #   model: "llama3.1-8b"
+  #   temperature: 0.3
+  # technical:
+  #   provider: "llamacpp"
+  #   model: "plutus"
+  #   temperature: 0.1
+  # context_summary:
+  #   provider: "llamacpp"
+  #   model: "deepseek-r1-8b"
+  #   temperature: 0.3
