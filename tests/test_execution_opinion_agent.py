@@ -8,19 +8,22 @@ from __future__ import annotations
 
 import pytest
 
+from src.config.schema import AgentLlm
 from src.orchestrator.execution_opinion_agent import ExecutionOpinionAgent
 from src.orchestrator.schemas import ExecutionPlanDraft, SchemaParseError
 
 
 class _FakeLLM:
-    """chat() を固定 / 連続レスポンスで返す mock。呼び出し履歴を記録。"""
+    """chat() を固定 / 連続レスポンスで返す mock。呼び出し履歴と temperature を記録。"""
 
     def __init__(self, responses: list[str]) -> None:
         self._responses = list(responses)
         self.calls: list[list[dict]] = []
+        self.temperatures: list[float] = []
 
     async def chat(self, messages, temperature=0.1) -> str:
         self.calls.append(messages)
+        self.temperatures.append(temperature)
         return self._responses.pop(0)
 
 
@@ -48,7 +51,7 @@ def _ctx() -> dict:
 
 async def test_draft_parses_into_execution_plan_draft() -> None:
     llm = _FakeLLM([_GOOD_DRAFT_JSON])
-    agent = ExecutionOpinionAgent(llm)
+    agent = ExecutionOpinionAgent(AgentLlm(client=llm, temperature=0.1))
     draft = await agent.draft(pair="USDJPY=X", direction="long", context=_ctx())
     assert isinstance(draft, ExecutionPlanDraft)
     assert draft.direction == "long"
@@ -57,7 +60,7 @@ async def test_draft_parses_into_execution_plan_draft() -> None:
 
 async def test_prompt_includes_pair_and_direction() -> None:
     llm = _FakeLLM([_GOOD_DRAFT_JSON])
-    agent = ExecutionOpinionAgent(llm)
+    agent = ExecutionOpinionAgent(AgentLlm(client=llm, temperature=0.1))
     await agent.draft(pair="USDJPY=X", direction="short", context=_ctx())
     # system + user message が渡る
     msgs = llm.calls[0]
@@ -68,14 +71,14 @@ async def test_prompt_includes_pair_and_direction() -> None:
 
 async def test_malformed_output_raises_schema_parse_error() -> None:
     llm = _FakeLLM(["not json"])
-    agent = ExecutionOpinionAgent(llm)
+    agent = ExecutionOpinionAgent(AgentLlm(client=llm, temperature=0.1))
     with pytest.raises(SchemaParseError):
         await agent.draft(pair="USDJPY=X", direction="long", context=_ctx())
 
 
 async def test_redraft_includes_revision_feedback() -> None:
     llm = _FakeLLM([_GOOD_DRAFT_JSON])
-    agent = ExecutionOpinionAgent(llm)
+    agent = ExecutionOpinionAgent(AgentLlm(client=llm, temperature=0.1))
     await agent.draft(
         pair="USDJPY=X",
         direction="long",
@@ -84,3 +87,18 @@ async def test_redraft_includes_revision_feedback() -> None:
     )
     blob = " ".join(m["content"] for m in llm.calls[0])
     assert "rr 0.8 below min 1.5" in blob
+
+
+async def test_draft_uses_injected_temperature() -> None:
+    """AgentLlm.temperature が chat() に渡る (method 既定 0.1 ではなく注入値)。"""
+    llm = _FakeLLM([_GOOD_DRAFT_JSON])
+    agent = ExecutionOpinionAgent(AgentLlm(client=llm, temperature=0.37))
+    await agent.draft(pair="USDJPY=X", direction="long", context=_ctx())
+    assert llm.temperatures == [0.37]
+
+
+async def test_draft_explicit_temperature_overrides_injected() -> None:
+    llm = _FakeLLM([_GOOD_DRAFT_JSON])
+    agent = ExecutionOpinionAgent(AgentLlm(client=llm, temperature=0.37))
+    await agent.draft(pair="USDJPY=X", direction="long", context=_ctx(), temperature=0.8)
+    assert llm.temperatures == [0.8]

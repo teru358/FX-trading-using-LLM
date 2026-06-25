@@ -37,8 +37,10 @@ _SYSTEM = (
 
 
 class ExecutionOpinionAgent:
-    def __init__(self, llm) -> None:
-        self._llm = llm
+    def __init__(self, agent_llm) -> None:
+        # agent_llm: src.config.schema.AgentLlm (client + 解決済 temperature)
+        self._llm = agent_llm.client
+        self._temperature = agent_llm.temperature
 
     async def draft(
         self,
@@ -47,13 +49,14 @@ class ExecutionOpinionAgent:
         direction: str,
         context: dict[str, Any],
         revision_feedback: list[str] | None = None,
-        temperature: float = 0.1,
+        temperature: float | None = None,
     ) -> ExecutionPlanDraft:
         """draft を 1 件起案する。parse 失敗時 SchemaParseError。"""
+        temp = self._temperature if temperature is None else temperature
         user = self._build_user_prompt(pair, direction, context, revision_feedback)
         raw = await self._llm.chat(
             [{"role": "system", "content": _SYSTEM}, {"role": "user", "content": user}],
-            temperature=temperature,
+            temperature=temp,
         )
         return ExecutionPlanDraft.from_llm_json(raw)
 
