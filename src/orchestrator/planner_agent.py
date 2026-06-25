@@ -41,12 +41,15 @@ _FINAL_SYSTEM = (
 
 
 class PlannerAgent:
-    def __init__(self, llm) -> None:
-        self._llm = llm
+    def __init__(self, agent_llm) -> None:
+        # agent_llm: src.config.schema.AgentLlm (client + 解決済 temperature)
+        self._llm = agent_llm.client
+        self._temperature = agent_llm.temperature
 
     async def scan_opportunity(
-        self, *, pair: str, context: dict[str, Any], temperature: float = 0.1
+        self, *, pair: str, context: dict[str, Any], temperature: float | None = None
     ) -> PlannerOpportunity:
+        temp = self._temperature if temperature is None else temperature
         user = "\n".join(
             [
                 f"pair: {pair}",
@@ -57,7 +60,7 @@ class PlannerAgent:
         )
         raw = await self._llm.chat(
             [{"role": "system", "content": _SCAN_SYSTEM}, {"role": "user", "content": user}],
-            temperature=temperature,
+            temperature=temp,
         )
         return PlannerOpportunity.from_llm_json(raw)
 
@@ -67,8 +70,9 @@ class PlannerAgent:
         pair: str,
         context: dict[str, Any],
         draft: ExecutionPlanDraft,
-        temperature: float = 0.1,
+        temperature: float | None = None,
     ) -> PlannerFinalDecision:
+        temp = self._temperature if temperature is None else temperature
         user = "\n".join(
             [
                 f"pair: {pair}",
@@ -81,7 +85,7 @@ class PlannerAgent:
         )
         raw = await self._llm.chat(
             [{"role": "system", "content": _FINAL_SYSTEM}, {"role": "user", "content": user}],
-            temperature=temperature,
+            temperature=temp,
         )
         return PlannerFinalDecision.from_llm_json(raw)
 
