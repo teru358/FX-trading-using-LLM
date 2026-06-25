@@ -300,6 +300,9 @@ def _build_agent_llms(raw_agents: dict) -> OrchestratorAgentsLlmConfig:
 
     起動時に検証する (typo/欠落を silent fallback させない):
       - 未知 agent キー (typo) → ConfigError
+      - agents.<name> が mapping でない → ConfigError
+      - agents.<name> 内の未知キー (例: provder) → ConfigError
+        (_from_dict が黙って捨てると provider="" となり意図しない fallback で起動するため)
       - 各 agent: provider 指定時は provider ∈ LLM_PROVIDERS、かつ model 必須
     provider != top-level provider のときの provider_configs 必須チェックは
     provider_configs 構築後 (load_config で _validate_agent_provider_configs) に行う。
@@ -313,11 +316,25 @@ def _build_agent_llms(raw_agents: dict) -> OrchestratorAgentsLlmConfig:
                 f"Fix the typo — an unknown key would silently fall back to the "
                 f"default role LLM instead of using the intended per-agent config."
             )
+    allowed_keys = {f.name for f in fields(AgentLlmConfig)}  # provider / model / temperature
     kwargs = {}
     for name in _AGENT_LLM_NAMES:
-        entry = raw_agents.get(name)
+        if name not in raw_agents:
+            continue  # 未指定 agent は fallback (既定 AgentLlmConfig)
+        entry = raw_agents[name]
         if not isinstance(entry, dict):
-            continue
+            raise ConfigError(
+                f"config/agents.yaml: agents.{name} must be a mapping "
+                f"(provider/model/temperature), got {type(entry).__name__}."
+            )
+        unknown = set(entry) - allowed_keys
+        if unknown:
+            raise ConfigError(
+                f"config/agents.yaml: agents.{name} has unknown key(s) {sorted(unknown)} "
+                f"(allowed: {sorted(allowed_keys)}). Fix the typo — an unknown key would "
+                f"be silently dropped, causing an unintended fallback instead of the "
+                f"intended per-agent LLM config."
+            )
         agent_cfg = _from_dict(AgentLlmConfig, entry)
         if agent_cfg.provider:
             if agent_cfg.provider not in LLM_PROVIDERS:

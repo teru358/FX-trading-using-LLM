@@ -250,3 +250,47 @@ def test_new_dataclasses_reexported_from_package_root() -> None:
 
     for name in ("AgentLlm", "AgentLlmConfig", "OrchestratorAgentsLlmConfig"):
         assert name in cfg_pkg.__all__
+
+
+def test_agent_inner_key_typo_raises(tmp_path) -> None:
+    """agents.<name> 内のキー typo (例: provder) は起動時 ConfigError。
+
+    _from_dict が未知キーを黙って捨てると provider="" となり意図しない fallback で
+    起動してしまう。typo 検出が本機能の目的なので許可キーを限定して弾く。
+    """
+    settings = _write_with_agents(
+        tmp_path,
+        "agents:\n"
+        "  planner:\n"
+        "    provder: claude-cli\n"      # typo of 'provider'
+        "    model: claude-sonnet-4-6\n",
+    )
+    with pytest.raises(ConfigError, match="unknown key"):
+        load_config(settings)
+
+
+def test_agent_entry_non_dict_raises(tmp_path) -> None:
+    """agents.<name> が mapping でない (scalar/list) なら起動時 ConfigError。"""
+    settings = _write_with_agents(
+        tmp_path,
+        "agents:\n"
+        "  planner: claude-cli\n",       # mapping ではなく scalar
+    )
+    with pytest.raises(ConfigError, match="must be a mapping"):
+        load_config(settings)
+
+
+def test_agent_inner_keys_all_allowed_ok(tmp_path) -> None:
+    """provider/model/temperature の全許可キーは通る (誤検出しない)。"""
+    settings = _write_with_agents(
+        tmp_path,
+        "agents:\n"
+        "  planner:\n"
+        "    provider: llamacpp\n"        # top-level (llamacpp) と同一 → provider_configs 不要
+        "    model: plutus\n"
+        "    temperature: 0.05\n",
+    )
+    cfg = load_config(settings)
+    assert cfg.agent_llms.planner.provider == "llamacpp"
+    assert cfg.agent_llms.planner.model == "plutus"
+    assert cfg.agent_llms.planner.temperature == 0.05
