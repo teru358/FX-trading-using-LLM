@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON, Column, DateTime, Float, Integer, String, UniqueConstraint,
-    func, select, update,
+    func, or_, select, update,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -601,6 +601,41 @@ class OrchestratorStore:
             for r in rows:
                 session.expunge(r)
             return rows
+
+    def get_stale_or_unconfirmed_intents(self, *, now: datetime) -> list["_OrderIntent"]:
+        """recovery 候補を返す (Task F, codex #1)。lease 超過のうち未完了 = recovery 3 分岐:
+        status=="pending" (未送信) OR status=="submitted" (送信後)。後者は order_id 有無で
+        recovery job が needs_reconcile / filled 補正に分岐する。terminal (filled/rejected/
+        failed/abandoned) は対象外。'pending only' の既存 get_stale_pending_intents だと
+        submitted (送信直後クラッシュ) を取りこぼすため別メソッドにする。
+        """
+        with Session(self._engine) as session:
+            stmt = (
+                select(_OrderIntent)
+                .where(_OrderIntent.lease_until < now)
+                .where(
+                    or_(
+                        _OrderIntent.status == "pending",
+                        _OrderIntent.status == "submitted",
+                    )
+                )
+            )
+            rows = list(session.execute(stmt).scalars().all())
+            for r in rows:
+                session.expunge(r)
+            return rows
+
+    def set_recovery_status(self, *, plan_id: int, recovery_status: str) -> None:
+        """recovery job が判定した recovery_status を書き込む (Task F)。"""
+        with Session(self._engine) as session:
+            stmt = select(_OrderIntent).where(_OrderIntent.plan_id == plan_id)
+            intent = session.execute(stmt).scalars().first()
+            if intent is None:
+                logger.warning(f"set_recovery_status: plan_id {plan_id} not found")
+                return
+            intent.recovery_status = recovery_status
+            intent.updated_at = db_now()
+            session.commit()
 
     def mark_order_submitted(self, *, plan_id: int, submitted_at: datetime) -> None:
         """broker 送信直前に submitted_at を埋める (送信前/後の分岐点)。"""
