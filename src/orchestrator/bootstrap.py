@@ -286,6 +286,12 @@ def build_orchestrator_runtime(
         "[ORCH] runtime built (mode=%s, pairs=%s, shadow_notify=%s)",
         orch_cfg.mode, pairs, orch_cfg.notifications.shadow_enabled,
     )
+
+    # Task F (spec §3): 起動時に前回クラッシュの未完了 order_intent を recovery 分類する。
+    # shadow でも実行して害は無い (order_intents が空なら no-op)。
+    from src.orchestrator.order_recovery import recover_pending_intents
+    recover_pending_intents(orch_store, now=db_now())
+
     return runtime
 
 
