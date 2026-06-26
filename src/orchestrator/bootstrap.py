@@ -266,6 +266,14 @@ def build_orchestrator_runtime(
         cadence_resolver=cadence_resolver, landing_detector=detector,
     )
 
+    # Task F (F-4): orchestrator.mode=live なら発注用 execution broker + position_mgr を
+    # 構築し執行段に注入する (single execution writer)。shadow では None で live 分岐に
+    # 入らない (回帰維持・shadow 境界)。
+    execution_broker = None
+    execution_position_mgr = None
+    if orch_cfg.mode == "live":
+        execution_broker, execution_position_mgr = _build_execution_broker(config)
+
     runtime = OrchestratorRuntime(
         config=orch_cfg,
         orch_store=orch_store,
@@ -280,7 +288,12 @@ def build_orchestrator_runtime(
         shadow_notifier=notifier,
         market_state_detector=mstate,
         state_bridge=state_bridge,
-        # broker adapter は渡さない (shadow 境界, §7.3)。
+        # Task F: mode=live のとき発注 broker / position_mgr / app_config を執行段へ注入。
+        # shadow では None で live 分岐に入らない (§7.3 shadow 境界維持)。
+        mode=orch_cfg.mode,
+        execution_broker=execution_broker,
+        execution_position_mgr=execution_position_mgr,
+        app_config=config,
     )
     logger.info(
         "[ORCH] runtime built (mode=%s, pairs=%s, shadow_notify=%s)",
@@ -410,3 +423,94 @@ def _build_pipeline(config: "AppConfig", orch_store: "OrchestratorStore"):
         ),
         config=config.orchestrator,
     )
+
+
+def _build_execution_broker(config: "AppConfig"):
+    """Task F (F-4): orchestrator 執行段の発注 broker + position_mgr を構築する。
+
+    broker は trading cycle と同じ `create_broker(mode=AppConfig.mode, ...)` で組む
+    (src/cycles/trading.py:1037 と同一引数)。発注先は top-level AppConfig.mode が決める:
+    paper→PaperBroker (仮想資金), live_test→paper+MT5 observer, live→本番 broker。
+
+    codex Critical: live_test は ShadowBrokerAdapter の observer (MT5) が実 execute_signal
+    するため、bridge が DRY_RUN=false だと MT5 order_send に到達する。config では bridge の
+    runtime 状態を検証できないので、ここで bridge /health の dry_run==true を確認し、
+    true でなければ起動を弾く (実発注事故の防止)。paper は MT5 に到達しないため gate 不要。
+    """
+    from src.notifications.notifier import create_notifier
+    from src.persistence.state_store import StateStore
+    from src.trading.live_broker import create_broker
+    from src.trading.position_manager import PositionManager
+
+    mt5_cfg = config.providers.mt5
+
+    # codex Critical: live_test は MT5 observer が実発注しうる。bridge の dry_run を確認し、
+    # true でなければ起動を弾く (broker 構築前に gate)。
+    if config.mode == "live_test":
+        _assert_bridge_dry_run(config)
+
+    notifier = create_notifier(config.notifier.enabled)
+    broker = create_broker(
+        config.mode,
+        config.live_broker,
+        max_positions_per_pair=config.trading.max_positions_per_pair,
+        scale_in_enabled=config.trading.scale_in_enabled,
+        scale_in_conf_margin=config.trading.scale_in_conf_margin,
+        scale_in_score_margin=config.trading.scale_in_score_margin,
+        notifier=notifier,
+        state_dir=config.state_dir,
+        drawdown_kill_switch_enabled=config.trading.drawdown_kill_switch_enabled,
+        drawdown_kill_switch_max_pct=config.trading.drawdown_kill_switch_max_pct,
+        mt5_bridge_url=(mt5_cfg.bridge_url if mt5_cfg else ""),
+        mt5_lot_size_units=(mt5_cfg.lot_size_units if mt5_cfg else 100_000),
+        mt5_magic_number=(mt5_cfg.magic_number if mt5_cfg else 12345),
+        mt5_order_timeout_seconds=(mt5_cfg.order_request_timeout_seconds if mt5_cfg else 10.0),
+        mt5_consecutive_reject_threshold=(mt5_cfg.consecutive_reject_threshold if mt5_cfg else 3),
+        live_test_log_path=(mt5_cfg.shadow_log_path if mt5_cfg else "data/state/shadow_trades.jsonl"),
+        live_test_observer_state_dir=(mt5_cfg.shadow_observer_state_dir if mt5_cfg else "data/shadow_state"),
+    )
+    position_mgr = PositionManager(
+        StateStore(config.state_dir), context="OrchestratorExecution"
+    )
+    logger.info(
+        "[ORCH] execution broker built (AppConfig.mode=%s, live_broker=%s)",
+        config.mode, config.live_broker,
+    )
+    return broker, position_mgr
+
+
+def _assert_bridge_dry_run(config: "AppConfig") -> None:
+    """live_test 起動前に MT5 bridge の /health dry_run==true を要求する (codex Critical)。
+
+    dry_run==false (= 実発注モード) または health 取得失敗 (接続不可・タイムアウト・
+    形不正) のときは安全側で ValueError を投げ、live_test の実発注事故を防ぐ。
+    """
+    import httpx
+
+    mt5_cfg = config.providers.mt5
+    bridge_url = (mt5_cfg.bridge_url if mt5_cfg else "").rstrip("/")
+    if not bridge_url:
+        raise ValueError(
+            "orchestrator.mode=live + AppConfig.mode=live_test requires a configured "
+            "mt5 bridge_url to verify dry_run state; got empty bridge_url."
+        )
+    headers = {}
+    if mt5_cfg and mt5_cfg.api_key:
+        headers["X-Bridge-Api-Key"] = mt5_cfg.api_key
+    try:
+        resp = httpx.get(f"{bridge_url}/health", headers=headers, timeout=5.0)
+        resp.raise_for_status()
+        dry_run = resp.json().get("dry_run")
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError(
+            f"orchestrator.mode=live + AppConfig.mode=live_test: could not verify "
+            f"MT5 bridge dry_run state at {bridge_url}/health ({exc}); refusing to "
+            "start to avoid accidental live orders. Use AppConfig.mode=paper for the "
+            "safest dry-run validation (never reaches MT5)."
+        ) from exc
+    if dry_run is not True:
+        raise ValueError(
+            f"orchestrator.mode=live + AppConfig.mode=live_test requires the MT5 bridge "
+            f"to run with DRY_RUN=true; bridge reports dry_run={dry_run!r}. Refusing to "
+            "start to avoid live orders via the MT5 observer."
+        )
