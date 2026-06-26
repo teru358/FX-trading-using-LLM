@@ -810,6 +810,14 @@ class OrchestratorRuntime:
                 # 再発注は次 planning が新 plan を作る (replan)。UNIQUE 行は残るが新 plan_id
                 # なので衝突しない (codex High#2: status 変更では UNIQUE 解放されない)。
                 self._orch.update_plan_status(plan.plan_id, "invalidated")
+            elif result.outcome == "executed":
+                # F-5: executed は is_alertable_outcome==False で warning が出ないため INFO を
+                # 足す (体裁は 🧪 shadow trigger と揃える)。order_id は result.order から取る
+                # (ExecutionResult に直属 order_id 属性は無い, codex Medium)。
+                logger.info(
+                    "[ORCH] ✅ live execute plan %s %s @ %s",
+                    plan.plan_id, pair, order_id,
+                )
             if is_alertable_outcome(result.outcome):
                 logger.warning(
                     f"[ORCH] live execute {result.outcome} plan {plan.plan_id}: "
@@ -937,6 +945,17 @@ class OrchestratorRuntime:
 
     def _notify_planning_result(self, pair: str, result: "PipelineResult") -> None:
         """plan_create / reject を shadow 通知する。direct_hold/failed は通知しない。"""
+        # F-5 (spec §F-5): plan 作成成功をターミナルログにも出す (shadow trigger 🧪 と対)。
+        # plan_create のときのみ。direct_hold / failed は出さない (既存通知方針と同じ)。
+        # notifier 未注入でも出す (mode 非依存の観測性改善) ため guard の前に置く。
+        if result.outcome == "plan_create" and result.plan_id is not None:
+            logger.info(
+                "[ORCH] 📋 plan created %s %s %s score=%+.2f conf=%.2f",
+                result.plan_id, pair, result.direction or "?",
+                result.score if result.score is not None else 0.0,
+                result.confidence if result.confidence is not None else 0.0,
+            )
+
         if self._notifier is None:
             return
         from src.orchestrator.shadow_notifier import PlanCreatedInfo
