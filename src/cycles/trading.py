@@ -897,6 +897,17 @@ async def _phase_execute_signals(
     price_provider: PriceProvider | None,
 ) -> tuple[list, list]:
     """Phase 4b: シグナルに RAG 補正を適用し、新規発注 or HOLD 保存を実行する。"""
+    # Task F (codex #3): orchestrator が本番発注を担う (mode=live) なら、旧 cycle の
+    # 新規 entry はここで一括停止する (single execution writer)。全 entry point
+    # (main/API/CLI/TUI) は run_trading_cycle → 本 phase を通るため一括カバーされる。
+    # exit/close/reconciliation (Phase 4a 等) は呼び出し側で継続するので触らない。
+    # コード削除 (omit) は live 安定後の別 cleanup task (F ではフラグ停止まで)。
+    if getattr(config.orchestrator, "mode", "shadow") == "live":
+        logger.info(
+            "[CYCLE] orchestrator.mode=live — 新規 entry phase を skip (single writer)"
+        )
+        return [], []
+
     rag_cfg = RagAdjustmentConfig(
         enabled=config.trading.rag_adjustment_enabled,
         max_adjustment=config.trading.rag_adjustment_max,
