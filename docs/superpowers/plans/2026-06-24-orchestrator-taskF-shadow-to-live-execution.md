@@ -15,9 +15,9 @@
 ## File Structure
 
 **変更:**
-- `src/config/schema.py` — `OrchestratorConfig.mode` validation (shadow/live)、`execution_opinion_recheck_enabled`、`AppConfig` の cross-field validation (orchestrator.mode=live → AppConfig.mode=live + live_broker)。
+- `src/config/schema.py` — `OrchestratorConfig.mode` validation (shadow/live)、`execution_opinion_recheck_enabled`、`AppConfig` の cross-field validation (2026-06-25 改訂: orchestrator.mode=live のとき AppConfig.mode=paper/live_test は許可〔段階検証〕、AppConfig.mode=live のときだけ live_broker 必須。Task 2 参照)。
 - `src/data/orchestrator_store.py` — recovery query 拡張 (`get_stale_or_unconfirmed_intents`)、`set_recovery_status`。
-- `src/orchestrator/runtime.py` — `_execute_live_trigger` (執行段)、`_record_shadow_trigger` の live 分岐、`__init__` に `execution_broker`/`execution_position_mgr`/`mode` 受け、reject 後の plan/intent 遷移、起動時 recovery job。
+- `src/orchestrator/runtime.py` — `_execute_live_trigger` (執行段)、`_record_shadow_trigger` の live 分岐、`__init__` に `execution_broker`/`execution_position_mgr`/`mode` 受け、reject 後の plan/intent 遷移、起動時 recovery job、F-5 観測性ログ (`_notify_planning_result` に 📋 plan created、執行段に ✅ live execute)。
 - `src/orchestrator/bootstrap.py` — live 時に execution broker + position_mgr 構築 + runtime 注入、recovery job 起動。
 - `src/trading/order_intent_status.py` (新規) — `EXECUTION_OUTCOME_TO_INTENT_STATUS` mapping (single source of truth)。
 - `src/cycles/trading.py` — entry phase の統一ガード (orchestrator.mode=live で entry skip)。
@@ -31,6 +31,7 @@
 - `tests/test_taskf_recovery_job.py`
 - `tests/test_taskf_single_writer_guard.py`
 - `tests/test_taskf_bootstrap_wiring.py`
+- `tests/test_taskf_observability_logs.py`
 
 **実行環境 (全タスク共通):**
 - テストは WSL venv で実行: `wsl.exe -d Ubuntu-24.04 -- bash -lc 'cd ~/project/finance && source .venv/bin/activate && python -m pytest <args>'`
@@ -164,7 +165,16 @@ git commit -m "feat: ExecutionResult.outcome → order_intent.status mapping (Ta
 - Modify: `src/config/schema.py` (`OrchestratorConfig.__post_init__` に mode validation + `execution_opinion_recheck_enabled` フィールド、`AppConfig.__post_init__` に cross-field validation)
 - Test: `tests/test_taskf_config_validation.py`
 
-**Note:** `OrchestratorConfig.mode: str = "shadow"` は既存 (`schema.py:678`)。トップレベル `AppConfig.mode: str = "paper"` (`schema.py:727`) と別物。発注 broker は AppConfig.mode + live_broker で選ばれる。`OrchestratorConfig` 単体では AppConfig を参照できないので cross-field 検証は `AppConfig.__post_init__` に置く。`AppConfig` の live_broker フィールド名は実装時に確認 (`schema.py` の `live_broker` / `trading.live_broker` のいずれか — 既存 `create_broker` 呼出箇所 `src/cycles/trading.py:1026` 周辺で確認して合わせる)。
+**Note:** `OrchestratorConfig.mode: str = "shadow"` は既存 (`schema.py:720`)。トップレベル `AppConfig.mode: str = "paper"` (`schema.py:769`) と別物 = 発注先 broker を選ぶ軸 (paper/live/live_test)。発注 broker は `create_broker(mode=AppConfig.mode, live_broker=AppConfig.live_broker, ...)` で選ばれる (`live_broker.py:140`)。`OrchestratorConfig` 単体では AppConfig を参照できないので cross-field 検証は `AppConfig.__post_init__` (現状 **未定義 — 新設する**) に置く。`AppConfig.live_broker` は top-level フィールド (`schema.py:771` `live_broker: str | None = None`)。
+
+**cross-field validation の方針 (2026-06-25 改訂、spec §5):** `orchestrator.mode=live` のとき、`AppConfig.mode` 別に:
+- `paper` → **許可** (paper_broker は完全仮想で MT5 に一切到達しない。最も安全な段階検証。spec §0 確定判断7)。
+- `live_test` → **許可するが実発注ガードが別途必要 (codex Critical、下記 §live_test 注意)**。
+- `live` → `live_broker` 必須 (未設定なら実発注の取り違え事故として ValueError)。
+
+旧版の「orchestrator.mode=live なら AppConfig.mode も必ず live」要求は paper 検証を弾くため撤回。`live_test` の `live_broker=mt5` 必須は `create_broker` 側が課すので AppConfig では二重に課さない。
+
+> **§live_test 注意 — 実発注ガード (codex Critical):** `live_test` は paper primary + MT5 observer の `ShadowBrokerAdapter` を使うが、observer (`MT5BridgeBroker`) の `execute_signal` は **実際に bridge `/order` へ POST し、bridge が `DRY_RUN=false` なら MT5 `order_send` まで到達する** (`shadow_broker.py:69`, `mt5_bridge_broker.py:148`, `mt5_bridge/server.py:312`)。つまり `live_test` は「実発注しない」とは**コード上保証されていない** — bridge runtime の dry_run 状態に依存する。**config validation だけでは防げない (bridge 状態は config でなく runtime)。** よって bootstrap で execution broker を組む時 (Task 8) に **bridge `/health` の `dry_run==true` を確認し、false / 取得失敗なら起動を `ValueError` で弾く gate を必須とする** (`HealthResponse.dry_run`, `server.py:217-224`)。これにより `live_test` の価値 (MT5 observer でロット/margin 計算を検証) を残しつつ実発注事故を防ぐ。**最も安全な検証は `AppConfig.mode=paper`** (MT5 に一切到達しない) なので、まず paper を推奨し、live_test は MT5 経路の検証が要るときだけ dry_run gate 前提で使う。
 
 - [ ] **Step 1: Write the failing test**
 
@@ -231,37 +241,63 @@ Expected: PASS (3 passed)。
 `src/config/schema.py` の `AppConfig.__post_init__` (無ければ新設、あれば末尾追記) に cross-field validation を追加:
 
 ```python
-        # Task F: orchestrator が本番発注 (mode=live) するなら、発注 broker を選ぶ
-        # top-level mode も live で live_broker 必須 (spec §5 cross-field)。
-        # 不一致だと「発注すると言いながら paper broker を握る」矛盾になる。
+        # Task F (spec §5, 2026-06-25 改訂): orchestrator が発注主体 (mode=live) のとき、
+        # 発注先 broker を選ぶ top-level mode との整合を検証する。
+        #   - AppConfig.mode=paper / live_test → 許可 (paper_broker で動作確認。本番資金を
+        #     動かさない段階検証。spec §0 確定判断7)。
+        #   - AppConfig.mode=live → live_broker 必須 (未設定なら「発注すると言いながら
+        #     broker 未設定」の取り違え事故になるため弾く)。
+        # 旧版の「orchestrator.mode=live なら AppConfig.mode も必ず live」要求は、
+        # paper での段階検証を弾くため撤回 (spec §5 改訂)。
         if getattr(self.orchestrator, "mode", "shadow") == "live":
-            if self.mode != "live":
+            if self.mode == "live" and self.live_broker is None:
                 raise ValueError(
-                    "orchestrator.mode=live requires AppConfig.mode=live "
-                    f"(got AppConfig.mode={self.mode!r})"
-                )
-            if not self._has_live_broker():
-                raise ValueError(
-                    "orchestrator.mode=live requires a configured live_broker"
+                    "orchestrator.mode=live with AppConfig.mode=live requires a "
+                    "configured live_broker (mt5/oanda); got live_broker=None. "
+                    "For dry-run validation use AppConfig.mode=paper or live_test."
                 )
 ```
 
-`_has_live_broker()` は実装時に既存の live_broker 設定の在り処に合わせる (例: `self.live_broker is not None` または `self.trading.live_broker`)。`create_broker` の `live_broker` 引数の出所 (`src/cycles/trading.py:1026` の呼出) を確認して同じ参照にする。
+`AppConfig.live_broker` は schema の top-level フィールド (`schema.py:771` `live_broker: str | None = None`)。`create_broker(mode=..., live_broker=...)` (`src/cycles/trading.py:1026` の呼出) と同じ参照。`paper` / `live_test` は実発注しない (live_test は paper + observer、`live_broker.py:20`) ので broker 必須を課さない。`live_test` の `live_broker=mt5` 必須は `create_broker` 側 (`live_broker.py:213-217`) が課すため AppConfig では二重に課さない。
 
 - [ ] **Step 6: Write the cross-field test + run**
 
 `tests/test_taskf_config_validation.py` に追記 (AppConfig 構築は最小 fixture / loader 経由。実装時に既存 AppConfig テストの構築方法に倣う):
 
 ```python
-def test_appconfig_orchestrator_live_requires_top_level_live():
-    """orchestrator.mode=live + AppConfig.mode=paper は ValueError (codex 追加確認)。"""
+def test_appconfig_orchestrator_live_paper_is_allowed():
+    """orchestrator.mode=live + AppConfig.mode=paper は許可 (段階的 paper 検証、2026-06-25 改訂)。
+
+    本番資金を動かさず paper_broker で F 経路を動作確認する正当な構成。ValueError にしない。
+    """
     # 実装時: 既存 AppConfig 構築 helper / loader で最小 config を作り、
-    # orchestrator.mode="live", top-level mode="paper" で ValueError を確認する。
-    # (具体的構築は既存 tests/test_config_loader.py のパターンを流用)
+    # orchestrator.mode="live", top-level mode="paper" で例外が出ないことを確認。
+    ...
+
+
+def test_appconfig_orchestrator_live_live_test_is_allowed():
+    """orchestrator.mode=live + AppConfig.mode=live_test も許可 (paper + observer 検証)。"""
+    # live_test は実発注しない (paper + MT5 observer)。例外を出さない。
+    # (live_broker=mt5 必須は create_broker 側が課すので AppConfig では検証しない)
+    ...
+
+
+def test_appconfig_orchestrator_live_with_top_level_live_requires_broker():
+    """orchestrator.mode=live + AppConfig.mode=live + live_broker=None は ValueError。
+
+    実発注モードなのに broker 未設定 = 取り違え事故を弾く (validation の本来の目的)。
+    """
+    # orchestrator.mode="live", top-level mode="live", live_broker=None で pytest.raises(ValueError)。
+    ...
+
+
+def test_appconfig_orchestrator_live_with_top_level_live_and_broker_ok():
+    """orchestrator.mode=live + AppConfig.mode=live + live_broker=mt5 は成功 (本番発注構成)。"""
+    # orchestrator.mode="live", top-level mode="live", live_broker="mt5" で例外なし。
     ...
 ```
 
-> このテストは AppConfig の最小構築が必要。既存テストの構築パターンを確認し、`orchestrator.mode="live"` かつ top-level `mode="paper"` で `pytest.raises(ValueError)`、`mode="live"`+live_broker 設定済で成功、を検証する。AppConfig 構築が重く mock が必要なら、最小限の loader 入力 dict で代替してよい。
+> AppConfig の最小構築が必要。既存テストの構築パターン (`tests/test_config_loader.py`) を流用。検証する 4 ケース: (1) orchestrator.mode=live + mode=paper → 例外なし、(2) + mode=live_test → 例外なし、(3) + mode=live + live_broker=None → ValueError、(4) + mode=live + live_broker=mt5 → 例外なし。AppConfig 構築が重く mock が必要なら、最小限の loader 入力 dict で代替してよい。`live_broker` は top-level フィールド (`schema.py:771`)。
 
 Run: `pytest tests/test_taskf_config_validation.py -v`
 Expected: PASS。
@@ -427,12 +463,14 @@ git commit -m "feat: recovery query で送信直後クラッシュを拾う + se
 ## Task 4: `_execute_live_trigger` — 執行段 (F-1 / F-3)
 
 **Files:**
-- Modify: `src/orchestrator/runtime.py` (`__init__` に `mode`/`execution_broker`/`execution_position_mgr` 追加、`_execute_live_trigger` 新規、`_record_shadow_trigger` の live 分岐)
-- Test: `tests/test_taskf_execute_live_trigger.py`
+- Modify: `src/orchestrator/runtime.py` (`__init__` に `mode`/`execution_broker`/`execution_position_mgr`/`app_config` 追加、`_execute_live_trigger` 新規、`_record_shadow_trigger` の live 分岐、reject 遷移 `_apply_reject_transition`)
+- Test: `tests/test_taskf_execute_live_trigger.py`, `tests/test_taskf_reject_transitions.py`
 
-**Note:** 既存 `OrchestratorRuntime.__init__` は `risk_gate` を持つ (`runtime.py:71` `self._risk_gate`)。`_record_shadow_trigger` は shadow_trigger 記録後 `_notify_shadow_trigger` を呼んで終わる (`runtime.py:626`)。F はその直前 (ok 確定後・通知前) に live 分岐を挿す。`RiskGateWorker.pre_check(draft, context) -> RiskGateResult(passed, reject_class, issues)` (`risk_gate.py:83`、reject_class は "structural"=恒久 / "fixable"=一時)。`try_insert_order_intent(*, plan_id, pair, intended_action, owner_run_id, lease_until, decision_id=None, trigger_id=None) -> bool` (`orchestrator_store.py:527`)。`broker.execute_signal(signal, position_mgr, macro_context="") -> ExecutionResult` (`broker_adapter.py:66`)。`TradeSignal(pair, action, confidence, entry_price, stop_loss, take_profit, ...)` (`signal_combiner.py:21`)。`record_order_result(*, plan_id, status, order_id=None, broker_result_json=None)`。`mark_order_submitted(*, plan_id, submitted_at)`。
+**Note:** 既存 `OrchestratorRuntime.__init__` は `risk_gate` を持つ (`runtime.py:71` `self._risk_gate`)。**live 分岐の挿入位置は通知直前ではなく `try` 内・shadow_trigger 記録成功直後 (run が open のうち) — codex High、上記「挿入位置」参照。** `RiskGateWorker.pre_check(draft, context) -> RiskGateResult(passed, reject_class, issues)` (`risk_gate.py:83`、reject_class は "structural"=恒久 / "fixable"=一時)。`try_insert_order_intent(*, plan_id, pair, intended_action, owner_run_id, lease_until, decision_id=None, trigger_id=None) -> bool` (`orchestrator_store.py:527`)。`broker.execute_signal(signal, position_mgr, macro_context="") -> ExecutionResult` (`broker_adapter.py:66`)。`TradeSignal(pair, action, confidence, entry_price, stop_loss, take_profit, ...)` (`signal_combiner.py:21`)。`record_order_result(*, plan_id, status, order_id=None, broker_result_json=None)`。`mark_order_submitted(*, plan_id, submitted_at)`。
 
-**重要 (この task の範囲):** F-1 の正常系 (claim→gate pass→submit→execute→filled 反映) と gate reject の発注抑止まで。reject 後の plan/intent 状態遷移は **Task 5** で詳細化 (この task では「reject なら発注しない + intent に rejected」まで、plan 遷移は Task 5)。
+**AppConfig 注入 (codex High — sizing 用):** position_size の risk 算出 (`config.trading.risk_per_trade` 等) は **AppConfig** にあり、`self._config` (= OrchestratorConfig、`bootstrap.py:270`) からは読めない。よって runtime に **AppConfig (または最小限 trading 設定 + instrument pip_value) を `app_config` として注入**する (bootstrap が `config` を渡す)。`_trade_signal_from_plan` にこれと execute 時点 balance を渡す。
+
+**重要 (この task の範囲、codex Medium — Task 5 統合):** live 経路の不変条件として、**gate reject 後の plan/intent 遷移 (旧 Task 5) を本 task に統合する**。Task 4 だけ先にコミットすると、gate reject 後に plan が `triggered` のまま残り `get_active_plans` (`orchestrator_store.py:514`) で再評価されない**永久ブロックの中間状態**が生まれるため (codex Medium)。よって `_execute_live_trigger` は reject/failed/halted 時に `_apply_reject_transition` で plan を terminal 化 (一時的→abandoned+invalidated / 恒久的→invalidated、spec §4) し、intent も terminal status にする。旧 Task 5 のテスト (`test_taskf_reject_transitions.py`) も本 task で実装する (Step は下記に追加)。
 
 - [ ] **Step 1: Write the failing test**
 
@@ -561,22 +599,37 @@ Expected: FAIL — runtime が `execution_broker`/`mode` を受けない / `_exe
 
 - [ ] **Step 4: Write minimal implementation (_execute_live_trigger + live 分岐)**
 
-`src/orchestrator/runtime.py` の `_record_shadow_trigger` の通知直前 (`if not ok: return False` の後、`self._notify_shadow_trigger(...)` の前) に live 分岐を挿入:
+**挿入位置 (codex High — 修正必須):** 当初案の「通知直前 (`if not ok: return False` の後)」は **不正**。`_record_shadow_trigger` の構造は `try: ... shadow_trigger 記録 ... ok=True / finally: finish_run(run_id) / (finally 後) 通知` (`runtime.py:615-633`)。通知直前は **`finally` の後＝`finish_run` 済み**。ここで live execution を呼ぶと、`_execute_live_trigger` 内の `record_decision(run_id, ...)` が**終了済み run に後付け**され、execute 失敗しても run は `ok` のまま残り、`snapshot_id=0` も汚染する。
+
+正しくは **`try` ブロック内・shadow_trigger 記録成功直後 (ok=True の直後、まだ run が open のうち)** に挿入し、`snapshot_id` / `shadow_trigger_id` / `trigger_ctx` を渡す。execute 失敗時は同一 try が `ok=False` に倒し、`finally` が `finish_run(status="failed")` を記録する。これにより run lifecycle と execution の整合が保たれる。
 
 ```python
+        # try 内、shadow_trigger 記録成功・ok=True の直後 (run が open のうち):
         # Task F: live mode かつ execution broker 注入時のみ本番発注へ進む (single writer)。
         if self._mode == "live" and self._execution_broker is not None:
-            self._execute_live_trigger(plan, pair, quote, decision_id, run_id)
+            # snapshot_id / shadow_trigger_id を渡し、record_decision が open run に正しく紐づく。
+            # 例外は _execute_live_trigger 内で握り、ok を倒さない or 倒すかは結果で決める
+            # (executed/skipped=正常終了、reject/failed=run は ok のままで intent 側に記録、
+            #  例外=recovery 対象として finally で failed)。詳細は下記実装。
+            self._execute_live_trigger(
+                plan, pair, quote, decision_id, shadow_trigger_id, snapshot_id, run_id,
+            )
 ```
+
+> 代替案: execution を別の execution run (`start_run(trigger_type="live_execute")`) で起こす設計も可。ただし shadow_trigger と同一 run に紐づける方が trace graph (§8.1) が単純。実装時にどちらか確定し、いずれにせよ **finish_run 後に record_decision しない**ことを不変条件とする。`_execute_live_trigger` の record_decision には `snapshot_id=0` でなく渡された `snapshot_id` を使う。
 
 `_record_shadow_trigger` の下に新メソッド:
 
 ```python
-    def _execute_live_trigger(self, plan, pair, quote, decision_id, run_id) -> None:
+    def _execute_live_trigger(
+        self, plan, pair, quote, decision_id, shadow_trigger_id, snapshot_id, run_id,
+    ) -> None:
         """本番発注の執行段 (spec §2, F-1/F-3)。single execution writer。
 
         claim (order_intent) → final gate → submit-marked → execute → 結果反映。
         例外は watch loop を止めない (recovery job が後で拾う)。
+        run はまだ open (呼び出しは finish_run より前)。record_decision には渡された
+        snapshot_id を使う (snapshot_id=0 を使わない、codex High)。
         """
         from datetime import timedelta
 
@@ -615,13 +668,15 @@ Expected: FAIL — runtime が `execution_broker`/`mode` を受けない / `_exe
             if not gate.passed:
                 self._orch.record_order_result(plan_id=plan.plan_id, status="rejected")
                 self._orch.record_decision(
-                    run_id=run_id, snapshot_id=0, pair=pair,
+                    run_id=run_id, snapshot_id=snapshot_id, pair=pair,
                     decision_type="plan_trigger", plan_id=plan.plan_id,
                     reasoning_summary=f"live gate reject: {gate.reject_class}",
                     risk_gate_result=gate.to_dict(),
                 )
                 logger.warning(f"[ORCH] live gate reject plan {plan.plan_id}: {gate.issues}")
-                return  # plan 遷移は Task 5 で詳細化
+                # reject 後の plan/intent 遷移はこの Task 内で実施 (codex Medium: Task 5 と統合)。
+                self._apply_reject_transition(plan, gate.reject_class)  # 下記 (旧 Task 5)
+                return
 
             # 3. submit マーキング (復旧分岐点)
             self._orch.mark_order_submitted(plan_id=plan.plan_id, submitted_at=db_now())
@@ -629,7 +684,9 @@ Expected: FAIL — runtime が `execution_broker`/`mode` を受けない / `_exe
             # 4. 発注 (single writer)。TradeSignal は全必須フィールドを満たす helper で構築
             #    (codex High: 現行 dataclass は predicted_direction/combined_score/position_size/
             #     signal_reason/detail_reason/news/price/generated_at も必須)。
-            signal = _trade_signal_from_plan(plan, pair, quote)
+            #    position_size は risk ベース算出 (codex High): config + execute 時点 balance を渡す。
+            balance = self._execution_position_mgr.get_balance()  # 実メソッド名は実装時に確認
+            signal = _trade_signal_from_plan(plan, pair, quote, self._app_config, balance)
             result = self._execution_broker.execute_signal(
                 signal, self._execution_position_mgr,
             )
@@ -698,7 +755,9 @@ git commit -m "feat: _execute_live_trigger 執行段 (claim→gate→submit→ex
 - Modify: `src/orchestrator/runtime.py` (module-level helper `_trade_signal_from_plan`)
 - Test: `tests/test_taskf_trade_signal_from_plan.py`
 
-**Note (codex High):** 現行 `TradeSignal` は 15 フィールド: `pair, action, predicted_direction, combined_score, confidence, entry_price, stop_loss, take_profit, position_size, signal_reason, detail_reason, news (NewsSentiment), price (PriceAnalysis), generated_at, tv_recommendation=""` (`signal_combiner.py:21`)。broker (`mt5_bridge_broker.execute_signal`) が読むのは `action / pair / position_size (→volume_lots) / stop_loss / take_profit / signal_reason (→comment) / confidence` (`mt5_bridge_broker.py:96-136`)。helper は plan の `action_json` (sl/tp/rr/confidence/position_size) と quote から broker 関連フィールドを埋め、provenance フィールド (news/price/predicted_direction 等) は orchestrator 由来と分かる最小有効値で埋める。`NewsSentiment(pair, sentiment_score, confidence, ...)` (`news_analyzer.py:45`) と `PriceAnalysis(pair, direction_bias, bias_score, confidence, entry_zone, reasoning_summary, analyzed_at, ...)` (`price_analyzer.py:36`) は必須フィールドのみ渡して最小構築する。
+**Note (codex High):** 現行 `TradeSignal` は 15 フィールド: `pair, action, predicted_direction, combined_score, confidence, entry_price, stop_loss, take_profit, position_size, signal_reason, detail_reason, news (NewsSentiment), price (PriceAnalysis), generated_at, tv_recommendation=""` (`signal_combiner.py:21`)。broker (`mt5_bridge_broker.execute_signal`) が読むのは `action / pair / position_size (→volume_lots) / stop_loss / take_profit / signal_reason (→comment) / confidence` (`mt5_bridge_broker.py:96-136`)。helper は plan の `action_json` (sl/tp/rr/confidence) と quote から broker 関連フィールドを埋め、provenance フィールド (news/price/predicted_direction 等) は orchestrator 由来と分かる最小有効値で埋める。`NewsSentiment(pair, sentiment_score, confidence, ...)` (`news_analyzer.py:45`) と `PriceAnalysis(pair, direction_bias, bias_score, confidence, entry_zone, reasoning_summary, analyzed_at, ...)` (`price_analyzer.py:36`) は必須フィールドのみ渡して最小構築する。
+
+**position_size (codex High — 修正):** `ExecutionPlanDraft.action` には `position_size` が**無い** (`schemas.py:240` は `sl/tp/size_policy/rr/comment`)。よって固定 `1000.0` fallback は使わず、**既存 trading cycle と同一の `_calculate_position_size(balance, risk_pct, entry, stop_loss, pip_value, min_lot_size, lot_unit)` (`signal_combiner.py:251`、trading cycle は `trading.py:306` で使用) を再利用**する。helper は `config` (risk_per_trade/min_lot_size/lot_unit を `config.trading` から、pip_value を instrument 設定から) と `balance` (現在残高) を受け取る。balance / pip_value の取得経路は既存 trading cycle の発注前処理 (`trading.py:301-308` 付近) に倣う (実装時に確認)。これにより orchestrator 発注も既存と同じリスク管理 (口座リスク % ベース) になる。
 
 - [ ] **Step 1: Write the failing test**
 
@@ -715,8 +774,7 @@ from src.signals.signal_combiner import TradeSignal
 def _plan():
     return SimpleNamespace(
         plan_id=1, pair="USDJPY=X", direction="long",
-        action_json={"sl": 149.0, "tp": 152.0, "rr": 2.0,
-                     "confidence": 0.7, "position_size": 1000.0},
+        action_json={"sl": 149.0, "tp": 152.0, "rr": 2.0, "confidence": 0.7},
     )
 
 
@@ -725,14 +783,19 @@ def _quote():
                            source="mt5", observed_at=datetime.now())
 
 
+def _config():
+    # 実装時: 既存 AppConfig 構築 helper / 最小 fixture。trading.risk_per_trade/
+    # min_lot_size/lot_unit と instrument の pip_value を持つ最小 config。
+    ...
+
+
 def test_builds_valid_tradesignal_with_all_fields():
-    sig = _trade_signal_from_plan(_plan(), "USDJPY=X", _quote())
+    sig = _trade_signal_from_plan(_plan(), "USDJPY=X", _quote(), _config(), balance=50000.0)
     assert isinstance(sig, TradeSignal)        # 全必須フィールドが揃い construct 成功
     assert sig.pair == "USDJPY=X"
     assert sig.action == "buy"                 # long → buy
     assert sig.stop_loss == 149.0
     assert sig.take_profit == 152.0
-    assert sig.position_size == 1000.0
     assert sig.confidence == 0.7
     assert sig.entry_price == 150.0            # quote.mid
     # broker が comment に使う signal_reason が空でない
@@ -744,16 +807,19 @@ def test_builds_valid_tradesignal_with_all_fields():
 def test_short_direction_maps_to_sell():
     plan = _plan()
     plan.direction = "short"
-    sig = _trade_signal_from_plan(plan, "USDJPY=X", _quote())
+    sig = _trade_signal_from_plan(plan, "USDJPY=X", _quote(), _config(), balance=50000.0)
     assert sig.action == "sell"
 
 
-def test_missing_position_size_falls_back():
-    plan = _plan()
-    plan.action_json = {"sl": 149.0, "tp": 152.0}  # position_size 無し
-    sig = _trade_signal_from_plan(plan, "USDJPY=X", _quote())
-    # 既定 lot にフォールバック (0 や None でない)
+def test_position_size_uses_risk_based_calc_not_fixed_1000():
+    """codex High: position_size は固定 1000 でなく、_calculate_position_size による
+    risk ベース算出 (balance × risk_per_trade / SL距離, min_lot/unit 丸め) になる。"""
+    # balance / risk_per_trade / SL距離 を変えると position_size が変わることを確認
+    # (固定 1000 なら不変になってしまう)。min_lot_size 下限・lot_unit 丸めも確認。
+    sig = _trade_signal_from_plan(_plan(), "USDJPY=X", _quote(), _config(), balance=50000.0)
     assert sig.position_size and sig.position_size > 0
+    # 既存 _calculate_position_size と同じ値になること (同一引数で直接呼んで突き合わせ)。
+    ...
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -766,17 +832,22 @@ Expected: FAIL — `_trade_signal_from_plan` が無い (ImportError)。
 `src/orchestrator/runtime.py` の module-level (クラス外、import 群の下) に追加:
 
 ```python
-def _trade_signal_from_plan(plan, pair: str, quote) -> "TradeSignal":
+def _trade_signal_from_plan(plan, pair: str, quote, config, balance: float) -> "TradeSignal":
     """plan の action_json + quote から発注用 TradeSignal を構築する (Task F)。
 
     broker が読むフィールド (action/pair/position_size/stop_loss/take_profit/
     signal_reason/confidence) を plan から埋め、provenance フィールド (news/price/
     predicted_direction 等) は orchestrator 由来と分かる最小有効値で埋める。
     TradeSignal は 15 フィールド必須 (signal_combiner.py:21) なので全て渡す。
+
+    position_size (codex High): ExecutionPlanDraft.action には position_size が無い
+    (schemas.py:240 は sl/tp/size_policy/rr/comment のみ) ため、既存 trading cycle と
+    同じ risk ベース算出を再利用する。固定 1000.0 fallback は risk_per_trade/
+    min_lot_size/lot_unit を無視するため使わない。
     """
     from src.analysis.news_analyzer import NewsSentiment
     from src.analysis.price_analyzer import PriceAnalysis
-    from src.signals.signal_combiner import TradeSignal
+    from src.signals.signal_combiner import TradeSignal, _calculate_position_size
     from src.utils.clock import db_now
 
     action = plan.action_json or {}
@@ -786,7 +857,18 @@ def _trade_signal_from_plan(plan, pair: str, quote) -> "TradeSignal":
     sl = float(action["sl"])
     tp = float(action["tp"])
     conf = float(action.get("confidence", 1.0))
-    size = float(action.get("position_size") or 1000.0)  # 既定 1 lot 相当
+    # 既存 trading cycle (trading.py:306) と同一の risk ベース算出を再利用する。
+    # pip_value は instrument 設定から (既存 trading cycle の取得経路に倣う、実装時に確認)。
+    pip_value = _resolve_pip_value(config, pair)  # 既存経路を流用 (trading cycle と同じ instrument 設定)
+    size = _calculate_position_size(
+        balance=balance,
+        risk_pct=config.trading.risk_per_trade,
+        entry=quote.mid,
+        stop_loss=sl,
+        pip_value=pip_value,
+        min_lot_size=config.trading.min_lot_size,
+        lot_unit=config.trading.lot_unit,
+    )
     now = db_now()
 
     news = NewsSentiment(pair=pair, sentiment_score=0.0, confidence=conf)
@@ -807,6 +889,8 @@ def _trade_signal_from_plan(plan, pair: str, quote) -> "TradeSignal":
 ```
 
 > `NewsSentiment` / `PriceAnalysis` の必須フィールドは実装時に再確認 (`news_analyzer.py:45` / `price_analyzer.py:36`)。本番発注で broker が実際に使うのは sl/tp/size/comment/confidence なので、provenance は最小有効値でよい (発注の意思決定は既に plan で確定済)。
+>
+> **`_resolve_pip_value` / balance の取得 (codex High):** `pip_value` は既存 trading cycle が instrument 設定から得ている経路を流用する (実装時に `trading.py:301-308` 付近の `_calculate_position_size` 呼出を確認し、同じ pip_value source を使う。helper 化できるならそれを共有)。`balance` は execute 時点の口座残高で、`_execute_live_trigger` (Task 4) が `execution_position_mgr` / StateStore から取得して helper に渡す (既存 trading cycle と同じ残高ソース)。これにより plan→発注の間に残高が動いても execute 時点の最新 balance でロットが決まる (orchestrator の逐次原則と整合)。
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -822,10 +906,12 @@ git commit -m "feat: _trade_signal_from_plan で完全な TradeSignal を構築 
 
 ---
 
-## Task 5: reject/failed/halted 後の plan/intent 遷移 (codex #4)
+## Task 5: reject/failed/halted 後の plan/intent 遷移 (codex #4) — **Task 4 と同一コミット**
+
+> **codex Medium:** 本 task (reject 後遷移) は Task 4 (`_execute_live_trigger`) と**同一コミットにまとめる**。Task 4 だけ先にコミットすると、gate reject 後に plan が `triggered` のまま残り再評価されない永久ブロックの中間状態が live 経路に入るため。実装手順としては Task 4 の `_execute_live_trigger` に `_apply_reject_transition` (本 task) を組み込んでから 1 コミットする。Task 4 の Step の中で本 task の test (`test_taskf_reject_transitions.py`) も green にする。下記はその遷移ロジックの詳細仕様。
 
 **Files:**
-- Modify: `src/orchestrator/runtime.py` (`_execute_live_trigger` の reject/非executed 分岐に plan 遷移を追加)
+- Modify: `src/orchestrator/runtime.py` (`_execute_live_trigger` の reject/非executed 分岐に plan 遷移 `_apply_reject_transition` を追加 — Task 4 と同一変更)
 - Test: `tests/test_taskf_reject_transitions.py`
 
 **Note (codex #4 + High#2):** trigger 時に plan は active→triggered に claim される (`runtime.py:569`)。`get_active_plans` は active のみ再評価 (`orchestrator_store.py:514`)。order_intent は plan_id UNIQUE で、**行が存在する限り UNIQUE を握り続ける (status を `abandoned` 等に変えても解放されない、codex High#2)**。何もしないと plan は triggered のまま再評価されず永久ブロック。
@@ -1222,14 +1308,32 @@ def test_shadow_mode_no_execution_broker(tmp_path, monkeypatch):
 
 
 def test_live_mode_injects_execution_broker(tmp_path, monkeypatch):
-    """mode=live: runtime に execution_broker + execution_position_mgr が注入される。"""
+    """mode=live + AppConfig.mode=live: runtime に execution_broker + position_mgr が注入される。"""
     # orchestrator.mode=live + AppConfig.mode=live + live_broker 設定で build し、
     # rt._execution_broker is not None / rt._mode == "live" を確認。
     # create_broker / PositionManager は monkeypatch で軽量 stub に差し替え (本番接続しない)。
     ...
+
+
+def test_live_mode_with_paper_injects_paper_broker(tmp_path, monkeypatch):
+    """段階検証: orchestrator.mode=live + AppConfig.mode=paper でも execution_broker が
+    注入される (paper_broker = 仮想資金で F 経路を動作確認、2026-06-25 改訂)。"""
+    # orchestrator.mode=live + AppConfig.mode=paper (live_broker 不要) で build し、
+    # rt._execution_broker is not None / rt._mode == "live" を確認。
+    # create_broker は mode=paper で PaperBrokerAdapter を返す (monkeypatch で stub 化可)。
+    ...
+
+
+def test_live_test_requires_bridge_dry_run(tmp_path, monkeypatch):
+    """codex Critical: orchestrator.mode=live + AppConfig.mode=live_test は、bridge /health の
+    dry_run==true を確認できなければ起動を ValueError で弾く (実発注事故の防止)。"""
+    # bridge /health の dry_run=false を返す stub で build → ValueError。
+    # dry_run=true を返す stub なら build 成功 (execution_broker 注入)。
+    # /health 取得失敗 (例外) でも ValueError (安全側)。
+    ...
 ```
 
-> 実装時に既存 `tests/test_orchestrator_bootstrap.py` の構築パターン (Phase 2/D の `test_producer_covers_all_tradeable...` 等) を流用。`create_broker` と `PositionManager`/`StateStore` を monkeypatch で stub 化し、本番 broker 接続を起こさない。cross-field validation (Task 2) があるので live テストは AppConfig.mode=live + live_broker を満たす config を作る。
+> 実装時に既存 `tests/test_orchestrator_bootstrap.py` の構築パターン (Phase 2/D の `test_producer_covers_all_tradeable...` 等) を流用。`create_broker` と `PositionManager`/`StateStore` を monkeypatch で stub 化し、本番 broker 接続を起こさない。bootstrap の execution 配線は `create_broker(mode=config.mode, ...)` を使うので、`orchestrator.mode=live` なら **top-level mode が paper でも live でも** execution broker が注入される (broker 種別は top-level mode が決める)。cross-field validation (Task 2) で live テストは AppConfig.mode=live + live_broker を満たす config を、paper 検証テストは AppConfig.mode=paper の config を作る。
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1260,7 +1364,16 @@ Expected: FAIL — bootstrap が execution broker を構築・注入しない。
             state_dir=config.state_dir,
             # mt5_* / lot / scale-in 等の引数は trading cycle 呼出と同じものを渡す
         )
+
+        # codex Critical: live_test は ShadowBrokerAdapter の observer (MT5) が実 execute_signal
+        # するため、bridge が DRY_RUN=false だと MT5 order_send に到達する。config では bridge の
+        # runtime 状態を検証できないので、ここで bridge /health の dry_run を確認し、true でなければ
+        # 起動を弾く (実発注事故の防止)。paper は MT5 に到達しないため gate 不要。
+        if config.mode == "live_test":
+            _assert_bridge_dry_run(config)  # /health の dry_run==true を要求。false/取得失敗で ValueError
 ```
+
+> **`_assert_bridge_dry_run` (新規 helper):** bridge の `/health` (`mt5_bridge/server.py:217`、`HealthResponse.dry_run: bool`) を叩き、`dry_run==true` でなければ `ValueError`。取得失敗 (接続不可・タイムアウト) も安全側で `ValueError` に倒す (dry_run 状態を確認できないまま live_test を起動しない)。bridge URL / 認証ヘッダは既存 `MT5BridgeBroker` 構築と同じ config 経路を使う (実装時に確認)。この gate は `config.mode == "live_test"` かつ `orch_cfg.mode == "live"` のときのみ走る。
 
 `OrchestratorRuntime(...)` 呼び出しに引数追加:
 
@@ -1291,6 +1404,107 @@ git commit -m "feat: live 時に execution broker/position_mgr を執行段に�
 
 ---
 
+## Task 8.5: F-5 観測性 — plan 作成ログ + 約定成功ログ (spec §F-5, 2026-06-25 追加)
+
+**Files:**
+- Modify: `src/orchestrator/runtime.py` (`_notify_planning_result` 近辺で plan_create 成功時 INFO、執行段 `_execute_live_trigger` の executed 成功時 INFO)
+- Test: `tests/test_taskf_observability_logs.py`
+
+**Note:** spec §F-5。現状 plan 作成は DB / Discord にしか残らず、ターミナルログに出ない (`_notify_planning_result`, `runtime.py:183`)。一方 trigger は `🧪 shadow trigger` を INFO で出す (`runtime.py:611`)。この非対称で shadow/live 検証中に「いつ plan ができ、いつ trigger/execute したか」をログだけで追えない。発注 (executed) も `is_alertable_outcome("executed")==False` のため warning が出ない。**mode 非依存** (shadow/live 両方で有効) の観測性改善。
+
+- [ ] **Step 1: Write the failing test**
+
+`tests/test_taskf_observability_logs.py` を新規作成:
+
+```python
+import logging
+
+import pytest
+
+# plan_create 成功時に [ORCH] 📋 plan created INFO が 1 本出る (shadow trigger 🧪 と対)。
+# direct_hold / failed には出さない。実装時に既存 runtime テストの fixture/モック構築に倣う。
+# (PipelineResult(outcome="plan_create", plan_id=N, direction=..., score=..., confidence=...)
+#  を返す pipeline をモックし、_notify_planning_result 経路を通す。)
+
+
+@pytest.mark.asyncio
+async def test_plan_create_emits_info_log(caplog):
+    """plan_create 成功時に [ORCH] 📋 plan created ... INFO が 1 本出る。"""
+    # 実装時: outcome="plan_create" の PipelineResult を返す runtime を組み、
+    # run_planning_cycle 実行 → caplog に "📋 plan created" の INFO が 1 件あること。
+    ...
+
+
+@pytest.mark.asyncio
+async def test_direct_hold_emits_no_plan_created_log(caplog):
+    """direct_hold では 📋 plan created を出さない (既存通知方針と同じ)。"""
+    ...
+
+
+@pytest.mark.asyncio
+async def test_live_execute_success_emits_info_log(caplog):
+    """executed (約定成功) 時に [ORCH] ✅ live execute ... INFO が 1 本出る。
+
+    executed は is_alertable_outcome==False で warning が出ないため、別途 INFO を足す。
+    """
+    ...
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `pytest tests/test_taskf_observability_logs.py -v`
+Expected: FAIL — plan created / live execute success の INFO がまだ無い。
+
+- [ ] **Step 3: Write minimal implementation (plan created ログ)**
+
+`src/orchestrator/runtime.py` の `_notify_planning_result` (`runtime.py:183` 近辺) で、plan_create 成功時 (Discord 通知の手前/直後、deterministic path 外) に INFO を 1 本追加:
+
+```python
+        # F-5 (spec §F-5): plan 作成成功をターミナルログにも出す (shadow trigger 🧪 と対)。
+        # plan_create のときのみ。direct_hold / failed は出さない (既存通知方針と同じ)。
+        if result.outcome == "plan_create" and result.plan_id is not None:
+            logger.info(
+                "[ORCH] 📋 plan created %s %s %s score=%+.2f conf=%.2f",
+                result.plan_id, pair, result.direction or "?",
+                result.score if result.score is not None else 0.0,
+                result.confidence if result.confidence is not None else 0.0,
+            )
+```
+
+> 配置は `_notify_planning_result` の plan_create 分岐 (notify_plan_created 呼出と同じ条件) に合わせる。reject も任意で 1 行 (`[ORCH] plan rejected %s: %s`) を足してよい (実装判断)。
+
+- [ ] **Step 4: Write minimal implementation (約定成功ログ)**
+
+`_execute_live_trigger` (Task 4 で新設) の executed 成功時に INFO を 1 本追加 (体裁は 🧪 shadow trigger と揃える):
+
+```python
+        # F-5: executed は is_alertable_outcome==False で warning が出ないため INFO を足す。
+        # 注意: ExecutionResult に order_id 属性は無い (broker_adapter.py:34 は order: Order|None)。
+        # order_id は result.order.order_id から取る (codex Medium)。
+        if result.outcome == "executed":
+            order_id = result.order.order_id if result.order is not None else None
+            logger.info(
+                "[ORCH] ✅ live execute plan %s %s @ %s",
+                plan.plan_id, pair, order_id,
+            )
+```
+
+> Task 4 の execute 結果反映 (§2 step6) の直後に置く。Task 4 実装時にこの 1 行を含めてもよい (その場合 Task 8.5 はテストのみ)。`ExecutionResult` は `order: Order | None` を持つ (`broker_adapter.py:34`)。`order_id` という直属属性は無いので `result.order.order_id if result.order else None` を使う。
+
+- [ ] **Step 5: Run test to verify it passes**
+
+Run: `pytest tests/test_taskf_observability_logs.py -v`
+Expected: PASS。`📋 plan created` / `✅ live execute` が出て、direct_hold には出ない。
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/orchestrator/runtime.py tests/test_taskf_observability_logs.py
+git commit -m "feat: F-5 plan作成・約定成功のターミナルログ (plan→trigger→execute 可観測化)"
+```
+
+---
+
 ## Task 9: settings.yaml.example + 全体回帰 + Review Checklist
 
 **Files:**
@@ -1302,7 +1516,10 @@ git commit -m "feat: live 時に execution broker/position_mgr を執行段に�
 
 ```yaml
   # Task F: shadow→本番発注 昇格。live は orchestrator 執行段が単一発注主体になる。
-  # ※ live は top-level mode=live + live_broker 必須 (cross-field validation)。
+  # 発注先 broker は top-level mode (paper/live/live_test) が決める:
+  #   - mode=live + AppConfig.mode=paper    → paper_broker (仮想資金) で動作確認 (推奨の段階検証)
+  #   - mode=live + AppConfig.mode=live_test → paper + MT5 observer (実発注なし) で検証
+  #   - mode=live + AppConfig.mode=live     → 本番発注 (live_broker 必須、未設定は起動時エラー)
   mode: "shadow"  # shadow | live
   # 発注直前の ExecutionOpinion 再点火 (material change 時)。既定 OFF (決定的・高速執行)。
   execution_opinion_recheck_enabled: false
@@ -1310,7 +1527,7 @@ git commit -m "feat: live 時に execution broker/position_mgr を執行段に�
 
 - [ ] **Step 2: 全 F テスト**
 
-Run: `pytest tests/test_taskf_order_intent_status_map.py tests/test_taskf_config_validation.py tests/test_taskf_recovery_query.py tests/test_taskf_execute_live_trigger.py tests/test_taskf_reject_transitions.py tests/test_taskf_recovery_job.py tests/test_taskf_single_writer_guard.py tests/test_taskf_bootstrap_wiring.py -v`
+Run: `pytest tests/test_taskf_order_intent_status_map.py tests/test_taskf_config_validation.py tests/test_taskf_recovery_query.py tests/test_taskf_execute_live_trigger.py tests/test_taskf_reject_transitions.py tests/test_taskf_recovery_job.py tests/test_taskf_single_writer_guard.py tests/test_taskf_bootstrap_wiring.py tests/test_taskf_observability_logs.py -v`
 Expected: PASS (全て)。
 
 - [ ] **Step 3: フルスイート回帰**
@@ -1325,6 +1542,7 @@ spec §7 の各項目を対応テストで満たしているか確認:
 - F-2 UNIQUE 二重発注防止 / recovery query 送信直後クラッシュ / needs_reconcile 隔離 → Task 3, 6
 - F-3 broker reject decision 反映 / reject 後遷移で永久ブロック回避 → Task 4, 5
 - F-4 shadow 回帰 / cross-field validation / 旧 cycle entry 全 entry point 停止 → Task 2, 7, 8
+- F-5 plan 作成成功 INFO (📋 plan created) / 約定成功 INFO (✅ live execute) / direct_hold・failed には出さない → Task 8.5
 
 - [ ] **Step 5: Commit**
 
@@ -1338,8 +1556,10 @@ git commit -m "docs: settings.yaml.example に orchestrator.mode=live (Task F) �
 ## 完了条件
 
 - `OrchestratorConfig.mode=shadow` (既定) で全既存挙動が無改変 (回帰グリーン)。
-- `mode=live` (+ AppConfig.mode=live + live_broker) で orchestrator 執行段が trigger→final gate→execute を single writer 実行。
+- `mode=live` で orchestrator 執行段が trigger→final gate→execute を single writer 実行。発注先 broker は top-level `AppConfig.mode` が決める: `paper`/`live_test` なら仮想資金/observer で動作確認 (段階検証)、`live`+`live_broker` で本番発注。
+- cross-field validation は `AppConfig.mode=live` のときだけ `live_broker` 必須を課し、`orchestrator.mode=live`+`AppConfig.mode=paper`/`live_test` (段階的 paper 検証) は通す (2026-06-25 改訂)。
 - order_intents UNIQUE で二重発注を防ぎ、起動時 recovery が pending→retryable / submitted+null→needs_reconcile を分類 (送信直後クラッシュを取りこぼさない)。
 - gate reject / 非 executed 後に plan が invalidated + intent terminal 化し、再発注は新 plan_id (replan) で行うため永久ブロックしない。
 - 旧 trading cycle の新規 entry が全 entry point (main/API/CLI/TUI) で停止 (single writer)。
+- F-5 観測性: plan 作成成功で `📋 plan created`、約定成功で `✅ live execute` の INFO がターミナルログに出る (shadow trigger 🧪 と対)。direct_hold / failed には出さない。shadow/live 両方で有効 (mode 非依存)。
 - 旧経路コード削除 (omit) / needs_reconcile 自動照合 / material recheck ON 化は本 plan のスコープ外 (将来課題)。

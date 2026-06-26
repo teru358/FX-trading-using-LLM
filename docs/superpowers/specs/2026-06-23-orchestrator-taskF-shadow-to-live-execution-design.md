@@ -28,6 +28,7 @@
 4. **material recheck:** F-1 の material change 時 ExecutionOpinionAgent 再点火は **配線するが config フラグで既定 OFF**。まず決定的・高速執行 (LLM なし) で live 検証。
 5. **執行コンテキスト:** trigger 確定直後に同一 watch スレッド内で同期執行 (案A、claim-first / submit-marked 一気通貫)。
 6. **旧経路 omit:** F では旧 trading cycle 発注を **フラグで停止するのみ**。コード削除は live 安定確認後の別 cleanup task。
+7. **段階的 paper 検証 (2026-06-25 追加):** `OrchestratorConfig.mode=live` (orchestrator が発注主体) と top-level `AppConfig.mode` (paper/live/live_test = 発注先 broker) は独立2軸。**`orchestrator.mode=live` + `AppConfig.mode=paper` (または `live_test`) は正当な構成**で、本番資金を動かさず orchestrator 執行段の新発注経路 (claim→gate→submit→execute→recovery) を一度 paper / live_test で動作確認できる。これが本番 (`AppConfig.mode=live`) へ踏み込む前の標準的な検証段。cross-field validation はこの段階検証を**禁止しない** (§5 参照)。
 
 ### 不変条件
 
@@ -57,7 +58,7 @@ watch loop (run_watch_cycle)
 
 mode 分岐 (`OrchestratorConfig.mode`):
 - `shadow` (既定): 従来通り。broker 未結線、shadow_trigger 記録のみ。**完全な後方互換・回帰維持。**
-- `live`: 上記 F 経路が有効。bootstrap が live 時のみ execution broker + execution position_mgr を runtime に注入。**ただし本番発注には top-level `AppConfig.mode=live` + `live_broker` が前提** (§5 の cross-field validation 参照)。
+- `live`: 上記 F 経路が有効。bootstrap が live 時のみ execution broker + execution position_mgr を runtime に注入。注入される broker は **top-level `AppConfig.mode` で決まる** (`create_broker(mode=AppConfig.mode, ...)`)。`AppConfig.mode=paper` なら paper_broker (仮想資金) に発注 = 本番資金を動かさず F 経路を動作確認できる段階検証 (§0 確定判断7)。`AppConfig.mode=live` + `live_broker` のとき初めて本番発注になる (§5 の cross-field validation 参照)。
 
 **Phase 2/D との独立性:** `tick_migration_stage` (保護移設の段階) と `OrchestratorConfig.mode` (発注の段階) は独立した2軸。`protect_live` (保護を worker が適用) と `mode=live` (entry を orchestrator が発注) は別概念。F は `OrchestratorConfig.mode` のみ扱う。
 
@@ -180,7 +181,11 @@ reject/failed/halted いずれも: 発注しない + order_intent に上記 stat
 
 **重要:** `OrchestratorConfig.mode` (`shadow`/`live`、`schema.py:678`) と トップレベル `AppConfig.mode` (`paper`/`live`/`live_test`、`schema.py:727`) は**別物**。発注 broker は **トップレベル `AppConfig.mode` + `live_broker`** で選ばれる (`create_broker(mode, live_broker, ...)`, `live_broker.py:140`)。`OrchestratorConfig.mode=live` だけでは本番 broker にならない。
 
-- **cross-field validation を追加 (必須):** `OrchestratorConfig.mode=="live"` のとき、`AppConfig.__post_init__` (または loader) で **`AppConfig.mode=="live"` かつ `live_broker` が設定済 (mt5 等)** を要求し、満たさなければ `ValueError`。orchestrator が本番発注すると言いながら top-level が paper だと、執行段が paper broker を握る (本番発注にならない) か矛盾するため。`OrchestratorConfig` 単体の `__post_init__` では AppConfig を参照できないので、この検証は AppConfig レベルに置く。
+- **cross-field validation を追加 (必須) — ただし paper / live_test 検証は許容 (2026-06-25 改訂):** `OrchestratorConfig.mode=="live"` のとき、`AppConfig.__post_init__` (または loader) で次を検証する。`OrchestratorConfig` 単体の `__post_init__` では AppConfig を参照できないので、この検証は AppConfig レベルに置く。
+  - `AppConfig.mode=="paper"` → **許可** (paper_broker で動作確認。本番資金を動かさない正当な検証段、§0 確定判断7)。
+  - `AppConfig.mode=="live_test"` → **許可** (paper + MT5 observer で実発注せず検証。`live_broker=="mt5"` 必須は既存 `create_broker` が課すのでここで二重に課さない)。
+  - `AppConfig.mode=="live"` → **`live_broker` が設定済 (mt5/oanda) を要求**し、未設定なら `ValueError`。「本番発注すると言いながら broker 未設定」という取り違え事故を防ぐ。
+  - **旧版からの変更点:** 旧 spec は「`orchestrator.mode=live` なら `AppConfig.mode` も必ず `live`」を要求していたが、これは「orchestrator=live + paper で先に動作確認する」という標準的な段階検証を弾いてしまうため撤回。validation の目的を「実発注モード (`AppConfig.mode=live`) のときに broker 未設定を弾く」に限定する。意図的な paper / live_test 検証は通す。
 - `OrchestratorConfig.mode` の許容値: F では `shadow`/`live` を扱う。`observe` は現状未使用で F の執行段を起動しない (= 非 live 扱い、broker 未結線)。許容値 validation は実装時に既存実態を確認して追加。
 - 限定発注は既存 config で表現: 限定銘柄 → `orchestrator.pairs` (planning scope) / 小ロット → `trading` のロット設定。新しい mode 軸は増やさない。
 - material recheck: `OrchestratorConfig` に `execution_opinion_recheck_enabled: bool = False` + `execution_recheck_timeout_seconds` (既存があれば再利用) を追加。
@@ -199,6 +204,23 @@ reject/failed/halted いずれも: 発注しない + order_intent に上記 stat
 - 旧 cycle の exit/close/reconciliation は触らない (既存系の再利用は維持)。
 - **コード削除 (旧 entry phase の omit) は別 cleanup task** (live 安定後の version2 完全移行)。F では「フラグで entry を停止」まで。
 
+### F-5: 観測性 — plan 作成ログの追加 (2026-06-25 追加)
+
+**背景:** 現状、watch ループの material 判定は毎 tick `[AGGREGATE]` を INFO で出すが、**plan が新規作成された事実はターミナルログに出ない** (`record_decision(plan_create)` で DB へ、`notify_plan_created` で Discord へ記録されるのみ、`runtime.py:183` `_notify_planning_result`)。一方、発注 (trigger) 側は `[ORCH] 🧪 shadow trigger plan N PAIR DIR @ price` を INFO で出す (`runtime.py:611`)。この非対称により、shadow/live 検証中に「いつ plan ができ、いつ trigger/発注したか」をログだけで追えない。
+
+**F での対応:** plan 作成成功時に発注ログと対になる INFO 行を 1 本追加する。`run_planning_cycle` の plan_create 確定箇所 (`_notify_planning_result` 呼出の近く、`runtime.py:183`) で:
+
+```
+INFO  [ORCH] 📋 plan created N PAIR DIR score=+0.XX conf=0.XX
+```
+
+- 体裁は shadow trigger ログ (🧪) と揃える (📋 = plan / 🧪 = trigger の対)。
+- `plan_create` の成功時のみ。`direct_hold` / `failed` は出さない (既存の通知方針と同じ — fail は既に `planning fail-safe` warning がある)。
+- reject も任意で 1 行 (`[ORCH] plan rejected PAIR: reason`) を足してよい (実装時判断)。
+- これは shadow/live 両方で有効な観測性改善 (mode 非依存)。live 執行段の発注ログ (§2 step6 の executed→filled) と合わせ、plan→trigger→execute の一連をログで追えるようにする。
+
+> **発注 (executed) 成功ログの補完:** §2 step6 の execute 経路は `is_alertable_outcome("executed")==False` のため warning を出さない。F-5 と同じ観測性方針で、約定成功時に `[ORCH] ✅ live execute plan N PAIR @ order_id` 相当の INFO を 1 本足す (実装時に shadow trigger ログと体裁を揃える)。
+
 ---
 
 ## 6. テスト方針 (TDD)
@@ -206,7 +228,7 @@ reject/failed/halted いずれも: 発注しない + order_intent に上記 stat
 - **F-1:** trigger→gate→execute フロー (gate pass で発注 / reject で不発注)。`ExecutionResult.outcome → order_intent.status` mapping (executed→filled / skipped→abandoned / rejected→rejected / halted→rejected / failed→failed) が正しく `record_order_result` に渡るか。
 - **F-2:** order_intents UNIQUE で二重発注防止。**recovery query が `status=submitted` かつ `order_id is null` (送信直後クラッシュ) を拾うか** (codex #1 回帰)。recovery 3分岐それぞれ (retryable / needs_reconcile が再 trigger 禁止 + alert / 正常 filled 補正)。`submitted_at` 前後 (status=pending vs submitted) のクラッシュ模擬。
 - **F-3:** broker reject が decision に反映されるか。pre-check pass + final reject の不一致が記録されるか。**reject/failed/halted 後の plan/order_intent 遷移** (一時的→abandoned+replan / 恒久的→invalidated) で永久ブロックが起きないか (codex #4 回帰)。
-- **F-4:** `OrchestratorConfig.mode=shadow` で broker 未結線 (回帰)。`mode=live` で broker 注入され執行段が動く。**`mode=live` かつ `AppConfig.mode!=live` で ValueError** (codex 追加確認 回帰)。**`OrchestratorConfig.mode=live` のとき `run_trading_cycle` が entry phase を skip するか** (全 entry point カバー、codex #3 回帰)。
+- **F-4:** `OrchestratorConfig.mode=shadow` で broker 未結線 (回帰)。`mode=live` で broker 注入され執行段が動く。**段階検証の許容:** `orchestrator.mode=live` + `AppConfig.mode=paper` (および `live_test`) は **ValueError にならず** paper_broker (仮想資金) に発注する (本番資金を動かさない動作確認)。**実発注の取り違え防止:** `orchestrator.mode=live` + `AppConfig.mode=live` かつ `live_broker` 未設定で ValueError。**`OrchestratorConfig.mode=live` のとき `run_trading_cycle` が entry phase を skip するか** (全 entry point カバー、codex #3 回帰)。
 
 実 broker / LLM はテストで mock (コスト抑制・本番発注を起こさない)。
 
@@ -224,8 +246,9 @@ reject/failed/halted いずれも: 発注しない + order_intent に上記 stat
 - [ ] F-3: broker reject / 両 gate 不一致が decision に反映されるか。
 - [ ] F-3: reject/failed/halted 後の plan/order_intent 遷移が定義され、永久ブロック・再評価不能が起きないか (codex #4)。
 - [ ] F-4: `mode=shadow` (既定) で broker 未結線・shadow 全テスト回帰グリーンか。
-- [ ] F-4: `OrchestratorConfig.mode=live` が `AppConfig.mode=live` + `live_broker` を要求する validation があるか (codex 追加確認)。
+- [ ] F-4: cross-field validation が **`AppConfig.mode=live` のときだけ `live_broker` を要求**し、`orchestrator.mode=live` + `AppConfig.mode=paper`/`live_test` (段階的 paper 検証) は通すか (codex 追加確認、2026-06-25 改訂)。
 - [ ] F-4: `OrchestratorConfig.mode=live` 時、`run_trading_cycle` の entry phase が全 entry point (main/API/CLI/TUI) で停止し、コード削除は行っていない (omit は別 task) か (codex #3)。
+- [ ] F-5: plan 作成成功時に `[ORCH] 📋 plan created ...` INFO が 1 本出るか (shadow trigger 🧪 と対)。約定成功時に execute 成功 INFO が出るか (executed は alert 対象外のため別途)。direct_hold/failed には出さないか。
 
 ---
 
