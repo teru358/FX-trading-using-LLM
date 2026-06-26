@@ -18,7 +18,7 @@ def test_orchestrator_config_defaults() -> None:
 def test_build_orchestrator_config_from_yaml_dict() -> None:
     data = {
         "enabled": True,
-        "mode": "observe",
+        "mode": "shadow",
         "policy": {"trade_horizon": "day", "advice_memo": "wait for CPI"},
         "llm": {"max_concurrent_jobs": 1, "planning_timeout_seconds": 90},
         "locks": {"order_lock_ttl_seconds": 60},
@@ -26,7 +26,7 @@ def test_build_orchestrator_config_from_yaml_dict() -> None:
     }
     cfg = _build_orchestrator_config(data)
     assert cfg.enabled is True
-    assert cfg.mode == "observe"
+    assert cfg.mode == "shadow"
     assert cfg.policy.trade_horizon == "day"
     assert cfg.policy.advice_memo == "wait for CPI"
     assert cfg.llm.planning_timeout_seconds == 90

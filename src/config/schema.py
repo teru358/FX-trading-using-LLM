@@ -726,6 +726,9 @@ class OrchestratorConfig:
     # producer 以上で quote-stream producer 起動 + watch 直読。protect_shadow 以上で保護 worker 起動。
     tick_migration_stage: str = "off"
     quote_stream_poll_seconds: int = 2
+    # Task F: material change 時の ExecutionOpinionAgent 再点火 (発注直前)。既定 OFF
+    # (まず決定的・高速執行で live 検証、spec §2 step2)。
+    execution_opinion_recheck_enabled: bool = False
     policy: OrchestratorPolicyConfig = field(default_factory=OrchestratorPolicyConfig)
     market_state: OrchestratorMarketStateConfig = field(
         default_factory=OrchestratorMarketStateConfig
@@ -760,6 +763,13 @@ class OrchestratorConfig:
             raise ValueError(
                 f"quote_stream_poll_seconds must be >= 1, "
                 f"got {self.quote_stream_poll_seconds!r}"
+            )
+        # Task F (spec §5): 執行段の発注主体モード。observe は現状未使用で執行段を
+        # 起動しないため F では shadow/live のみ許容。
+        valid_modes = ("shadow", "live")
+        if self.mode not in valid_modes:
+            raise ValueError(
+                f"OrchestratorConfig.mode must be one of {valid_modes}, got {self.mode!r}"
             )
 
 
@@ -796,6 +806,24 @@ class AppConfig:
 
     # ── プロバイダー別設定 (旧 price_provider + mt5_bridge を統合) ──
     providers: ProvidersConfig = field(default_factory=ProvidersConfig)
+
+    def __post_init__(self) -> None:
+        # Task F (spec §5, 2026-06-25 改訂): orchestrator が発注主体 (mode=live) のとき、
+        # 発注先 broker を選ぶ top-level mode との整合を検証する。
+        #   - AppConfig.mode=paper / live_test → 許可 (paper_broker で動作確認。本番資金を
+        #     動かさない段階検証。spec §0 確定判断7)。live_test の live_broker=mt5 必須は
+        #     create_broker 側 (live_broker.py) が課すのでここで二重に課さない。
+        #   - AppConfig.mode=live → live_broker 必須 (未設定なら「発注すると言いながら
+        #     broker 未設定」の取り違え事故になるため弾く)。
+        # 旧版の「orchestrator.mode=live なら AppConfig.mode も必ず live」要求は、
+        # paper での段階検証を弾くため撤回 (spec §5 改訂)。
+        if getattr(self.orchestrator, "mode", "shadow") == "live":
+            if self.mode == "live" and self.live_broker is None:
+                raise ValueError(
+                    "orchestrator.mode=live with AppConfig.mode=live requires a "
+                    "configured live_broker (mt5/oanda); got live_broker=None. "
+                    "For dry-run validation use AppConfig.mode=paper or live_test."
+                )
 
     @property
     def state_dir(self) -> Path:
