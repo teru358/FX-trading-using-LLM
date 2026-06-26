@@ -52,6 +52,72 @@ def _side_of(direction: str | None) -> str | None:
     return None
 
 
+def _resolve_pip_value(app_config, pair: str) -> float:
+    """pair の pip_value を AppConfig.tradeable_instruments から引く (Task F)。
+
+    既存 trading cycle (src/cycles/trading.py:301-308) と同じ instrument 設定経路を使う。
+    見つからなければ 0.0 を返す (_calculate_position_size 側で fallback ロットになる)。
+    """
+    inst = next(
+        (p for p in app_config.tradeable_instruments if p.symbol == pair), None
+    )
+    return inst.pip_value if inst is not None else 0.0
+
+
+def _trade_signal_from_plan(plan, pair: str, quote, app_config, balance: float):
+    """plan の action_json + quote から発注用 TradeSignal を構築する (Task F, codex High)。
+
+    broker が読むフィールド (action/pair/position_size/stop_loss/take_profit/
+    signal_reason/confidence) を plan から埋め、provenance フィールド (news/price/
+    predicted_direction 等) は orchestrator 由来と分かる最小有効値で埋める。
+    TradeSignal は 15 フィールド必須 (signal_combiner.py:21) なので全て渡す。
+
+    position_size (codex High): ExecutionPlanDraft.action には position_size が無い
+    (schemas.py の action は sl/tp/size_policy/rr/comment のみ) ため、既存 trading cycle と
+    同じ risk ベース算出 (_calculate_position_size) を再利用する。固定 1000.0 fallback は
+    risk_per_trade/min_lot_size/lot_unit を無視するため使わない。balance は execute 時点の
+    口座残高で _execute_live_trigger が渡す (plan→発注の間に残高が動いても最新で sizing)。
+    """
+    from src.analysis.news_analyzer import NewsSentiment
+    from src.analysis.price_analyzer import PriceAnalysis
+    from src.signals.signal_combiner import TradeSignal, _calculate_position_size
+
+    action = plan.action_json or {}
+    side = "buy" if plan.direction == "long" else "sell"
+    bias = "bullish" if plan.direction == "long" else "bearish"
+    pbias = "long" if plan.direction == "long" else "short"
+    sl = float(action["sl"])
+    tp = float(action["tp"])
+    conf = float(action.get("confidence", 1.0))
+    pip_value = _resolve_pip_value(app_config, pair)
+    size = _calculate_position_size(
+        balance=balance,
+        risk_pct=app_config.trading.risk_per_trade,
+        entry=quote.mid,
+        stop_loss=sl,
+        pip_value=pip_value,
+        min_lot_size=app_config.trading.min_lot_size,
+        lot_unit=app_config.trading.lot_unit,
+    )
+    now = db_now()
+
+    news = NewsSentiment(pair=pair, sentiment_score=0.0, confidence=conf)
+    price = PriceAnalysis(
+        pair=pair, direction_bias=pbias, bias_score=0.0, confidence=conf,
+        entry_zone=(quote.mid, quote.mid), reasoning_summary="orchestrator plan",
+        analyzed_at=now, stop_loss=sl, take_profit=tp,
+        risk_reward_ratio=float(action.get("rr", 0.0)),
+    )
+    return TradeSignal(
+        pair=pair, action=side, predicted_direction=bias,
+        combined_score=0.0, confidence=conf, entry_price=quote.mid,
+        stop_loss=sl, take_profit=tp, position_size=size,
+        signal_reason=f"orchestrator plan {plan.plan_id}",
+        detail_reason="orchestrator watch trigger (Task F live execute)",
+        news=news, price=price, generated_at=now,
+    )
+
+
 class OrchestratorRuntime:
     """2 ループ (planning / watch) を駆動する非LLM ランタイム骨格。"""
 
@@ -73,6 +139,10 @@ class OrchestratorRuntime:
         shadow_notifier: "ShadowNotifier | None" = None,
         market_state_detector: "MarketStateDetector | None" = None,
         state_bridge: "MarketStateBridge | None" = None,
+        mode: str = "shadow",
+        execution_broker=None,
+        execution_position_mgr=None,
+        app_config=None,
     ) -> None:
         self._config = config
         self._orch = orch_store
@@ -125,6 +195,13 @@ class OrchestratorRuntime:
         self._mstate_thread: threading.Thread | None = None
         # pair -> 直近 mid (move_pct 算出用)。
         self._last_mid: dict[str, float] = {}
+        # Task F: 本番発注 (mode=live) の執行段。shadow では execution_broker=None で
+        # live 分岐に入らない (回帰維持)。app_config は position_size の risk 算出
+        # (risk_per_trade / pip_value) に使う (OrchestratorConfig には無いため)。
+        self._mode = mode
+        self._execution_broker = execution_broker
+        self._execution_position_mgr = execution_position_mgr
+        self._app_config = app_config
 
     # ── 1 サイクル分の処理 (テスト・手動駆動可) ─────────────────
 
@@ -612,6 +689,14 @@ class OrchestratorRuntime:
                 f"[ORCH] 🧪 shadow trigger plan {plan.plan_id} {pair} {plan.direction} "
                 f"@ {quote.mid}"
             )
+            # Task F: live mode かつ execution broker 注入時のみ本番発注へ進む (single
+            # writer)。try 内・run が open のうちに呼ぶ (record_decision を open run に
+            # 正しく紐づけ、finish_run 後の後付けを避ける, codex High)。例外は
+            # _execute_live_trigger 内で握り、shadow trigger 記録 (ok=True) は倒さない。
+            if self._mode == "live" and self._execution_broker is not None:
+                self._execute_live_trigger(
+                    plan, pair, quote, decision_id, snapshot_id, run_id,
+                )
         finally:
             self._orch.finish_run(run_id, status="ok" if ok else "failed")
             if not ok:
@@ -626,6 +711,129 @@ class OrchestratorRuntime:
         self._notify_shadow_trigger(plan, pair, quote, action)
         return True
 
+    # ── Task F: 本番発注 執行段 (F-1 / F-3) ─────────────────────
+
+    _EXECUTION_LEASE_SECONDS = 120
+
+    def _execute_live_trigger(
+        self, plan, pair: str, quote, decision_id, snapshot_id, run_id,
+    ) -> None:
+        """本番発注の執行段 (spec §2, F-1/F-3)。single execution writer。
+
+        claim (order_intent) → final gate → submit-marked → execute → 結果反映。
+        例外は watch loop を止めない (recovery job が後で拾う)。run はまだ open
+        (呼び出しは finish_run より前)。record_decision には渡された snapshot_id を使う。
+        """
+        from datetime import timedelta
+
+        from src.trading.order_intent_status import (
+            intent_status_for_outcome,
+            is_alertable_outcome,
+        )
+
+        try:
+            # 1. claim (UNIQUE で二重発注防止)
+            lease = db_now() + timedelta(seconds=self._EXECUTION_LEASE_SECONDS)
+            claimed = self._orch.try_insert_order_intent(
+                plan_id=plan.plan_id, pair=pair,
+                intended_action=_side_of(plan.direction) or "buy",
+                owner_run_id=run_id, lease_until=lease, decision_id=decision_id,
+            )
+            if not claimed:
+                logger.info(
+                    f"[ORCH] plan {plan.plan_id} already has order_intent — execute skipped"
+                )
+                return
+
+            # 1.5 material recheck (spec §2 step2、既定 OFF)。ON 時のみ ExecutionOpinionAgent
+            #     を再点火する分岐をここに置く (将来 task — 現状は配線のプレースのみ)。
+            if self._config.execution_opinion_recheck_enabled:
+                logger.debug(
+                    "[ORCH] material recheck flag on — (future) ExecutionOpinion 再点火"
+                )
+
+            # 2. final gate (RiskGate pre_check を hard gate として使う)。draft 復元
+            #    不能 (expires_at 欠落等) のときは hard reject せず構造 reject 扱いにする。
+            draft = self._build_execution_draft(plan, reasoning="live final gate")
+            if draft is None:
+                self._orch.record_order_result(plan_id=plan.plan_id, status="rejected")
+                self._apply_reject_transition(
+                    plan, pair, "structural", run_id, snapshot_id, None,
+                    reason="live gate: draft reconstruction failed",
+                )
+                logger.warning(
+                    f"[ORCH] live gate reject plan {plan.plan_id}: draft unbuildable"
+                )
+                return
+            gate_ctx = self._ctx.assemble(pair=pair, now=db_now(), quote=quote)
+            gate = self._risk_gate.pre_check(draft, gate_ctx)
+            if not gate.passed:
+                # 恒久 (structural)=rejected / 一時 (fixable)=abandoned で intent.status を区別。
+                # どちらも plan は invalidated (terminal)。再発注は新 plan_id で行う (replan)。
+                intent_status = "rejected" if gate.reject_class == "structural" else "abandoned"
+                self._orch.record_order_result(plan_id=plan.plan_id, status=intent_status)
+                self._apply_reject_transition(
+                    plan, pair, gate.reject_class, run_id, snapshot_id, gate.to_dict(),
+                    reason=f"live gate reject ({gate.reject_class})",
+                )
+                logger.warning(
+                    f"[ORCH] live gate reject plan {plan.plan_id}: {gate.issues}"
+                )
+                return
+
+            # 3. submit マーキング (復旧分岐点)。直後にクラッシュすると status=submitted
+            #    かつ order_id null になり recovery job が needs_reconcile で隔離する。
+            self._orch.mark_order_submitted(plan_id=plan.plan_id, submitted_at=db_now())
+
+            # 4. 発注 (single writer)。execute 時点の balance で risk ベース sizing。
+            balance = self._execution_position_mgr.get_account_state().balance
+            signal = _trade_signal_from_plan(plan, pair, quote, self._app_config, balance)
+            result = self._execution_broker.execute_signal(
+                signal, self._execution_position_mgr,
+            )
+
+            # 5. 結果反映 (outcome → status mapping)
+            status = intent_status_for_outcome(result.outcome)
+            order_id = result.order.order_id if result.is_executed and result.order else None
+            self._orch.record_order_result(
+                plan_id=plan.plan_id, status=status, order_id=order_id,
+                broker_result_json={"outcome": result.outcome, "reason": result.reason},
+            )
+            self._orch.record_decision(
+                run_id=run_id, snapshot_id=snapshot_id, pair=pair,
+                decision_type="plan_trigger", plan_id=plan.plan_id,
+                reasoning_summary=f"live execute: {result.outcome}",
+                order_id=order_id,
+            )
+            if not result.is_executed:
+                # 発注に至らなかった (skipped/halted/rejected/failed): plan を terminal 化。
+                # 再発注は次 planning が新 plan を作る (replan)。UNIQUE 行は残るが新 plan_id
+                # なので衝突しない (codex High#2: status 変更では UNIQUE 解放されない)。
+                self._orch.update_plan_status(plan.plan_id, "invalidated")
+            if is_alertable_outcome(result.outcome):
+                logger.warning(
+                    f"[ORCH] live execute {result.outcome} plan {plan.plan_id}: "
+                    f"{result.reason}"
+                )
+        except Exception:
+            logger.exception(f"[ORCH] live execute failed for plan {plan.plan_id}")
+
+    def _apply_reject_transition(
+        self, plan, pair: str, reject_class, run_id, snapshot_id, risk_gate_result,
+        *, reason: str,
+    ) -> None:
+        """gate reject 後の plan 遷移 (spec §4, codex #4)。plan を invalidated (terminal)
+        にし plan_invalidate decision を残す。再発注は次 planning が新 plan を作る (replan)
+        ため、triggered のまま残して永久ブロックになるのを防ぐ。intent.status は呼び出し側で
+        既に terminal 化済 (rejected/abandoned)。
+        """
+        self._orch.update_plan_status(plan.plan_id, "invalidated")
+        self._orch.record_decision(
+            run_id=run_id, snapshot_id=snapshot_id, pair=pair,
+            decision_type="plan_invalidate", plan_id=plan.plan_id,
+            reasoning_summary=reason, risk_gate_result=risk_gate_result,
+        )
+
     def _shadow_risk_precheck(self, plan, trigger_ctx: dict) -> dict | None:
         """ExecutionPlanDraft 相当を組んで RiskGateWorker.pre_check を回し dict 化する。
 
@@ -633,12 +841,21 @@ class OrchestratorRuntime:
         (vocabulary 不整合 / expires_at 欠落等) 場合は None を返し trigger 記録は継続する
         (shadow なので risk reject でも発注はしない — 記録の欠落だけ許容)。
         """
+        draft = self._build_execution_draft(plan, reasoning="shadow precheck")
+        if draft is None:
+            return None
+        return self._risk_gate.pre_check(draft, trigger_ctx).to_dict()
+
+    def _build_execution_draft(self, plan, *, reasoning: str):
+        """plan の保存済み条件から ExecutionPlanDraft を復元する (shadow precheck と live
+        final gate で共有, Task F DRY)。expires_at 欠落 / vocabulary 不整合なら None。
+        """
         # expires_at は ExecutionPlanDraft で datetime 必須。nullable column なので
         # None のとき draft を作らず pre-check を skip する (Codex review #4)。
         if plan.expires_at is None:
             return None
         try:
-            draft = ExecutionPlanDraft(
+            return ExecutionPlanDraft(
                 direction=plan.direction,
                 entry_conditions=[
                     EntryCondition.from_dict(c) for c in (plan.entry_conditions_json or [])
@@ -649,15 +866,13 @@ class OrchestratorRuntime:
                     for c in (plan.invalidation_json or [])
                 ],
                 expires_at=plan.expires_at,
-                reasoning_summary="shadow precheck",
+                reasoning_summary=reasoning,
             )
         except (SchemaParseError, ValueError):
             logger.warning(
-                f"[ORCH] shadow risk pre-check skipped for plan {plan.plan_id}: "
-                "could not reconstruct draft"
+                f"[ORCH] risk draft reconstruction failed for plan {plan.plan_id}"
             )
             return None
-        return self._risk_gate.pre_check(draft, trigger_ctx).to_dict()
 
     # ── shadow 通知 (Phase 5, worker thread で非ブロッキング) ────
 
