@@ -147,6 +147,28 @@ async def test_chat_usage_limit_from_stdout_success_exit():
 
 
 @pytest.mark.asyncio
+async def test_chat_session_limit_429_raises_usage_limit_error():
+    """実際の 429 session limit メッセージ → ClaudeCliUsageLimitError。
+
+    本番 (2026-06-26 01:37) で claude-cli が返した実メッセージ。
+    api_error_status=429 + "session limit" を usage limit として分類し、
+    基底 ClaudeCliError ではなく UsageLimitError に倒す (retry しない / 上位で fail-safe)。
+    """
+    client = ClaudeCliClient(model="claude-sonnet-4-6", max_retries=3)
+    body = (
+        '{"type":"result","subtype":"success","is_error":true,'
+        '"api_error_status":429,"result":'
+        '"You\'ve hit your session limit · resets 1:40am (Asia/Tokyo)"}'
+    )
+    with patch(
+        "asyncio.create_subprocess_exec",
+        AsyncMock(return_value=_mock_proc(stdout=body, stderr="", returncode=1)),
+    ):
+        with pytest.raises(ClaudeCliUsageLimitError):
+            await client.chat([{"role": "user", "content": "hi"}])
+
+
+@pytest.mark.asyncio
 async def test_chat_malformed_json_raises():
     client = ClaudeCliClient(model="claude-haiku-4-5", max_retries=1)
     with patch(

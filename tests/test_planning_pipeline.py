@@ -19,6 +19,7 @@ import pytest
 
 from src.config.schema import AgentLlm, OrchestratorConfig
 from src.data.orchestrator_store import OrchestratorStore
+from src.llm.claude_cli_client import ClaudeCliUsageLimitError
 from src.llm.client import CircuitOpenError
 from src.orchestrator.execution_opinion_agent import ExecutionOpinionAgent
 from src.orchestrator.planner_agent import PlannerAgent
@@ -372,3 +373,37 @@ async def test_circuit_open_yields_failed_no_plan(store: OrchestratorStore) -> N
 
     assert result.outcome == "failed"
     assert result.plan_id is None
+
+
+async def test_usage_limit_is_failsafe_warning_not_unexpected_error(
+    store: OrchestratorStore, caplog
+) -> None:
+    """LLM usage limit (claude-cli 429 等) は想定内 fail-safe として扱う。
+
+    本番 (2026-06-26) で claude-cli session limit が ``except Exception`` に落ち、
+    ERROR + スタックトレースを吐いていた。これは想定内の一時障害なので
+    ``planning fail-safe`` WARNING に倒し、``planning unexpected error`` ERROR
+    (= logger.exception, スタックトレース) を出さない。
+    """
+    import logging
+
+    llm = _ScriptedLLM([ClaudeCliUsageLimitError("session limit hit")])
+    pipe = _make_pipeline(store, llm)
+    ctx = _ctx(store)
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+
+    with caplog.at_level(logging.WARNING, logger="src.orchestrator.planning_pipeline"):
+        result = await pipe.run(pair="USDJPY=X", context=ctx, run_id=run_id)
+
+    assert result.outcome == "failed"
+    assert result.plan_id is None
+    # 想定外 ERROR (logger.exception) を出していないこと。
+    assert not any(
+        r.levelno >= logging.ERROR and "unexpected error" in r.getMessage()
+        for r in caplog.records
+    ), "usage limit should be fail-safe WARNING, not an unexpected-error ERROR"
+    # 想定内 fail-safe WARNING を出していること。
+    assert any(
+        r.levelno == logging.WARNING and "fail-safe" in r.getMessage()
+        for r in caplog.records
+    )

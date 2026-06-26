@@ -29,6 +29,7 @@ from typing import Any
 
 from src.config.schema import OrchestratorConfig
 from src.data.orchestrator_store import OrchestratorStore
+from src.llm.claude_cli_client import ClaudeCliUsageLimitError
 from src.llm.client import CircuitOpenError
 from src.orchestrator.execution_opinion_agent import ExecutionOpinionAgent
 from src.orchestrator.planner_agent import PlannerAgent
@@ -43,7 +44,10 @@ logger = logging.getLogger(__name__)
 
 # fail-safe で握る想定内の例外 (新規 plan を作らず failed に倒す)。
 # Python 3.11+ では asyncio.TimeoutError is TimeoutError なので TimeoutError のみで足りる。
-_FAILSAFE_EXC = (SchemaParseError, CircuitOpenError, TimeoutError)
+# ClaudeCliUsageLimitError: LLM の usage/session limit (claude-cli 429 等)。レート制限は
+#   運用上の想定内事象なので、ERROR + スタックトレース (unexpected error) ではなく
+#   WARNING (planning fail-safe) に倒す。リセット後の次 tick で再評価される。
+_FAILSAFE_EXC = (SchemaParseError, CircuitOpenError, TimeoutError, ClaudeCliUsageLimitError)
 
 
 @dataclass

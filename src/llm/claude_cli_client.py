@@ -69,6 +69,7 @@ class ClaudeCliTimeoutError(ClaudeCliError):
 # usage limit を示唆する stderr/stdout パターン
 _USAGE_LIMIT_PATTERNS = (
     "usage limit",
+    "session limit",  # claude-cli 429: "You've hit your session limit · resets ..."
     "rate limit",
     "please upgrade",
     "quota exceeded",
