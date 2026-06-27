@@ -166,9 +166,6 @@ trading:
   sl_atr_mult_max: 5.0                # LLM動的更新の上限
   tp_atr_mult_min: 2.0
   tp_atr_mult_max: 10.0
-  # TradingView テクニカルサマリー (矛盾検出)
-  tv_summary_enabled: false      # TV判定と方向矛盾時にconfidence減衰
-  tv_conflict_dampen: 0.7        # 矛盾時のconfidence倍率
   # ペアごとのポジション数上限 (1 ペアでの最大累積 open ポジ数)
   max_positions_per_pair: 2              # scale-in 含めて 1 ペアで最大 N ポジ
   # Scale-in (順張り増し玉): 既存ポジと同方向で強い signal が来た時に追加発注

@@ -33,7 +33,6 @@ class TradeSignal:
     news: NewsSentiment
     price: PriceAnalysis
     generated_at: datetime
-    tv_recommendation: str = ""  # TradingView コンセンサス推奨 (例 "BUY"/"STRONG_SELL")。未取得時 ""
 
 
 def combine_signals(
@@ -49,8 +48,6 @@ def combine_signals(
     signal_deadband: float = 0.15,
     min_lot_size: float = 1000.0,
     lot_unit: float = 1000.0,
-    tv_summary=None,  # TVSummary | None (矛盾検出用)
-    tv_conflict_dampen: float = 0.7,  # TV方向矛盾時のconfidence減衰率
     min_rr_ratio: float = 0.0,        # 未使用 (ATR後に _apply_atr_sltp_to_signal で判定)
     accuracy_provider: AccuracyProvider | None = None,
     accuracy_config: ForecastAccuracyFeedbackConfig | None = None,
@@ -83,21 +80,6 @@ def combine_signals(
     combined_confidence = (
         (news.confidence * effective_news_weight + price.confidence * effective_price_weight) * conflict_penalty
     )
-
-    # TradingView テクニカルサマリーとの矛盾検出
-    tv_conflict = False
-    if tv_summary is not None and tv_summary.direction != "neutral":
-        price_dir = "long" if price.bias_score > 0.05 else "short" if price.bias_score < -0.05 else "neutral"
-        if price_dir != "neutral" and tv_summary.direction != price_dir:
-            combined_confidence *= tv_conflict_dampen
-            combined_score *= tv_conflict_dampen
-            tv_conflict = True
-            logger.info(
-                f"[SIGNAL] {pair_cfg.display_name}: TV conflict — "
-                f"price={price_dir} TV={tv_summary.direction} "
-                f"(buy={tv_summary.buy}/sell={tv_summary.sell}) "
-                f"conf×{tv_conflict_dampen}"
-            )
 
     # Deadband: confidence 連動 + market_regime 連動
     # Step 1: confidence による基本調整
@@ -204,12 +186,6 @@ def combine_signals(
         f"ニュース: {news.sentiment_score:+.2f} ({news.confidence:.0%}) — {news_themes}",
         f"テクニカル(ルール): {price.bias_score:+.2f} ({price.confidence:.0%}) — {price.direction_bias}",
     ]
-    if tv_summary is not None:
-        tv_mark = "⚠" if tv_conflict else "✓"
-        detail_lines.append(
-            f"TV consensus: {tv_summary.recommendation} "
-            f"(buy={tv_summary.buy}/sell={tv_summary.sell}/neutral={tv_summary.neutral}) {tv_mark}"
-        )
     detail_lines.append(f"合成: {combined_score:+.3f} → {action.upper()} ({reason})")
     if accuracy_note:
         detail_lines.append(accuracy_note)

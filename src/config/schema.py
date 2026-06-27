@@ -158,9 +158,6 @@ class TradingConfig:
     sl_atr_mult_max: float = 5.0
     tp_atr_mult_min: float = 2.0
     tp_atr_mult_max: float = 10.0
-    # TradingView テクニカルサマリー (矛盾検出)
-    tv_summary_enabled: bool = False
-    tv_conflict_dampen: float = 0.7    # TV判定と方向が矛盾時のconfidence倍率
     # Scale-in (順張り増し玉): 既存ポジと同方向で強い signal が来た時に追加発注
     scale_in_enabled: bool = False
     scale_in_conf_margin: float = 0.05    # confidence 上回り幅

@@ -16,7 +16,6 @@ def test_signal_outcome_defaults():
         reason="r", detail_reason="d",
         news_score=0.12, tech_score=0.37,
     )
-    assert o.tv_recommendation == ""
     assert o.rag_note == ""
     assert o.order is None
 
@@ -42,7 +41,7 @@ def _executed_outcome(**kw) -> SignalOutcome:
         pair="USDJPY=X", action="buy", status="executed",
         confidence=0.75, combined_score=0.320,
         reason="rates higher + tech long alignment", detail_reason="",
-        news_score=0.12, tech_score=0.37, tv_recommendation="BUY", order=order,
+        news_score=0.12, tech_score=0.37, order=order,
     )
     defaults.update(kw)
     return SignalOutcome(**defaults)
@@ -53,7 +52,7 @@ def _hold_outcome(**kw) -> SignalOutcome:
         pair="EURUSD=X", action="hold", status="hold",
         confidence=0.30, combined_score=-0.023,
         reason="confidence too low, NEWS/PRICE conflict", detail_reason="",
-        news_score=0.09, tech_score=-0.05, tv_recommendation="STRONG_SELL",
+        news_score=0.09, tech_score=-0.05,
     )
     defaults.update(kw)
     return SignalOutcome(**defaults)
@@ -70,7 +69,7 @@ def test_format_signal_block_executed_has_all_lines():
     # pips_tp = (160.580 - 159.004) / 0.01 = +157.6
     assert "SL 158.21600 (-78.8 pips)" in block
     assert "TP 160.58000 (+157.6 pips)" in block
-    assert "drivers: News +0.12 / Tech +0.37 / TV BUY" in block
+    assert "drivers: News +0.12 / Tech +0.37" in block
     assert "reason: rates higher" in block
 
 
@@ -80,7 +79,7 @@ def test_format_signal_block_hold_omits_entry_sl_tp_and_rr():
     assert "score -0.023 | conf 30%" in block
     assert "entry" not in block
     assert "RR" not in block
-    assert "drivers: News +0.09 / Tech -0.05 / TV STRONG_SELL" in block
+    assert "drivers: News +0.09 / Tech -0.05" in block
     assert "reason: confidence too low" in block
 
 
@@ -127,11 +126,6 @@ def test_format_signal_block_skipped_omits_drivers():
                       reason="既存ポジションあり"))
     assert "drivers:" not in block
 
-
-def test_format_signal_block_omits_tv_when_empty():
-    block = _format_signal_block(_hold_outcome(tv_recommendation=""))
-    assert "TV" not in block
-    assert "drivers: News +0.09 / Tech -0.05" in block
 
 
 def test_format_signal_block_shows_rag_note():

@@ -131,7 +131,7 @@ def test_classify_hold_reasons_confidence_and_conflict():
     )
     flags = classify_hold_reasons(o, pre_action="hold")
     assert "confidence_low" in flags
-    assert "tv_conflict" in flags or "news_price_conflict" in flags
+    assert "news_price_conflict" in flags
     assert "rag_demote" not in flags  # pre も hold なので降格ではない
 
 
@@ -212,7 +212,6 @@ def _exec_signal(action: str = "buy") -> MagicMock:
     s.take_profit = 161.0
     s.position_size = 1000.0
     s.predicted_direction = "bullish"
-    s.tv_recommendation = "BUY"
     s.news = MagicMock(sentiment_score=0.12)
     s.price = MagicMock(bias_score=0.37)
     return s
@@ -268,7 +267,6 @@ async def test_execute_one_signal_executed_returns_outcome_with_order(monkeypatc
     assert outcome.order is order
     assert outcome.news_score == 0.12
     assert outcome.tech_score == 0.37
-    assert outcome.tv_recommendation == "BUY"
 
 
 @pytest.mark.asyncio

@@ -192,8 +192,3 @@ def _bare_signal() -> TradeSignal:
         ),
         generated_at=datetime(2026, 5, 19, 12, 0),
     )
-
-
-def test_trade_signal_tv_recommendation_defaults_empty():
-    """tv_recommendation を渡さなければ空文字。"""
-    assert _bare_signal().tv_recommendation == ""

@@ -154,17 +154,6 @@ async def _process_pair(
 
         news = aggregate_news_sentiment(pair_cfg, store, config)
 
-        # TradingView テクニカルサマリー取得 (オプション・矛盾検出用)
-        tv_summary = None
-        if config.trading.tv_summary_enabled:
-            from src.analysis.tv_summary import get_tv_summary
-            tv_summary = get_tv_summary(pair_cfg.symbol, interval=config.trading.ohlcv_interval)
-            if tv_summary:
-                logger.info(
-                    f"[TV-TA] {pair_cfg.display_name}: {tv_summary.recommendation} "
-                    f"(buy={tv_summary.buy} sell={tv_summary.sell} neutral={tv_summary.neutral})"
-                )
-
         account = position_mgr.get_account_state()
 
         # Forecast accuracy auto-feedback の provider を構築
@@ -192,13 +181,10 @@ async def _process_pair(
             signal_deadband=config.trading.signal_deadband,
             min_lot_size=config.trading.min_lot_size,
             lot_unit=config.trading.lot_unit,
-            tv_summary=tv_summary,
-            tv_conflict_dampen=config.trading.tv_conflict_dampen,
             min_rr_ratio=config.trading.min_rr_ratio,
             accuracy_provider=accuracy_provider,
             accuracy_config=config.trading.forecast_accuracy_feedback,
         )
-        signal.tv_recommendation = tv_summary.recommendation if tv_summary else ""
         return PairAnalysisOutcome(
             signal=signal, macro_ctx=macro_ctx, tech_fallback=tech_fallback,
         )
@@ -776,7 +762,6 @@ async def _execute_one_signal(
         detail_reason=sig.detail_reason,
         news_score=sig.news.sentiment_score,
         tech_score=sig.price.bias_score,
-        tv_recommendation=sig.tv_recommendation,
         order=result.order,
     )
 
@@ -961,7 +946,6 @@ async def _phase_execute_signals(
                     detail_reason=sig.detail_reason,
                     news_score=sig.news.sentiment_score,
                     tech_score=sig.price.bias_score,
-                    tv_recommendation=sig.tv_recommendation,
                     rag_note=rag_note,
                 ))
                 logger.info(f"[SIGNAL] {sig.pair}: skipped — {cooldown_reason}")
@@ -990,7 +974,6 @@ async def _phase_execute_signals(
                 detail_reason=sig.detail_reason,
                 news_score=sig.news.sentiment_score,
                 tech_score=sig.price.bias_score,
-                tv_recommendation=sig.tv_recommendation,
                 rag_note=rag_note,
             )
             outcomes.append(outcome)

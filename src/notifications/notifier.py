@@ -85,7 +85,6 @@ class SignalOutcome:
     detail_reason: str           # ニュース/テクニカル詳細内訳
     news_score: float            # signal.news.sentiment_score — drivers 行
     tech_score: float            # signal.price.bias_score — drivers 行
-    tv_recommendation: str = ""  # signal.tv_recommendation — drivers 行 ("" なら非表示)
     rag_note: str = ""           # RAG 補正が action/score を変えたときの注記 ("" なら非表示)
     order: Order | None = None   # status=="executed" のとき約定 Order
 
@@ -182,8 +181,6 @@ def _format_signal_block(o: SignalOutcome) -> str:
 
     if o.status in ("executed", "hold"):
         drivers = f"drivers: News {o.news_score:+.2f} / Tech {o.tech_score:+.2f}"
-        if o.tv_recommendation:
-            drivers += f" / TV {o.tv_recommendation}"
         lines.append(drivers)
 
     if o.reason:
