@@ -781,18 +781,27 @@ class OrchestratorRuntime:
                 )
                 return
 
-            # 3. submit マーキング (復旧分岐点)。直後にクラッシュすると status=submitted
-            #    かつ order_id null になり recovery job が needs_reconcile で隔離する。
-            self._orch.mark_order_submitted(plan_id=plan.plan_id, submitted_at=db_now())
-
-            # 4. 発注 (single writer)。execute 時点の balance で risk ベース sizing。
+            # 3. signal 構築 (broker 送信前 = 復旧分岐点の前)。sizing/signal 構築は broker
+            #    side effect が無いので submit マーキングより前に置く。ここで例外
+            #    (pip_value=0 ZeroDivision / sl-tp 欠落 KeyError 等) が出ても order_intent は
+            #    pending のまま → recovery が retryable で扱える (false needs_reconcile を避ける、
+            #    code review M1/M2)。balance は disk から reload して最新値で sizing する
+            #    (execution position_mgr は長命で他経路の決済を取りこぼすため、M1)。
+            self._execution_position_mgr.reload()
             balance = self._execution_position_mgr.get_account_state().balance
             signal = _trade_signal_from_plan(plan, pair, quote, self._app_config, balance)
+
+            # 4. submit マーキング (復旧分岐点)。この直後〜broker 応答前にクラッシュすると
+            #    status=submitted かつ order_id null になり、建玉不明として recovery job が
+            #    needs_reconcile で隔離する。よって submit マークは broker 送信の直前に置く。
+            self._orch.mark_order_submitted(plan_id=plan.plan_id, submitted_at=db_now())
+
+            # 5. 発注 (single writer)
             result = self._execution_broker.execute_signal(
                 signal, self._execution_position_mgr,
             )
 
-            # 5. 結果反映 (outcome → status mapping)
+            # 6. 結果反映 (outcome → status mapping)
             status = intent_status_for_outcome(result.outcome)
             order_id = result.order.order_id if result.is_executed and result.order else None
             self._orch.record_order_result(

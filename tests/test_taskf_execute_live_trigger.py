@@ -50,6 +50,27 @@ def test_live_trigger_duplicate_intent_aborts(tmp_path):
     assert broker.calls == []                         # 既発注 → 二重発注しない
 
 
+def test_sizing_failure_before_submit_leaves_intent_pending(tmp_path):
+    """code review M1/M2: signal 構築 (sizing) の失敗は submit マーキングより前なので、
+    order_intent は pending のまま残り broker は呼ばれない。recovery は retryable で扱える
+    (false needs_reconcile を生まない)。pip_value=0 で ZeroDivision を誘発する。"""
+    from src.config.schema import AppConfig, InstrumentConfig, TradingConfig
+
+    broker = _FakeBroker(ExecutionResult.executed(_executed_order()))
+    rt = make_live_runtime(tmp_path, broker, _GatePass())
+    # pip_value=0 + 大きな balance で _calculate_position_size を ZeroDivision に倒す。
+    rt._app_config = AppConfig(
+        trading=TradingConfig(risk_per_trade=0.02, min_lot_size=1000.0, lot_unit=1000.0),
+        instruments=[InstrumentConfig(symbol="USDJPY=X", display_name="USD/JPY", pip_value=0.0)],
+    )
+    plan_id = seed_active_plan_ready_to_trigger(rt)
+    rt.run_watch_cycle(now=NOW)
+    assert broker.calls == []                         # broker 未送信
+    intent = rt._orch.get_order_intent(plan_id)
+    assert intent.status == "pending"                 # submit マーク前に失敗 → pending のまま
+    assert intent.submitted_at is None                # 復旧分岐点に到達していない
+
+
 def test_shadow_mode_never_executes(tmp_path):
     broker = _FakeBroker(ExecutionResult.executed(_executed_order()))
     # mode="shadow": execution_broker を渡しても live 分岐に入らない

@@ -42,6 +42,10 @@ class _FakePositionMgr:
 
     def __init__(self, balance: float = 50000.0):
         self._balance = balance
+        self.reload_calls = 0
+
+    def reload(self):
+        self.reload_calls += 1
 
     def get_account_state(self):
         return SimpleNamespace(balance=self._balance)
