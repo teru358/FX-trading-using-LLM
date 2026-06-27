@@ -128,6 +128,9 @@ def _build_orchestrator_config(data: dict) -> OrchestratorConfig:
         agents=_from_dict(OrchestratorAgentsConfig, data.get("agents", {}) or {}),
         tick_migration_stage=data.get("tick_migration_stage", "off"),
         quote_stream_poll_seconds=data.get("quote_stream_poll_seconds", 2),
+        execution_opinion_recheck_enabled=data.get(
+            "execution_opinion_recheck_enabled", False
+        ),
     )
 
 

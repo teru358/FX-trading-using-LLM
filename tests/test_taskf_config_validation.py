@@ -1,5 +1,6 @@
 import pytest
 
+from src.config.loader import _build_orchestrator_config
 from src.config.schema import AppConfig, OrchestratorConfig
 
 
@@ -17,6 +18,15 @@ def test_orchestrator_mode_accepts_shadow_and_live():
 def test_orchestrator_mode_rejects_unknown():
     with pytest.raises(ValueError):
         OrchestratorConfig(mode="bogus")
+
+
+def test_loader_passes_execution_opinion_recheck_enabled():
+    """codex Medium: YAML の execution_opinion_recheck_enabled=true が loader 経由で
+    OrchestratorConfig に届く (field 列挙漏れで常に default False になっていた回帰)。"""
+    cfg = _build_orchestrator_config({"execution_opinion_recheck_enabled": True})
+    assert cfg.execution_opinion_recheck_enabled is True
+    # 省略時は default False
+    assert _build_orchestrator_config({}).execution_opinion_recheck_enabled is False
 
 
 # ── AppConfig cross-field validation (spec §5, 2026-06-25 改訂) ──
