@@ -906,7 +906,23 @@ async def _phase_execute_signals(
         logger.info(
             "[CYCLE] orchestrator.mode=live — 新規 entry phase を skip (single writer)"
         )
-        return [], []
+        # codex Low: 空 return だと cycle summary が「entry 無し」に見え、orchestrator が
+        # 別経路で発注している事実が通知から落ちる。entry 候補 (非 hold) を skipped outcome
+        # として残し、サマリーに「orchestrator live のため別経路」を明示する。
+        skipped_outcomes = [
+            SignalOutcome(
+                pair=sig.pair, action=sig.action, status="skipped",
+                confidence=getattr(sig, "confidence", 0.0),
+                combined_score=getattr(sig, "combined_score", 0.0),
+                reason="orchestrator.mode=live: entry は orchestrator 執行段が担当 (single writer)",
+                detail_reason="",
+                news_score=getattr(getattr(sig, "news", None), "sentiment_score", 0.0) or 0.0,
+                tech_score=getattr(getattr(sig, "price", None), "bias_score", 0.0) or 0.0,
+            )
+            for sig in signals
+            if getattr(sig, "action", "hold") != "hold"
+        ]
+        return [], skipped_outcomes
 
     rag_cfg = RagAdjustmentConfig(
         enabled=config.trading.rag_adjustment_enabled,

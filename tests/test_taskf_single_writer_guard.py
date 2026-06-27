@@ -47,8 +47,14 @@ def _run_phase(orch_mode: str, broker):
 
 
 def test_entry_skipped_when_orchestrator_live():
-    """orchestrator.mode=live: 新規 entry phase が即 return し execute_signal を呼ばない。"""
+    """orchestrator.mode=live: 新規 entry phase が即 return し execute_signal を呼ばない。
+    entry 候補は skipped outcome として cycle summary に残る (codex Low)。"""
     broker = _Broker()
     executed, outcomes = _run_phase("live", broker)
     assert broker.calls == []        # 発注なし (single writer は orchestrator 側)
     assert executed == []
+    # 非 hold の entry 候補が skipped として可視化される (空 return ではない)
+    assert len(outcomes) == 1
+    assert outcomes[0].status == "skipped"
+    assert outcomes[0].pair == "USDJPY=X"
+    assert "orchestrator" in outcomes[0].reason
