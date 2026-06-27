@@ -696,6 +696,7 @@ class OrchestratorRuntime:
             if self._mode == "live" and self._execution_broker is not None:
                 self._execute_live_trigger(
                     plan, pair, quote, decision_id, snapshot_id, run_id,
+                    trigger_id=str(shadow_trigger_id), trigger_ctx=trigger_ctx,
                 )
         finally:
             self._orch.finish_run(run_id, status="ok" if ok else "failed")
@@ -717,12 +718,15 @@ class OrchestratorRuntime:
 
     def _execute_live_trigger(
         self, plan, pair: str, quote, decision_id, snapshot_id, run_id,
+        *, trigger_id=None, trigger_ctx=None,
     ) -> None:
         """本番発注の執行段 (spec §2, F-1/F-3)。single execution writer。
 
         claim (order_intent) → final gate → submit-marked → execute → 結果反映。
-        例外は watch loop を止めない (recovery job が後で拾う)。run はまだ open
-        (呼び出しは finish_run より前)。record_decision には渡された snapshot_id を使う。
+        run はまだ open (呼び出しは finish_run より前)。record_decision には渡された
+        snapshot_id を使う。final gate は trigger 時の trigger_ctx を再利用し、保存 snapshot
+        と監査整合させる (codex Medium)。trigger_id (= shadow_trigger_id) を order_intent に
+        記録し trace を繋ぐ。例外はフェーズ別に即時記録 (codex High、下記 except)。
         """
         from datetime import timedelta
 
@@ -731,6 +735,12 @@ class OrchestratorRuntime:
             is_alertable_outcome,
         )
 
+        # 例外フェーズ追跡 (codex High): broad catch が intent を放置すると、daemon 生存中は
+        # recovery (bootstrap 1 回のみ) に拾われず plan が triggered のまま永久ブロックする。
+        # claim 済かつ submit 前で落ちたら abandoned+invalidated (未発注 = 新 plan で replan)、
+        # submit 後で落ちたら needs_reconcile (建玉不明 = 隔離) を except で即時記録する。
+        claimed = False
+        submitted = False
         try:
             # 1. claim (UNIQUE で二重発注防止)
             lease = db_now() + timedelta(seconds=self._EXECUTION_LEASE_SECONDS)
@@ -738,6 +748,7 @@ class OrchestratorRuntime:
                 plan_id=plan.plan_id, pair=pair,
                 intended_action=_side_of(plan.direction) or "buy",
                 owner_run_id=run_id, lease_until=lease, decision_id=decision_id,
+                trigger_id=trigger_id,
             )
             if not claimed:
                 logger.info(
@@ -765,7 +776,11 @@ class OrchestratorRuntime:
                     f"[ORCH] live gate reject plan {plan.plan_id}: draft unbuildable"
                 )
                 return
-            gate_ctx = self._ctx.assemble(pair=pair, now=db_now(), quote=quote)
+            # final gate は trigger 時の context を再利用する (codex Medium): 別途
+            # assemble(now) で組み直すと gate 判断が保存 snapshot で再現できなくなる。
+            # trigger_ctx 未提供時 (直接呼出テスト等) のみ assemble に fallback する。
+            gate_ctx = trigger_ctx if trigger_ctx is not None else \
+                self._ctx.assemble(pair=pair, now=db_now(), quote=quote)
             gate = self._risk_gate.pre_check(draft, gate_ctx)
             if not gate.passed:
                 # 恒久 (structural)=rejected / 一時 (fixable)=abandoned で intent.status を区別。
@@ -792,9 +807,11 @@ class OrchestratorRuntime:
             signal = _trade_signal_from_plan(plan, pair, quote, self._app_config, balance)
 
             # 4. submit マーキング (復旧分岐点)。この直後〜broker 応答前にクラッシュすると
-            #    status=submitted かつ order_id null になり、建玉不明として recovery job が
-            #    needs_reconcile で隔離する。よって submit マークは broker 送信の直前に置く。
+            #    status=submitted かつ order_id null になり、建玉不明として needs_reconcile で
+            #    隔離する。よって submit マークは broker 送信の直前に置く。submitted フラグを
+            #    立て、以降の例外は「送信後」として except で needs_reconcile に倒す。
             self._orch.mark_order_submitted(plan_id=plan.plan_id, submitted_at=db_now())
+            submitted = True
 
             # 5. 発注 (single writer)
             result = self._execution_broker.execute_signal(
@@ -834,6 +851,45 @@ class OrchestratorRuntime:
                 )
         except Exception:
             logger.exception(f"[ORCH] live execute failed for plan {plan.plan_id}")
+            # codex High: フェーズ別に即時記録し、daemon 生存中も plan が triggered のまま
+            # 放置されない (recovery は bootstrap 1 回のみ)。記録自体が失敗しても watch loop は
+            # 止めない (二重 except)。
+            self._record_execution_failure(plan, run_id, snapshot_id, claimed, submitted)
+
+    def _record_execution_failure(
+        self, plan, run_id, snapshot_id, claimed: bool, submitted: bool,
+    ) -> None:
+        """_execute_live_trigger の例外をフェーズ別に terminal/needs_reconcile 記録する。
+
+        - claim 前で落ちた (claimed=False): order_intent 行が無いので何もしない。plan は
+          finally で active に戻され次 tick で再評価される (codex High は claim 後が対象)。
+        - submit 前で落ちた (claimed=True, submitted=False): 未発注。intent=abandoned +
+          plan=invalidated (新 plan で replan)。
+        - submit 後で落ちた (submitted=True): broker 応答前にクラッシュ = 建玉不明。
+          needs_reconcile で隔離 (intent/plan は触らず、手動/既存 reconciliation 待ち)。
+        """
+        try:
+            if not claimed:
+                return
+            if submitted:
+                self._orch.set_recovery_status(
+                    plan_id=plan.plan_id, recovery_status="needs_reconcile",
+                )
+                logger.warning(
+                    "[ORCH-RECOVERY] needs_reconcile (in-process): plan %s submitted but "
+                    "broker result unknown — 再 trigger 禁止・要手動確認", plan.plan_id,
+                )
+            else:
+                self._orch.record_order_result(plan_id=plan.plan_id, status="abandoned")
+                self._orch.update_plan_status(plan.plan_id, "invalidated")
+                logger.warning(
+                    "[ORCH] live execute aborted before submit for plan %s — "
+                    "intent=abandoned, plan=invalidated (replan)", plan.plan_id,
+                )
+        except Exception:
+            logger.exception(
+                f"[ORCH] failed to record execution failure state for plan {plan.plan_id}"
+            )
 
     def _apply_reject_transition(
         self, plan, pair: str, reject_class, run_id, snapshot_id, risk_gate_result,

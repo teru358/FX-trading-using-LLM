@@ -50,10 +50,11 @@ def test_live_trigger_duplicate_intent_aborts(tmp_path):
     assert broker.calls == []                         # 既発注 → 二重発注しない
 
 
-def test_sizing_failure_before_submit_leaves_intent_pending(tmp_path):
-    """code review M1/M2: signal 構築 (sizing) の失敗は submit マーキングより前なので、
-    order_intent は pending のまま残り broker は呼ばれない。recovery は retryable で扱える
-    (false needs_reconcile を生まない)。pip_value=0 で ZeroDivision を誘発する。"""
+def test_sizing_failure_before_submit_abandons_and_invalidates(tmp_path):
+    """code review M1/M2 + codex High: signal 構築 (sizing) の失敗は submit マーキングより
+    前なので broker は呼ばれず未発注。phase 追跡の except が intent=abandoned + plan=
+    invalidated を即時記録する (daemon 生存中も triggered のまま放置しない)。pip_value=0 で
+    ZeroDivision を誘発する。"""
     from src.config.schema import AppConfig, InstrumentConfig, TradingConfig
 
     broker = _FakeBroker(ExecutionResult.executed(_executed_order()))
@@ -67,8 +68,46 @@ def test_sizing_failure_before_submit_leaves_intent_pending(tmp_path):
     rt.run_watch_cycle(now=NOW)
     assert broker.calls == []                         # broker 未送信
     intent = rt._orch.get_order_intent(plan_id)
-    assert intent.status == "pending"                 # submit マーク前に失敗 → pending のまま
+    assert intent.status == "abandoned"               # submit 前失敗 → 未発注として terminal 化
     assert intent.submitted_at is None                # 復旧分岐点に到達していない
+    assert rt._orch.get_trade_plan(plan_id).status == "invalidated"  # 永久ブロック回避
+
+
+class _RaisingBroker:
+    """execute_signal で例外を投げる (送信後フェーズのクラッシュを模擬)。"""
+
+    def __init__(self):
+        self.calls = []
+
+    def execute_signal(self, signal, position_mgr, macro_context=""):
+        self.calls.append(signal)
+        raise RuntimeError("broker connection lost mid-send")
+
+
+def test_broker_exception_after_submit_marks_needs_reconcile(tmp_path):
+    """codex High: broker.execute_signal が例外を投げる = 送信後・応答前のクラッシュ。
+    建玉不明なので needs_reconcile で隔離し、plan は triggered のまま (terminal 化しない)。"""
+    broker = _RaisingBroker()
+    rt = make_live_runtime(tmp_path, broker, _GatePass())
+    plan_id = seed_active_plan_ready_to_trigger(rt)
+    rt.run_watch_cycle(now=NOW)
+    assert len(broker.calls) == 1                      # 送信は試みた
+    intent = rt._orch.get_order_intent(plan_id)
+    assert intent.recovery_status == "needs_reconcile"  # 隔離
+    assert intent.status == "submitted"                # 触らない (建玉あるかもしれない)
+    assert intent.submitted_at is not None             # submit マーク済
+    assert rt._orch.get_trade_plan(plan_id).status == "triggered"  # terminal 化しない
+
+
+def test_trigger_id_recorded_on_order_intent(tmp_path):
+    """codex Medium: shadow_trigger_id が order_intent.trigger_id に記録され trace が繋がる。"""
+    broker = _FakeBroker(ExecutionResult.executed(_executed_order()))
+    rt = make_live_runtime(tmp_path, broker, _GatePass())
+    plan_id = seed_active_plan_ready_to_trigger(rt)
+    rt.run_watch_cycle(now=NOW)
+    intent = rt._orch.get_order_intent(plan_id)
+    trig = rt._orch.get_shadow_trigger(plan_id)
+    assert intent.trigger_id == str(trig.id)
 
 
 def test_shadow_mode_never_executes(tmp_path):
