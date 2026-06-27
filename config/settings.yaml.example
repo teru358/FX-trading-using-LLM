@@ -374,8 +374,15 @@ data_backup:
 # Phase 1 foundation. enabled=false で既存サイクルに影響しない。
 orchestrator:
   enabled: false
-  mode: shadow  # observe | shadow | live
+  # Task F: shadow→本番発注 昇格。live は orchestrator 執行段が単一発注主体になる
+  # (旧 trading cycle の新規 entry は停止)。発注先 broker は top-level mode が決める:
+  #   - mode=live + AppConfig.mode=paper     → paper_broker (仮想資金) で動作確認 (推奨の段階検証)
+  #   - mode=live + AppConfig.mode=live_test → paper + MT5 observer (実発注なし。bridge DRY_RUN=true 必須)
+  #   - mode=live + AppConfig.mode=live      → 本番発注 (live_broker 必須、未設定は起動時エラー)
+  mode: shadow  # shadow | live
   pairs: [USDJPY=X, EURUSD=X]  # 空なら tradeable instruments を使う
+  # 発注直前の ExecutionOpinion 再点火 (material change 時)。既定 OFF (決定的・高速執行)。
+  execution_opinion_recheck_enabled: false
   # Phase 2/D: tick migration 段階導入 (off→producer→protect_shadow→protect_live)。
   # producer 以上で quote-stream producer 起動 + watch 直読 + spread 実値化。
   tick_migration_stage: "off"
