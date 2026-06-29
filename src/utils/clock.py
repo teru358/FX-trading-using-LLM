@@ -54,6 +54,36 @@ def db_utc_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _resolve_local_tz(local_tz):
+    """local_tz 未指定ならマシンのローカル TZ を返す。"""
+    if local_tz is not None:
+        return local_tz
+    return datetime.now().astimezone().tzinfo
+
+
+def to_db_naive_datetime(dt: datetime, local_tz=None) -> datetime:
+    """tz-aware datetime を DB 規約 (naive machine-local) に変換する。
+
+    DB 規約は ``db_now()`` = naive machine-local。tz-aware を ``replace(tzinfo=None)``
+    で直に剥がすと (= naive UTC) JST 環境で db_now() との比較が 9 時間ズレる。UTC→
+    ローカル変換してから tz を剥がす。naive 入力はそのまま返す。``local_tz`` を注入
+    すると実行環境 TZ に依存せずテストできる。
+    """
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(_resolve_local_tz(local_tz)).replace(tzinfo=None)
+
+
+def to_db_naive_index(index, local_tz=None):
+    """tz-aware な pandas DatetimeIndex を DB 規約 (naive machine-local) に変換する。
+
+    ``to_db_naive_datetime`` の index 版。tz-naive はそのまま返す。
+    """
+    if getattr(index, "tz", None) is not None:
+        return index.tz_convert(_resolve_local_tz(local_tz)).tz_localize(None)
+    return index
+
+
 def monotonic_now() -> float:
     """単調増加クロック — 経過時間測定専用 (``time.monotonic()`` 薄ラッパー)。
 
