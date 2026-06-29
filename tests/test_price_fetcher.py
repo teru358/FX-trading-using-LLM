@@ -34,3 +34,22 @@ def test_current_price_float_backward_compat():
     """float() で従来と同じように price 値を取得できること。"""
     cp = CurrentPrice(price=149.85, timestamp=datetime.now())
     assert float(cp) == 149.85
+
+
+import pandas as pd
+from zoneinfo import ZoneInfo
+import src.utils.clock as clock
+from src.data.price_fetcher import _normalize_index
+
+_JST = ZoneInfo("Asia/Tokyo")
+
+
+def test_normalize_index_aware_utc_to_local(monkeypatch):
+    """tz-aware UTC index は naive ローカルに変換される (naive UTC のままにしない)。"""
+    monkeypatch.setattr(clock, "_resolve_local_tz", lambda tz=None: _JST)
+    idx = pd.DatetimeIndex(["2026-06-29 10:00:00"], tz="UTC")
+    df = pd.DataFrame({"Open": [1.0], "High": [1.0], "Low": [1.0],
+                       "Close": [1.0], "Volume": [1]}, index=idx)
+    out = _normalize_index(df)
+    assert out.index.tz is None
+    assert out.index[-1] == pd.Timestamp("2026-06-29 19:00:00")  # JST

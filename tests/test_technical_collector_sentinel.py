@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
 
 from src.data.analysis_store import AnalysisStore
-from src.jobs.technical_collector import _collect_one
+from src.jobs.technical_collector import _collect_one, _is_price_data_stale
 from src.utils.clock import db_now
+import src.utils.clock as clock
 
 
 def _inst(symbol: str = "USDJPY=X", asset_type: str = "fx"):
@@ -286,3 +288,22 @@ def test_collect_all_phase1_prefetch_failure_writes_failed_sentinel(tmp_path, mo
     assert latest.collect_status == "failed"
     assert "prefetch_failed" in (latest.reasoning_summary or "")
     assert "ConnectionError" in (latest.reasoning_summary or "")
+
+
+_JST_TC = ZoneInfo("Asia/Tokyo")
+
+
+def test_is_price_data_stale_raw_aware_utc_fresh_not_stale(monkeypatch):
+    """生の tz-aware UTC の新鮮なバーは stale 判定されない (剥がすだけバグの回帰)。"""
+    monkeypatch.setattr(clock, "_resolve_local_tz", lambda tz=None: _JST_TC)
+    now_local = db_now()
+    aware_utc = (
+        pd.Timestamp(now_local).tz_localize(_JST_TC).tz_convert("UTC")
+        - pd.Timedelta(minutes=15)
+    )
+    df = pd.DataFrame(
+        {"Open": [1.0], "High": [1.0], "Low": [1.0], "Close": [1.0], "Volume": [1]},
+        index=pd.DatetimeIndex([aware_utc]),  # tz-aware UTC のまま
+    )
+    price_data = SimpleNamespace(symbol="USDJPY=X", df=df, current_price=1.0)
+    assert _is_price_data_stale(price_data) is None

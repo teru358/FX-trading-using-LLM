@@ -11,6 +11,8 @@ import pandas as pd
 from sqlalchemy import Column, DateTime, Float, String, create_engine, inspect as sa_inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Session
 
+from src.utils.clock import to_db_naive_datetime
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -85,9 +87,9 @@ class PriceStore:
                     ts.to_pydatetime() if hasattr(ts, "to_pydatetime")
                     else datetime(ts.year, ts.month, ts.day)
                 )
-                # timezone-naive に正規化
-                if bar_time.tzinfo is not None:
-                    bar_time = bar_time.replace(tzinfo=None)
+                # DB 規約 (naive machine-local) に正規化。aware UTC を直に剥がすと
+                # 9h ズレるため共通ヘルパで UTC→ローカル変換してから naive 化する。
+                bar_time = to_db_naive_datetime(bar_time)
                 obj = _OhlcvRow(
                     symbol=symbol,
                     bar_time=bar_time,

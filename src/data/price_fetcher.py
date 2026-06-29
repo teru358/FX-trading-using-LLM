@@ -9,6 +9,8 @@ import pandas as pd
 import yfinance as yf
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from src.utils.clock import to_db_naive_index
+
 if TYPE_CHECKING:
     from src.data.price_store import PriceStore
 
@@ -55,10 +57,12 @@ def _parse_period_days(period: str) -> int:
 
 
 def _normalize_index(df: pd.DataFrame) -> pd.DataFrame:
-    """yfinance が返す timezone-aware な index を naive に正規化する。"""
-    if hasattr(df.index, "tz") and df.index.tz is not None:
-        df.index = df.index.tz_convert(None)
-    df.index = pd.to_datetime(df.index)
+    """yfinance の tz-aware index を DB 規約 (naive machine-local) に正規化する。
+
+    tz_convert(None) は naive UTC を作り db_now() と 9h ズレるため使わない
+    (to_db_naive_index が UTC→ローカル変換してから剥がす)。
+    """
+    df.index = to_db_naive_index(pd.to_datetime(df.index))
     return df
 
 

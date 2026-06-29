@@ -83,13 +83,14 @@ def _is_price_data_stale(
     max_staleness: timedelta = _MAX_STALENESS_FX,
 ) -> timedelta | None:
     """最新バーの鮮度をチェック。古すぎる場合は経過時間を返す (スキップ判定用)。"""
-    from src.utils.clock import db_now
+    from src.utils.clock import db_now, to_db_naive_datetime
 
     latest_bar = price_data.df.index[-1]
     if hasattr(latest_bar, "to_pydatetime"):
         latest_bar = latest_bar.to_pydatetime()
-    if hasattr(latest_bar, "tzinfo") and latest_bar.tzinfo is not None:
-        latest_bar = latest_bar.replace(tzinfo=None)
+    # aware は DB 規約 (naive local) に変換してから比較する (naive UTC のまま剥がすと
+    # JST 環境で +9h ズレ、新鮮なバーが誤って stale_price 判定される)。
+    latest_bar = to_db_naive_datetime(latest_bar)
     staleness = db_now() - latest_bar
     if staleness > max_staleness:
         return staleness
