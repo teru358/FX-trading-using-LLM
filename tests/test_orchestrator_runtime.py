@@ -76,7 +76,10 @@ def test_run_watch_cycle_records_freshness_for_active_plan(
         action_json={}, invalidation_json=[],
         expires_at=datetime(2026, 6, 27, 12, 0, 0), created_by_run_id=1,
     )
-    triggered = runtime.run_watch_cycle()
+    # now を fixture の as_of_time/observed_at に合わせて固定する: 既定の db_now() を
+    # 使うと plan の expires_at (2026-06-27) を過ぎた時点で plan が expired 扱いになり
+    # freshness 記録経路に入らず date-flake する (固定過去日付 seed の罠)。
+    triggered = runtime.run_watch_cycle(now=datetime(2026, 6, 20, 12, 0, 0))
     # observe mode: 条件評価は later plan。ここでは執行 (order) が無いことを保証する。
     assert triggered == []
     # freshness 行が実際に記録されていることを検証する (record_freshness が消えても
