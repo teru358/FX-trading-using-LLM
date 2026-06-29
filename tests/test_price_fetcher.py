@@ -1,7 +1,13 @@
 """price_fetcher の CurrentPrice テスト。"""
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from src.data.price_fetcher import CurrentPrice
+import pandas as pd
+
+import src.utils.clock as clock
+from src.data.price_fetcher import CurrentPrice, _normalize_index
+
+_JST = ZoneInfo("Asia/Tokyo")
 
 
 def test_current_price_basic_fields():
@@ -34,14 +40,6 @@ def test_current_price_float_backward_compat():
     """float() で従来と同じように price 値を取得できること。"""
     cp = CurrentPrice(price=149.85, timestamp=datetime.now())
     assert float(cp) == 149.85
-
-
-import pandas as pd
-from zoneinfo import ZoneInfo
-import src.utils.clock as clock
-from src.data.price_fetcher import _normalize_index
-
-_JST = ZoneInfo("Asia/Tokyo")
 
 
 def test_normalize_index_aware_utc_to_local(monkeypatch):
