@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
 from src.analysis.price_analyzer import analyze_price_action
@@ -42,6 +42,7 @@ from src.rag.prompt_formatter import (
 )
 from src.rag.vector_store import VectorStore
 from src.trading.market_hours import is_market_open
+from src.utils.clock import to_db_naive_datetime
 
 if TYPE_CHECKING:
     from src.data.price_fetcher import PriceData
@@ -95,6 +96,16 @@ def _is_price_data_stale(
     if staleness > max_staleness:
         return staleness
     return None
+
+
+def _econ_window_for(event_time: datetime, hours: int = 1) -> tuple[datetime, datetime]:
+    """econ event_time (aware UTC) を DB 規約 (naive local) に変換し ±hours の窓を返す。
+
+    ohlcv テーブルは naive machine-local なので、load_ohlcv の窓も local 時刻で指定
+    する。naive UTC のまま渡すと窓がズレてバーを取りこぼす。
+    """
+    base = to_db_naive_datetime(event_time)
+    return base - timedelta(hours=hours), base + timedelta(hours=hours)
 
 
 _CORR_LOOKBACK_DAYS = 30  # 相関に十分なバー数を確保する lookback
@@ -512,11 +523,10 @@ async def _collect_econ_impact(
                     snapshot_briefs = []
                     for p in related_pairs:
                         try:
-                            event_time_naive = ev.event_time.replace(tzinfo=None)
+                            event_time_naive = to_db_naive_datetime(ev.event_time)
+                            _win_start, _win_end = _econ_window_for(ev.event_time)
                             pd_ = price_store.load_ohlcv(
-                                p.symbol,
-                                event_time_naive - timedelta(hours=1),
-                                event_time_naive + timedelta(hours=1),
+                                p.symbol, _win_start, _win_end,
                             )
                             if pd_.empty or len(pd_) < 2:
                                 continue
