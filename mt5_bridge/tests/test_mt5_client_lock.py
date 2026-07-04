@@ -107,3 +107,81 @@ def test_disconnect_does_not_interleave_with_copy_rates():
     ci_start, ci_end = log.index("copy_start"), log.index("copy_end")
     sd = log.index("shutdown")
     assert not (ci_start < sd < ci_end), f"shutdown interleaved: {log}"
+
+
+import pytest
+from mt5_client import Mt5Client, PreflightError
+
+
+class _PreflightFakeMt5:
+    ORDER_TYPE_BUY = 0
+    ORDER_TYPE_SELL = 1
+
+    def __init__(self, *, tick_ok=True, free_margin=10_000.0, select_ok=True):
+        self._tick_ok = tick_ok
+        self._free_margin = free_margin
+        self._select_ok = select_ok
+
+    def symbol_select(self, symbol, enable):
+        return self._select_ok
+
+    def symbol_info_tick(self, symbol):
+        if not self._tick_ok:
+            return None
+        return type("T", (), {"ask": 150.0, "bid": 149.98})()
+
+    def order_calc_margin(self, order_type, symbol, volume, price):
+        return 100.0
+
+    def account_info(self):
+        # 実 MT5 の account_info() は margin_free を返す (get_account が free_margin に map)
+        return type("A", (), {
+            "login": 1, "server": "s", "currency": "JPY",
+            "balance": self._free_margin, "equity": self._free_margin,
+            "margin": 0.0, "margin_free": self._free_margin,
+            "leverage": 100, "name": "n", "trade_mode": 0,
+        })()
+
+    def last_error(self):
+        return (0, "ok")
+
+
+def _preflight_client(fake):
+    c = Mt5Client.__new__(Mt5Client)
+    c._mt5 = fake
+    c._lock = threading.Lock()
+    return c
+
+
+def test_preflight_order_margin_passes_when_margin_sufficient():
+    c = _preflight_client(_PreflightFakeMt5(free_margin=10_000.0))
+    c.preflight_order_margin("USDJPY", "buy", 0.1)  # 例外なし = 成功
+
+
+def test_preflight_order_margin_raises_on_insufficient_margin():
+    c = _preflight_client(_PreflightFakeMt5(free_margin=1.0))
+    with pytest.raises(PreflightError) as ei:
+        c.preflight_order_margin("USDJPY", "buy", 0.1)
+    assert "insufficient margin" in str(ei.value).lower()
+
+
+def test_preflight_order_margin_raises_when_symbol_unavailable():
+    c = _preflight_client(_PreflightFakeMt5(select_ok=False))
+    with pytest.raises(PreflightError):
+        c.preflight_order_margin("USDJPY", "buy", 0.1)
+
+
+def test_preflight_order_margin_raises_when_no_tick():
+    c = _preflight_client(_PreflightFakeMt5(tick_ok=False))
+    with pytest.raises(PreflightError):
+        c.preflight_order_margin("USDJPY", "buy", 0.1)
+
+
+def test_preflight_does_not_deadlock_calling_locked_helpers():
+    """preflight は lock 保持のまま margin/account を計算しても self-deadlock しない
+    (= *_locked private を呼んでいる)。正常に完了すれば OK。"""
+    c = _preflight_client(_PreflightFakeMt5(free_margin=10_000.0))
+    c.preflight_order_margin("USDJPY", "buy", 0.1)
+    # 追加で public get_account / calc_required_margin も従来どおり動く (回帰)
+    assert c.get_account().free_margin == 10_000.0
+    assert c.calc_required_margin("USDJPY", "buy", 0.1, 150.0) == 100.0

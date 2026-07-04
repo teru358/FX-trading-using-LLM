@@ -79,6 +79,16 @@ class ClosedDeal:
     reason: str
 
 
+class PreflightError(Exception):
+    """order pre-flight 検証の失敗 (symbol 不可 / tick 無し / 証拠金不足)。
+
+    server 側で HTTP status に map する (http_status を持つ)。
+    """
+    def __init__(self, message: str, *, http_status: int = 422) -> None:
+        super().__init__(message)
+        self.http_status = http_status
+
+
 class Mt5Client:
     """MT5 ターミナルへの接続を保持し、read-only 照会だけを提供する。"""
 
@@ -128,21 +138,24 @@ class Mt5Client:
 
     def get_account(self) -> AccountInfo:
         with self._lock:
-            info = self._mt5.account_info()
-            if info is None:
-                raise RuntimeError(f"account_info() failed: {self._mt5.last_error()}")
-            return AccountInfo(
-                login=info.login,
-                server=info.server,
-                currency=info.currency,
-                balance=info.balance,
-                equity=info.equity,
-                margin=info.margin,
-                free_margin=info.margin_free,
-                leverage=info.leverage,
-                name=info.name,
-                trade_mode=info.trade_mode,
-            )
+            return self._get_account_locked()
+
+    def _get_account_locked(self) -> AccountInfo:
+        info = self._mt5.account_info()
+        if info is None:
+            raise RuntimeError(f"account_info() failed: {self._mt5.last_error()}")
+        return AccountInfo(
+            login=info.login,
+            server=info.server,
+            currency=info.currency,
+            balance=info.balance,
+            equity=info.equity,
+            margin=info.margin,
+            free_margin=info.margin_free,
+            leverage=info.leverage,
+            name=info.name,
+            trade_mode=info.trade_mode,
+        )
 
     def get_quote(self, symbol: str) -> Quote:
         from datetime import datetime, timezone
@@ -360,15 +373,20 @@ class Mt5Client:
     ) -> float:
         """MT5 内蔵関数で必要証拠金を計算 (口座通貨建て、通貨換算込み)。"""
         with self._lock:
-            action = (
-                self._mt5.ORDER_TYPE_BUY if side == "buy" else self._mt5.ORDER_TYPE_SELL
+            return self._calc_required_margin_locked(symbol, side, volume_lots, price)
+
+    def _calc_required_margin_locked(
+        self, symbol: str, side: str, volume_lots: float, price: float,
+    ) -> float:
+        action = (
+            self._mt5.ORDER_TYPE_BUY if side == "buy" else self._mt5.ORDER_TYPE_SELL
+        )
+        margin = self._mt5.order_calc_margin(action, symbol, volume_lots, price)
+        if margin is None:
+            raise RuntimeError(
+                f"order_calc_margin failed: {self._mt5.last_error()}"
             )
-            margin = self._mt5.order_calc_margin(action, symbol, volume_lots, price)
-            if margin is None:
-                raise RuntimeError(
-                    f"order_calc_margin failed: {self._mt5.last_error()}"
-                )
-            return float(margin)
+        return float(margin)
 
     def modify_position_dry_run(
         self, ticket: int, *, sl: float | None = None, tp: float | None = None,
@@ -469,6 +487,31 @@ class Mt5Client:
                 "dry_run": False,
                 "note": "",
             }
+
+    def preflight_order_margin(
+        self, symbol: str, side: str, volume_lots: float,
+        *, margin_buffer: float = 1.05,
+    ) -> None:
+        """live 発注前の証拠金チェック (symbol_select→tick→margin→free_margin) を
+        lock 下で実行する。問題があれば PreflightError。price は margin 計算専用
+        (place_order_live が自前で tick を取り直すため戻さない)。"""
+        with self._lock:
+            if not self._mt5.symbol_select(symbol, True):
+                raise PreflightError(f"symbol {symbol} not available", http_status=404)
+            tick = self._mt5.symbol_info_tick(symbol)
+            if tick is None:
+                raise PreflightError(f"no tick for {symbol}", http_status=404)
+            price = float(tick.ask if side == "buy" else tick.bid)
+            required = self._calc_required_margin_locked(symbol, side, volume_lots, price)
+            required_with_buffer = required * margin_buffer
+            free_margin = self._get_account_locked().free_margin
+            if free_margin < required_with_buffer:
+                raise PreflightError(
+                    f"insufficient margin: required={required:.2f} "
+                    f"(with buffer={required_with_buffer:.2f}) "
+                    f"free={free_margin:.2f}",
+                    http_status=422,
+                )
 
     def place_order_live(
         self, symbol: str, side: str, volume_lots: float,
