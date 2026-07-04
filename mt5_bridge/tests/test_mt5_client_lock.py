@@ -185,3 +185,116 @@ def test_preflight_does_not_deadlock_calling_locked_helpers():
     # 追加で public get_account / calc_required_margin も従来どおり動く (回帰)
     assert c.get_account().free_margin == 10_000.0
     assert c.calc_required_margin("USDJPY", "buy", 0.1, 150.0) == 100.0
+
+
+def test_copy_rates_and_preflight_do_not_interleave():
+    """copy_rates_range (data) と preflight_order_margin (order前処理) が
+    同時に走っても、各々の symbol_select→次のMT5呼び出しが割り込まれない。"""
+    from datetime import datetime, timezone
+
+    order_log: list[str] = []
+    log_lock = threading.Lock()
+
+    class _Fake:
+        TIMEFRAME_H1 = 16385
+        ORDER_TYPE_BUY = 0
+        ORDER_TYPE_SELL = 1
+        def _rec(self, n):
+            with log_lock:
+                order_log.append(n)
+        def symbol_select(self, s, e):
+            self._rec(f"select:{s}"); time.sleep(0.02); return True
+        def copy_rates_range(self, s, tf, a, b):
+            self._rec(f"copy:{s}"); time.sleep(0.02)
+            return [{"time": 1700000000, "open": 1.0, "high": 1.0,
+                     "low": 1.0, "close": 1.0, "tick_volume": 1}]
+        def symbol_info_tick(self, s):
+            self._rec(f"tick:{s}"); time.sleep(0.02)
+            return type("T", (), {"ask": 150.0, "bid": 149.98})()
+        def order_calc_margin(self, ot, s, v, p):
+            return 100.0
+        def account_info(self):
+            return type("A", (), {
+                "login": 1, "server": "s", "currency": "JPY",
+                "balance": 10_000.0, "equity": 10_000.0, "margin": 0.0,
+                "margin_free": 10_000.0, "leverage": 100, "name": "n",
+                "trade_mode": 0,
+            })()
+        def last_error(self):
+            return (0, "ok")
+
+    c = Mt5Client.__new__(Mt5Client)
+    c._mt5 = _Fake()
+    c._lock = threading.Lock()
+
+    d0 = datetime(2026, 6, 30, tzinfo=timezone.utc)
+    d1 = datetime(2026, 6, 30, 1, tzinfo=timezone.utc)
+
+    def data_worker():
+        c.copy_rates_range("USDJPY", "1h", d0, d1)
+
+    def order_worker():
+        c.preflight_order_margin("EURUSD", "buy", 0.1)
+
+    t1 = threading.Thread(target=data_worker)
+    t2 = threading.Thread(target=order_worker)
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    # どちらかのブロックが完全に先行する (interleave しない)。
+    data_block = ["select:USDJPY", "copy:USDJPY"]
+    order_block = ["select:EURUSD", "tick:EURUSD"]
+    assert order_log in (
+        data_block + order_block,
+        order_block + data_block,
+    ), f"interleave detected: {order_log}"
+
+
+def test_last_error_failure_path_is_serialized():
+    """copy_rates_range が None を返し last_error() を読む失敗パスが、別 call と
+    並行しても lock 内で完結する (last_error race の検証)。"""
+    from datetime import datetime, timezone
+
+    log: list[str] = []
+    log_lock = threading.Lock()
+
+    class _FailFake:
+        TIMEFRAME_H1 = 16385
+        def _rec(self, n):
+            with log_lock:
+                log.append(n)
+        def symbol_select(self, s, e):
+            self._rec(f"select:{s}"); time.sleep(0.02); return True
+        def copy_rates_range(self, s, tf, a, b):
+            self._rec(f"copy:{s}"); time.sleep(0.02)
+            if s == "FAILSYM":
+                return None
+            return [{"time": 1700000000, "open": 1.0, "high": 1.0,
+                     "low": 1.0, "close": 1.0, "tick_volume": 1}]
+        def last_error(self):
+            self._rec("last_error"); time.sleep(0.02); return (1, "err")
+
+    c = Mt5Client.__new__(Mt5Client)
+    c._mt5 = _FailFake()
+    c._lock = threading.Lock()
+    d0 = datetime(2026, 6, 30, tzinfo=timezone.utc)
+    d1 = datetime(2026, 6, 30, 1, tzinfo=timezone.utc)
+
+    errors: list[Exception] = []
+    def fail_worker():
+        try:
+            c.copy_rates_range("FAILSYM", "1h", d0, d1)
+        except RuntimeError as e:
+            errors.append(e)
+    def ok_worker():
+        c.copy_rates_range("OKSYM", "1h", d0, d1)
+
+    t1 = threading.Thread(target=fail_worker)
+    t2 = threading.Thread(target=ok_worker)
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    assert len(errors) == 1
+    fail_block = ["select:FAILSYM", "copy:FAILSYM", "last_error"]
+    ok_block = ["select:OKSYM", "copy:OKSYM"]
+    assert log in (fail_block + ok_block, ok_block + fail_block), (
+        f"last_error race / interleave detected: {log}"
+    )
