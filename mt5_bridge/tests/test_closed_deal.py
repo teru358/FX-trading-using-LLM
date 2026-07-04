@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -51,6 +52,7 @@ def test_get_closed_deal_uses_out_deals_weighted_price_and_total_pnl():
             ]
 
     client._mt5 = _FakeMt5()
+    client._lock = threading.Lock()
 
     deal = client.get_closed_deal(111)
 
@@ -86,5 +88,6 @@ def test_get_closed_deal_returns_none_when_no_out_deal():
             ]
 
     client._mt5 = _FakeMt5()
+    client._lock = threading.Lock()
 
     assert client.get_closed_deal(111) is None
