@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from admin_models import AdminStatus, HaltRequest
 from config import BridgeSettings, load_settings
-from mt5_client import Mt5Client
+from mt5_client import Mt5Client, PreflightError
 from ohlcv_models import OhlcvBar, OhlcvResponse
 from order_models import (
     ClosedDealResponse,
@@ -347,28 +347,13 @@ def place_order(req: OrderRequest):
         )
 
     # 経路 3: live mode
-    # ── 事前証拠金チェック (5% バッファ) ──
+    # ── 事前証拠金チェック (5% バッファ) — Mt5Client の lock 下で実行 (直 _mt5 アクセス禁止) ──
     try:
-        if not _client._mt5.symbol_select(req.symbol, True):
-            raise HTTPException(404, f"symbol {req.symbol} not available")
-        tick = _client._mt5.symbol_info_tick(req.symbol)
-        if tick is None:
-            raise HTTPException(404, f"no tick for {req.symbol}")
-        price = float(tick.ask if req.side == "buy" else tick.bid)
-        required = _client.calc_required_margin(
-            req.symbol, req.side, req.volume_lots, price,
+        _client.preflight_order_margin(
+            req.symbol, req.side, req.volume_lots, margin_buffer=1.05,
         )
-        required_with_buffer = required * 1.05
-        account = _client.get_account()
-        if account.free_margin < required_with_buffer:
-            raise HTTPException(
-                422,
-                f"insufficient margin: required={required:.2f} "
-                f"(with 5% buffer={required_with_buffer:.2f}) "
-                f"free={account.free_margin:.2f}",
-            )
-    except HTTPException:
-        raise
+    except PreflightError as e:
+        raise HTTPException(e.http_status, str(e))
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"pre-flight check failed: {e}")
 
