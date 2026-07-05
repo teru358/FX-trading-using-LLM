@@ -53,23 +53,27 @@ def _get_ohlcv(
     return fetch_ohlcv(symbol, period, interval, price_store)
 
 
-def _compute_atr_from_price_data(price_data, resample_tf: str = "") -> float | None:
+def _compute_atr_from_price_data(
+    price_data, resample_tf: str = "", base_interval: str = "1h"
+) -> float | None:
     """price_data から ATR(14) を計算する。データ不足や例外時は None。
 
     Args:
         price_data: OHLCV データ (price_data.df)
         resample_tf: リサンプル足種 ("4h", "1d" 等)。空なら元の足種のまま。
+        base_interval: price_data.df の基底足 ("15m", "1h" 等)。resample_tf が
+            base_interval と異なる場合のみ resample_ohlcv でリサンプルする
+            (codex High#1: "1h" 固定除外だと 15m 基底で resample_tf="1h" が
+            スキップされ ATR が過小評価される)。
     """
     if not price_data or len(price_data.df) < 14:
         return None
     try:
         import pandas_ta as pta
+        from src.data.resample import resample_ohlcv
         df = price_data.df
-        if resample_tf and resample_tf not in ("", "1h"):
-            df = df.resample(resample_tf).agg({
-                "Open": "first", "High": "max", "Low": "min",
-                "Close": "last", "Volume": "sum",
-            }).dropna()
+        if resample_tf and resample_tf != base_interval:
+            df = resample_ohlcv(df, resample_tf, base_interval=base_interval)
             if len(df) < 14:
                 return None
         atr_s = pta.atr(df["High"], df["Low"], df["Close"], length=14)
@@ -98,7 +102,11 @@ def _fetch_and_compute_atr(
             config.trading.ohlcv_interval,
             price_store=price_store,
         )
-        return _compute_atr_from_price_data(price_data, resample_tf=atr_timeframe)
+        return _compute_atr_from_price_data(
+            price_data,
+            resample_tf=atr_timeframe,
+            base_interval=config.trading.ohlcv_interval,
+        )
     except Exception:
         return None
 

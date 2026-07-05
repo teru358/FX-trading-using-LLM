@@ -219,6 +219,7 @@ def _apply_atr_sltp_to_signal(
         )
         atr_val = _compute_atr_from_price_data(
             price_data, resample_tf=config.trading.atr_timeframe,
+            base_interval=config.trading.ohlcv_interval,
         )
         if not atr_val or atr_val <= 0:
             return None
