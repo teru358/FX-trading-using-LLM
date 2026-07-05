@@ -95,6 +95,87 @@ def test_latest_unknown_pair_is_none():
     assert prod.latest("EURUSD=X") is None
 
 
+def _make_producer(fetcher: _FakeFetcher) -> QuoteStreamProducer:
+    return QuoteStreamProducer(
+        pairs=["USDJPY=X"], fetcher=fetcher,
+        price_provider=_FakePriceProvider(150.0), mt5_enabled=True, poll_seconds=2,
+    )
+
+
+def test_closed_market_polls_once_then_pauses(monkeypatch):
+    """閉場中は最初の snapshot を張った後 poll しない (取引時間外の bridge tick 停止)。"""
+    monkeypatch.setattr("src.data.quote_stream.is_market_open", lambda: False)
+    fetcher = _FakeFetcher({"USDJPY=X": _quote(150.00, 150.02)})
+    prod = _make_producer(fetcher)
+
+    prod._poll_if_open()
+    assert len(fetcher.calls) == 1          # latest 空 → 1回だけ poll して張る
+    assert prod.latest("USDJPY=X") is not None
+
+    prod._poll_if_open()
+    prod._poll_if_open()
+    assert len(fetcher.calls) == 1          # 以後は閉場中 poll しない
+
+
+def test_open_market_polls_every_iteration(monkeypatch):
+    monkeypatch.setattr("src.data.quote_stream.is_market_open", lambda: True)
+    fetcher = _FakeFetcher({"USDJPY=X": _quote(150.00, 150.02)})
+    prod = _make_producer(fetcher)
+
+    prod._poll_if_open()
+    prod._poll_if_open()
+    assert len(fetcher.calls) == 2
+
+
+def test_closed_market_keeps_polling_until_all_pairs_covered(monkeypatch):
+    """閉場中でも未取得 pair が残る限り poll を続ける (部分 coverage で止めない)。"""
+    monkeypatch.setattr("src.data.quote_stream.is_market_open", lambda: False)
+    fetcher = _FakeFetcher({"USDJPY=X": _quote(150.00, 150.02)})  # EURUSD は quote なし
+    provider = _FakePriceProvider(150.0)
+    prod = QuoteStreamProducer(
+        pairs=["USDJPY=X", "EURUSD=X"], fetcher=fetcher,
+        price_provider=provider, mt5_enabled=True, poll_seconds=2,
+    )
+
+    # EURUSD は degrade 先の price_provider も失敗 → snapshot が張れない
+    def boom(pair):
+        raise RuntimeError("explode")
+    provider.get_current_price = boom  # type: ignore[method-assign]
+
+    prod._poll_if_open()
+    prod._poll_if_open()
+    assert prod.latest("USDJPY=X") is not None
+    assert prod.latest("EURUSD=X") is None
+    assert fetcher.calls.count("EURUSD=X") == 2  # 未 coverage の間は poll 継続
+
+    # EURUSD の quote が取れるようになったら張って停止する
+    fetcher._quotes["EURUSD=X"] = _quote(1.1000, 1.1002)
+    prod._poll_if_open()
+    assert prod.latest("EURUSD=X") is not None
+    calls_after_covered = len(fetcher.calls)
+    prod._poll_if_open()
+    assert len(fetcher.calls) == calls_after_covered  # 全 pair 張れたら閉場中は停止
+
+
+def test_reopen_resumes_polling(monkeypatch):
+    """閉場→開場の遷移で polling が再開する。"""
+    open_flag = {"open": False}
+    monkeypatch.setattr(
+        "src.data.quote_stream.is_market_open", lambda: open_flag["open"]
+    )
+    fetcher = _FakeFetcher({"USDJPY=X": _quote(150.00, 150.02)})
+    prod = _make_producer(fetcher)
+
+    prod._poll_if_open()                    # 閉場: 初回張りのみ
+    prod._poll_if_open()
+    assert len(fetcher.calls) == 1
+
+    open_flag["open"] = True
+    prod._poll_if_open()
+    prod._poll_if_open()
+    assert len(fetcher.calls) == 3          # 再開後は毎 iteration poll
+
+
 def test_producer_snapshot_observed_at_subtractable_with_naive_now():
     """producer の observed_at が naive なので naive now と引き算でき age が出る (H1 回帰)。"""
     from src.utils.clock import db_now
