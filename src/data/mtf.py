@@ -100,17 +100,24 @@ def compute_mtf_summaries(
     df_1h: pd.DataFrame,
     analysis_cfg: "AnalysisConfig",
     timeframes: dict[str, dict],
+    base_interval: str = "1h",
 ) -> dict[str, IndicatorSummary]:
-    """1h OHLCV をベースに、各タイムフレームの IndicatorSummary を返す。
+    """基底足 OHLCV をベースに、各タイムフレームの IndicatorSummary を返す。
 
     Args:
-        df_1h: 1h 足の OHLCV (index=DatetimeIndex)
+        df_1h: 基底足 (base_interval で指定した粒度) の OHLCV (index=DatetimeIndex)。
+               引数名は既存互換のため "df_1h" のままだが、実データは
+               base_interval に応じて 15m/30m/1h などになりうる。
         analysis_cfg: 全体の analysis 設定 (indicator / pattern toggles)
         timeframes: {
             "long":   {"lookback_days": 90, "interval": "1d", "enabled": True},
             "medium": {"lookback_days": 14, "interval": "4h", "enabled": True},
             "short":  {"lookback_days": 2,  "interval": "1h", "enabled": True},
         }
+        base_interval: df_1h の実際の基底足粒度。"15m" / "30m" / "1h" など。
+                       デフォルトは "1h" (後方互換)。resample_ohlcv にそのまま
+                       渡され、各 tf["interval"] が base_interval より細かい
+                       場合は ValueError になる。
 
     Returns:
         {"long": IndicatorSummary, "medium": ..., "short": ...}
@@ -129,8 +136,8 @@ def compute_mtf_summaries(
         interval = tf["interval"]
         lookback_days = tf["lookback_days"]
 
-        # リサンプル (1h は恒等)
-        df_tf = resample_ohlcv(df_1h, interval)
+        # リサンプル (interval == base_interval は恒等)
+        df_tf = resample_ohlcv(df_1h, interval, base_interval=base_interval)
 
         # lookback_days 分に切り詰める
         # interval から時間単位を概算
@@ -169,6 +176,13 @@ def _bars_per_day_for_interval(interval: str) -> int:
         return 1
     if interval == "1h":
         return 24
+    # "15m" / "30m" などの "Nm" 形式
+    if interval.endswith("m"):
+        try:
+            m = int(interval[:-1])
+            return max(1, (24 * 60) // m)
+        except ValueError:
+            pass
     # "4h" / "8h" などの "Nh" 形式
     if interval.endswith("h"):
         try:

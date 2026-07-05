@@ -197,7 +197,10 @@ def _compute_mtf_and_log(inst: InstrumentConfig, df_1h, config: AppConfig):
             "enabled": mtf_cfg.short.enabled,
         },
     }
-    summaries = compute_mtf_summaries(df_1h, config.analysis, timeframes)
+    summaries = compute_mtf_summaries(
+        df_1h, config.analysis, timeframes,
+        base_interval=config.trading.ohlcv_interval,
+    )
 
     # 各 TF に適用する indicator/pattern cfg は mtf 内部でフィルタされているが、
     # compute_technical_score にも同じ filtered cfg を渡して disabled 指標の
