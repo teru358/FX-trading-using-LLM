@@ -276,6 +276,8 @@ class _ShadowHindsightEvaluation(_Base):
     horizon_seconds   = Column(Integer)
     mfe_r             = Column(Float)
     mae_r             = Column(Float)
+    # NET (spread 控除後)。spread_cost_r が NULL の行は GROSS (旧データ or spread 不明)。
+    # gross = pnl_r + spread_cost_r で復元可能 (spec D-8)。
     pnl_r             = Column(Float)
     would_hit_sl      = Column(Integer)    # 0/1 (bool を SQLite 互換に)
     would_hit_tp      = Column(Integer)    # 0/1

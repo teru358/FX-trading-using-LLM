@@ -49,3 +49,24 @@ def test_zero_spread_treated_as_no_cost():
     res = _evaluate(0.0)
     assert res.spread_cost_r is None
     assert res.pnl_r == pytest.approx(0.0, abs=1e-9)
+
+
+def test_sl_hit_with_spread_goes_below_minus_one():
+    """SL ヒット時 net = -1.0 - cost (spread は実質 SL 距離を悪化させる)。"""
+    # Low が SL(149.5) を割るバーを含める → SL-hit 分岐 (High は TP(151.0) 未到達)
+    idx = pd.date_range("2026-07-01 10:00", periods=4, freq="1h")
+    df = pd.DataFrame(
+        {"Open": [150.0] * 4, "High": [150.1] * 4,
+         "Low": [150.0, 149.3, 149.3, 149.3], "Close": [149.6] * 4,
+         "Volume": [0.0] * 4},
+        index=idx,
+    )
+    ev = HindsightEvaluator(ohlcv_provider=_provider_factory(df))
+    res = ev.evaluate(
+        pair="USDJPY=X", direction="long", trigger_price=150.0,
+        sl=149.5, tp=151.0,
+        triggered_at=datetime(2026, 7, 1, 10, 0), horizon_seconds=3600 * 8,
+        spread_pips=5.0,  # cost_r = 0.1
+    )
+    assert res.would_hit_sl is True
+    assert res.pnl_r == pytest.approx(-1.1)

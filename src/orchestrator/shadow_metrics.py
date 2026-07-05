@@ -78,6 +78,7 @@ def compute_shadow_metrics(
         hindsight_failed=hs_counts.get("failed", 0),
         avg_mfe_r=raw["avg_mfe_r"],
         avg_mae_r=raw["avg_mae_r"],
+        # 注: spread_cost_r 導入 (2026-07-05) 以前の行は gross、以後は net が混在する
         avg_pnl_r=raw["avg_pnl_r"],
         sl_hit_rate=_rate(raw["sl_hits"], hindsight_evaluated),
         tp_hit_rate=_rate(raw["tp_hits"], hindsight_evaluated),
