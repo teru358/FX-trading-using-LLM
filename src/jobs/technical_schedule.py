@@ -13,6 +13,17 @@ def technical_times_for(interval_hours: int) -> list[str]:
     return [f"{h:02d}:00" for h in range(0, 24, step)]
 
 
+def technical_times_for_minutes(interval_minutes: int) -> list[str]:
+    """指定間隔 (分) の "HH:MM" 時刻リストを返す。
+
+    interval_minutes=30 → 48 個。0/負値は 60 (毎時) に倒す。
+    """
+    step = interval_minutes if interval_minutes > 0 else 60
+    return [
+        f"{m // 60:02d}:{m % 60:02d}" for m in range(0, 24 * 60, step)
+    ]
+
+
 def build_technical_dispatch(
     trade_set: set[str],
     watch_set: set[str],

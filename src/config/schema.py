@@ -317,6 +317,9 @@ class ScheduleConfig:
     # trade は cadence resolver で boost される土台、watch は低頻度固定用。
     technical_trade_interval_hours: int = 1
     technical_watch_interval_hours: int = 1
+    # technical trade 収集の分粒度 interval。設定時は technical_trade_interval_hours
+    # より優先。None (既定) なら従来の hours を使う = 挙動不変 (spec 2026-07-05 S-4c)。
+    technical_trade_interval_minutes: int | None = None
     # cadence resolver による可変 interval 収集 (§5.3/§5.6, Phase1 Task B)。既定 false で
     # 現行の union-time dispatch を維持 (後方互換)。true で cadence_driver に切替。
     cadence_enabled: bool = False
@@ -325,6 +328,23 @@ class ScheduleConfig:
     # FX technical 鮮度閾値 (分)。既定 360 = 従来の 6h 定数と等価 (挙動不変)。
     # day horizon では 90 に短縮する (spec 2026-07-05 S-3)。watch 側 (120h) は定数のまま。
     technical_max_staleness_fx_minutes: int = 360
+
+    def effective_trade_interval_seconds(self) -> int:
+        """cadence base 用の有効 trade 収集間隔 (秒)。minutes 優先。"""
+        if self.technical_trade_interval_minutes:
+            return self.technical_trade_interval_minutes * 60
+        return self.technical_trade_interval_hours * 3600
+
+    def effective_trade_times(self) -> list[str]:
+        """schedule 登録用の有効 trade 収集時刻リスト。minutes 優先。
+
+        循環 import 回避のためメソッド内 import にしている (src.jobs.technical_schedule は
+        現状 config に依存していないが、将来の依存追加に備えて安全側に倒す)。
+        """
+        from src.jobs.technical_schedule import technical_times_for, technical_times_for_minutes
+        if self.technical_trade_interval_minutes:
+            return technical_times_for_minutes(self.technical_trade_interval_minutes)
+        return technical_times_for(self.technical_trade_interval_hours)
 
 
 @dataclass

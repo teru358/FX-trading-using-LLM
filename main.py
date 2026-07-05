@@ -99,7 +99,7 @@ def _build_cadence_driver(config, run_watch_tech, run_trade_tech):
 
     trade_pairs = [i.symbol for i in config.tradeable_instruments]
     watch_pairs = [i.symbol for i in config.watch_only_instruments]
-    trade_base = config.schedule.technical_trade_interval_hours * 3600
+    trade_base = config.schedule.effective_trade_interval_seconds()
     watch_base = config.schedule.technical_watch_interval_hours * 3600
     boost_sec = config.schedule.cadence_boost_interval_minutes * 60
 
@@ -236,7 +236,7 @@ def main() -> None:
 
     # technical 収集は trade/watch 別 interval (既定は両方 1h = 毎時)。
     # 単一 slot skip を避けるため union 時刻 + watch→trade 逐次ディスパッチにする。
-    _trade_tech_set = set(technical_times_for(config.schedule.technical_trade_interval_hours))
+    _trade_tech_set = set(config.schedule.effective_trade_times())
     _watch_tech_set = set(technical_times_for(config.schedule.technical_watch_interval_hours))
 
     def _run_watch_tech(_t: str) -> None:
