@@ -164,7 +164,9 @@ class TwelveDataFetcher:
         current_price = float(values[0]["close"])  # values[0]が最新
 
         if price_store is not None:
-            price_store.upsert_ohlcv(symbol, df)
+            # PriceStore のキーは MT5/yfinance 経路と揃えて「要求された」interval 文字列
+            # (td_interval ではなく元の interval) を使う (codex Med#1)。
+            price_store.upsert_ohlcv(symbol, df, interval=interval)
 
         logger.info(f"[TWELVEDATA] {symbol}: fetched {len(df)} bars, latest close={current_price:.5f}")
 

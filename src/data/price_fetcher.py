@@ -9,6 +9,7 @@ import pandas as pd
 import yfinance as yf
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from src.data.resample import interval_minutes
 from src.utils.clock import to_db_naive_index
 
 if TYPE_CHECKING:
@@ -144,18 +145,18 @@ def fetch_ohlcv(
 
         # Step 1: 最新データから遡って過去方向の補完
         # DBの最新バーを基点に必要期間を遡り、最古バーが不足していればバックフィルする
-        latest = price_store.get_latest_date(symbol)
+        latest = price_store.get_latest_date(symbol, interval=interval)
         hist_start = (
             latest - timedelta(days=days + 1)
             if latest is not None
             else required_start  # DB空の場合は現在から遡る
         )
-        earliest = price_store.get_earliest_date(symbol)
+        earliest = price_store.get_earliest_date(symbol, interval=interval)
         if earliest is None or earliest > hist_start + timedelta(hours=2):
             try:
                 hist_df = _yf_fetch_range(symbol, hist_start, interval)
                 if not hist_df.empty:
-                    price_store.upsert_ohlcv(symbol, hist_df)
+                    price_store.upsert_ohlcv(symbol, hist_df, interval=interval)
                     logger.info(
                         f"Backfill: stored {len(hist_df)} bars for {symbol} "
                         f"since {hist_start:%Y-%m-%d}"
@@ -164,20 +165,26 @@ def fetch_ohlcv(
                 logger.warning(f"Historical backfill failed for {symbol}: {e}")
 
         # Step 2: 差分フェッチ（最新バー以降の未取得分）
-        latest = price_store.get_latest_date(symbol)
+        # 刻みは interval 連動 (codex Med#1: 1h 固定だと 15m で 45 分取り逃がす)。
+        # 不明な interval は従来通り 1h にフォールバックする。
+        latest = price_store.get_latest_date(symbol, interval=interval)
         if latest is not None:
-            fetch_from = latest + (timedelta(hours=1) if _is_intraday(interval) else timedelta(days=1))
+            step = (
+                timedelta(minutes=interval_minutes(interval) or 60)
+                if _is_intraday(interval) else timedelta(days=1)
+            )
+            fetch_from = latest + step
             if fetch_from <= datetime.now():
                 try:
                     new_df = _yf_fetch_range(symbol, fetch_from, interval)
                     if not new_df.empty:
-                        price_store.upsert_ohlcv(symbol, new_df)
+                        price_store.upsert_ohlcv(symbol, new_df, interval=interval)
                         logger.info(f"Stored {len(new_df)} new bars for {symbol}")
                 except Exception as e:
                     logger.warning(f"Incremental fetch failed for {symbol}: {e}")
 
         # DBからロード
-        df = price_store.load_ohlcv(symbol, required_start, datetime.now())
+        df = price_store.load_ohlcv(symbol, required_start, datetime.now(), interval=interval)
         if len(df) >= 20:
             current_price = float(df["Close"].iloc[-1])
             logger.info(f"Loaded {len(df)} bars for {symbol} from DB, latest close={current_price:.5f}")
@@ -196,7 +203,7 @@ def fetch_ohlcv(
         raise ValueError(f"Insufficient data for {symbol}: only {len(df)} bars")
 
     if price_store is not None:
-        price_store.upsert_ohlcv(symbol, df)
+        price_store.upsert_ohlcv(symbol, df, interval=interval)
 
     current_price = float(df["Close"].iloc[-1])
     logger.info(f"Fetched {len(df)} bars for {symbol} from yfinance, latest close={current_price:.5f}")
