@@ -24,6 +24,15 @@ def technical_times_for_minutes(interval_minutes: int) -> list[str]:
     ]
 
 
+def effective_trade_times(
+    interval_hours: int, interval_minutes: int | None
+) -> list[str]:
+    """有効な trade 収集時刻リスト。minutes 優先、None なら hours (挙動不変)。"""
+    if interval_minutes:
+        return technical_times_for_minutes(interval_minutes)
+    return technical_times_for(interval_hours)
+
+
 def build_technical_dispatch(
     trade_set: set[str],
     watch_set: set[str],

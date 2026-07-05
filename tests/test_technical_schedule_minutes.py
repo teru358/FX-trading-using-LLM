@@ -1,5 +1,9 @@
 """分粒度スケジュール (spec S-4c / codex High#3)。"""
-from src.jobs.technical_schedule import technical_times_for, technical_times_for_minutes
+from src.jobs.technical_schedule import (
+    effective_trade_times,
+    technical_times_for,
+    technical_times_for_minutes,
+)
 from src.config.schema import ScheduleConfig
 
 
@@ -27,8 +31,7 @@ def test_effective_trade_interval_seconds():
 
 
 def test_effective_trade_times_minutes_priority():
-    cfg = ScheduleConfig()
-    cfg.technical_trade_interval_minutes = 30
-    assert cfg.effective_trade_times() == technical_times_for_minutes(30)
-    cfg.technical_trade_interval_minutes = None
-    assert cfg.effective_trade_times() == technical_times_for(1)
+    assert effective_trade_times(1, 30) == technical_times_for_minutes(30)
+    assert effective_trade_times(1, None) == technical_times_for(1)
+    assert effective_trade_times(2, None) == technical_times_for(2)
+    assert effective_trade_times(1, 0) == technical_times_for(1)  # 0 = 未設定扱い

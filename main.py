@@ -25,7 +25,11 @@ from src.jobs.technical_collector import (
     run_trade_technical_collection,
     run_watch_technical_collection,
 )
-from src.jobs.technical_schedule import technical_times_for, build_technical_dispatch
+from src.jobs.technical_schedule import (
+    technical_times_for,
+    effective_trade_times,
+    build_technical_dispatch,
+)
 from src.logging_setup import setup_logging
 from src.rag.vector_store import VectorStore
 from src.startup import startup_checks
@@ -236,7 +240,10 @@ def main() -> None:
 
     # technical 収集は trade/watch 別 interval (既定は両方 1h = 毎時)。
     # 単一 slot skip を避けるため union 時刻 + watch→trade 逐次ディスパッチにする。
-    _trade_tech_set = set(config.schedule.effective_trade_times())
+    _trade_tech_set = set(effective_trade_times(
+        config.schedule.technical_trade_interval_hours,
+        config.schedule.technical_trade_interval_minutes,
+    ))
     _watch_tech_set = set(technical_times_for(config.schedule.technical_watch_interval_hours))
 
     def _run_watch_tech(_t: str) -> None:

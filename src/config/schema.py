@@ -335,17 +335,6 @@ class ScheduleConfig:
             return self.technical_trade_interval_minutes * 60
         return self.technical_trade_interval_hours * 3600
 
-    def effective_trade_times(self) -> list[str]:
-        """schedule 登録用の有効 trade 収集時刻リスト。minutes 優先。
-
-        循環 import 回避のためメソッド内 import にしている (src.jobs.technical_schedule は
-        現状 config に依存していないが、将来の依存追加に備えて安全側に倒す)。
-        """
-        from src.jobs.technical_schedule import technical_times_for, technical_times_for_minutes
-        if self.technical_trade_interval_minutes:
-            return technical_times_for_minutes(self.technical_trade_interval_minutes)
-        return technical_times_for(self.technical_trade_interval_hours)
-
 
 @dataclass
 class PriceMonitorConfig:
