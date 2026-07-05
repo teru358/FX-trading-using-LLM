@@ -108,7 +108,7 @@ class PriceStore:
         logger.debug(f"Upserted {len(df)} OHLCV rows for {symbol}")
 
     def load_ohlcv(self, symbol: str, start: datetime, end: datetime, *, interval: str = "1h") -> pd.DataFrame:
-        """指定期間のOHLCVをDataFrame (DatetimeIndex) で返す。"""
+        """指定期間・指定 interval (足種, 既定 1h) のOHLCVをDataFrame (DatetimeIndex) で返す。"""
         with Session(self._engine) as session:
             stmt = (
                 select(_OhlcvRow)
@@ -135,6 +135,7 @@ class PriceStore:
         )
 
     def get_latest_date(self, symbol: str, *, interval: str = "1h") -> datetime | None:
+        """指定 interval (足種, 既定 1h) の最新 bar_time を返す。データなしなら None。"""
         with Session(self._engine) as session:
             stmt = (
                 select(_OhlcvRow.bar_time)
@@ -146,6 +147,7 @@ class PriceStore:
             return session.execute(stmt).scalar_one_or_none()
 
     def get_earliest_date(self, symbol: str, *, interval: str = "1h") -> datetime | None:
+        """指定 interval (足種, 既定 1h) の最古 bar_time を返す。データなしなら None。"""
         with Session(self._engine) as session:
             stmt = (
                 select(_OhlcvRow.bar_time)
