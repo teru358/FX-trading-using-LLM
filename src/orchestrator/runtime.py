@@ -675,6 +675,7 @@ class OrchestratorRuntime:
                 direction=plan.direction, triggered_at=now, trigger_price=quote.mid,
                 sl=action.get("sl"), tp=action.get("tp"), rr=action.get("rr"),
                 snapshot_id=snapshot_id, risk_gate_result=risk_result,
+                spread_pips=self._spread_pips(pair, quote.spread),
             )
             # Plan C: trigger 確定と同時に pending hindsight 行を enqueue する。
             # horizon 経過後に hindsight loop が MFE-R/MAE-R/PnL-R を埋める。

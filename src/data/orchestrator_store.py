@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON, Column, DateTime, Float, Integer, String, UniqueConstraint,
-    func, or_, select, update,
+    func, or_, select, text, update,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -245,6 +245,7 @@ class _ShadowTrigger(_Base):
     sl                    = Column(Float)
     tp                    = Column(Float)
     rr                    = Column(Float)
+    spread_pips           = Column(Float)   # trigger 時の spread (spec 2026-07-05 S-5)
     snapshot_id           = Column(Integer)
     risk_gate_result_json = Column(JSON)
 
@@ -310,6 +311,22 @@ class OrchestratorStore:
 
     def __init__(self, db_path: Path) -> None:
         self._engine = _get_engine(db_path)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        """既存テーブルに新カラムを追加する (ALTER TABLE、既にあれば何もしない)。"""
+        migrations = [
+            ("shadow_triggers", "spread_pips", "FLOAT"),
+            ("shadow_hindsight_evaluations", "spread_cost_r", "FLOAT"),
+        ]
+        with self._engine.connect() as conn:
+            for table, col, col_type in migrations:
+                try:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
+                    conn.commit()
+                    logger.info(f"[MIGRATE] Added {table}.{col}")
+                except Exception:
+                    pass  # カラムが既に存在
 
     # ── decision_snapshots (§8.7) ──────────────────────────────
 
@@ -912,11 +929,13 @@ class OrchestratorStore:
         rr: float | None = None,
         snapshot_id: int | None = None,
         risk_gate_result: dict | None = None,
+        spread_pips: float | None = None,
     ) -> int:
         """shadow_triggers に 1 行書き、新規 id を返す (§8.1)。
 
         watch loop が plan_trigger を shadow 記録した直後に呼ぶ。risk_gate_result は
-        JSON 安全な dict (RiskGateResult.to_dict()) を渡す。
+        JSON 安全な dict (RiskGateResult.to_dict()) を渡す。spread_pips は trigger 時点の
+        spread (pips 換算)。hindsight の spread コスト採点に使う (spec S-5)。
         """
         with Session(self._engine) as session:
             trig = _ShadowTrigger(
@@ -929,6 +948,7 @@ class OrchestratorStore:
                 sl=sl,
                 tp=tp,
                 rr=rr,
+                spread_pips=spread_pips,
                 snapshot_id=snapshot_id,
                 risk_gate_result_json=_json_safe(risk_gate_result),
             )
