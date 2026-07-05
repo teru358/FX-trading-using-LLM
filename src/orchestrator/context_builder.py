@@ -148,6 +148,7 @@ class DecisionContextBuilder:
             "policy": {
                 "trade_horizon": self._config.policy.trade_horizon,
                 "advice_memo": self._config.policy.advice_memo or None,  # "" -> None
+                "plan_ttl_max_hours": self._config.plan_ttl_max_hours,
             },
         }
 

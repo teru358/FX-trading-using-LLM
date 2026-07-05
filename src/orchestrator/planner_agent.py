@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from src.orchestrator.execution_opinion_agent import _horizon_guidance
 from src.orchestrator.schemas import (
     ExecutionPlanDraft,
     PlannerFinalDecision,
@@ -53,6 +54,7 @@ class PlannerAgent:
         user = "\n".join(
             [
                 f"pair: {pair}",
+                _horizon_guidance(context),
                 "decision_context:",
                 json.dumps(_compact_context(context), ensure_ascii=False),
                 "Decide if there is a tradeable opportunity. Return STRICT JSON.",
@@ -76,6 +78,7 @@ class PlannerAgent:
         user = "\n".join(
             [
                 f"pair: {pair}",
+                _horizon_guidance(context),
                 "decision_context:",
                 json.dumps(_compact_context(context), ensure_ascii=False),
                 "proposed_draft:",

@@ -70,6 +70,7 @@ class ExecutionOpinionAgent:
         lines = [
             f"pair: {pair}",
             f"intended direction: {direction}",
+            _horizon_guidance(context),
             "decision_context:",
             json.dumps(_compact_context(context), ensure_ascii=False),
         ]
@@ -80,6 +81,27 @@ class ExecutionOpinionAgent:
             lines.extend(f"  - {issue}" for issue in revision_feedback)
         lines.append("Return the trade plan draft as STRICT JSON.")
         return "\n".join(lines)
+
+
+def _horizon_guidance(context: dict[str, Any]) -> str:
+    """context.policy から horizon 別の運用指針文を組む (spec 2026-07-05 S-2)。"""
+    policy = context.get("policy") or {}
+    horizon = policy.get("trade_horizon", "swing")
+    if horizon == "day":
+        ttl = policy.get("plan_ttl_max_hours") or 0
+        ttl_line = (
+            f" expires_at must be within {ttl} hours from now." if ttl else ""
+        )
+        return (
+            "Operating horizon: DAY trade. The plan must complete within hours,"
+            " never overnight." + ttl_line +
+            " Entry conditions must be reachable from the current price"
+            " (guideline: 0.3-1.5x the 1h ATR). Keep RR >= 2."
+        )
+    return (
+        "Operating horizon: SWING trade. Plans may span days."
+        " Prefer pullback/retest conditional entries over chasing extended moves."
+    )
 
 
 def _compact_context(context: dict[str, Any]) -> dict[str, Any]:
