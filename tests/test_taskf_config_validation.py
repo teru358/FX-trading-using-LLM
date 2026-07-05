@@ -29,6 +29,15 @@ def test_loader_passes_execution_opinion_recheck_enabled():
     assert _build_orchestrator_config({}).execution_opinion_recheck_enabled is False
 
 
+def test_loader_passes_plan_ttl_max_hours():
+    """spec S-1 / codex Med#1: YAML の plan_ttl_max_hours が loader 経由で届く
+    (field 列挙漏れで常に default 0 になる回帰を防ぐ)。"""
+    cfg = _build_orchestrator_config({"plan_ttl_max_hours": 8})
+    assert cfg.plan_ttl_max_hours == 8
+    # 省略時は default 0 (クランプ無効・従来挙動)
+    assert _build_orchestrator_config({}).plan_ttl_max_hours == 0
+
+
 # ── AppConfig cross-field validation (spec §5, 2026-06-25 改訂) ──
 
 

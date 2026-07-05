@@ -738,6 +738,9 @@ class OrchestratorConfig:
     # Task F: material change 時の ExecutionOpinionAgent 再点火 (発注直前)。既定 OFF
     # (まず決定的・高速執行で live 検証、spec §2 step2)。
     execution_opinion_recheck_enabled: bool = False
+    # plan expires_at の上限クランプ (時間)。0 = 無効 (従来挙動)。day 運用では 8 を
+    # 設定し、LLM が長すぎる TTL を出しても決定的に切り詰める (spec 2026-07-05 S-1)。
+    plan_ttl_max_hours: int = 0
     policy: OrchestratorPolicyConfig = field(default_factory=OrchestratorPolicyConfig)
     market_state: OrchestratorMarketStateConfig = field(
         default_factory=OrchestratorMarketStateConfig

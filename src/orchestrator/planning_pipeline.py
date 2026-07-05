@@ -24,7 +24,8 @@ record 順序 (§5.2): 中間 opinion を agent_outputs/execution_opinions に�
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import timedelta
 from typing import Any
 
 from src.config.schema import OrchestratorConfig
@@ -39,6 +40,7 @@ from src.orchestrator.schemas import (
     PlannerFinalDecision,
     SchemaParseError,
 )
+from src.utils.clock import db_now, to_db_naive_datetime
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +50,28 @@ logger = logging.getLogger(__name__)
 #   運用上の想定内事象なので、ERROR + スタックトレース (unexpected error) ではなく
 #   WARNING (planning fail-safe) に倒す。リセット後の次 tick で再評価される。
 _FAILSAFE_EXC = (SchemaParseError, CircuitOpenError, TimeoutError, ClaudeCliUsageLimitError)
+
+
+def clamp_draft_ttl(draft: ExecutionPlanDraft, *, max_hours: int) -> ExecutionPlanDraft:
+    """draft.expires_at を DB 規約 (naive local) に正規化し、上限でクランプする。
+
+    LLM 出力の expires_at は +00:00 付きだと aware になる (schemas.from_llm_json)。
+    naive DB 値と比較する前に必ず正規化する (codex Med#1)。max_hours<=0 はクランプ
+    無効だが正規化は常に行う (aware のまま保存すると runtime の naive 比較が壊れる)。
+    """
+    normalized = to_db_naive_datetime(draft.expires_at)
+    if normalized != draft.expires_at:
+        draft = replace(draft, expires_at=normalized)
+    if max_hours <= 0:
+        return draft
+    cap = db_now() + timedelta(hours=max_hours)
+    if draft.expires_at > cap:
+        logger.info(
+            "[ORCH] plan TTL clamped: %s -> %s (max %dh)",
+            draft.expires_at, cap, max_hours,
+        )
+        draft = replace(draft, expires_at=cap)
+    return draft
 
 
 @dataclass
@@ -149,6 +173,7 @@ class PlanningPipeline:
                 pair=pair, direction=direction, context=context,
                 revision_feedback=feedback,
             )
+            draft = clamp_draft_ttl(draft, max_hours=self._config.plan_ttl_max_hours)
             self._persist_opinion(run_id, pair, draft)
 
             final = await self._planner.final_decision(

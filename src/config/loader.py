@@ -131,6 +131,7 @@ def _build_orchestrator_config(data: dict) -> OrchestratorConfig:
         execution_opinion_recheck_enabled=data.get(
             "execution_opinion_recheck_enabled", False
         ),
+        plan_ttl_max_hours=data.get("plan_ttl_max_hours", 0),
     )
 
 
