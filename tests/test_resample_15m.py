@@ -43,6 +43,12 @@ def test_downsample_below_base_raises():
         resample_ohlcv(df, "15m", base_interval="1h")  # 1h 基底から 15m は作れない
 
 
+def test_unsupported_base_interval_raises():
+    df = _df_15m()
+    with pytest.raises(ValueError):
+        resample_ohlcv(df, "1h", base_interval="99m")
+
+
 def test_default_base_is_1h_backward_compat():
     idx = pd.date_range("2026-07-01 00:00", periods=8, freq="1h")
     df = pd.DataFrame(

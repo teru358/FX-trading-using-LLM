@@ -29,6 +29,9 @@ _INTERVAL_MINUTES: dict[str, int] = {
     "6h": 360, "8h": 480, "12h": 720, "1d": 1440, "1w": 10080,
 }
 
+# 2 つの map は同一キー集合を維持する (drift すると ValueError 契約が KeyError に化ける)
+assert _RULE_MAP.keys() == _INTERVAL_MINUTES.keys()
+
 
 def resample_ohlcv(
     df_base: pd.DataFrame, interval: str, base_interval: str = "1h"
