@@ -29,6 +29,7 @@ from src.orchestrator.schemas import (
     SchemaParseError,
 )
 from src.orchestrator.watch_evaluator import WatchEvaluator
+from src.trading.market_hours import is_market_open
 from src.utils.clock import db_now
 
 if TYPE_CHECKING:
@@ -172,6 +173,7 @@ class OrchestratorRuntime:
             spread_max_pips=config.entry.spread_max_pips
         )
         self._stop = threading.Event()
+        self._planning_paused = False  # planning loop の閉場ゲート状態 (遷移ログ用)
         self._planning_thread: threading.Thread | None = None
         self._watch_thread: threading.Thread | None = None
         self._hindsight_thread: threading.Thread | None = None
@@ -1157,11 +1159,30 @@ class OrchestratorRuntime:
         if self._quote_producer is not None:
             self._quote_producer.stop()
 
+    def _planning_gate_open(self) -> bool:
+        """FX 閉場中は planning を空回りさせない (news 集計 [AGGREGATE]・LLM 呼び出しの抑止)。
+
+        判定は wall-clock の is_market_open() (引数なし)。db_now() は naive ローカルで、
+        渡すと market_hours 側で ET と誤解釈されるため渡さない。ゲートは production
+        駆動側 (planning loop) に置き、run_planning_cycle 自体はテスト・手動駆動可の
+        まま無条件で動く。遷移ログは方向ごとに 1 回だけ出す。
+        """
+        if is_market_open():
+            if self._planning_paused:
+                logger.info("[ORCH] market open — planning resumed")
+                self._planning_paused = False
+            return True
+        if not self._planning_paused:
+            logger.info("[ORCH] market closed — planning paused")
+            self._planning_paused = True
+        return False
+
     def _planning_loop(self) -> None:
         wait = self._config.market_state.normal_seconds
         while not self._stop.is_set():
             try:
-                self.run_planning_cycle()
+                if self._planning_gate_open():
+                    self.run_planning_cycle()
             except Exception:
                 logger.exception("[ORCH] planning loop iteration failed")
             self._stop.wait(timeout=wait)

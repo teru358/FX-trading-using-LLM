@@ -446,3 +446,44 @@ def test_planning_cycle_only_processes_detector_pairs(tmp_path: Path) -> None:
     # snapshot 作成まで到達した (成功) ので mark_committed が呼ばれる (mark_attempted でない)
     assert detector.committed == ["USDJPY=X"]
     assert detector.attempted == []
+
+
+# ── planning loop の市場開閉ゲート ──────────────────────────────
+
+
+def test_planning_gate_closed_market_returns_false(
+    runtime: OrchestratorRuntime, monkeypatch, caplog
+) -> None:
+    """閉場中は planning gate が閉じ、遷移ログは1回だけ出る。"""
+    import logging
+
+    monkeypatch.setattr("src.orchestrator.runtime.is_market_open", lambda: False)
+    with caplog.at_level(logging.INFO, logger="src.orchestrator.runtime"):
+        assert runtime._planning_gate_open() is False
+        assert runtime._planning_gate_open() is False
+    paused_logs = [r for r in caplog.records if "planning paused" in r.message]
+    assert len(paused_logs) == 1            # 60s 周期でも spam しない
+
+
+def test_planning_gate_open_market_returns_true(
+    runtime: OrchestratorRuntime, monkeypatch
+) -> None:
+    monkeypatch.setattr("src.orchestrator.runtime.is_market_open", lambda: True)
+    assert runtime._planning_gate_open() is True
+
+
+def test_planning_gate_reopen_logs_resume(
+    runtime: OrchestratorRuntime, monkeypatch, caplog
+) -> None:
+    """閉場→開場の遷移で resumed ログが出て gate が開く。"""
+    import logging
+
+    flag = {"open": False}
+    monkeypatch.setattr(
+        "src.orchestrator.runtime.is_market_open", lambda: flag["open"]
+    )
+    assert runtime._planning_gate_open() is False
+    flag["open"] = True
+    with caplog.at_level(logging.INFO, logger="src.orchestrator.runtime"):
+        assert runtime._planning_gate_open() is True
+    assert any("planning resumed" in r.message for r in caplog.records)
