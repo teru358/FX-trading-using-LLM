@@ -37,6 +37,7 @@ async def record_trade_entry(
     embed_fn: EmbedFn,
     order: Any,
     signal: Any,
+    horizon: str | None = None,
 ) -> None:
     """新規約定をエントリーフェーズとして directional RAG に登録する。"""
     direction = "bullish" if order.direction == "buy" else "bearish"
@@ -48,6 +49,8 @@ async def record_trade_entry(
     )
     try:
         embedding = await embed_fn(text)
+        # horizon キー無し = legacy swing カード規約 (spec V-1)。None は渡さない。
+        extra = {"horizon": horizon} if horizon else {}
         store.directional.upsert(
             entry_id=f"{order.order_id}_entry",
             text=text,
@@ -59,6 +62,7 @@ async def record_trade_entry(
             phase="entry",
             signal_score=signal.combined_score,
             confidence=signal.confidence,
+            **extra,
         )
     except Exception as e:
         logger.warning(f"[SESSION] RAG entry failed for {order.order_id}: {e}")
@@ -69,6 +73,7 @@ async def record_trade_complete(
     embed_fn: EmbedFn,
     closed_order: Any,
     reflection_text: str,
+    horizon: str | None = None,
 ) -> None:
     """決済完了をコンプリートフェーズとして directional RAG に登録する。"""
     direction = "bullish" if closed_order.direction == "buy" else "bearish"
@@ -86,6 +91,8 @@ async def record_trade_complete(
     )
     try:
         embedding = await embed_fn(text)
+        # horizon キー無し = legacy swing カード規約 (spec V-1)。None は渡さない。
+        extra = {"horizon": horizon} if horizon else {}
         store.directional.upsert(
             entry_id=f"{closed_order.order_id}_complete",
             text=text,
@@ -100,6 +107,7 @@ async def record_trade_complete(
             outcome="win" if realized > 0 else "loss",
             realized_pnl=realized,
             close_reason=closed_order.close_reason,
+            **extra,
         )
     except Exception as e:
         logger.warning(f"[SESSION] RAG complete failed for {closed_order.order_id}: {e}")
@@ -114,6 +122,7 @@ async def record_forecast_entry(
     pair: str,
     signal: Any,
     now: datetime,
+    horizon: str | None = None,
 ) -> None:
     """新規予測をエントリーフェーズとして directional RAG に登録する。"""
     direction = _normalize_direction(
@@ -128,6 +137,8 @@ async def record_forecast_entry(
     try:
         embedding = await embed_fn(text)
         ts_str = now.strftime("%Y%m%d_%H%M")
+        # horizon キー無し = legacy swing カード規約 (spec V-1)。None は渡さない。
+        extra = {"horizon": horizon} if horizon else {}
         store.directional.upsert(
             entry_id=f"forecast_{pair}_{ts_str}_entry",
             text=text,
@@ -139,6 +150,7 @@ async def record_forecast_entry(
             phase="entry",
             signal_score=signal.combined_score,
             confidence=signal.confidence,
+            **extra,
         )
     except Exception as e:
         logger.warning(f"[FORECAST/DIR] {pair} entry: {e}")
@@ -151,6 +163,7 @@ async def record_forecast_review(
     forecast: Any,
     review_text: str,
     current_price: float,
+    horizon: str | None = None,
 ) -> None:
     """既存予測の検証結果を directional RAG に登録する。"""
     direction = _normalize_direction(
@@ -161,6 +174,8 @@ async def record_forecast_review(
     actual_dir = "bullish" if delta > 0 else "bearish"
     try:
         embedding = await embed_fn(review_text)
+        # horizon キー無し = legacy swing カード規約 (spec V-1)。None は渡さない。
+        extra = {"horizon": horizon} if horizon else {}
         store.directional.upsert(
             entry_id=f"forecast_{forecast.id}_complete",
             text=review_text,
@@ -173,6 +188,7 @@ async def record_forecast_review(
             signal_score=forecast.combined_score,
             confidence=forecast.confidence,
             outcome="correct" if direction == actual_dir else "incorrect",
+            **extra,
         )
     except Exception as e:
         logger.warning(f"[FORECAST/DIR] {pair} fc={forecast.id}: {e}")
@@ -187,6 +203,7 @@ async def record_hold_review(
     hold: Any,
     review_text: str,
     lesson: str,
+    horizon: str | None = None,
 ) -> None:
     """HOLD 判断の検証結果を directional RAG に登録する。"""
     direction = _normalize_direction(
@@ -195,6 +212,8 @@ async def record_hold_review(
     )
     try:
         embedding = await embed_fn(review_text)
+        # horizon キー無し = legacy swing カード規約 (spec V-1)。None は渡さない。
+        extra = {"horizon": horizon} if horizon else {}
         store.directional.upsert(
             entry_id=f"hold_{hold.pair}_{hold.id}_complete",
             text=review_text,
@@ -207,6 +226,7 @@ async def record_hold_review(
             signal_score=hold.signal_score,
             confidence=hold.confidence,
             outcome="correct" if "CORRECT" in lesson else "incorrect",
+            **extra,
         )
     except Exception as e:
         logger.warning(f"[HOLD/DIR] {hold.pair}: {e}")

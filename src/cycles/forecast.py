@@ -97,6 +97,7 @@ async def forecast_cycle(
                     if fc_significant:
                         await record_forecast_review(
                             store, embed_fn, pair_cfg.symbol, fc, fc_text, current_price,
+                            horizon=config.orchestrator.policy.trade_horizon,
                         )
 
             # Phase 2: 新規予測生成 (C: スコア閾値チェック、LLM 不使用)
@@ -115,7 +116,10 @@ async def forecast_cycle(
             macro_ctx = _build_macro_context(config, analysis_store)
             forecast_store.save_forecast(pair_cfg.symbol, signal, macro_context=macro_ctx)
 
-            await record_forecast_entry(store, embed_fn, pair_cfg.symbol, signal, now)
+            await record_forecast_entry(
+                store, embed_fn, pair_cfg.symbol, signal, now,
+                horizon=config.orchestrator.policy.trade_horizon,
+            )
 
         except Exception as e:
             logger.warning(f"[FORECAST] {pair_cfg.symbol}: error — {e}", exc_info=True)

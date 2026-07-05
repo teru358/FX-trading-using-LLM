@@ -399,6 +399,7 @@ async def _finalize_closed_orders(
                 await record_trade_complete(
                     store, embed_fn, closed_order,
                     reflection.full_text if reflection else "",
+                    horizon=config.orchestrator.policy.trade_horizon,
                 )
         except Exception as e:
             logger.warning(f"{log_source} Failed for {closed_order.pair}: {e}")
@@ -441,7 +442,10 @@ async def _review_hold_decisions(
             logger.info(f"[HOLD REVIEW] {hold.pair}: {review_text}")
 
             if worth_storing:
-                await record_hold_review(store, embed_fn, hold, review_text, lesson)
+                await record_hold_review(
+                    store, embed_fn, hold, review_text, lesson,
+                    horizon=config.orchestrator.policy.trade_horizon,
+                )
 
             hold_store.mark_reviewed(hold.id)
         except Exception as e:
@@ -837,7 +841,10 @@ async def _execute_one_signal(
             key_support=sltp_result.key_support if sltp_result else None,
             key_resistance=sltp_result.key_resistance if sltp_result else None,
         )
-        await record_trade_entry(store, embed_fn_adj, order, sig)
+        await record_trade_entry(
+            store, embed_fn_adj, order, sig,
+            horizon=config.orchestrator.policy.trade_horizon,
+        )
     return outcome
 
 

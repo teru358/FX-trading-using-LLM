@@ -59,6 +59,7 @@ class DirectionalStore:
         outcome: str | None = None,
         realized_pnl: float | None = None,
         close_reason: str | None = None,
+        horizon: str | None = None,
     ) -> None:
         """方向別コレクションにドキュメントを追加する。"""
         metadata: dict = {
@@ -75,6 +76,11 @@ class DirectionalStore:
             metadata["realized_pnl"] = realized_pnl
         if close_reason is not None:
             metadata["close_reason"] = close_reason
+        # horizon キー無し = legacy swing カード規約 (spec V-1)。
+        # None を渡すと ChromaDB がメタデータ値として拒否するため、
+        # 値がある場合のみキーを追加する (Falsy な "" も除外)。
+        if horizon:
+            metadata["horizon"] = horizon
 
         col = self._collection(direction)
         col.upsert(

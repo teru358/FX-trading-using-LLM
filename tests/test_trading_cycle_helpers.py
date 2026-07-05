@@ -456,6 +456,10 @@ class _FakeTradeableCfg:
         class reflection:
             temperature = 0.3
 
+    class orchestrator:
+        class policy:
+            trade_horizon = "swing"
+
 
 class _FakeOrderForFinalize:
     order_id = "test-order-1"
@@ -536,10 +540,11 @@ async def test_finalize_closed_orders_calls_reflection_and_record(monkeypatch):
         reflect_calls.append(kwargs["order"].order_id)
         return _FakeReflection()
 
-    async def _fake_record(store, embed_fn, closed_order, reflection_text):
+    async def _fake_record(store, embed_fn, closed_order, reflection_text, horizon=None):
         record_calls.append({
             "order_id": closed_order.order_id,
             "reflection_text": reflection_text,
+            "horizon": horizon,
         })
 
     monkeypatch.setattr("src.cycles.trading.generate_close_reflection", _fake_reflect)
