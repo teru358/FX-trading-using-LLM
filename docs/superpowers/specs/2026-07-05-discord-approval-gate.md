@@ -42,6 +42,9 @@ pipeline 作成 (gate ON)
             └──放置──→ expired  (TTL、既存 sweep)
 ```
 
+- position-context spec (P-2) の `current_plan` ブロックの対象を
+  {active} → {active, pending_approval} に拡張する (返答待ち plan も planner から
+  見えるようにする。status 追加とセットで本 spec 側の作業)
 - 遷移は既存 `try_claim_plan_status` を使う:
   approve = claim(active, from=pending_approval) / reject = claim(rejected, from=pending_approval)。
   二重クリック・承認と却下の競合は rowcount 排他で自然解決、負けた側は 409

@@ -22,8 +22,9 @@
   「新たなシグナルの明示」を prompt で要求する
 - 決定的な最終壁は既存の broker 層 `max_positions_per_pair: 2` (scale-in 1回許容) を
   **変更しない**。装置を重ねず、判断は planner・強制は broker の一層ずつ
-- planner が建玉を踏まえたかは reasoning_summary に残る → shadow 期間に検証可能
-  (「治す」でなく「測る」の哲学と整合)
+- planner が建玉を踏まえたかは構造化フィールド (P-2b) と snapshot 保存 (P-5) で
+  機械的に検証可能にする (「治す」でなく「測る」の哲学と整合)。ただし建玉取得
+  失敗時だけは prompt に依存せず決定的に direct_hold へ倒す (P-4)
 
 ## 2. 現状 (2026-07-05 時点の事実)
 
@@ -43,8 +44,11 @@
 
 ### P-1: position provider の注入と配線
 
-`DecisionContextBuilder` に `position_provider: Callable[[str], dict] | None` を追加
-(news_provider / risk_state_provider と同じ注入パターン)。bootstrap で構築:
+`DecisionContextBuilder` に `position_provider: Callable[[str], list[dict]] | None` を
+追加 (news_provider / risk_state_provider と同じ注入パターン)。**provider は raw の
+open position (Order 由来 dict) の list を返すだけ**とし、pnl_r 等の整形は builder 側で
+build 時の `quote.mid` を使って行う (codex High#2: provider に quote を渡さない設計で
+pnl_r を算出するため、整形責務を builder に置く)。bootstrap で構築:
 
 - ProtectionWorker と同様 self-contained に `PositionManager(StateStore(config.state_dir))`
   を planning 用に1つ作り、**呼び出し毎に reload()** してから該当 pair の open
@@ -69,15 +73,18 @@
 }
 ```
 
-- `pnl_r` は build 時の quote.mid で算出。`initial_risk_price_distance == 0` なら null
-- provider 例外時は fail-safe: `{"count": null, "items": [], "status": "unavailable"}`
-  + warning ログ。risk_state provider と同じ思想 (1材料の失敗で cycle を落とさない)。
-  prompt 指針 (P-3) が「position 不明時は追加エントリーを提案しない」を担保する
+- `pnl_r` は builder が build 時の quote.mid で算出。`initial_risk_price_distance == 0`
+  なら null
+- provider 例外時は `{"count": null, "items": [], "status": "unavailable"}` + warning
+  ログ (1材料の失敗で cycle を落とさない)。ただし**このケースの安全は prompt に
+  依存させず P-5 の決定的 fail-safe で処理する** (codex High#1)
 
 ### P-2: current_plan ブロックの追加
 
 context に `current_plan` キーを新設。orch_store から該当 pair の
-status ∈ {active, pending_approval} の plan (最大1件、supersede 保証) を要約:
+**status = active** の plan (最大1件、supersede 保証) を要約 (codex Medium#1:
+`pending_approval` は現行 PLAN_STATUSES に存在しない。approval gate spec の実装時に
+対象へ追加する — gate spec 側に記載):
 
 ```json
 {
@@ -93,6 +100,20 @@ status ∈ {active, pending_approval} の plan (最大1件、supersede 保証) �
 plan なしなら `null`。`_compact_context` に `current_plan` を追加 (planner /
 ExecutionOpinionAgent 両方に届く)。
 
+### P-2b: 構造化 scale-in フィールド (codex Medium#3)
+
+「新シグナル根拠がある」の検証を reasoning の自然文判定に依存させないため、
+`ExecutionPlanDraft` (LLM 出力 schema) に構造化フィールドを追加する:
+
+- `scale_in: bool` — 同 pair に建玉がある状態での同方向 plan なら true を要求
+- `new_signal_evidence: str | null` — scale_in=true のとき必須 (空なら
+  SchemaParseError と同じ再起案経路に乗せる)。建玉 entry 時と異なる新シグナルの記述
+
+永続化は trade_plans への nullable 列 2 本 (`scale_in`, `new_signal_evidence`、
+idempotent ALTER)。集計は SQL だけで「scale-in plan のうち根拠記述がある比率」を
+出せる。position が空のときの scale_in=true は builder/pipeline 側で false に矯正
+(LLM の誤申告を材料と突合して直す)。
+
 **意味論**: planner が current_plan を見て direct_hold を返す = 既存 plan の維持
 (supersede は新 plan 作成時のみ発火するので現行コードのままこの意味論が成立する)。
 新 plan を返す = 置換の明示的判断。「上書きか新規か」は planner の判断に昇格する。
@@ -103,15 +124,42 @@ ExecutionOpinionAgent 両方に届く)。
 position 指針を追加。内容 (要旨):
 
 - 同 pair に建玉がある状態で**同方向**の plan を出す場合、それは scale-in である。
-  entry 時と異なる**新たなシグナル** (新しい技術的根拠・材料) を reasoning に明示
-  すること。既存建玉の entry_reason と同じ根拠の再掲は scale-in の理由にならない
+  `scale_in: true` を立て、entry 時と異なる**新たなシグナル**を `new_signal_evidence`
+  に記述すること。既存建玉の entry_reason と同じ根拠の再掲は理由にならない
 - 建玉と**逆方向**の plan は実質的なドテン提案。既存建玉が invalidation に近い等の
   根拠を示すこと
-- `position.status == "unavailable"` (取得失敗) のときは追加エントリーを提案しない
 - current_plan が存在し前提が変わっていなければ direct_hold (plan 維持) を選ぶこと。
   置換は前提の変化を reasoning で示す
 
-### P-4: 変更しないもの (明示)
+(position 取得失敗時の挙動は prompt でなく P-5 で決定的に処理する)
+
+### P-4: 決定的 fail-safe — position 取得失敗時は planning しない (codex High#1)
+
+`position.status == "unavailable"` のときは **LLM を呼ばず direct_hold に倒す**
+(pipeline 入口の決定的分岐)。理由:
+
+- 建玉取得失敗時こそ「建玉を知らずに重ねる」が再発する瞬間であり、その安全を
+  prompt (確率的) に依存させない
+- risk_state provider 失敗時の fail-safe (楽観に倒さない) と同じ思想
+- LLM 呼び出しの節約にもなる。direct_hold の reasoning に
+  "position unavailable — planning skipped (fail-safe)" を記録し、頻発するなら
+  provider 側の障害として気づける
+
+RiskGateWorker への position チェック追加は行わない (装置を重ねない。執行時の
+最終壁は broker の max_positions_per_pair が既に担う)。
+
+### P-5: snapshot への保存 — 検証可能性 (codex Medium#2)
+
+現行 decision_snapshots は quote_json / technical_ref / news_ref のみで、LLM が見た
+建玉・既存 plan を後から再現できない。nullable 列 2 本を追加 (idempotent ALTER):
+
+- `position_json` — context に入れた position ブロックをそのまま保存
+- `current_plan_json` — 同 current_plan (null 可)
+
+これで「そのとき LLM は建玉を知っていたか」が snapshot から機械的に復元でき、
+検証が reasoning 目視に依存しない。
+
+### P-6: 変更しないもの (明示)
 
 - `max_positions_per_pair: 2` — 最終壁として現状維持。planner の判断品質で連続発注が
   収まるかを先に測る。収まらなければそのとき初めて 1 を検討
@@ -120,16 +168,23 @@ position 指針を追加。内容 (要旨):
 
 ## 4. 検証 (shadow / paper で)
 
-- reasoning_summary に建玉言及があるか (建玉あり pair の plan について目視 + 後日集計)
+- **合格条件は SQL で機械判定**: scale_in=true の plan は new_signal_evidence が
+  非空であること (P-2b の構造化フィールド)。reasoning 目視は補助
+- snapshot の position_json と plan の scale_in を突合し、「建玉あり同方向 plan で
+  scale_in=false」(LLM の見落とし) がないかを集計
 - 建玉保有中 pair への同方向 plan 作成頻度 before/after
-- 5問題スコアカード問題1の判定材料になる: 「同方向 plan には新シグナル根拠が
-  reasoning に必ずある」が合格条件
+- 5問題スコアカード問題1の判定材料
 
 ## 5. テスト観点
 
 - position provider: 建玉なし→count 0 / items 空、建玉あり→正規化 (buy→long)、
-  pnl_r 算出 (方向別符号・risk 0 で null)、provider 例外→unavailable ブロック
-- current_plan: active / pending_approval / なし の3通り、entry_summary 短縮
+  pnl_r 算出は builder 側 (方向別符号・risk 0 で null・quote.mid 使用)、
+  provider 例外→unavailable ブロック
+- P-4 fail-safe: unavailable → LLM 不呼び出しで direct_hold 記録 (pipeline 入口分岐)
+- current_plan: active あり / なし の2通り、entry_summary 短縮
+- P-2b: scale_in=true + evidence 空 → 再起案経路、position 空 + scale_in=true →
+  false に矯正、trade_plans への永続化
+- P-5: snapshot に position_json / current_plan_json が保存・復元できること
 - _compact_context に position 実データと current_plan が乗ること
 - prompt: guidance 行が horizon 指針と併存すること (day/swing 両方)
 - 既存テスト回帰: position stub 前提のテストは新形状に追従 (空のときの形状は
