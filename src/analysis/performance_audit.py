@@ -48,6 +48,9 @@ class AuditResult:
 
 
 _price_store_singleton = None
+# audit 対象 (traded pairs) の OHLCV cache 足種。run_audit で
+# config.trading.ohlcv_interval に設定される (day=15m)。既定 1h は後方互換。
+_ohlcv_interval_singleton = "1h"
 
 
 def _default_input_reader(prompt: str = "") -> str:
@@ -59,13 +62,17 @@ def _load_pair_ohlcv(pair: str, since: datetime, until: datetime | None = None):
     """price_store から指定ペアの OHLCV を取得する。
 
     テスト時は monkeypatch でこの関数を差し替え可能。
+    読み出し足種は _ohlcv_interval_singleton (traded pair の cache は
+    ohlcv_interval で書かれるため、interval 無指定だと day モードで空になる)。
     """
     store = _price_store_singleton
     if store is None:
         return None
     end = until or datetime.now()
     try:
-        return store.load_ohlcv(pair, start=since, end=end)
+        return store.load_ohlcv(
+            pair, start=since, end=end, interval=_ohlcv_interval_singleton,
+        )
     except Exception as e:  # pragma: no cover - defensive
         logger.warning(f"[AUDIT] load_ohlcv failed for {pair}: {e}")
         return None
@@ -83,13 +90,14 @@ def run_audit(
         days: 何日前までのトレードを対象にするか
         review: True なら対話 review モード (Task 20 で実装)
     """
-    global _price_store_singleton
+    global _price_store_singleton, _ohlcv_interval_singleton
     from src.data.price_store import PriceStore
 
     # 出力ディレクトリを確保
     config.audit_output_dir.mkdir(parents=True, exist_ok=True)
 
     _price_store_singleton = PriceStore(config.prices_db_path)
+    _ohlcv_interval_singleton = config.trading.ohlcv_interval
     session_store = SessionStore(config.prices_db_path)
 
     now = datetime.now()

@@ -542,8 +542,12 @@ async def _collect_econ_impact(
                         try:
                             event_time_naive = to_db_naive_datetime(ev.event_time)
                             _win_start, _win_end = _econ_window_for(ev.event_time)
+                            # p は tradeable 由来 → cache は _ohlcv_interval_for
+                            # (= ohlcv_interval) で書かれる。interval 無指定だと
+                            # day モードで "1h" バケットを読み空になる (codex Med#1 同族)
                             pd_ = price_store.load_ohlcv(
                                 p.symbol, _win_start, _win_end,
+                                interval=_ohlcv_interval_for(p, config),
                             )
                             if pd_.empty or len(pd_) < 2:
                                 continue

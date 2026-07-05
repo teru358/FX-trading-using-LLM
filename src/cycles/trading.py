@@ -260,15 +260,16 @@ def _apply_atr_sltp_to_signal(
         # ボラレジームによるリスク倍率適用
         effective_risk_pct = config.trading.risk_per_trade
         if config.trading.vol_regime_enabled:
+            from src.data.resample import resample_ohlcv
             from src.signals.vol_regime import compute_vol_regime
-            # ATR と同じ足種でリサンプルして vol_regime を計算
+            # ATR と同じ足種でリサンプルして vol_regime を計算。基底足は
+            # price_data の取得足種 = ohlcv_interval (codex High#1 と同族:
+            # "1h" 固定除外だと 15m 基底で atr_timeframe="1h" がスキップされる)
             vr_df = price_data.df
             _vr_tf = config.trading.atr_timeframe
-            if _vr_tf and _vr_tf not in ("", "1h"):
-                vr_df = vr_df.resample(_vr_tf).agg({
-                    "Open": "first", "High": "max", "Low": "min",
-                    "Close": "last", "Volume": "sum",
-                }).dropna()
+            _vr_base = config.trading.ohlcv_interval
+            if _vr_tf and _vr_tf != _vr_base:
+                vr_df = resample_ohlcv(vr_df, _vr_tf, base_interval=_vr_base)
             vr = compute_vol_regime(
                 vr_df,
                 ewma_span=config.trading.vol_regime_ewma_span,
