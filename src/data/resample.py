@@ -33,6 +33,11 @@ _INTERVAL_MINUTES: dict[str, int] = {
 assert _RULE_MAP.keys() == _INTERVAL_MINUTES.keys()
 
 
+def interval_minutes(interval: str) -> int | None:
+    """interval 文字列の分数を返す (未知は None)。_INTERVAL_MINUTES の公開窓口。"""
+    return _INTERVAL_MINUTES.get(interval)
+
+
 def resample_ohlcv(
     df_base: pd.DataFrame, interval: str, base_interval: str = "1h"
 ) -> pd.DataFrame:

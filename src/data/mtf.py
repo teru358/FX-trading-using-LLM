@@ -24,7 +24,7 @@ import pandas as pd
 
 from src.config import ChartPatternConfig, IndicatorToggleConfig
 from src.data.indicators import IndicatorSummary, compute_indicators
-from src.data.resample import resample_ohlcv
+from src.data.resample import interval_minutes, resample_ohlcv
 
 if TYPE_CHECKING:
     from src.config import AnalysisConfig
@@ -171,23 +171,12 @@ def compute_mtf_summaries(
 
 
 def _bars_per_day_for_interval(interval: str) -> int:
-    """interval 文字列から 1 日あたりのおおよそのバー数を返す。"""
-    if interval == "1d":
-        return 1
-    if interval == "1h":
-        return 24
-    # "15m" / "30m" などの "Nm" 形式
-    if interval.endswith("m"):
-        try:
-            m = int(interval[:-1])
-            return max(1, (24 * 60) // m)
-        except ValueError:
-            pass
-    # "4h" / "8h" などの "Nh" 形式
-    if interval.endswith("h"):
-        try:
-            h = int(interval[:-1])
-            return max(1, 24 // h)
-        except ValueError:
-            pass
-    return 24  # fallback
+    """interval 文字列から 1 日あたりのおおよそのバー数を返す。
+
+    分数は resample.py の interval_minutes を単一情報源とする (重複表の drift 防止)。
+    未知 interval は従来どおり 24 に倒す。
+    """
+    minutes = interval_minutes(interval)
+    if minutes is None:
+        return 24  # fallback (未知 interval)
+    return max(1, (24 * 60) // minutes)
