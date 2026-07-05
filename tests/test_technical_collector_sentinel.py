@@ -308,4 +308,4 @@ def test_is_price_data_stale_raw_aware_utc_fresh_not_stale(monkeypatch):
         index=pd.DatetimeIndex([aware_utc]),  # tz-aware UTC のまま
     )
     price_data = SimpleNamespace(symbol="USDJPY=X", df=df, current_price=1.0)
-    assert _is_price_data_stale(price_data) is None
+    assert _is_price_data_stale(price_data, max_staleness=timedelta(hours=6)) is None

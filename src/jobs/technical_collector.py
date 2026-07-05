@@ -51,9 +51,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-# FX: 24時間取引。config 化済み (ScheduleConfig.technical_max_staleness_fx_minutes)。
-# ここでは _is_price_data_stale の後方互換デフォルト引数としてのみ残す。
-_MAX_STALENESS_FX = timedelta(hours=6)
+# FX 側の閾値は config 化済み (ScheduleConfig.technical_max_staleness_fx_minutes)。
 _MAX_STALENESS_WATCH = timedelta(hours=120)   # ETF/指数: 週末+米国3連休を跨ぐため5日
 
 
@@ -85,7 +83,7 @@ def _fetch_instrument_ohlcv(
 
 def _is_price_data_stale(
     price_data,
-    max_staleness: timedelta = _MAX_STALENESS_FX,
+    max_staleness: timedelta,
 ) -> timedelta | None:
     """最新バーの鮮度をチェック。古すぎる場合は経過時間を返す (スキップ判定用)。"""
     from src.utils.clock import db_now, to_db_naive_datetime
