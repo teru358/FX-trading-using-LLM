@@ -101,6 +101,23 @@ def _parse_period_days(period: str) -> int:
     return 90
 
 
+def _interval_delta(interval: str) -> timedelta:
+    """interval 文字列 ("15m"/"1h"/"1d") を差分フェッチの刻みに変換する。
+
+    不明な形式は安全側 (従来の 1h) に倒す。
+    """
+    try:
+        if interval.endswith("m"):
+            return timedelta(minutes=int(interval[:-1]))
+        if interval.endswith("h"):
+            return timedelta(hours=int(interval[:-1]))
+        if interval.endswith("d"):
+            return timedelta(days=int(interval[:-1]))
+    except ValueError:
+        pass
+    return timedelta(hours=1)
+
+
 class Mt5OhlcvFetcher:
     def __init__(
         self, *, bridge_url: str, request_timeout: float,
@@ -176,29 +193,31 @@ class Mt5OhlcvFetcher:
 
         if price_store is not None:
             # Step 1: 過去方向の補完 (DB が空なら required_start から、あれば最古から遡る)
-            latest = price_store.get_latest_date(symbol)
+            latest = price_store.get_latest_date(symbol, interval=interval)
             hist_start = (
                 latest - timedelta(days=days + 1) if latest is not None
                 else required_start
             )
-            earliest = price_store.get_earliest_date(symbol)
+            earliest = price_store.get_earliest_date(symbol, interval=interval)
             if earliest is None or earliest > hist_start + timedelta(hours=2):
                 self._fetch_and_upsert(
                     symbol, hist_start, datetime.now(),
                     interval=interval, price_store=price_store,
                 )
 
-            # Step 2: 差分フェッチ (最新バー以降)
-            latest = price_store.get_latest_date(symbol)
+            # Step 2: 差分フェッチ (最新バー以降、刻みは interval 連動 = spec S-4a)
+            latest = price_store.get_latest_date(symbol, interval=interval)
             if latest is not None:
-                fetch_from = latest + timedelta(hours=1)
+                fetch_from = latest + _interval_delta(interval)
                 if fetch_from <= datetime.now():
                     self._fetch_and_upsert(
                         symbol, fetch_from, datetime.now(),
                         interval=interval, price_store=price_store,
                     )
 
-            df = price_store.load_ohlcv(symbol, required_start, datetime.now())
+            df = price_store.load_ohlcv(
+                symbol, required_start, datetime.now(), interval=interval,
+            )
             if len(df) >= 20:
                 current_price = float(df["Close"].iloc[-1])
                 logger.info(
@@ -222,7 +241,7 @@ class Mt5OhlcvFetcher:
             )
 
         if price_store is not None:
-            price_store.upsert_ohlcv(symbol, df)
+            price_store.upsert_ohlcv(symbol, df, interval=interval)
 
         current_price = float(df["Close"].iloc[-1])
         return PriceData(
@@ -236,7 +255,7 @@ class Mt5OhlcvFetcher:
     ) -> None:
         df = self._fetch_dataframe(symbol, start, end, interval=interval)
         if not df.empty:
-            price_store.upsert_ohlcv(symbol, df)
+            price_store.upsert_ohlcv(symbol, df, interval=interval)
             logger.info(
                 f"[MT5] Stored {len(df)} bars for {symbol} ({start:%Y-%m-%d}〜)"
             )
