@@ -90,7 +90,8 @@ def _horizon_guidance(context: dict[str, Any]) -> str:
     if horizon == "day":
         ttl = policy.get("plan_ttl_max_hours") or 0
         ttl_line = (
-            f" expires_at must be within {ttl} hours from now." if ttl else ""
+            f" expires_at must be within {ttl} hours from now"
+            " (the system clamps any longer value)." if ttl else ""
         )
         return (
             "Operating horizon: DAY trade. The plan must complete within hours,"
