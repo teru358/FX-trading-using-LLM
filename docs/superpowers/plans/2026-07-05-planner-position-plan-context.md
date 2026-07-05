@@ -62,6 +62,21 @@ def test_draft_scale_in_true_requires_evidence():
     })
     with pytest.raises(SchemaParseError):
         ExecutionPlanDraft.from_llm_json(raw)
+
+
+def test_draft_scale_in_rejects_non_bool():
+    """codex Medium: bool("false") is True の丸め込みを許さない。型は JSON bool のみ。"""
+    base = {
+        "direction": "long",
+        "entry_conditions": [{"type": "price_at_or_below", "value": 150.0}],
+        "action": {}, "invalidation": [],
+        "expires_at": "2026-07-05T20:00:00", "reasoning_summary": "t",
+    }
+    with pytest.raises(SchemaParseError):
+        ExecutionPlanDraft.from_llm_json(json.dumps({**base, "scale_in": "false"}))
+    with pytest.raises(SchemaParseError):
+        ExecutionPlanDraft.from_llm_json(
+            json.dumps({**base, "scale_in": True, "new_signal_evidence": 123}))
 ```
 
 - [ ] **Step 2: RED 確認** — `uv run pytest tests/test_orchestrator_schemas.py -q -k scale_in`
@@ -79,11 +94,25 @@ def test_draft_scale_in_true_requires_evidence():
             raise ValueError("scale_in=true requires non-empty new_signal_evidence")
 ```
 
-`from_llm_json` の `cls(...)` に (ValueError は既存 except で SchemaParseError に包まれる):
+`from_llm_json` の try 内・`cls(...)` の前に型検証 (ValueError は既存 except で
+SchemaParseError に包まれる):
 
 ```python
-                scale_in=bool(data.get("scale_in", False)),
-                new_signal_evidence=data.get("new_signal_evidence"),
+            scale_in = data.get("scale_in", False)
+            if not isinstance(scale_in, bool):
+                raise ValueError(f"scale_in must be a JSON bool, got {scale_in!r}")
+            evidence = data.get("new_signal_evidence")
+            if evidence is not None and not isinstance(evidence, str):
+                raise ValueError(
+                    f"new_signal_evidence must be null or string, got {type(evidence).__name__}"
+                )
+```
+
+`cls(...)` に:
+
+```python
+                scale_in=scale_in,
+                new_signal_evidence=evidence,
 ```
 
 `to_storage_dict` に `"scale_in": self.scale_in, "new_signal_evidence": self.new_signal_evidence,` を追加。
@@ -176,7 +205,7 @@ def test_trade_plan_persists_scale_in_fields(tmp_path):
         expires_at=datetime(2026, 7, 5, 20, 0), created_by_run_id=1,
         scale_in=True, new_signal_evidence="new 1h breakout",
     )
-    plan = store.get_plan(pid)
+    plan = store.get_trade_plan(pid)
     assert plan.scale_in is True
     assert plan.new_signal_evidence == "new 1h breakout"
 
@@ -189,12 +218,12 @@ def test_trade_plan_scale_in_defaults_null(tmp_path):
         action_json={}, invalidation_json=[],
         expires_at=datetime(2026, 7, 5, 20, 0), created_by_run_id=1,
     )
-    plan = store.get_plan(pid)
+    plan = store.get_trade_plan(pid)
     assert plan.scale_in in (None, False)
     assert plan.new_signal_evidence is None
 ```
 
-(`get_plan` が無ければ既存の plan 取得手段 (`get_active_plans` 等) を使う。migration テストも Task 2 と同型で trade_plans 版を1本追加。)
+(取得 API は `get_trade_plan` (orchestrator_store.py:484)。migration テストも Task 2 と同型で trade_plans 版を1本追加。)
 
 - [ ] **Step 2: RED 確認**
 - [ ] **Step 3: 実装** — `_TradePlan` に:
@@ -488,6 +517,26 @@ def test_current_plan_block_from_active_plan(tmp_path):
     assert "price_at_or_below" in cur["entry_summary"]
 
 
+def test_current_plan_entry_summary_non_price_conditions(tmp_path):
+    """type ごとの参照キー出し分け (codex Medium): value / value_pips / status。"""
+    db = tmp_path / "o.db"
+    orch = OrchestratorStore(db)
+    sid = orch.create_snapshot(pair="USDJPY=X", as_of_time=datetime(2026, 7, 5, 11, 0))
+    orch.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=sid, horizon="day", direction="long",
+        entry_conditions_json=[
+            {"type": "spread_below", "value_pips": 2.0},
+            {"type": "technical_status_is", "status": "ok"},
+        ],
+        action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 7, 5, 20, 0), created_by_run_id=1,
+    )
+    builder = DecisionContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
+    ctx = builder.build(pair="USDJPY=X", now=datetime(2026, 7, 5, 12, 0), quote=_quote())
+    assert "spread_below 2.0" in ctx["current_plan"]["entry_summary"]
+    assert "technical_status_is ok" in ctx["current_plan"]["entry_summary"]
+
+
 def test_current_plan_none_when_no_active(tmp_path):
     ctx = _builder(tmp_path).build(pair="USDJPY=X", now=datetime(2026, 7, 5, 12, 0),
                                    quote=_quote())
@@ -539,10 +588,22 @@ def test_snapshot_stores_position_and_current_plan(tmp_path):
 
 ```python
 def _entry_summary(conditions: list | None) -> str:
-    """entry_conditions_json の短縮表記 (先頭2条件)。"""
+    """entry_conditions_json の短縮表記 (先頭2条件)。
+
+    条件 type ごとに参照キーが違う (codex Medium): price 系=value /
+    spread_below=value_pips / technical_status_is=status。既知キーを順に引き、
+    どれも無ければ type のみ。
+    """
     if not conditions:
         return ""
-    parts = [f"{c.get('type')} {c.get('value')}" for c in conditions[:2]]
+
+    def _one(c: dict) -> str:
+        for key in ("value", "value_pips", "status"):
+            if c.get(key) is not None:
+                return f"{c.get('type')} {c[key]}"
+        return str(c.get("type"))
+
+    parts = [_one(c) for c in conditions[:2]]
     if len(conditions) > 2:
         parts.append(f"(+{len(conditions) - 2} more)")
     return ", ".join(parts)
@@ -614,19 +675,25 @@ async def test_position_unavailable_skips_llm_and_holds(pipeline_fixtures):
 
 ---
 
-### Task 8: pipeline の scale_in 矯正 + 永続化 (P-2b 配線)
+### Task 8: pipeline の scale_in 決定的導出 + 永続化 (P-2b 配線)
+
+**scale_in の正本は LLM 申告ではなく決定的導出** (codex plan review High):
+`scale_in = 建玉 items に draft.direction と同方向が存在`。どちら向きの誤申告も
+導出値で上書きし、scale-in なのに new_signal_evidence が無い plan は**作らない**
+(予算内なら 1 回 redraft、尽きたら決定的 reject)。
 
 **Files:**
 - Modify: `src/orchestrator/planning_pipeline.py` (_pipeline draft 処理 ~line 176, _commit_plan ~line 269)
-- Test: `tests/test_planning_pipeline.py` に追記
+- Test: `tests/test_planning_pipeline.py` に追記 (fake exec agent の逐次 draft 返却は
+  既存 revise ループテストの fake パターンに合わせる)
 
 - [ ] **Step 1: 失敗するテストを書く**
 
 ```python
 async def test_scale_in_coerced_false_without_position(pipeline_fixtures):
-    """position 空なのに LLM が scale_in=true → false に矯正して保存 (P-2b)。"""
-    pipeline, planner, orch = pipeline_fixtures
-    planner.set_draft(scale_in=True, new_signal_evidence="hallucinated")  # fake の設定手段は既存 fixture に合わせる
+    """position 空なのに LLM が scale_in=true → 導出値 false で保存。"""
+    pipeline, agents, orch = pipeline_fixtures
+    agents.set_drafts([draft_kwargs(scale_in=True, new_signal_evidence="hallucinated")])
     context = make_context()   # position は {"count": 0, "items": []}
     result = await pipeline.run(pair="USDJPY=X", context=context, run_id=1)
     assert result.outcome == "plan_create"
@@ -635,24 +702,90 @@ async def test_scale_in_coerced_false_without_position(pipeline_fixtures):
     assert plan.new_signal_evidence is None
 
 
-async def test_scale_in_persisted_with_position(pipeline_fixtures):
-    pipeline, planner, orch = pipeline_fixtures
-    planner.set_draft(scale_in=True, new_signal_evidence="fresh 1h breakout")
+async def test_same_direction_position_forces_scale_in(pipeline_fixtures):
+    """同方向建玉があれば LLM が scale_in を省略しても scale-in 扱いになり、
+    evidence 無し draft は redraft feedback を受ける (codex High の本丸)。"""
+    pipeline, agents, orch = pipeline_fixtures
+    agents.set_drafts([
+        draft_kwargs(direction="long", scale_in=False),                  # 1st: 申告漏れ
+        draft_kwargs(direction="long", scale_in=True,
+                     new_signal_evidence="fresh 1h breakout after entry"),  # 2nd: 根拠あり
+    ])
     context = make_context()
     context["position"] = {"count": 1, "items": [{"direction": "long"}]}
     result = await pipeline.run(pair="USDJPY=X", context=context, run_id=1)
+    assert result.outcome == "plan_create"
+    assert result.redraft_count == 1
     plan = orch.get_active_plans("USDJPY=X")[0]
     assert plan.scale_in is True
-    assert plan.new_signal_evidence == "fresh 1h breakout"
+    assert plan.new_signal_evidence == "fresh 1h breakout after entry"
+
+
+async def test_scale_in_rejected_when_evidence_never_provided(pipeline_fixtures):
+    """redraft しても evidence が出ない → 決定的 reject (plan を作らない)。"""
+    pipeline, agents, orch = pipeline_fixtures
+    agents.set_drafts([
+        draft_kwargs(direction="long", scale_in=False),
+        draft_kwargs(direction="long", scale_in=False),
+    ])
+    context = make_context()
+    context["position"] = {"count": 1, "items": [{"direction": "long"}]}
+    result = await pipeline.run(pair="USDJPY=X", context=context, run_id=1)
+    assert result.outcome == "reject"
+    assert "new_signal_evidence" in result.reason
+    assert orch.get_active_plans("USDJPY=X") == []
+
+
+async def test_opposite_direction_position_is_not_scale_in(pipeline_fixtures):
+    """逆方向建玉 (ドテン提案) は scale-in ではない → evidence 不要で通る。"""
+    pipeline, agents, orch = pipeline_fixtures
+    agents.set_drafts([draft_kwargs(direction="long", scale_in=False)])
+    context = make_context()
+    context["position"] = {"count": 1, "items": [{"direction": "short"}]}
+    result = await pipeline.run(pair="USDJPY=X", context=context, run_id=1)
+    assert result.outcome == "plan_create"
+    assert orch.get_active_plans("USDJPY=X")[0].scale_in is False
 ```
 
 - [ ] **Step 2: RED 確認**
 - [ ] **Step 3: 実装** — `_pipeline` の `draft = clamp_draft_ttl(...)` 直後に:
 
 ```python
-            # P-2b: 建玉が無いのに scale_in=true は LLM の誤申告 → 材料と突合して矯正。
-            if draft.scale_in and not (context.get("position") or {}).get("count"):
-                draft = replace(draft, scale_in=False, new_signal_evidence=None)
+            # P-2b: scale_in の正本は決定的導出 (codex High)。建玉 items に draft と
+            # 同方向があるかで決まり、LLM 申告と食い違えば導出値で上書きする。
+            # 【順序重要】replace() は __post_init__ を再実行するため、evidence 空のまま
+            # scale_in=True へ replace すると ValueError で fail-safe に落ちる。
+            # 先に evidence を検証し、replace は妥当な組み合わせでのみ行う。
+            items = (context.get("position") or {}).get("items") or []
+            same_dir = any(it.get("direction") == draft.direction for it in items)
+            if same_dir and not (draft.new_signal_evidence or "").strip():
+                # scale-in なのに新シグナル根拠なし → plan は作らない。
+                if redraft_count < max_redraft:
+                    redraft_count += 1
+                    feedback = [
+                        "An open same-direction position exists: this plan is a"
+                        " scale-in. Set scale_in=true and provide new_signal_evidence"
+                        " describing a NEW signal that did not exist at the original"
+                        " entry.",
+                    ]
+                    continue
+                did = self._orch.record_decision(
+                    run_id=run_id, snapshot_id=snapshot_id, pair=pair,
+                    decision_type="reject", decision="reject",
+                    reasoning_summary=(
+                        "scale-in without new_signal_evidence (deterministic)"
+                    ),
+                    trade_horizon=horizon,
+                )
+                return PipelineResult(
+                    outcome="reject", decision_ids=[did], redraft_count=redraft_count,
+                    reason="scale-in without new_signal_evidence",
+                )
+            if draft.scale_in != same_dir:
+                draft = replace(
+                    draft, scale_in=same_dir,
+                    new_signal_evidence=draft.new_signal_evidence if same_dir else None,
+                )
 ```
 
 `_commit_plan` の `create_trade_plan(...)` 呼び出しに:
@@ -664,7 +797,7 @@ async def test_scale_in_persisted_with_position(pipeline_fixtures):
 (`replace` は planning_pipeline で import 済み — clamp_draft_ttl が使用。)
 
 - [ ] **Step 4: GREEN + 回帰**
-- [ ] **Step 5: Commit** — `feat: coerce and persist scale_in through planning pipeline`
+- [ ] **Step 5: Commit** — `feat: derive scale_in deterministically in planning pipeline`
 
 ---
 
@@ -789,7 +922,8 @@ def test_bootstrap_injects_position_provider(...):
   旧 position stub 形状に依存する落ち穂があればここで拾って追従修正
 - [ ] **Step 6: 本 plan 末尾に実装完了メモ (スイート数・コミット列・スコープ外事項) を追記
 - [ ] **Step 7: Commit** — `feat: inject position provider into orchestrator bootstrap`
-  (メモは `docs: ...` で別コミット可)
+  (メモは `docs: ...` で別コミット。docs/ は gitignore 対象だが、このブランチでは
+  specs/plans を `git add -f` で意図的にコミットする運用 — 既存 docs コミットと同じ)
 
 ---
 

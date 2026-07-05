@@ -105,14 +105,21 @@ ExecutionOpinionAgent 両方に届く)。
 「新シグナル根拠がある」の検証を reasoning の自然文判定に依存させないため、
 `ExecutionPlanDraft` (LLM 出力 schema) に構造化フィールドを追加する:
 
-- `scale_in: bool` — 同 pair に建玉がある状態での同方向 plan なら true を要求
-- `new_signal_evidence: str | null` — scale_in=true のとき必須 (空なら
-  SchemaParseError と同じ再起案経路に乗せる)。建玉 entry 時と異なる新シグナルの記述
+- `scale_in: bool` — LLM も申告するが、**正本は pipeline の決定的導出**
+  (codex plan review High): `scale_in = 建玉 items に draft.direction と同方向が存在`。
+  LLM 申告が導出値と食い違えば導出値で上書きする (どちら向きの誤申告も矯正)
+- `new_signal_evidence: str | null` — scale_in (導出値)=true のとき必須。
+  空なら plan を作らない: redraft 予算が残っていれば feedback を積んで 1 回
+  再起案、尽きていれば決定的 reject (LLM schema 違反による SchemaParseError は
+  従来どおり fail-safe failed — 再起案経路ではない)
+- 型検証は厳格に: scale_in は JSON bool のみ (文字列 "false" は SchemaParseError)、
+  new_signal_evidence は null | str のみ
 
 永続化は trade_plans への nullable 列 2 本 (`scale_in`, `new_signal_evidence`、
 idempotent ALTER)。集計は SQL だけで「scale-in plan のうち根拠記述がある比率」を
-出せる。position が空のときの scale_in=true は builder/pipeline 側で false に矯正
-(LLM の誤申告を材料と突合して直す)。
+出せる。導出が決定的なので「同方向建玉あり plan で scale_in=false」は構造的に
+存在しない (LLM の見落としを測る場合は申告値と導出値の不一致率を agent_output
+の structured_payload から集計する)。
 
 **意味論**: planner が current_plan を見て direct_hold を返す = 既存 plan の維持
 (supersede は新 plan 作成時のみ発火するので現行コードのままこの意味論が成立する)。
@@ -170,8 +177,8 @@ RiskGateWorker への position チェック追加は行わない (装置を重�
 
 - **合格条件は SQL で機械判定**: scale_in=true の plan は new_signal_evidence が
   非空であること (P-2b の構造化フィールド)。reasoning 目視は補助
-- snapshot の position_json と plan の scale_in を突合し、「建玉あり同方向 plan で
-  scale_in=false」(LLM の見落とし) がないかを集計
+- scale_in は決定的導出なので突合不要。LLM の建玉認識品質は「申告値 vs 導出値の
+  不一致率」で測る (snapshot position_json + draft 申告から)
 - 建玉保有中 pair への同方向 plan 作成頻度 before/after
 - 5問題スコアカード問題1の判定材料
 
