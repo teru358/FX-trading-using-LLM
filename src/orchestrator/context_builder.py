@@ -75,14 +75,22 @@ class DecisionContextBuilder:
         self._news_provider = news_provider
         self._risk_state_provider = risk_state_provider
 
-    # technical snapshot をこの分数より古ければ stale 扱いにする (decision に古い
-    # データを使わせない)。
-    _TECHNICAL_MAX_STALE_MINUTES = 30
-    # lookback 窓。stale と missing を区別するため max_stale より十分広く取る必要が
-    # ある (窓が max_stale と同じだと、max_stale 超過の行が窓から外れて missing に
-    # 見え、stale と区別できない)。max_stale から導出し「窓 > max_stale」を機械的に
-    # 保証する (将来 max_stale を変えても窓が自動追従する)。最低 1h。
-    _TECHNICAL_LOOKBACK_HOURS = max(1, (_TECHNICAL_MAX_STALE_MINUTES * 48) // 60)
+    # technical snapshot の stale 閾値は orchestrator.entry.max_technical_age_seconds
+    # から導出する (watch loop の freshness gate と同一基準に統一 — codex Med#2)。
+    # lookback 窓は「窓 > max_stale」を機械的に保証する従来比率 (×48/60) を維持する。
+
+    @property
+    def _technical_max_stale(self) -> timedelta:
+        return timedelta(seconds=self._config.entry.max_technical_age_seconds)
+
+    @property
+    def _technical_lookback_hours(self) -> int:
+        # lookback 窓。stale と missing を区別するため max_stale より十分広く取る
+        # 必要がある (窓が max_stale と同じだと、max_stale 超過の行が窓から外れて
+        # missing に見え、stale と区別できない)。max_stale から導出し「窓 > max_stale」
+        # を機械的に保証する (将来 max_stale を変えても窓が自動追従する)。最低 1h。
+        minutes = self._config.entry.max_technical_age_seconds // 60
+        return max(1, (minutes * 48) // 60)
 
     def build(self, *, pair: str, now: datetime, quote: QuoteSnapshot) -> dict[str, Any]:
         """decision_snapshot を materialize し §7 標準 context dict を返す。"""
@@ -167,9 +175,9 @@ class DecisionContextBuilder:
         区別できない)。24h あれば数時間古い行も取得でき、age>max_stale で stale に
         分類できる。
         """
-        max_stale = timedelta(minutes=self._TECHNICAL_MAX_STALE_MINUTES)
+        max_stale = self._technical_max_stale
         rows = self._analysis.get_recent_ok_snapshots(
-            pair, hours=self._TECHNICAL_LOOKBACK_HOURS,
+            pair, hours=self._technical_lookback_hours,
         )
         if not rows:
             return {
