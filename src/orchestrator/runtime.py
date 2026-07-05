@@ -491,6 +491,7 @@ class OrchestratorRuntime:
             tp=trig.tp,
             triggered_at=trig.triggered_at,
             horizon_seconds=ev.horizon_seconds or self._config.hindsight.horizon_seconds,
+            spread_pips=trig.spread_pips,
         )
         if not result.has_data:
             self._orch.update_hindsight_evaluation(
@@ -503,6 +504,7 @@ class OrchestratorRuntime:
             mfe_r=result.mfe_r, mae_r=result.mae_r, pnl_r=result.pnl_r,
             would_hit_sl=result.would_hit_sl, would_hit_tp=result.would_hit_tp,
             reasoning_summary=result.reasoning_summary,
+            spread_cost_r=result.spread_cost_r,
         )
         # 評価成功のみ shadow 通知 (failed は通知しない — ノイズ抑制)。
         self._notify_hindsight(trig, result)
@@ -1072,6 +1074,7 @@ class OrchestratorRuntime:
             pair=trig.pair, direction=trig.direction, plan_id=trig.plan_id,
             mfe_r=result.mfe_r, mae_r=result.mae_r, pnl_r=result.pnl_r,
             would_hit_tp=result.would_hit_tp, would_hit_sl=result.would_hit_sl,
+            spread_cost_r=result.spread_cost_r,
         )
         self._run_notify(lambda: n.notify_hindsight_evaluated(info))
 

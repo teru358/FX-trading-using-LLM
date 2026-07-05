@@ -71,6 +71,7 @@ class HindsightInfo:
     pnl_r: float | None
     would_hit_tp: bool | None = None
     would_hit_sl: bool | None = None
+    spread_cost_r: float | None = None  # pnl_r から控除した spread コスト内訳 (spec D-8)
 
 
 # ── 整形ヘルパ ─────────────────────────────────────────────
@@ -158,7 +159,8 @@ class ShadowNotifier:
         await self._send_capped(
             f"{_PREFIX} Hindsight {info.pair} {info.direction.upper()}{hit}\n"
             f"{plan_part}PnL {_fmt_opt(info.pnl_r)}R | "
-            f"MFE {_fmt_opt(info.mfe_r)}R | MAE {_fmt_opt(info.mae_r)}R"
+            f"MFE {_fmt_opt(info.mfe_r)}R | MAE {_fmt_opt(info.mae_r)}R | "
+            f"spread_cost={_fmt_opt(info.spread_cost_r)}R"
         )
 
     # ── daily summary ─────────────────────────────────────────

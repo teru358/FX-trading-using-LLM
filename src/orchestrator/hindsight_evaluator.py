@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Callable
 
+from src.orchestrator.watch_evaluator import _pip_size_for
+
 if TYPE_CHECKING:
     from src.data.price_store import PriceStore
 
@@ -35,10 +37,11 @@ class HindsightResult:
     has_data: bool
     mfe_r: float | None = None        # 最大順行幅 / 1R (>= 0)
     mae_r: float | None = None        # 最大逆行幅 / 1R (<= 0)
-    pnl_r: float | None = None        # 確定 R (SL/TP 到達 or horizon 末 mark-to-market)
+    pnl_r: float | None = None        # 確定 R (SL/TP 到達 or horizon 末 mark-to-market、spread 控除後)
     would_hit_sl: bool | None = None
     would_hit_tp: bool | None = None
     reasoning_summary: str = ""
+    spread_cost_r: float | None = None  # pnl_r から控除した spread コスト内訳 (spec D-8)
 
 
 class HindsightEvaluator:
@@ -57,8 +60,16 @@ class HindsightEvaluator:
         tp: float | None,
         triggered_at: datetime,
         horizon_seconds: int,
+        spread_pips: float | None = None,
     ) -> HindsightResult:
-        """trigger 後 horizon 窓の OHLCV から MFE-R/MAE-R/PnL-R を算出する。"""
+        """trigger 後 horizon 窓の OHLCV から MFE-R/MAE-R/PnL-R を算出する。
+
+        spread_pips (trigger 時点の spread) を渡すと、day trading の spread/TP 比が
+        swing より高いことによる過大評価を補正するため、spread コストを R 換算して
+        pnl_r から控除する (spec D-8)。控除額は spread_cost_r に内訳として残す
+        (pnl_r は NET、spread_cost_r が分かれば gross = pnl_r + spread_cost_r で復元可能)。
+        None または 0 以下なら控除しない (spread_cost_r=None のまま)。
+        """
         sign = self._direction_sign(direction)
         if sign == 0:
             return HindsightResult(
@@ -75,6 +86,12 @@ class HindsightEvaluator:
             return HindsightResult(
                 has_data=False, reasoning_summary="zero risk distance (trigger==sl)"
             )
+
+        # spread コストを R 換算 (spec D-8)。未提供 / 0 以下は控除なし (swing 由来の
+        # 既存行や spread 不明ケースは gross のまま = 挙動不変)。
+        spread_cost_r: float | None = None
+        if spread_pips is not None and spread_pips > 0:
+            spread_cost_r = (spread_pips * _pip_size_for(pair)) / risk
 
         end = triggered_at + timedelta(seconds=horizon_seconds)
         df = self._provider(pair, triggered_at, end)
@@ -116,6 +133,10 @@ class HindsightEvaluator:
             would_hit_sl, would_hit_tp = False, False
             reason = "mark-to-market at horizon end (no SL/TP touch)"
 
+        # spread コストを控除して NET 化 (SL/TP/mark-to-market いずれの分岐も対象)。
+        if spread_cost_r is not None:
+            pnl_r -= spread_cost_r
+
         return HindsightResult(
             has_data=True,
             mfe_r=mfe_r,
@@ -124,6 +145,7 @@ class HindsightEvaluator:
             would_hit_sl=would_hit_sl,
             would_hit_tp=would_hit_tp,
             reasoning_summary=reason,
+            spread_cost_r=spread_cost_r,
         )
 
     @staticmethod

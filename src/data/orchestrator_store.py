@@ -281,6 +281,7 @@ class _ShadowHindsightEvaluation(_Base):
     would_hit_tp      = Column(Integer)    # 0/1
     reasoning_summary = Column(String)
     created_at        = Column(DateTime, nullable=False)
+    spread_cost_r     = Column(Float)   # R 換算の spread コスト内訳 (spec 2026-07-05 S-5)
 
     # trigger ごとに hindsight 行は最大 1 件 (二重 enqueue を DB で防ぐ)。
     __table_args__ = (
@@ -1058,10 +1059,12 @@ class OrchestratorStore:
         would_hit_sl: bool | None = None,
         would_hit_tp: bool | None = None,
         reasoning_summary: str | None = None,
+        spread_cost_r: float | None = None,
     ) -> None:
         """poll loop が pending 行に metric を埋め status を遷移させる。
 
         評価成功なら status='evaluated' + metric 群、評価不能なら status='failed'。
+        spread_cost_r は pnl_r (NET) から控除した spread コストの内訳 (spec D-8)。
         """
         if status not in HINDSIGHT_STATUSES:
             raise ValueError(
@@ -1082,6 +1085,7 @@ class OrchestratorStore:
             ev.would_hit_sl = None if would_hit_sl is None else int(would_hit_sl)
             ev.would_hit_tp = None if would_hit_tp is None else int(would_hit_tp)
             ev.reasoning_summary = reasoning_summary
+            ev.spread_cost_r = spread_cost_r
             session.commit()
 
     def get_pending_hindsight_evaluations(
