@@ -26,15 +26,17 @@ class _Base(DeclarativeBase):
 
 
 def _migrate_schema(engine) -> None:
-    """旧スキーマ（date列）を新スキーマ（bar_time列）に自動移行する。"""
+    """旧スキーマを新スキーマに自動移行する (cache のため DROP→再作成)。"""
     inspector = sa_inspect(engine)
     if "ohlcv" in inspector.get_table_names():
         cols = {c["name"] for c in inspector.get_columns("ohlcv")}
-        if "date" in cols and "bar_time" not in cols:
+        if ("date" in cols and "bar_time" not in cols) or "interval" not in cols:
             with engine.connect() as conn:
                 conn.execute(text("DROP TABLE ohlcv"))
                 conn.commit()
-            logger.warning("OHLCV table migrated: old 'date' column replaced with 'bar_time' (cache cleared)")
+            logger.warning(
+                "OHLCV table migrated: schema changed (cache cleared, will refetch)"
+            )
 
 
 def _get_engine(db_path: Path):
@@ -59,7 +61,8 @@ class _OhlcvRow(_Base):
     __tablename__ = "ohlcv"
 
     symbol   = Column(String,   primary_key=True)
-    bar_time = Column(DateTime, primary_key=True)  # datetime（1h足・日足共用）
+    interval = Column(String,   primary_key=True, default="1h")  # "1h" | "15m" 等 (spec S-4a)
+    bar_time = Column(DateTime, primary_key=True)  # datetime（各足種共用）
     open     = Column(Float)
     high     = Column(Float)
     low      = Column(Float)
@@ -77,8 +80,8 @@ class PriceStore:
     def __init__(self, db_path: Path) -> None:
         self._engine = _get_engine(db_path)
 
-    def upsert_ohlcv(self, symbol: str, df: pd.DataFrame) -> None:
-        """DataFrameのOHLCVをDBに差分保存（同一 symbol+bar_time は上書き）。"""
+    def upsert_ohlcv(self, symbol: str, df: pd.DataFrame, *, interval: str = "1h") -> None:
+        """DataFrameのOHLCVをDBに差分保存（同一 symbol+interval+bar_time は上書き）。"""
         if df.empty:
             return
         with Session(self._engine) as session:
@@ -92,6 +95,7 @@ class PriceStore:
                 bar_time = to_db_naive_datetime(bar_time)
                 obj = _OhlcvRow(
                     symbol=symbol,
+                    interval=interval,
                     bar_time=bar_time,
                     open=float(row["Open"]),
                     high=float(row["High"]),
@@ -103,12 +107,13 @@ class PriceStore:
             session.commit()
         logger.debug(f"Upserted {len(df)} OHLCV rows for {symbol}")
 
-    def load_ohlcv(self, symbol: str, start: datetime, end: datetime) -> pd.DataFrame:
+    def load_ohlcv(self, symbol: str, start: datetime, end: datetime, *, interval: str = "1h") -> pd.DataFrame:
         """指定期間のOHLCVをDataFrame (DatetimeIndex) で返す。"""
         with Session(self._engine) as session:
             stmt = (
                 select(_OhlcvRow)
                 .where(_OhlcvRow.symbol == symbol)
+                .where(_OhlcvRow.interval == interval)
                 .where(_OhlcvRow.bar_time >= start)
                 .where(_OhlcvRow.bar_time <= end)
                 .order_by(_OhlcvRow.bar_time)
@@ -129,21 +134,23 @@ class PriceStore:
             index=pd.to_datetime([r.bar_time for r in rows]),
         )
 
-    def get_latest_date(self, symbol: str) -> datetime | None:
+    def get_latest_date(self, symbol: str, *, interval: str = "1h") -> datetime | None:
         with Session(self._engine) as session:
             stmt = (
                 select(_OhlcvRow.bar_time)
                 .where(_OhlcvRow.symbol == symbol)
+                .where(_OhlcvRow.interval == interval)
                 .order_by(_OhlcvRow.bar_time.desc())
                 .limit(1)
             )
             return session.execute(stmt).scalar_one_or_none()
 
-    def get_earliest_date(self, symbol: str) -> datetime | None:
+    def get_earliest_date(self, symbol: str, *, interval: str = "1h") -> datetime | None:
         with Session(self._engine) as session:
             stmt = (
                 select(_OhlcvRow.bar_time)
                 .where(_OhlcvRow.symbol == symbol)
+                .where(_OhlcvRow.interval == interval)
                 .order_by(_OhlcvRow.bar_time.asc())
                 .limit(1)
             )
