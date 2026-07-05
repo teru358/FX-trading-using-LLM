@@ -111,7 +111,7 @@ trading:
   # 新規運用では 0 のまま、audit で 30 件以上溜まってから tiny TP が目立つなら 1.2〜1.5 を検討
   min_rr_ratio: 0.0
   lookback_days: 90
-  ohlcv_interval: "1h"             # yfinance の足種（1h足で毎時:00のテクニカル分析に対応）
+  ohlcv_interval: "15m"             # 基底足。1h → 15m (day horizon, spec 2026-07-05 S-4)
   news_weight: 0.20                     # テクニカル主導 (LLM ニュース分析はノイジーなため price 側を厚く)
   price_weight: 0.80
   signal_deadband: 0.15            # BUY/SELL判定のスコア閾値（±）
@@ -125,21 +125,21 @@ trading:
   position_review_enabled: false        # Phase 3c OFF (Phase 4 で再評価)
   reversal_confidence_min: 0.70         # Layer 1: 反転シグナルの最低信頼度
   reversal_score_threshold: 0.25        # Layer 1: 反転スコアの絶対値閾値
-  # Position management v2
-  reversal_min_holding_minutes: 240
+  # Position management v2 (day horizon: 1/4 スケール, spec 2026-07-05 §5.2)
+  reversal_min_holding_minutes: 60      # 240 → 60 (day)
   reversal_guard_enabled: true
   reversal_close_enabled: false
   reversal_consecutive_required: 2
   reversal_raise_sl_to_breakeven: true
   time_stop_enabled: true
   no_progress_enabled: true
-  no_progress_watch_hours: 6
-  no_progress_exit_hours: 12
+  no_progress_watch_hours: 2            # 6 → 2 (day)
+  no_progress_exit_hours: 4             # 12 → 4 (day)
   no_progress_min_mfe_r: 0.1
   no_progress_requires_signal_weakness: true
-  stale_position_review_hours: 24
-  timeout_cooldown_hours: 4
-  stale_signal_hours: 8
+  stale_position_review_hours: 8        # 24 → 8 (time_stop 実体, セッション長アンカー, D-7)
+  timeout_cooldown_hours: 1             # 4 → 1 (day)
+  stale_signal_hours: 2                 # 8 → 2 (day)
   session_end_flatten_enabled: false
   profit_protection_enabled: true
   protect_half_r: 0.3
@@ -158,10 +158,10 @@ trading:
   rag_adjustment_trade_multiplier: 1.0
   rag_adjustment_forecast_multiplier: 0.5
   rag_adjustment_hold_multiplier: 0.3
-  # ATRベースSL/TP
-  atr_timeframe: "4h"                 # ATR計算用の足種 ("1h"/"4h"/"1d")。テクニカル分析の ohlcv_interval とは独立
-  sl_atr_mult_default: 3.0            # SL距離 = ATR(14, atr_timeframe) × この倍率
-  tp_atr_mult_default: 6.0            # TP距離 = ATR(14, atr_timeframe) × この倍率
+  # ATRベースSL/TP (day horizon: 1h足ATR対応, spec 2026-07-05 §5.2 D-5)
+  atr_timeframe: "1h"                 # ATR計算用の足種 ("1h"/"4h"/"1d")。4h → 1h (day)。テクニカル分析の ohlcv_interval とは独立
+  sl_atr_mult_default: 2.0            # SL距離 = ATR(14, atr_timeframe) × この倍率。3.0 → 2.0 (day)
+  tp_atr_mult_default: 4.0            # TP距離 = ATR(14, atr_timeframe) × この倍率。6.0 → 4.0 (RR=2.0 不変, D-6)
   sl_atr_mult_min: 1.0                # LLM動的更新の下限
   sl_atr_mult_max: 5.0                # LLM動的更新の上限
   tp_atr_mult_min: 2.0
@@ -217,11 +217,17 @@ schedule:
   # （exit_check の毎時:00 はこれとは独立で固定）。
   technical_trade_interval_hours: 1
   technical_watch_interval_hours: 1
+  # technical trade 収集の分粒度 interval。設定時は technical_trade_interval_hours より
+  # 優先。day horizon (spec 2026-07-05 §5.2): 1h → 30min (15m 足 2 本分)
+  technical_trade_interval_minutes: 30
   # cadence resolver による可変 interval 収集 (§5.3/§5.6)。false = 現行の毎時 union
   # dispatch を維持。true で「経済カレンダー/市場 state の boost に応じて trade の収集
   # 頻度を動的に上げる」cadence_driver に切替 (watch は base 固定)。
   cadence_enabled: false
   cadence_boost_interval_minutes: 5      # boost 中の収集間隔 (分)
+  # FX technical 鮮度閾値 (分)。既定 360 = 従来の 6h と等価。day horizon では 90 に
+  # 短縮 (15m 足 6 本分 = 収集 interval×3, spec 2026-07-05 S-3)。watch 側は定数のまま。
+  technical_max_staleness_fx_minutes: 90
 
 analysis:
   # テクニカル指標の有効/無効
@@ -268,17 +274,18 @@ analysis:
   #   short  (full):      エントリー判定    — 既存の全指標セット (形状パターンは除外)
   multi_timeframe:
     enabled: true                  # false で従来の単一 TF (1h) 動作に fallback
+    # day horizon (spec 2026-07-05 §5.2 D-9): bar 本数がほぼ同じになるよう縮小
     long:
-      lookback_days: 90            # 90 本の日足 (原作者設計の Ichimoku 日足レベル)
-      interval: "1d"
-      enabled: true
-    medium:
-      lookback_days: 14            # 14 × 6 = 84 本の 4h 足 (pattern 検出に十分)
+      lookback_days: 15            # 1d/90d → 4h/15d (~90 本を保存)
       interval: "4h"
       enabled: true
-    short:
-      lookback_days: 2             # 48 本の 1h 足 (エントリー timing)
+    medium:
+      lookback_days: 4             # 4h/14d → 1h/4d (~96 本)
       interval: "1h"
+      enabled: true
+    short:
+      lookback_days: 1             # 1h/2d → 15m/1d (~96 本、執行足)
+      interval: "15m"
       enabled: true
     # 合成重み (合計 1.0 が推奨。欠落 TF は自動的に再正規化される)
     weights:
@@ -384,8 +391,11 @@ orchestrator:
   # producer 以上で quote-stream producer 起動 + watch 直読 + spread 実値化。
   tick_migration_stage: "off"
   quote_stream_poll_seconds: 2
+  # plan expires_at の上限クランプ (時間)。0=無効。day 運用は 1 セッション上限として 8
+  # (spec 2026-07-05 S-1)
+  plan_ttl_max_hours: 8
   policy:
-    trade_horizon: swing    # day | swing
+    trade_horizon: day      # day | swing。swing → day (2026-07-05 移行)
     advice_memo: ""         # 自然文助言メモ (参考程度・hard gate 不可侵)
   market_state:
     calm_seconds: 300
@@ -406,12 +416,14 @@ orchestrator:
     news_impact_min: 0.5
     require_fresh_technical: true
     max_quote_age_seconds: 10
-    max_technical_age_seconds: 1800
+    max_technical_age_seconds: 5400  # 1800 → 5400 (staleness 90min と整合, day)
   firing:
     material_news_impact_min: 0.5
     material_bias_delta_min: 0.20
     debounce_window_seconds: 180
-    min_planning_interval_seconds: 1800
+    min_planning_interval_seconds: 900  # 1800 → 900 (収集 interval の半分, day)
+  hindsight:
+    horizon_seconds: 28800  # 86400 → 28800 (24h→8h, time_stop と整合, D-7)
   agents:
     news_enabled: true
     technical_enabled: true
