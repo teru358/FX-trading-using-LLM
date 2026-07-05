@@ -62,6 +62,18 @@ def _max_staleness_for(inst: InstrumentConfig, config: AppConfig) -> timedelta:
     return _MAX_STALENESS_WATCH
 
 
+def _ohlcv_interval_for(inst: InstrumentConfig, config: AppConfig) -> str:
+    """収集基底足を銘柄種別で決める。
+
+    trade 銘柄は config (day=15m)。watch 銘柄は 1h 固定 — spec 2026-07-05 §2
+    non-goal (watch 経路は現行のまま)。yfinance は 15m を period>60d で拒否する
+    ため、watch を 15m に載せると収集が壊れる。
+    """
+    if inst.is_tradeable:
+        return config.trading.ohlcv_interval
+    return "1h"
+
+
 def _fetch_instrument_ohlcv(
     inst: InstrumentConfig,
     config: AppConfig,
@@ -70,7 +82,7 @@ def _fetch_instrument_ohlcv(
 ):
     """price_provider または fetch_ohlcv で OHLCV を取得する。"""
     period = f"{config.trading.lookback_days}d"
-    interval = config.trading.ohlcv_interval
+    interval = _ohlcv_interval_for(inst, config)
     if price_provider:
         return price_provider.get_ohlcv(
             inst.symbol, period=period, interval=interval, price_store=price_store,
@@ -201,7 +213,7 @@ def _compute_mtf_and_log(inst: InstrumentConfig, df_1h, config: AppConfig):
     }
     summaries = compute_mtf_summaries(
         df_1h, config.analysis, timeframes,
-        base_interval=config.trading.ohlcv_interval,
+        base_interval=_ohlcv_interval_for(inst, config),
     )
 
     # 各 TF に適用する indicator/pattern cfg は mtf 内部でフィルタされているが、

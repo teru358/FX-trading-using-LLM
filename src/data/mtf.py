@@ -17,6 +17,7 @@ TF ごとの役割:
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
@@ -28,6 +29,8 @@ from src.data.resample import interval_minutes, resample_ohlcv
 
 if TYPE_CHECKING:
     from src.config import AnalysisConfig
+
+logger = logging.getLogger(__name__)
 
 TfSubset = Literal["regime", "structure", "full"]
 
@@ -135,6 +138,16 @@ def compute_mtf_summaries(
 
         interval = tf["interval"]
         lookback_days = tf["lookback_days"]
+
+        # base より細かい TF は生成不能 — watch (base=1h) が day 用 mtf 設定
+        # (short=15m) を読んだ場合など。スキップして他 TF は継続する。
+        base_min = interval_minutes(base_interval)
+        tf_min = interval_minutes(interval)
+        if base_min is not None and tf_min is not None and tf_min < base_min:
+            logger.info(
+                "[MTF] skip %s (%s): finer than base %s", tf_name, interval, base_interval
+            )
+            continue
 
         # リサンプル (interval == base_interval は恒等)
         df_tf = resample_ohlcv(df_1h, interval, base_interval=base_interval)
