@@ -258,7 +258,7 @@ def build_orchestrator_runtime(
 
     detector = _build_detector(config, orch_cfg, analysis_store, pairs, store=store)
     pipeline = _build_pipeline(config, orch_store)
-    hindsight = make_hindsight_evaluator(price_store)
+    hindsight = make_hindsight_evaluator(price_store, interval=config.trading.ohlcv_interval)
     notifier = create_shadow_notifier(orch_cfg.notifications)
 
     mstate, state_bridge = _build_market_state(

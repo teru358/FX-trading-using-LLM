@@ -194,15 +194,21 @@ class HindsightEvaluator:
         return high >= level
 
 
-def make_hindsight_evaluator(price_store: "PriceStore") -> HindsightEvaluator:
+def make_hindsight_evaluator(
+    price_store: "PriceStore", *, interval: str = "1h"
+) -> HindsightEvaluator:
     """PriceStore.load_ohlcv をラップして HindsightEvaluator を組み立てる。
 
     Phase 6 (main.py 配線) の injection point。OrchestratorRuntime に
     `hindsight_evaluator=make_hindsight_evaluator(price_store)` を渡すと、trigger 後の
     OHLCV を既存 OHLCV キャッシュから引いて R を後追い計測する。
     make_news_provider と同じアダプタ方針 (runtime は PriceStore に直接依存しない)。
+
+    interval は OHLCV cache の読み出し足種 (config.trading.ohlcv_interval と一致させる
+    — day=15m, codex High#2)。指定しないと常に "1h" バケットを読み、day モードでは
+    15m でキャッシュされたデータが見えず "no ohlcv in horizon" になる。
     """
     def provider(symbol: str, start: datetime, end: datetime):
-        return price_store.load_ohlcv(symbol, start, end)
+        return price_store.load_ohlcv(symbol, start, end, interval=interval)
 
     return HindsightEvaluator(ohlcv_provider=provider)
