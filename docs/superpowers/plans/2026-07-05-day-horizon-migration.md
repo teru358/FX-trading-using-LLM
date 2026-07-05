@@ -1460,3 +1460,4 @@ git commit -m "feat: day horizon 設定値を適用 (swing→day, spec 2026-07-0
 3. **切替後早期の実測検算 (spec §6-5):** 1h/15m ATR 分布と実 spread 分布を集計し「spread / TP 距離 < 5%」を確認。崩れていれば sl/tp_atr_mult を上方調整 (RR=2 維持)。
 4. **starvation 監視 (spec §7):** technical LLM オミット (roadmap Phase 2-1) 未実施のため、planning floor 900s + 収集 30min での LLM slot 競合を `data_freshness_snapshots` で監視。悪化時は min_planning_interval_seconds を 1800 へ戻す。
 5. **settings.yaml は gitignore 対象:** day 値の正本はコミットされた `config/settings.yaml.example` と本 spec §5.2。Fiosracht への適用はローカル `config/settings.yaml` の rsync (または手動編集)。リポジトリの settings.yaml.example だけ見て「未適用」と誤認しないこと。
+6. **watch 経路の 1h 固定 (Task 13 follow-up):** spec §9-5 の NG を修正済み — watch 銘柄は `_ohlcv_interval_for` で 1h 固定、MTF は base より細かい TF を skip。day 化しても watch (yfinance ETF) の収集は従来どおり。
