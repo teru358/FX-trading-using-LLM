@@ -379,7 +379,9 @@ class OrchestratorRuntime:
             if self._last_summary_date == today:
                 return False  # 同日は送信済み
             try:
-                metrics = compute_shadow_metrics(self._orch, now=now)
+                metrics = compute_shadow_metrics(
+                    self._orch, now=now, trade_horizon=self._config.policy.trade_horizon,
+                )
             except Exception:
                 logger.exception("[ORCH] daily summary metrics 計算に失敗 — 当日再試行する")
                 return False  # 日付を確定しない (次 cycle で再試行)

@@ -1128,47 +1128,75 @@ class OrchestratorStore:
 
     # ── shadow metrics 集計 (§8.2 / Phase 4 Task 4.3) ──────────
 
-    def get_shadow_metrics_raw(self) -> dict[str, Any]:
+    def get_shadow_metrics_raw(
+        self, *, trade_horizon: str | None = None,
+    ) -> dict[str, Any]:
         """shadow 検証 metric の生カウント / 合計を 1 dict で返す。
 
         rate / 平均などの導出は shadow_metrics.compute_shadow_metrics 側で行う
         (SQL は engine を持つ store に集約し、shaping は pure module に分離)。
+
+        `trade_horizon` を渡すと plan_counts / agent_runs / hindsight 集計を
+        その horizon (day | swing) に絞る (daily summary で swing/day 混在の
+        gross/net が混ざらないようにする, codex Low)。None なら従来通り全期間
+        集計 (後方互換)。
         """
         with Session(self._engine) as session:
             # plan lifecycle: status 別件数
-            plan_rows = session.execute(
-                select(_TradePlan.status, func.count())
-                .group_by(_TradePlan.status)
-            ).all()
+            plan_stmt = select(_TradePlan.status, func.count()).group_by(_TradePlan.status)
+            if trade_horizon is not None:
+                plan_stmt = plan_stmt.where(_TradePlan.horizon == trade_horizon)
+            plan_rows = session.execute(plan_stmt).all()
             plan_counts = {status: count for status, count in plan_rows}
 
             # agent_runs: status 別件数 (LLM failure rate 用)
-            run_rows = session.execute(
-                select(_AgentRun.status, func.count())
-                .group_by(_AgentRun.status)
-            ).all()
+            run_stmt = select(_AgentRun.status, func.count()).group_by(_AgentRun.status)
+            if trade_horizon is not None:
+                run_stmt = run_stmt.where(_AgentRun.trade_horizon == trade_horizon)
+            run_rows = session.execute(run_stmt).all()
             run_counts = {status: count for status, count in run_rows}
 
-            # hindsight: status 別件数 + evaluated 行の集計
-            hs_rows = session.execute(
-                select(
-                    _ShadowHindsightEvaluation.status, func.count()
-                ).group_by(_ShadowHindsightEvaluation.status)
-            ).all()
+            # hindsight: status 別件数 + evaluated 行の集計。horizon 絞り込みは
+            # shadow_hindsight_evaluations -> shadow_triggers -> trade_plans の
+            # join 経由 (hindsight/trigger 自体に horizon 列が無いため)。
+            hs_stmt = select(
+                _ShadowHindsightEvaluation.status, func.count()
+            )
+            evaluated_stmt = select(
+                func.avg(_ShadowHindsightEvaluation.mfe_r),
+                func.avg(_ShadowHindsightEvaluation.mae_r),
+                func.avg(_ShadowHindsightEvaluation.pnl_r),
+                func.sum(_ShadowHindsightEvaluation.would_hit_sl),
+                func.sum(_ShadowHindsightEvaluation.would_hit_tp),
+            ).where(_ShadowHindsightEvaluation.status == "evaluated")
+            if trade_horizon is not None:
+                hs_stmt = (
+                    hs_stmt
+                    .join(
+                        _ShadowTrigger,
+                        _ShadowTrigger.id == _ShadowHindsightEvaluation.shadow_trigger_id,
+                    )
+                    .join(_TradePlan, _TradePlan.plan_id == _ShadowTrigger.plan_id)
+                    .where(_TradePlan.horizon == trade_horizon)
+                )
+                evaluated_stmt = (
+                    evaluated_stmt
+                    .join(
+                        _ShadowTrigger,
+                        _ShadowTrigger.id == _ShadowHindsightEvaluation.shadow_trigger_id,
+                    )
+                    .join(_TradePlan, _TradePlan.plan_id == _ShadowTrigger.plan_id)
+                    .where(_TradePlan.horizon == trade_horizon)
+                )
+            hs_stmt = hs_stmt.group_by(_ShadowHindsightEvaluation.status)
+            hs_rows = session.execute(hs_stmt).all()
             hindsight_counts = {status: count for status, count in hs_rows}
 
-            evaluated = session.execute(
-                select(
-                    func.avg(_ShadowHindsightEvaluation.mfe_r),
-                    func.avg(_ShadowHindsightEvaluation.mae_r),
-                    func.avg(_ShadowHindsightEvaluation.pnl_r),
-                    func.sum(_ShadowHindsightEvaluation.would_hit_sl),
-                    func.sum(_ShadowHindsightEvaluation.would_hit_tp),
-                ).where(_ShadowHindsightEvaluation.status == "evaluated")
-            ).one()
+            evaluated = session.execute(evaluated_stmt).one()
 
             # freshness block: issues_json が非空の行数。JSON 比較は型差が大きいため
             # Python 側で判定する (data_freshness_snapshots は小規模テーブル)。
+            # horizon 列を持たないため trade_horizon 指定時も絞り込まない (全期間のまま)。
             issues_rows = session.execute(
                 select(_DataFreshnessSnapshot.issues_json)
             ).all()

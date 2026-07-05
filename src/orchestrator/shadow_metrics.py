@@ -47,13 +47,16 @@ def _rate(numerator: int, denominator: int) -> float:
 
 
 def compute_shadow_metrics(
-    store: "OrchestratorStore", *, now: datetime
+    store: "OrchestratorStore", *, now: datetime, trade_horizon: str | None = None,
 ) -> ShadowMetrics:
     """store の生カウントから ShadowMetrics を組み立てる。
 
-    now は将来の窓限定集計のために受けておく (現状は全期間集計)。
+    now は将来の窓限定集計のために受けておく (現状は窓での絞り込みはしない)。
+    `trade_horizon` を渡すと plan/hindsight/agent_runs を day | swing で絞り込む
+    (daily summary で運用中の horizon だけを見せる, codex Low)。None なら従来通り
+    全 horizon 合算 (後方互換)。
     """
-    raw = store.get_shadow_metrics_raw()
+    raw = store.get_shadow_metrics_raw(trade_horizon=trade_horizon)
     plan_counts: dict = raw["plan_counts"]
     run_counts: dict = raw["run_counts"]
     hs_counts: dict = raw["hindsight_counts"]
@@ -78,7 +81,10 @@ def compute_shadow_metrics(
         hindsight_failed=hs_counts.get("failed", 0),
         avg_mfe_r=raw["avg_mfe_r"],
         avg_mae_r=raw["avg_mae_r"],
-        # 注: spread_cost_r 導入 (2026-07-05) 以前の行は gross、以後は net が混在する
+        # 注: spread_cost_r (net PnL-R) は day horizon 導入 (2026-07-05) と同時期に
+        # 追加されたため、trade_horizon="day" で絞り込めば net のみになり gross との
+        # 混在はほぼ解消する。trade_horizon=None (全期間合算) の場合は、day 導入以前の
+        # swing 行 (gross) と day 行 (net) が依然として混在しうる点に注意。
         avg_pnl_r=raw["avg_pnl_r"],
         sl_hit_rate=_rate(raw["sl_hits"], hindsight_evaluated),
         tp_hit_rate=_rate(raw["tp_hits"], hindsight_evaluated),

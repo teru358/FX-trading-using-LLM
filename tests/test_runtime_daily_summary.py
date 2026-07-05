@@ -109,7 +109,7 @@ def test_metrics_failure_retries_same_day(tmp_path, monkeypatch):
 
     calls = {"n": 0}
 
-    def flaky_metrics(store, *, now):
+    def flaky_metrics(store, *, now, trade_horizon=None):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("transient")
