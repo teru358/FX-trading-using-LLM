@@ -322,6 +322,9 @@ class ScheduleConfig:
     cadence_enabled: bool = False
     # boost 中の収集間隔 (分)。econ/state 経路が窓内でこの間隔まで頻度を上げる。
     cadence_boost_interval_minutes: int = 5
+    # FX technical 鮮度閾値 (分)。既定 360 = 従来の 6h 定数と等価 (挙動不変)。
+    # day horizon では 90 に短縮する (spec 2026-07-05 S-3)。watch 側 (120h) は定数のまま。
+    technical_max_staleness_fx_minutes: int = 360
 
 
 @dataclass

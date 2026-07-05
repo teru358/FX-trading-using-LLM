@@ -44,6 +44,8 @@ def _config(analysis_lookback_hours: int = 8):
             analysis_lookback_hours=analysis_lookback_hours,
         ),
         analysis=MagicMock(),
+        # FX staleness config 化 (spec S-3): 既定 360min (=6h) と等価にしておく。
+        schedule=MagicMock(technical_max_staleness_fx_minutes=360),
         paper_provider="twelvedata",
     )
 

@@ -51,13 +51,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-_MAX_STALENESS_FX = timedelta(hours=6)        # FX: 24時間取引
+# FX: 24時間取引。config 化済み (ScheduleConfig.technical_max_staleness_fx_minutes)。
+# ここでは _is_price_data_stale の後方互換デフォルト引数としてのみ残す。
+_MAX_STALENESS_FX = timedelta(hours=6)
 _MAX_STALENESS_WATCH = timedelta(hours=120)   # ETF/指数: 週末+米国3連休を跨ぐため5日
 
 
-def _max_staleness_for(inst: InstrumentConfig) -> timedelta:
-    """銘柄タイプ別の stale 閾値を返す。"""
-    return _MAX_STALENESS_FX if inst.asset_type == "fx" else _MAX_STALENESS_WATCH
+def _max_staleness_for(inst: InstrumentConfig, config: AppConfig) -> timedelta:
+    """銘柄タイプ別の stale 閾値を返す (FX は config、watch は定数)。"""
+    if inst.asset_type == "fx":
+        return timedelta(minutes=config.schedule.technical_max_staleness_fx_minutes)
+    return _MAX_STALENESS_WATCH
 
 
 def _fetch_instrument_ohlcv(
@@ -140,7 +144,7 @@ def _reload_watch_prices(
             symbol=w.symbol, df=df,
             current_price=float(df["Close"].iloc[-1]), fetched_at=end,
         )
-        if _is_price_data_stale(pd_w, max_staleness=_max_staleness_for(w)) is not None:
+        if _is_price_data_stale(pd_w, max_staleness=_max_staleness_for(w, config)) is not None:
             logger.debug(f"[CORR] watch {w.symbol} stale, excluded from correlation")
             continue
         out[w.symbol] = pd_w
@@ -336,12 +340,12 @@ async def _collect_one(
         price_data = _fetch_instrument_ohlcv(inst, config, price_store, price_provider)
 
     # Phase 2: 鮮度チェック (古ければ stale_price sentinel + skip)
-    staleness = _is_price_data_stale(price_data, max_staleness=_max_staleness_for(inst))
+    staleness = _is_price_data_stale(price_data, max_staleness=_max_staleness_for(inst, config))
     if staleness is not None:
         analysis_store.add_sentinel(
             symbol=inst.symbol,
             status="stale_price",
-            reason=f"latest bar {staleness} ago (max {_max_staleness_for(inst)})",
+            reason=f"latest bar {staleness} ago (max {_max_staleness_for(inst, config)})",
         )
         logger.info(
             f"[COLLECT] {inst.display_name}: stale_price sentinel ({staleness} ago)"
