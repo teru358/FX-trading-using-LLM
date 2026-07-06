@@ -186,6 +186,43 @@ class PlanningPipeline:
                 revision_feedback=feedback,
             )
             draft = clamp_draft_ttl(draft, max_hours=self._config.plan_ttl_max_hours)
+
+            # P-2b: scale_in の正本は決定的導出 (codex High)。建玉 items に draft と
+            # 同方向があるかで決まり、LLM 申告と食い違えば導出値で上書きする。
+            # 【順序重要】replace() は __post_init__ を再実行するため、evidence 空のまま
+            # scale_in=True へ replace すると ValueError で fail-safe に落ちる。
+            # 先に evidence を検証し、replace は妥当な組み合わせでのみ行う。
+            items = (context.get("position") or {}).get("items") or []
+            same_dir = any(it.get("direction") == draft.direction for it in items)
+            if same_dir and not (draft.new_signal_evidence or "").strip():
+                # scale-in なのに新シグナル根拠なし → plan は作らない。
+                if redraft_count < max_redraft:
+                    redraft_count += 1
+                    feedback = [
+                        "An open same-direction position exists: this plan is a"
+                        " scale-in. Set scale_in=true and provide new_signal_evidence"
+                        " describing a NEW signal that did not exist at the original"
+                        " entry.",
+                    ]
+                    continue
+                did = self._orch.record_decision(
+                    run_id=run_id, snapshot_id=snapshot_id, pair=pair,
+                    decision_type="reject", decision="reject",
+                    reasoning_summary=(
+                        "scale-in without new_signal_evidence (deterministic)"
+                    ),
+                    trade_horizon=horizon,
+                )
+                return PipelineResult(
+                    outcome="reject", decision_ids=[did], redraft_count=redraft_count,
+                    reason="scale-in without new_signal_evidence",
+                )
+            if draft.scale_in != same_dir:
+                draft = replace(
+                    draft, scale_in=same_dir,
+                    new_signal_evidence=draft.new_signal_evidence if same_dir else None,
+                )
+
             self._persist_opinion(run_id, pair, draft)
 
             final = await self._planner.final_decision(
@@ -286,6 +323,7 @@ class PlanningPipeline:
             invalidation_json=storage["invalidation"],
             expires_at=draft.expires_at, created_by_run_id=run_id,
             status="requires_replan",
+            scale_in=draft.scale_in, new_signal_evidence=draft.new_signal_evidence,
         )
         # write 順序: create(pending) → decision → vote → supersede → activate。
         did = self._orch.record_decision(

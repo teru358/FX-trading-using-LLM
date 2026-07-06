@@ -64,7 +64,12 @@ FINAL_REVISE = (
 )
 
 
-def _draft_json(*, sl=149.0, tp=152.0, rr=2.0) -> str:
+def _draft_json(*, sl=149.0, tp=152.0, rr=2.0, scale_in=None, evidence=None) -> str:
+    extra = ""
+    if scale_in is not None:
+        extra += f',"scale_in": {"true" if scale_in else "false"}'
+    if evidence is not None:
+        extra += f',"new_signal_evidence": "{evidence}"'
     return (
         "{"
         '"direction": "long",'
@@ -73,6 +78,7 @@ def _draft_json(*, sl=149.0, tp=152.0, rr=2.0) -> str:
         '"invalidation": [{"type": "price_below", "value": 148.0}],'
         '"expires_at": "2026-12-31T18:00:00+00:00",'
         '"reasoning_summary": "pullback long"'
+        f"{extra}"
         "}"
     )
 
@@ -367,6 +373,103 @@ async def test_accept_supersedes_existing_active_plan(store: OrchestratorStore) 
     assert len(active) == 1  # pair 単位最大 1
     assert active[0].plan_id == result.plan_id
     assert old != result.plan_id
+
+
+# ── scale_in 決定的導出 (P-2b) ────────────────────────────────
+
+
+def _position(*directions: str) -> dict:
+    return {
+        "count": len(directions),
+        "items": [{"direction": d} for d in directions],
+        "status": "ok",
+    }
+
+
+async def test_scale_in_coerced_false_without_position(store: OrchestratorStore) -> None:
+    """建玉なしなのに LLM が scale_in=true を申告 → 導出値 False で上書き。"""
+    llm = _ScriptedLLM(
+        [OPP_YES, _draft_json(scale_in=True, evidence="claimed breakout"), FINAL_ACCEPT]
+    )
+    pipe = _make_pipeline(store, llm)
+    ctx = _ctx(store)
+    ctx["position"] = _position()  # 建玉ゼロ
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+
+    result = await pipe.run(pair="USDJPY=X", context=ctx, run_id=run_id)
+
+    assert result.outcome == "plan_create"
+    active = store.get_active_plans("USDJPY=X")
+    assert len(active) == 1
+    assert active[0].scale_in is False
+    assert active[0].new_signal_evidence is None
+
+
+async def test_same_direction_position_forces_scale_in(store: OrchestratorStore) -> None:
+    """同方向建玉あり: evidence なし draft は再起案され、2 回目で scale_in plan になる。"""
+    llm = _ScriptedLLM(
+        [
+            OPP_YES,
+            _draft_json(),  # scale_in 申告なし・evidence なし → 決定的再起案
+            _draft_json(scale_in=True, evidence="fresh 1h breakout after entry"),
+            FINAL_ACCEPT,
+        ]
+    )
+    pipe = _make_pipeline(store, llm)
+    ctx = _ctx(store)
+    ctx["position"] = _position("long")
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+
+    result = await pipe.run(pair="USDJPY=X", context=ctx, run_id=run_id)
+
+    assert result.outcome == "plan_create"
+    assert result.redraft_count == 1
+    active = store.get_active_plans("USDJPY=X")
+    assert len(active) == 1
+    assert active[0].scale_in is True
+    assert active[0].new_signal_evidence == "fresh 1h breakout after entry"
+    # 再起案プロンプトに scale-in feedback が流れていること (calls[2] = 2 回目 draft)
+    redraft_user_prompt = llm.calls[2][-1]["content"]
+    assert "scale-in" in redraft_user_prompt
+    assert "new_signal_evidence" in redraft_user_prompt
+
+
+async def test_scale_in_rejected_when_evidence_never_provided(
+    store: OrchestratorStore,
+) -> None:
+    """同方向建玉あり: 2 回とも evidence なし → 決定的 reject (plan を作らない)。"""
+    llm = _ScriptedLLM([OPP_YES, _draft_json(), _draft_json()])
+    pipe = _make_pipeline(store, llm)
+    ctx = _ctx(store)
+    ctx["position"] = _position("long")
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+
+    result = await pipe.run(pair="USDJPY=X", context=ctx, run_id=run_id)
+
+    assert result.outcome == "reject"
+    assert result.plan_id is None
+    assert result.redraft_count == 1
+    assert "new_signal_evidence" in result.reason
+    assert store.get_active_plans("USDJPY=X") == []
+
+
+async def test_opposite_direction_position_is_not_scale_in(
+    store: OrchestratorStore,
+) -> None:
+    """逆方向建玉のみ → scale_in ではない (evidence 不要で plan になる)。"""
+    llm = _ScriptedLLM([OPP_YES, _draft_json(), FINAL_ACCEPT])
+    pipe = _make_pipeline(store, llm)
+    ctx = _ctx(store)
+    ctx["position"] = _position("short")
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+
+    result = await pipe.run(pair="USDJPY=X", context=ctx, run_id=run_id)
+
+    assert result.outcome == "plan_create"
+    assert result.redraft_count == 0
+    active = store.get_active_plans("USDJPY=X")
+    assert len(active) == 1
+    assert active[0].scale_in is False
 
 
 # ── fail-safe ─────────────────────────────────────────────────
