@@ -30,7 +30,10 @@ _SYSTEM = (
     '  "invalidation": [{"type": "price_below"|"price_above", "value": number} | '
     '{"type": "technical_stale"|"news_conflict"|"expired"}],\n'
     '  "expires_at": ISO-8601 datetime,\n'
-    '  "reasoning_summary": string\n'
+    '  "reasoning_summary": string,\n'
+    '  "scale_in": boolean (true ONLY when adding to an existing same-direction position),\n'
+    '  "new_signal_evidence": string or null (required when scale_in=true: the NEW '
+    "signal justifying the add)\n"
     "}\n"
     "Use only the listed condition vocabularies. `and` semantics only."
 )
@@ -71,6 +74,7 @@ class ExecutionOpinionAgent:
             f"pair: {pair}",
             f"intended direction: {direction}",
             _horizon_guidance(context),
+            _position_guidance(context),
             "decision_context:",
             json.dumps(_compact_context(context), ensure_ascii=False),
         ]
@@ -80,7 +84,7 @@ class ExecutionOpinionAgent:
             )
             lines.extend(f"  - {issue}" for issue in revision_feedback)
         lines.append("Return the trade plan draft as STRICT JSON.")
-        return "\n".join(lines)
+        return "\n".join(line for line in lines if line)
 
 
 def _horizon_guidance(context: dict[str, Any]) -> str:
@@ -105,6 +109,29 @@ def _horizon_guidance(context: dict[str, Any]) -> str:
     )
 
 
+def _position_guidance(context: dict[str, Any]) -> str:
+    """建玉・既存 plan がある場合の指針文 (spec P-3)。無ければ空文字。"""
+    parts: list[str] = []
+    position = context.get("position") or {}
+    if position.get("items"):
+        parts.append(
+            "An open position exists for this pair (decision_context.position)."
+            " A same-direction plan is a scale-in: set scale_in=true and describe in"
+            " new_signal_evidence a NEW signal that did not exist at the original"
+            " entry (re-stating the original entry reason is not valid)."
+            " An opposite-direction plan is a reversal: justify why the existing"
+            " position's thesis is failing."
+        )
+    if context.get("current_plan"):
+        parts.append(
+            "An existing plan is already waiting for entry"
+            " (decision_context.current_plan). If its premise still holds, prefer"
+            " keeping it (direct_hold) over replacing it; a replacement must cite"
+            " what changed."
+        )
+    return " ".join(parts)
+
+
 def _compact_context(context: dict[str, Any]) -> dict[str, Any]:
     """プロンプトに載せる主要フィールドだけ抜き出す (token 節約)。
 
@@ -114,6 +141,7 @@ def _compact_context(context: dict[str, Any]) -> dict[str, Any]:
     return {
         "quote": context.get("quote"),
         "position": context.get("position"),
+        "current_plan": context.get("current_plan"),
         "technical": context.get("technical"),
         "news": context.get("news"),
         "policy": context.get("policy"),

@@ -15,7 +15,10 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from src.orchestrator.execution_opinion_agent import _horizon_guidance
+from src.orchestrator.execution_opinion_agent import (
+    _horizon_guidance,
+    _position_guidance,
+)
 from src.orchestrator.schemas import (
     ExecutionPlanDraft,
     PlannerFinalDecision,
@@ -52,13 +55,16 @@ class PlannerAgent:
     ) -> PlannerOpportunity:
         temp = self._temperature if temperature is None else temperature
         user = "\n".join(
-            [
+            part
+            for part in [
                 f"pair: {pair}",
                 _horizon_guidance(context),
+                _position_guidance(context),
                 "decision_context:",
                 json.dumps(_compact_context(context), ensure_ascii=False),
                 "Decide if there is a tradeable opportunity. Return STRICT JSON.",
             ]
+            if part
         )
         raw = await self._llm.chat(
             [{"role": "system", "content": _SCAN_SYSTEM}, {"role": "user", "content": user}],
@@ -76,15 +82,18 @@ class PlannerAgent:
     ) -> PlannerFinalDecision:
         temp = self._temperature if temperature is None else temperature
         user = "\n".join(
-            [
+            part
+            for part in [
                 f"pair: {pair}",
                 _horizon_guidance(context),
+                _position_guidance(context),
                 "decision_context:",
                 json.dumps(_compact_context(context), ensure_ascii=False),
                 "proposed_draft:",
                 json.dumps(_draft_summary(draft), ensure_ascii=False),
                 "Make the final decision (accept/revise/reject). Return STRICT JSON.",
             ]
+            if part
         )
         raw = await self._llm.chat(
             [{"role": "system", "content": _FINAL_SYSTEM}, {"role": "user", "content": user}],
@@ -99,6 +108,7 @@ def _compact_context(context: dict[str, Any]) -> dict[str, Any]:
     return {
         "quote": context.get("quote"),
         "position": context.get("position"),
+        "current_plan": context.get("current_plan"),
         "technical": context.get("technical"),
         "news": context.get("news"),
         "policy": context.get("policy"),
