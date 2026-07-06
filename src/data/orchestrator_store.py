@@ -52,6 +52,8 @@ class _DecisionSnapshot(_Base):
     quote_json    = Column(JSON)
     technical_ref = Column(JSON)
     news_ref      = Column(JSON)
+    position_json     = Column(JSON)   # P-5: LLM が見た建玉ブロック (検証用)
+    current_plan_json = Column(JSON)   # P-5: 同 current_plan (null 可)
     created_at    = Column(DateTime, nullable=False)
 
 
@@ -321,6 +323,8 @@ class OrchestratorStore:
         migrations = [
             ("shadow_triggers", "spread_pips", "FLOAT"),
             ("shadow_hindsight_evaluations", "spread_cost_r", "FLOAT"),
+            ("decision_snapshots", "position_json", "JSON"),
+            ("decision_snapshots", "current_plan_json", "JSON"),
         ]
         with self._engine.connect() as conn:
             for table, col, col_type in migrations:
@@ -340,6 +344,8 @@ class OrchestratorStore:
         quote_json: dict[str, Any] | None = None,
         technical_ref: dict[str, Any] | None = None,
         news_ref: dict[str, Any] | None = None,
+        position_json: dict[str, Any] | None = None,
+        current_plan_json: dict[str, Any] | None = None,
     ) -> int:
         """decision_snapshot を materialize し snapshot_id を返す。"""
         with Session(self._engine) as session:
@@ -349,6 +355,8 @@ class OrchestratorStore:
                 quote_json=quote_json,
                 technical_ref=technical_ref,
                 news_ref=news_ref,
+                position_json=position_json,
+                current_plan_json=current_plan_json,
                 created_at=db_now(),
             )
             session.add(snap)

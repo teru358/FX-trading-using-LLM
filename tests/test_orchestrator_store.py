@@ -737,3 +737,40 @@ def test_get_pending_hindsight_excludes_already_evaluated(
         now=datetime(2026, 6, 21, 9, 0, 0)
     )
     assert all(p.shadow_trigger_id != trig_id for p in pending)
+
+
+# ── P-5: decision_snapshots に position_json / current_plan_json ──
+
+
+def test_snapshot_persists_position_and_current_plan(tmp_path: Path) -> None:
+    store = OrchestratorStore(tmp_path / "o.db")
+    pos = {"count": 1, "items": [{"direction": "long", "entry_price": 150.0}]}
+    cur = {"plan_id": 9, "status": "active"}
+    sid = store.create_snapshot(
+        pair="USDJPY=X", as_of_time=datetime(2026, 7, 5, 12, 0),
+        position_json=pos, current_plan_json=cur,
+    )
+    snap = store.get_snapshot(sid)
+    assert snap.position_json == pos
+    assert snap.current_plan_json == cur
+
+
+def test_snapshot_migration_adds_columns(tmp_path: Path) -> None:
+    """旧 schema (position_json 無し) の DB を開くと ALTER で列が生える。"""
+    import sqlite3
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE decision_snapshots ("
+        "snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT, pair VARCHAR NOT NULL,"
+        "as_of_time DATETIME NOT NULL, quote_json JSON, technical_ref JSON,"
+        "news_ref JSON, created_at DATETIME NOT NULL)"
+    )
+    conn.commit()
+    conn.close()
+    store = OrchestratorStore(db)
+    sid = store.create_snapshot(
+        pair="USDJPY=X", as_of_time=datetime(2026, 7, 5, 12, 0),
+        position_json={"count": 0, "items": []},
+    )
+    assert store.get_snapshot(sid).position_json == {"count": 0, "items": []}
