@@ -121,7 +121,11 @@ def _compact_context(context: dict[str, Any]) -> dict[str, Any]:
 
 
 def _draft_summary(draft: ExecutionPlanDraft) -> dict[str, Any]:
-    """final_decision プロンプト用に draft を要約。expires_at は ISO 文字列化。"""
+    """final_decision プロンプト用に draft を要約。expires_at は ISO 文字列化。
+
+    scale_in / new_signal_evidence (coerce 済の申告値) も渡す — planner は建玉指針で
+    これらの妥当性判断を求められるため、要約に無いと判断材料を欠く (Task 9 review)。
+    """
     return {
         "direction": draft.direction,
         "entry_conditions": [c.to_dict() for c in draft.entry_conditions],
@@ -129,4 +133,6 @@ def _draft_summary(draft: ExecutionPlanDraft) -> dict[str, Any]:
         "invalidation": [c.to_dict() for c in draft.invalidation],
         "expires_at": draft.expires_at.isoformat(),
         "reasoning_summary": draft.reasoning_summary,
+        "scale_in": draft.scale_in,
+        "new_signal_evidence": draft.new_signal_evidence,
     }

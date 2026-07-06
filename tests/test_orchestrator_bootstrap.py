@@ -228,6 +228,21 @@ def test_producer_covers_all_tradeable_even_with_pairs_subset(
     assert sorted(rt._quote_producer._pairs) == ["EURUSD=X", "USDJPY=X"]
 
 
+# ── position provider 注入 (planner position/plan context Task 10) ──
+
+
+def test_bootstrap_injects_position_provider(tmp_path: Path, monkeypatch) -> None:
+    """build_orchestrator 経由の DecisionContextBuilder に position_provider が注入される。"""
+    _patch_heavy(monkeypatch, tmp_path)
+    cfg = _config(enabled=True, tmp_path=tmp_path)
+
+    rt = bs.build_orchestrator_runtime(
+        cfg, store=object(), price_store=object(),
+        analysis_store=_FakeAnalysisStore(), price_provider=_FakePriceProvider(),
+    )
+    assert rt._ctx._position_provider is not None
+
+
 # ── quote provider ────────────────────────────────────────────
 
 

@@ -72,6 +72,7 @@ def make_position_provider(config: "AppConfig") -> Callable[[str], list[dict]]:
     ProtectionWorker と同じく self-contained な PositionManager を1つ持ち、
     呼び出し毎に disk から reload する (planning は 60s 周期なので安価)。
     整形 (pnl_r/long 正規化) は DecisionContextBuilder 側 (codex High#2)。
+    順序は get_open_positions_by_pair の opened_at 昇順 (時系列で LLM に渡す)。
     """
     from src.persistence.state_store import StateStore
     from src.trading.position_manager import PositionManager
@@ -81,9 +82,7 @@ def make_position_provider(config: "AppConfig") -> Callable[[str], list[dict]]:
     def provider(pair: str) -> list[dict]:
         mgr.reload()
         out: list[dict] = []
-        for o in mgr.get_account_state().open_positions:
-            if o.pair != pair:
-                continue
+        for o in mgr.get_open_positions_by_pair(pair):
             out.append({
                 "direction": o.direction,                     # "buy" | "sell" raw
                 "entry_price": o.entry_price,
@@ -213,6 +212,7 @@ def build_orchestrator_runtime(
         orch_store, analysis_store, orch_cfg,
         news_provider=make_news_provider(config, store),
         risk_state_provider=make_risk_state_provider(config),
+        position_provider=make_position_provider(config),
     )
 
     quote_provider = make_quote_provider(price_provider)
