@@ -353,6 +353,12 @@ class TestExecutionPlanDraft:
             ExecutionPlanDraft.from_llm_json(
                 json.dumps({**base, "scale_in": True, "new_signal_evidence": 123}))
 
+    def test_scale_in_without_evidence_direct_construction(self) -> None:
+        """直接構築でも __post_init__ が効く (SchemaParseError ではなく素の ValueError)。"""
+        with pytest.raises(ValueError) as excinfo:
+            ExecutionPlanDraft(**{**self._valid_kwargs(), "scale_in": True})
+        assert not isinstance(excinfo.value, SchemaParseError)
+
 
 # ---------------------------------------------------------------------------
 # PlannerFinalDecision

@@ -265,8 +265,9 @@ class ExecutionPlanDraft:
             evidence = data.get("new_signal_evidence")
             if evidence is not None and not isinstance(evidence, str):
                 raise ValueError(
-                    f"new_signal_evidence must be null or string, got {type(evidence).__name__}"
+                    f"new_signal_evidence must be null or string, got {evidence!r}"
                 )
+            evidence = evidence.strip() or None if evidence is not None else None
             return cls(
                 direction=data["direction"],
                 entry_conditions=entries,
