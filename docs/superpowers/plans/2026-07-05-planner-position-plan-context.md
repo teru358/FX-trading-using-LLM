@@ -934,3 +934,51 @@ def test_bootstrap_injects_position_provider(...):
 - `recent_orders/exits/trade_stats` stub の配線
 - assemble() (watch tick 経路) への position 配線
 - RiskGateWorker への position チェック追加
+
+---
+
+## 実装完了メモ (2026-07-05)
+
+全 10 タスク完了。フルスイート **1385 passed, 0 failed** (`uv run pytest -q`)。
+
+### コミット列 (3cee892..HEAD, 時系列昇順)
+
+```
+d81d94a refactor: normalize new_signal_evidence and tighten draft tests
+23f1268 feat: persist position/current_plan context in decision snapshots
+f37ff0d feat: persist scale_in fields on trade plans
+84c42d8 refactor: polish store column alignment and tighten scale_in test
+5a945d4 feat: add position provider for planning context
+07fcd7f feat: wire real position block into planning context
+9b07891 feat: add current_plan block and snapshot persistence
+d77ef62 refactor: harden current_plan shaping and pin snapshot parity
+0fe3483 feat: fail safe to direct_hold when position is unavailable
+a6287e3 feat: derive scale_in deterministically in planning pipeline
+d668296 fix: persist raw draft claim before deterministic scale_in gate
+d6b1835 feat: add position/current_plan prompt guidance
+03e06ec feat: inject position provider into orchestrator bootstrap
+```
+
+review 対応コミット: d81d94a / 84c42d8 / d77ef62 / d668296 + 03e06ec (下記 carry-over)。
+
+### carry-over 解消 (03e06ec に同梱)
+
+- **Task 9 Important#1**: `_draft_summary` に `scale_in` / `new_signal_evidence`
+  (coerce 済申告値) を追加 — planner final_decision が判断対象の値を要約で受け取る
+- **Task 4 Minor#1**: `make_position_provider` を `get_open_positions_by_pair`
+  ベースに変更 (opened_at 昇順の時系列順序)
+- **Task 9 Minor#3**: position + current_plan 両方存在時に両指針が space-joined
+  単一文字列で入るテストを追加
+- **Task 9 Minor#2**: final_decision の user プロンプトに "scale-in" 指針が届く
+  プロンプトレベルテスト (_FakeLLM capture) を追加
+
+### スコープ外 (変更なし)
+
+P-6 のとおり: `max_positions_per_pair=2` 据え置き、supersede 機構不変、
+`recent_orders/exits/trade_stats` stub のまま、assemble() (watch tick 経路) への
+position 配線なし、RiskGateWorker 不変。
+
+### 運用ノート
+
+反実仮想メトリクス (spec §4) は `agent_outputs.structured_payload_json.scale_in`
+(LLM 申告) vs `trade_plans.scale_in` (決定論導出) の突合で取れる。
