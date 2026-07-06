@@ -46,15 +46,15 @@ class _DecisionSnapshot(_Base):
     """decision 開始時に materialize する入力スナップショット (spec §8.7)。"""
     __tablename__ = "decision_snapshots"
 
-    snapshot_id   = Column(Integer, primary_key=True, autoincrement=True)
-    pair          = Column(String, nullable=False, index=True)
-    as_of_time    = Column(DateTime, nullable=False)
-    quote_json    = Column(JSON)
-    technical_ref = Column(JSON)
-    news_ref      = Column(JSON)
+    snapshot_id       = Column(Integer, primary_key=True, autoincrement=True)
+    pair              = Column(String, nullable=False, index=True)
+    as_of_time        = Column(DateTime, nullable=False)
+    quote_json        = Column(JSON)
+    technical_ref     = Column(JSON)
+    news_ref          = Column(JSON)
     position_json     = Column(JSON)   # P-5: LLM が見た建玉ブロック (検証用)
     current_plan_json = Column(JSON)   # P-5: 同 current_plan (null 可)
-    created_at    = Column(DateTime, nullable=False)
+    created_at        = Column(DateTime, nullable=False)
 
 
 class _AgentRun(_Base):
@@ -99,8 +99,8 @@ class _TradePlan(_Base):
     expires_at            = Column(DateTime)
     status                = Column(String, nullable=False, index=True)
     created_by_run_id     = Column(Integer)
-    scale_in            = Column(Boolean)  # P-2b: 建玉ありでの同方向 plan (null=旧データ)
-    new_signal_evidence = Column(String)   # P-2b: scale_in の新シグナル根拠
+    scale_in              = Column(Boolean)  # P-2b: 建玉ありでの同方向 plan (null=旧データ)
+    new_signal_evidence   = Column(String)   # P-2b: scale_in の新シグナル根拠
     created_at            = Column(DateTime, nullable=False)
     updated_at            = Column(DateTime, nullable=False)
 

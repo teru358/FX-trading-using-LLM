@@ -1,6 +1,7 @@
 """orchestrator_store の §8 トレーステーブル CRUD テスト。"""
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 
@@ -757,7 +758,6 @@ def test_snapshot_persists_position_and_current_plan(tmp_path: Path) -> None:
 
 def test_snapshot_migration_adds_columns(tmp_path: Path) -> None:
     """旧 schema (position_json 無し) の DB を開くと ALTER で列が生える。"""
-    import sqlite3
     db = tmp_path / "old.db"
     conn = sqlite3.connect(db)
     conn.execute(
@@ -802,13 +802,12 @@ def test_trade_plan_scale_in_defaults_null(tmp_path: Path) -> None:
         expires_at=datetime(2026, 7, 5, 20, 0), created_by_run_id=1,
     )
     plan = store.get_trade_plan(pid)
-    assert plan.scale_in in (None, False)
+    assert plan.scale_in is None
     assert plan.new_signal_evidence is None
 
 
 def test_trade_plan_migration_adds_scale_in_columns(tmp_path: Path) -> None:
     """旧 schema (scale_in 無し) の DB を開くと ALTER で列が生える。"""
-    import sqlite3
     db = tmp_path / "old.db"
     conn = sqlite3.connect(db)
     conn.execute(
