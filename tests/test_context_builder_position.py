@@ -79,3 +79,92 @@ def test_assemble_keeps_stub_position(tmp_path):
     ctx = _builder(tmp_path, lambda pair: raw).assemble(
         pair="USDJPY=X", now=datetime(2026, 7, 5, 12, 0), quote=_quote())
     assert ctx["position"] == {"count": 0, "items": []}
+
+
+def test_malformed_raw_position_degrades_to_unavailable(tmp_path):
+    """整形 loop 中の例外 (壊れた raw dict) も unavailable に倒す (Task 5 Minor#1)。"""
+    raw = [{"direction": "buy", "entry_price": "not-a-number", "size": 1,
+            "opened_at": None, "mfe_r": 0.0, "initial_risk_price_distance": 0.5,
+            "is_scale_in": False, "entry_reason": ""}]
+    ctx = _builder(tmp_path, lambda pair: raw).build(
+        pair="USDJPY=X", now=datetime(2026, 7, 5, 12, 0), quote=_quote())
+    assert ctx["position"] == {"count": None, "items": [], "status": "unavailable"}
+
+
+# ── current_plan ブロック (P-2) ─────────────────────────────
+
+
+def test_current_plan_block_from_active_plan(tmp_path):
+    db = tmp_path / "o.db"
+    orch = OrchestratorStore(db)
+    sid = orch.create_snapshot(pair="USDJPY=X", as_of_time=datetime(2026, 7, 5, 11, 0))
+    orch.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=sid, horizon="day", direction="long",
+        entry_conditions_json=[{"type": "price_at_or_below", "value": 149.8}],
+        action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 7, 5, 20, 0), created_by_run_id=1,
+    )
+    builder = DecisionContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
+    ctx = builder.build(pair="USDJPY=X", now=datetime(2026, 7, 5, 12, 0), quote=_quote())
+    cur = ctx["current_plan"]
+    assert cur["direction"] == "long"
+    assert cur["status"] == "active"
+    assert "price_at_or_below" in cur["entry_summary"]
+
+
+def test_current_plan_entry_summary_non_price_conditions(tmp_path):
+    """type ごとの参照キー出し分け (codex Medium): value / value_pips / status。"""
+    db = tmp_path / "o.db"
+    orch = OrchestratorStore(db)
+    sid = orch.create_snapshot(pair="USDJPY=X", as_of_time=datetime(2026, 7, 5, 11, 0))
+    orch.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=sid, horizon="day", direction="long",
+        entry_conditions_json=[
+            {"type": "spread_below", "value_pips": 2.0},
+            {"type": "technical_status_is", "status": "ok"},
+        ],
+        action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 7, 5, 20, 0), created_by_run_id=1,
+    )
+    builder = DecisionContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
+    ctx = builder.build(pair="USDJPY=X", now=datetime(2026, 7, 5, 12, 0), quote=_quote())
+    assert "spread_below 2.0" in ctx["current_plan"]["entry_summary"]
+    assert "technical_status_is ok" in ctx["current_plan"]["entry_summary"]
+
+
+def test_current_plan_none_when_no_active(tmp_path):
+    ctx = _builder(tmp_path).build(pair="USDJPY=X", now=datetime(2026, 7, 5, 12, 0),
+                                   quote=_quote())
+    assert ctx["current_plan"] is None
+
+
+def test_snapshot_stores_position_and_current_plan(tmp_path):
+    db = tmp_path / "o.db"
+    orch = OrchestratorStore(db)
+    raw = [{"direction": "buy", "entry_price": 150.0, "size": 1, "opened_at": None,
+            "mfe_r": 0.0, "initial_risk_price_distance": 0.5, "is_scale_in": False,
+            "entry_reason": ""}]
+    builder = DecisionContextBuilder(
+        orch, AnalysisStore(db), OrchestratorConfig(), position_provider=lambda p: raw)
+    ctx = builder.build(pair="USDJPY=X", now=datetime(2026, 7, 5, 12, 0), quote=_quote())
+    snap = orch.get_snapshot(ctx["snapshot_id"])
+    assert snap.position_json["count"] == 1
+    assert snap.current_plan_json is None
+
+
+def test_assemble_has_no_current_plan_key_or_none(tmp_path):
+    """watch tick 経路 (assemble) は current_plan も stub (None) のまま (設計:
+    1s tick で plan reload しない — position stub と同じ思想)。"""
+    db = tmp_path / "o.db"
+    orch = OrchestratorStore(db)
+    sid = orch.create_snapshot(pair="USDJPY=X", as_of_time=datetime(2026, 7, 5, 11, 0))
+    orch.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=sid, horizon="day", direction="long",
+        entry_conditions_json=[{"type": "price_at_or_below", "value": 149.8}],
+        action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 7, 5, 20, 0), created_by_run_id=1,
+    )
+    builder = DecisionContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
+    ctx = builder.assemble(pair="USDJPY=X", now=datetime(2026, 7, 5, 12, 0),
+                           quote=_quote())
+    assert ctx.get("current_plan") is None

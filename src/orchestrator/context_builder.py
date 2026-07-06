@@ -104,6 +104,7 @@ class DecisionContextBuilder:
         news = self._build_news(pair, now)
         quote_dict = self._quote_dict(quote)
         position = self._build_position(pair, quote_dict)
+        current_plan = self._build_current_plan(pair)
 
         snapshot_id = self._orch.create_snapshot(
             pair=pair,
@@ -111,8 +112,11 @@ class DecisionContextBuilder:
             quote_json=quote_dict,
             technical_ref=technical.get("_ref"),
             news_ref=news.get("_ref"),
+            position_json=position,
+            current_plan_json=current_plan,
         )
-        ctx = self._assemble(pair, now, quote_dict, technical, news, position=position)
+        ctx = self._assemble(pair, now, quote_dict, technical, news,
+                             position=position, current_plan=current_plan)
         ctx["snapshot_id"] = snapshot_id
         return ctx
 
@@ -144,6 +148,7 @@ class DecisionContextBuilder:
         technical: dict[str, Any],
         news: dict[str, Any],
         position: dict[str, Any] | None = None,
+        current_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """technical/news/quote から §7 標準 context dict を組む (snapshot_id 無し)。"""
         return {
@@ -151,6 +156,7 @@ class DecisionContextBuilder:
             "now": now.isoformat(),
             "quote": quote_dict,
             "position": position if position is not None else self._empty_position(),
+            "current_plan": current_plan,
             "technical": {k: v for k, v in technical.items() if k != "_ref"},
             "news": {k: v for k, v in news.items() if k != "_ref"},
             "risk_state": self._build_risk_state(pair),
@@ -255,15 +261,17 @@ class DecisionContextBuilder:
         if self._position_provider is None:
             return {"count": 0, "items": []}
         try:
+            # 整形 loop も try 内: 壊れた raw dict (型不正など) で planning cycle を
+            # 落とさず unavailable に倒す (Task 5 review Minor#1)。
             raw = self._position_provider(pair)
+            mid = quote_dict.get("mid")
+            items = [self._position_item(p, mid) for p in raw]
         except Exception:
             logger.warning(
                 "[ORCH] position provider failed for %s — unavailable", pair,
                 exc_info=True,
             )
             return {"count": None, "items": [], "status": "unavailable"}
-        mid = quote_dict.get("mid")
-        items = [self._position_item(p, mid) for p in raw]
         return {"count": len(items), "items": items}
 
     @staticmethod
@@ -285,6 +293,28 @@ class DecisionContextBuilder:
             "mfe_r": p.get("mfe_r"),
             "is_scale_in": bool(p.get("is_scale_in", False)),
             "entry_reason": (p.get("entry_reason") or "")[:200],
+        }
+
+    def _build_current_plan(self, pair: str) -> dict[str, Any] | None:
+        """該当 pair の active plan (最大1件、supersede 保証) の要約 (P-2)。
+
+        approval gate 導入時に対象へ pending_approval を追加する (gate spec F-1)。
+        """
+        try:
+            plans = self._orch.get_active_plans(pair)
+        except Exception:
+            logger.warning("[ORCH] current_plan read failed for %s", pair, exc_info=True)
+            return None
+        if not plans:
+            return None
+        plan = plans[0]
+        return {
+            "plan_id": plan.plan_id,
+            "status": plan.status,
+            "direction": plan.direction,
+            "entry_summary": _entry_summary(plan.entry_conditions_json),
+            "expires_at": plan.expires_at.isoformat() if plan.expires_at else None,
+            "created_at": plan.created_at.isoformat() if plan.created_at else None,
         }
 
     @staticmethod
@@ -361,3 +391,25 @@ def make_news_provider(config: "AppConfig", store: "VectorStore") -> NewsProvide
         }
 
     return provider
+
+
+def _entry_summary(conditions: list | None) -> str:
+    """entry_conditions_json の短縮表記 (先頭2条件)。
+
+    条件 type ごとに参照キーが違う (codex Medium): price 系=value /
+    spread_below=value_pips / technical_status_is=status。既知キーを順に引き、
+    どれも無ければ type のみ。
+    """
+    if not conditions:
+        return ""
+
+    def _one(c: dict) -> str:
+        for key in ("value", "value_pips", "status"):
+            if c.get(key) is not None:
+                return f"{c.get('type')} {c[key]}"
+        return str(c.get("type"))
+
+    parts = [_one(c) for c in conditions[:2]]
+    if len(conditions) > 2:
+        parts.append(f"(+{len(conditions) - 2} more)")
+    return ", ".join(parts)
