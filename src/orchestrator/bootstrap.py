@@ -18,7 +18,7 @@ shadow 境界 (§7.3): broker / order_intents には触れない。本 bootstrap
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from src.orchestrator.context_builder import (
     DecisionContextBuilder,
@@ -62,6 +62,39 @@ def make_quote_provider(price_provider: "PriceProvider") -> QuoteProvider:
             bid=cp.price, ask=cp.price, mid=cp.price, spread=None,
             source=cp.source, observed_at=observed,
         )
+
+    return provider
+
+
+def make_position_provider(config: "AppConfig") -> Callable[[str], list[dict]]:
+    """planning context 用の raw position provider (spec P-1)。
+
+    ProtectionWorker と同じく self-contained な PositionManager を1つ持ち、
+    呼び出し毎に disk から reload する (planning は 60s 周期なので安価)。
+    整形 (pnl_r/long 正規化) は DecisionContextBuilder 側 (codex High#2)。
+    """
+    from src.persistence.state_store import StateStore
+    from src.trading.position_manager import PositionManager
+
+    mgr = PositionManager(StateStore(config.state_dir), context="PlanningContext")
+
+    def provider(pair: str) -> list[dict]:
+        mgr.reload()
+        out: list[dict] = []
+        for o in mgr.get_account_state().open_positions:
+            if o.pair != pair:
+                continue
+            out.append({
+                "direction": o.direction,                     # "buy" | "sell" raw
+                "entry_price": o.entry_price,
+                "size": o.position_size,
+                "opened_at": o.opened_at.isoformat() if o.opened_at else None,
+                "mfe_r": o.max_favorable_r,
+                "initial_risk_price_distance": o.initial_risk_price_distance,
+                "is_scale_in": o.is_scale_in,
+                "entry_reason": o.signal_reason or "",
+            })
+        return out
 
     return provider
 
