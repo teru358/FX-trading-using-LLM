@@ -774,3 +774,61 @@ def test_snapshot_migration_adds_columns(tmp_path: Path) -> None:
         position_json={"count": 0, "items": []},
     )
     assert store.get_snapshot(sid).position_json == {"count": 0, "items": []}
+
+
+# ── P-2b: trade_plans に scale_in / new_signal_evidence ──
+
+
+def test_trade_plan_persists_scale_in_fields(tmp_path: Path) -> None:
+    store = OrchestratorStore(tmp_path / "o.db")
+    pid = store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=1, horizon="day", direction="long",
+        entry_conditions_json=[{"type": "price_at_or_below", "value": 150.0}],
+        action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 7, 5, 20, 0), created_by_run_id=1,
+        scale_in=True, new_signal_evidence="new 1h breakout",
+    )
+    plan = store.get_trade_plan(pid)
+    assert plan.scale_in is True
+    assert plan.new_signal_evidence == "new 1h breakout"
+
+
+def test_trade_plan_scale_in_defaults_null(tmp_path: Path) -> None:
+    store = OrchestratorStore(tmp_path / "o.db")
+    pid = store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=1, horizon="day", direction="long",
+        entry_conditions_json=[{"type": "price_at_or_below", "value": 150.0}],
+        action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 7, 5, 20, 0), created_by_run_id=1,
+    )
+    plan = store.get_trade_plan(pid)
+    assert plan.scale_in in (None, False)
+    assert plan.new_signal_evidence is None
+
+
+def test_trade_plan_migration_adds_scale_in_columns(tmp_path: Path) -> None:
+    """旧 schema (scale_in 無し) の DB を開くと ALTER で列が生える。"""
+    import sqlite3
+    db = tmp_path / "old.db"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "CREATE TABLE trade_plans ("
+        "plan_id INTEGER PRIMARY KEY AUTOINCREMENT, pair VARCHAR NOT NULL,"
+        "snapshot_id INTEGER, horizon VARCHAR, direction VARCHAR,"
+        "entry_conditions_json JSON, action_json JSON, invalidation_json JSON,"
+        "expires_at DATETIME, status VARCHAR NOT NULL,"
+        "created_by_run_id INTEGER, created_at DATETIME NOT NULL,"
+        "updated_at DATETIME NOT NULL)"
+    )
+    conn.commit()
+    conn.close()
+    store = OrchestratorStore(db)
+    pid = store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=1, horizon="day", direction="long",
+        entry_conditions_json=[], action_json={}, invalidation_json=[],
+        expires_at=datetime(2026, 7, 5, 20, 0), created_by_run_id=1,
+        scale_in=True, new_signal_evidence="new 1h breakout",
+    )
+    plan = store.get_trade_plan(pid)
+    assert plan.scale_in is True
+    assert plan.new_signal_evidence == "new 1h breakout"

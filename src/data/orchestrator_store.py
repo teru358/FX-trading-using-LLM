@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import (
-    JSON, Column, DateTime, Float, Integer, String, UniqueConstraint,
+    JSON, Boolean, Column, DateTime, Float, Integer, String, UniqueConstraint,
     func, or_, select, text, update,
 )
 from sqlalchemy.exc import IntegrityError
@@ -99,6 +99,8 @@ class _TradePlan(_Base):
     expires_at            = Column(DateTime)
     status                = Column(String, nullable=False, index=True)
     created_by_run_id     = Column(Integer)
+    scale_in            = Column(Boolean)  # P-2b: 建玉ありでの同方向 plan (null=旧データ)
+    new_signal_evidence = Column(String)   # P-2b: scale_in の新シグナル根拠
     created_at            = Column(DateTime, nullable=False)
     updated_at            = Column(DateTime, nullable=False)
 
@@ -325,6 +327,8 @@ class OrchestratorStore:
             ("shadow_hindsight_evaluations", "spread_cost_r", "FLOAT"),
             ("decision_snapshots", "position_json", "JSON"),
             ("decision_snapshots", "current_plan_json", "JSON"),
+            ("trade_plans", "scale_in", "BOOLEAN"),
+            ("trade_plans", "new_signal_evidence", "VARCHAR"),
         ]
         with self._engine.connect() as conn:
             for table, col, col_type in migrations:
@@ -459,6 +463,8 @@ class OrchestratorStore:
         expires_at: datetime,
         created_by_run_id: int,
         status: str = "active",
+        scale_in: bool | None = None,
+        new_signal_evidence: str | None = None,
     ) -> int:
         """trade_plan を作成し plan_id を返す。
 
@@ -482,6 +488,8 @@ class OrchestratorStore:
                 expires_at=expires_at,
                 status=status,
                 created_by_run_id=created_by_run_id,
+                scale_in=scale_in,
+                new_signal_evidence=new_signal_evidence,
                 created_at=now,
                 updated_at=now,
             )
