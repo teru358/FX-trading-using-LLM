@@ -403,6 +403,14 @@ async def test_scale_in_coerced_false_without_position(store: OrchestratorStore)
     assert len(active) == 1
     assert active[0].scale_in is False
     assert active[0].new_signal_evidence is None
+    # 申告値 (raw claim) は coercion 前に永続化される。不一致率メトリクス (spec §4:
+    # agent_outputs.structured_payload.scale_in vs trade_plans.scale_in) の原資。
+    draft_outputs = [
+        o for o in store.get_agent_outputs(run_id)
+        if o.output_type == "execution_draft"
+    ]
+    assert len(draft_outputs) == 1
+    assert draft_outputs[0].structured_payload_json["scale_in"] is True
 
 
 async def test_same_direction_position_forces_scale_in(store: OrchestratorStore) -> None:
@@ -451,6 +459,14 @@ async def test_scale_in_rejected_when_evidence_never_provided(
     assert result.redraft_count == 1
     assert "new_signal_evidence" in result.reason
     assert store.get_active_plans("USDJPY=X") == []
+    # 決定的 redraft/reject で終わっても draft ごとに opinion 監査痕跡が残る
+    # (2 draft → agent_outputs 2 行 + execution_opinion 記録あり)。
+    draft_outputs = [
+        o for o in store.get_agent_outputs(run_id)
+        if o.output_type == "execution_draft"
+    ]
+    assert len(draft_outputs) == 2
+    assert store.get_execution_opinion(run_id) is not None
 
 
 async def test_opposite_direction_position_is_not_scale_in(

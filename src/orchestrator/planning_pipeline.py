@@ -186,6 +186,11 @@ class PlanningPipeline:
                 revision_feedback=feedback,
             )
             draft = clamp_draft_ttl(draft, max_hours=self._config.plan_ttl_max_hours)
+            # 【順序重要】opinion は決定的 gate の前に LLM の申告値のまま永続化する。
+            # coercion 後だと申告値が消え、申告 vs 導出の不一致率 (spec §4:
+            # agent_outputs.structured_payload.scale_in vs trade_plans.scale_in) が
+            # 測定不能になる。redraft/reject で終わる draft も監査痕跡として残る。
+            self._persist_opinion(run_id, pair, draft)
 
             # P-2b: scale_in の正本は決定的導出 (codex High)。建玉 items に draft と
             # 同方向があるかで決まり、LLM 申告と食い違えば導出値で上書きする。
@@ -218,12 +223,14 @@ class PlanningPipeline:
                     reason="scale-in without new_signal_evidence",
                 )
             if draft.scale_in != same_dir:
+                logger.info(
+                    "[ORCH] scale_in claim overridden for %s: llm=%s derived=%s",
+                    pair, draft.scale_in, same_dir,
+                )
                 draft = replace(
                     draft, scale_in=same_dir,
                     new_signal_evidence=draft.new_signal_evidence if same_dir else None,
                 )
-
-            self._persist_opinion(run_id, pair, draft)
 
             final = await self._planner.final_decision(
                 pair=pair, context=context, draft=draft
