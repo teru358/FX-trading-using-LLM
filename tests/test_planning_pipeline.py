@@ -163,6 +163,30 @@ async def test_position_unavailable_skips_llm_and_holds(store: OrchestratorStore
     assert "position unavailable" in dec.reasoning_summary
 
 
+async def test_current_plan_unavailable_skips_llm_and_holds(
+    store: OrchestratorStore,
+) -> None:
+    """current_plan.status=unavailable → LLM 不呼び出しで direct_hold (P-4 と同一 gate)。
+
+    読めなかった既存 plan を planner が知らずに置き換えるのを決定的に防ぐ。
+    """
+    llm = _ScriptedLLM([])  # 応答なし: LLM が呼ばれたら pop で即死する
+    pipe = _make_pipeline(store, llm)
+    ctx = _ctx(store)
+    ctx["current_plan"] = {"status": "unavailable"}
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+
+    result = await pipe.run(pair="USDJPY=X", context=ctx, run_id=run_id)
+
+    assert result.outcome == "direct_hold"
+    assert result.plan_id is None
+    assert llm.calls == []
+    assert store.get_active_plans("USDJPY=X") == []
+    dec = store.get_decision(result.decision_ids[0])
+    assert dec.decision_type == "direct_hold"
+    assert "current_plan unavailable" in dec.reasoning_summary
+
+
 # ── opportunity = yes → accept → risk pass → active plan ───────
 
 

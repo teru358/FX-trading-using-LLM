@@ -299,6 +299,10 @@ class DecisionContextBuilder:
         """該当 pair の active plan (最大1件、supersede 保証) の要約 (P-2)。
 
         approval gate 導入時に対象へ pending_approval を追加する (gate spec F-1)。
+        読み取り失敗は None (plan なし) と区別して unavailable ブロックを返す
+        (codex Medium): None に潰すと planner が「見ていない既存 plan」を置き換えうる。
+        P-4 gate が position と同様に direct_hold へ倒し、snapshot にも
+        unavailable が残るため事後検証可能。
         """
         try:
             plans = self._orch.get_active_plans(pair)
@@ -315,7 +319,7 @@ class DecisionContextBuilder:
             }
         except Exception:
             logger.warning("[ORCH] current_plan read failed for %s", pair, exc_info=True)
-            return None
+            return {"status": "unavailable"}
 
     @staticmethod
     def _empty_position() -> dict[str, Any]:

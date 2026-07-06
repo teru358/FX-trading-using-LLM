@@ -75,6 +75,16 @@ def test_current_plan_present_prefers_hold():
     assert "existing plan" in g.lower()
 
 
+def test_current_plan_unavailable_dict_yields_no_plan_guidance():
+    """unavailable ブロック (plan_id なし) は「既存 plan あり」指針を出さない。
+
+    (実際は P-4 gate が prompt 前に hold するが、guidance 単体でも頑健に。)
+    """
+    ctx = {"position": {"count": 0, "items": []},
+           "current_plan": {"status": "unavailable"}}
+    assert _position_guidance(ctx) == ""
+
+
 def test_position_and_plan_both_present_yields_both_parts():
     """建玉と既存 plan の両方がある場合、両指針が空白連結の単一文字列で入る。"""
     ctx = {"position": {"count": 1, "items": [{"direction": "long"}]},

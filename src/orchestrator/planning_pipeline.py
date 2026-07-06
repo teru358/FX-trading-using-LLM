@@ -135,14 +135,23 @@ class PlanningPipeline:
     async def _pipeline(
         self, pair: str, context: dict[str, Any], run_id: int, snapshot_id: int, horizon: str
     ) -> PipelineResult:
-        # P-4 決定的 fail-safe: 建玉が読めないときは planning しない。「建玉を知らずに
-        # 重ねる」の再発防止を prompt (確率的) に依存させない (codex High#1)。
-        position = context.get("position") or {}
-        if position.get("status") == "unavailable":
+        # P-4 決定的 fail-safe: 建玉/既存 plan が読めないときは planning しない。
+        # 「建玉を知らずに重ねる」「既存 plan を知らずに置き換える」の再発防止を
+        # prompt (確率的) に依存させない (codex High#1 / Medium)。
+        unavailable = [
+            name for name, block in (
+                ("position", context.get("position")),
+                ("current_plan", context.get("current_plan")),
+            )
+            if (block or {}).get("status") == "unavailable"
+        ]
+        if unavailable:
             did = self._orch.record_decision(
                 run_id=run_id, snapshot_id=snapshot_id, pair=pair,
                 decision_type="direct_hold", decision="hold",
-                reasoning_summary="position unavailable — planning skipped (fail-safe)",
+                reasoning_summary=(
+                    f"{'/'.join(unavailable)} unavailable — planning skipped (fail-safe)"
+                ),
                 trade_horizon=horizon,
             )
             return PipelineResult(outcome="direct_hold", decision_ids=[did])

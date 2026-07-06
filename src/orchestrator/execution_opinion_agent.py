@@ -122,7 +122,10 @@ def _position_guidance(context: dict[str, Any]) -> str:
             " An opposite-direction plan is a reversal: justify why the existing"
             " position's thesis is failing."
         )
-    if context.get("current_plan"):
+    # unavailable ブロック ({"status": "unavailable"}) を「既存 plan あり」と誤認
+    # しないよう plan_id の存在で判定する (実際は P-4 gate が prompt 前に hold する)。
+    current_plan = context.get("current_plan") or {}
+    if current_plan.get("plan_id"):
         parts.append(
             "An existing plan is already waiting for entry"
             " (decision_context.current_plan). If its premise still holds, prefer"

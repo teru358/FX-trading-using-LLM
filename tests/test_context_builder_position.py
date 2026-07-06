@@ -139,6 +139,26 @@ def test_current_plan_none_when_no_active(tmp_path):
     assert ctx["current_plan"] is None
 
 
+def test_current_plan_read_failure_yields_unavailable(tmp_path):
+    """get_active_plans 例外 → 「plan なし (None)」と区別できる unavailable ブロック。
+
+    None に潰すと planner が「見ていない既存 plan」を置き換えうる (codex Medium)。
+    """
+    db = tmp_path / "o.db"
+    orch = OrchestratorStore(db)
+
+    def boom(pair):
+        raise RuntimeError("db locked")
+
+    orch.get_active_plans = boom
+    builder = DecisionContextBuilder(orch, AnalysisStore(db), OrchestratorConfig())
+    ctx = builder.build(pair="USDJPY=X", now=datetime(2026, 7, 5, 12, 0), quote=_quote())
+    assert ctx["current_plan"] == {"status": "unavailable"}
+    # P-5: snapshot にも unavailable が残り「LLM は読めなかった」を後から検証できる。
+    snap = orch.get_snapshot(ctx["snapshot_id"])
+    assert snap.current_plan_json == {"status": "unavailable"}
+
+
 def test_snapshot_stores_position_and_current_plan(tmp_path):
     db = tmp_path / "o.db"
     orch = OrchestratorStore(db)
