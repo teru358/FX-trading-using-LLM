@@ -241,12 +241,16 @@ class ExecutionPlanDraft:
     invalidation: list[InvalidationCondition]
     expires_at: datetime
     reasoning_summary: str
+    scale_in: bool = False
+    new_signal_evidence: str | None = None
 
     def __post_init__(self) -> None:
         if self.direction not in _DRAFT_DIRECTION:
             raise ValueError(f"direction must be long/short, got {self.direction!r}")
         if not self.entry_conditions:
             raise ValueError("entry_conditions must not be empty")
+        if self.scale_in and not (self.new_signal_evidence or "").strip():
+            raise ValueError("scale_in=true requires non-empty new_signal_evidence")
 
     @classmethod
     def from_llm_json(cls, raw: str) -> "ExecutionPlanDraft":
@@ -255,6 +259,14 @@ class ExecutionPlanDraft:
             entries = [EntryCondition.from_dict(c) for c in data["entry_conditions"]]
             invals = [InvalidationCondition.from_dict(c) for c in data["invalidation"]]
             expires_at = datetime.fromisoformat(data["expires_at"])
+            scale_in = data.get("scale_in", False)
+            if not isinstance(scale_in, bool):
+                raise ValueError(f"scale_in must be a JSON bool, got {scale_in!r}")
+            evidence = data.get("new_signal_evidence")
+            if evidence is not None and not isinstance(evidence, str):
+                raise ValueError(
+                    f"new_signal_evidence must be null or string, got {type(evidence).__name__}"
+                )
             return cls(
                 direction=data["direction"],
                 entry_conditions=entries,
@@ -262,6 +274,8 @@ class ExecutionPlanDraft:
                 invalidation=invals,
                 expires_at=expires_at,
                 reasoning_summary=data["reasoning_summary"],
+                scale_in=scale_in,
+                new_signal_evidence=evidence,
             )
         except SchemaParseError:
             raise
@@ -281,6 +295,8 @@ class ExecutionPlanDraft:
             "invalidation": [c.to_dict() for c in self.invalidation],
             "expires_at": self.expires_at,
             "reasoning_summary": self.reasoning_summary,
+            "scale_in": self.scale_in,
+            "new_signal_evidence": self.new_signal_evidence,
         }
 
 

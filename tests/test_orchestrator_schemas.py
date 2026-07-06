@@ -6,6 +6,7 @@ EntryCondition / InvalidationCondition。LLM raw text を直接 plan にせず�
 """
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -297,6 +298,60 @@ class TestExecutionPlanDraft:
         ]
         assert payload["invalidation"] == [{"type": "price_below", "value": 148.5}]
         assert payload["direction"] == "long"
+
+    def test_draft_scale_in_fields_parsed(self) -> None:
+        raw = json.dumps({
+            "direction": "long",
+            "entry_conditions": [{"type": "price_at_or_below", "value": 150.0}],
+            "action": {"sl": 149.0, "tp": 152.0},
+            "invalidation": [],
+            "expires_at": "2026-07-05T20:00:00",
+            "reasoning_summary": "test",
+            "scale_in": True,
+            "new_signal_evidence": "1h RSI divergence formed after original entry",
+        })
+        draft = ExecutionPlanDraft.from_llm_json(raw)
+        assert draft.scale_in is True
+        assert "divergence" in draft.new_signal_evidence
+        d = draft.to_storage_dict()
+        assert d["scale_in"] is True
+        assert d["new_signal_evidence"]
+
+    def test_draft_scale_in_defaults_false_when_absent(self) -> None:
+        raw = json.dumps({
+            "direction": "long",
+            "entry_conditions": [{"type": "price_at_or_below", "value": 150.0}],
+            "action": {}, "invalidation": [],
+            "expires_at": "2026-07-05T20:00:00", "reasoning_summary": "t",
+        })
+        draft = ExecutionPlanDraft.from_llm_json(raw)
+        assert draft.scale_in is False
+        assert draft.new_signal_evidence is None
+
+    def test_draft_scale_in_true_requires_evidence(self) -> None:
+        raw = json.dumps({
+            "direction": "long",
+            "entry_conditions": [{"type": "price_at_or_below", "value": 150.0}],
+            "action": {}, "invalidation": [],
+            "expires_at": "2026-07-05T20:00:00", "reasoning_summary": "t",
+            "scale_in": True, "new_signal_evidence": "  ",
+        })
+        with pytest.raises(SchemaParseError):
+            ExecutionPlanDraft.from_llm_json(raw)
+
+    def test_draft_scale_in_rejects_non_bool(self) -> None:
+        """codex Medium: bool("false") is True の丸め込みを許さない。型は JSON bool のみ。"""
+        base = {
+            "direction": "long",
+            "entry_conditions": [{"type": "price_at_or_below", "value": 150.0}],
+            "action": {}, "invalidation": [],
+            "expires_at": "2026-07-05T20:00:00", "reasoning_summary": "t",
+        }
+        with pytest.raises(SchemaParseError):
+            ExecutionPlanDraft.from_llm_json(json.dumps({**base, "scale_in": "false"}))
+        with pytest.raises(SchemaParseError):
+            ExecutionPlanDraft.from_llm_json(
+                json.dumps({**base, "scale_in": True, "new_signal_evidence": 123}))
 
 
 # ---------------------------------------------------------------------------
