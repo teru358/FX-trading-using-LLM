@@ -35,6 +35,10 @@ NewsProvider = Callable[[str], dict[str, Any]]
 # (未注入だと休場/halt 中でも gate が素通りする — Codex High)。
 RiskStateProvider = Callable[[str], dict[str, Any]]
 
+# pair -> raw open positions (bootstrap.make_position_provider が生成)。
+# 整形 (buy→long / pnl_r) は builder 側 (spec P-1, codex High#2)。
+PositionProvider = Callable[[str], list[dict]]
+
 # provider 失敗時に倒す安全側 risk_state。gate 状態が読めない以上、楽観既定 (market_open=
 # True) ではなく執行を止める方向に倒す (休場/halt 中の誤 trigger を防ぐ)。
 _SAFE_RISK_STATE = {
@@ -68,12 +72,14 @@ class DecisionContextBuilder:
         config: OrchestratorConfig,
         news_provider: NewsProvider | None = None,
         risk_state_provider: "RiskStateProvider | None" = None,
+        position_provider: "PositionProvider | None" = None,
     ) -> None:
         self._orch = orch_store
         self._analysis = analysis_store
         self._config = config
         self._news_provider = news_provider
         self._risk_state_provider = risk_state_provider
+        self._position_provider = position_provider
 
     # technical snapshot の stale 閾値は orchestrator.entry.max_technical_age_seconds
     # から導出する (watch loop の freshness gate と同一基準に統一 — codex Med#2)。
@@ -97,6 +103,7 @@ class DecisionContextBuilder:
         technical = self._build_technical(pair, now)
         news = self._build_news(pair, now)
         quote_dict = self._quote_dict(quote)
+        position = self._build_position(pair, quote_dict)
 
         snapshot_id = self._orch.create_snapshot(
             pair=pair,
@@ -105,7 +112,7 @@ class DecisionContextBuilder:
             technical_ref=technical.get("_ref"),
             news_ref=news.get("_ref"),
         )
-        ctx = self._assemble(pair, now, quote_dict, technical, news)
+        ctx = self._assemble(pair, now, quote_dict, technical, news, position=position)
         ctx["snapshot_id"] = snapshot_id
         return ctx
 
@@ -136,13 +143,14 @@ class DecisionContextBuilder:
         quote_dict: dict[str, Any],
         technical: dict[str, Any],
         news: dict[str, Any],
+        position: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """technical/news/quote から §7 標準 context dict を組む (snapshot_id 無し)。"""
         return {
             "pair": pair,
             "now": now.isoformat(),
             "quote": quote_dict,
-            "position": self._empty_position(),
+            "position": position if position is not None else self._empty_position(),
             "technical": {k: v for k, v in technical.items() if k != "_ref"},
             "news": {k: v for k, v in news.items() if k != "_ref"},
             "risk_state": self._build_risk_state(pair),
@@ -238,9 +246,50 @@ class DecisionContextBuilder:
             "_ref": {"source": "rag_aggregate", "as_of": now.isoformat()},
         }
 
+    def _build_position(self, pair: str, quote_dict: dict[str, Any]) -> dict[str, Any]:
+        """raw position を §7 position ブロックに整形する (P-1)。
+
+        provider 失敗は status="unavailable" に倒す。このケースの安全は prompt
+        でなく pipeline の決定的 fail-safe (P-4) が処理する。
+        """
+        if self._position_provider is None:
+            return {"count": 0, "items": []}
+        try:
+            raw = self._position_provider(pair)
+        except Exception:
+            logger.warning(
+                "[ORCH] position provider failed for %s — unavailable", pair,
+                exc_info=True,
+            )
+            return {"count": None, "items": [], "status": "unavailable"}
+        mid = quote_dict.get("mid")
+        items = [self._position_item(p, mid) for p in raw]
+        return {"count": len(items), "items": items}
+
+    @staticmethod
+    def _position_item(p: dict[str, Any], mid: float | None) -> dict[str, Any]:
+        entry = p.get("entry_price")
+        risk = p.get("initial_risk_price_distance") or 0.0
+        pnl_r = None
+        if mid is not None and entry is not None and risk > 0:
+            delta = mid - entry
+            if p.get("direction") == "sell":
+                delta = -delta
+            pnl_r = round(delta / risk, 2)
+        return {
+            "direction": "short" if p.get("direction") == "sell" else "long",
+            "entry_price": entry,
+            "size": p.get("size"),
+            "opened_at": p.get("opened_at"),
+            "pnl_r": pnl_r,
+            "mfe_r": p.get("mfe_r"),
+            "is_scale_in": bool(p.get("is_scale_in", False)),
+            "entry_reason": (p.get("entry_reason") or "")[:200],
+        }
+
     @staticmethod
     def _empty_position() -> dict[str, Any]:
-        return {"side": None, "entry": None, "size": None, "pnl": None, "mfe_r": None}
+        return {"count": 0, "items": []}
 
     @staticmethod
     def _empty_news() -> dict[str, Any]:
