@@ -26,6 +26,9 @@ def _patch_heavy(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(OrchestratorStore, "__init__", fake_init)
     monkeypatch.setattr("src.llm.factory.create_llm_client", lambda config, role: object())
     monkeypatch.setattr(bs, "make_news_provider", lambda config, store: (lambda pair: {}))
+    # 実 make_position_provider は repo data/state に PositionManager/StateStore を
+    # 作ってしまう (クリーン環境で balance.json 生成) ので stub で隔離。
+    monkeypatch.setattr(bs, "make_position_provider", lambda config: (lambda pair: []))
 
 
 def _patch_execution_deps(monkeypatch) -> dict:

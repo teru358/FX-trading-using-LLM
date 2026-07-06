@@ -68,6 +68,11 @@ def _patch_heavy(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         bs, "make_news_provider", lambda config, store: (lambda pair: {})
     )
+    # position provider は実 config.state_dir (repo data/state) に PositionManager /
+    # StateStore を作り、クリーン環境では balance.json 等を生成してしまうので stub。
+    monkeypatch.setattr(
+        bs, "make_position_provider", lambda config: (lambda pair: [])
+    )
 
 
 def _patch_orch_store(monkeypatch, tmp_path: Path) -> None:
@@ -82,6 +87,9 @@ def _patch_orch_store(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(OrchestratorStore, "__init__", fake_init)
     monkeypatch.setattr(
         bs, "make_news_provider", lambda config, store: (lambda pair: {})
+    )
+    monkeypatch.setattr(
+        bs, "make_position_provider", lambda config: (lambda pair: [])
     )
 
 
@@ -232,15 +240,24 @@ def test_producer_covers_all_tradeable_even_with_pairs_subset(
 
 
 def test_bootstrap_injects_position_provider(tmp_path: Path, monkeypatch) -> None:
-    """build_orchestrator 経由の DecisionContextBuilder に position_provider が注入される。"""
+    """build_orchestrator 経由の DecisionContextBuilder に position_provider が注入される。
+
+    実 make_position_provider は repo の data/state に触るため sentinel で差し替え、
+    「bootstrap が make_position_provider の戻り値をそのまま注入する」ことを検証する。
+    """
     _patch_heavy(monkeypatch, tmp_path)
+
+    def sentinel_provider(pair):
+        return []
+
+    monkeypatch.setattr(bs, "make_position_provider", lambda config: sentinel_provider)
     cfg = _config(enabled=True, tmp_path=tmp_path)
 
     rt = bs.build_orchestrator_runtime(
         cfg, store=object(), price_store=object(),
         analysis_store=_FakeAnalysisStore(), price_provider=_FakePriceProvider(),
     )
-    assert rt._ctx._position_provider is not None
+    assert rt._ctx._position_provider is sentinel_provider
 
 
 # ── quote provider ────────────────────────────────────────────
