@@ -466,6 +466,36 @@ async def test_same_direction_position_forces_scale_in(store: OrchestratorStore)
     assert "new_signal_evidence" in redraft_user_prompt
 
 
+async def test_scale_in_claimed_true_without_evidence_redrafts(
+    store: OrchestratorStore,
+) -> None:
+    """LLM が scale_in=true を申告しつつ evidence を欠く → schema fail ではなく
+    他の不備と同じ feedback 再起案経路に乗る (evidence 必須は pipeline gate に一元化)。"""
+    llm = _ScriptedLLM(
+        [
+            OPP_YES,
+            _draft_json(scale_in=True),  # 申告 true・evidence なし → 決定的再起案
+            _draft_json(scale_in=True, evidence="fresh 1h breakout after entry"),
+            FINAL_ACCEPT,
+        ]
+    )
+    pipe = _make_pipeline(store, llm)
+    ctx = _ctx(store)
+    ctx["position"] = _position("long")
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+
+    result = await pipe.run(pair="USDJPY=X", context=ctx, run_id=run_id)
+
+    assert result.outcome == "plan_create"
+    assert result.redraft_count == 1
+    active = store.get_active_plans("USDJPY=X")
+    assert len(active) == 1
+    assert active[0].scale_in is True
+    assert active[0].new_signal_evidence == "fresh 1h breakout after entry"
+    redraft_user_prompt = llm.calls[2][-1]["content"]
+    assert "new_signal_evidence" in redraft_user_prompt
+
+
 async def test_scale_in_rejected_when_evidence_never_provided(
     store: OrchestratorStore,
 ) -> None:

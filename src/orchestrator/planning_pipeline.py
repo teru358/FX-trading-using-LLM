@@ -203,9 +203,8 @@ class PlanningPipeline:
 
             # P-2b: scale_in の正本は決定的導出 (codex High)。建玉 items に draft と
             # 同方向があるかで決まり、LLM 申告と食い違えば導出値で上書きする。
-            # 【順序重要】replace() は __post_init__ を再実行するため、evidence 空のまま
-            # scale_in=True へ replace すると ValueError で fail-safe に落ちる。
-            # 先に evidence を検証し、replace は妥当な組み合わせでのみ行う。
+            # evidence 必須の enforcement もここに一元化 (schema は型検証のみ):
+            # 先に evidence を検証して redraft/reject を確定し、その後に coerce する。
             items = (context.get("position") or {}).get("items") or []
             same_dir = any(it.get("direction") == draft.direction for it in items)
             if same_dir and not (draft.new_signal_evidence or "").strip():

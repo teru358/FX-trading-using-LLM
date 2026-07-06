@@ -328,7 +328,12 @@ class TestExecutionPlanDraft:
         assert draft.scale_in is False
         assert draft.new_signal_evidence is None
 
-    def test_draft_scale_in_true_requires_evidence(self) -> None:
+    def test_draft_scale_in_true_without_evidence_parses(self) -> None:
+        """scale_in=true + evidence 空でも parse は通る (whitespace は None に正規化)。
+
+        evidence 必須は pipeline の決定的 gate が一元処理する: schema で raise すると
+        run 全体が fail-safe failed になり feedback 再起案経路に乗れない (codex Medium)。
+        """
         raw = json.dumps({
             "direction": "long",
             "entry_conditions": [{"type": "price_at_or_below", "value": 150.0}],
@@ -336,8 +341,9 @@ class TestExecutionPlanDraft:
             "expires_at": "2026-07-05T20:00:00", "reasoning_summary": "t",
             "scale_in": True, "new_signal_evidence": "  ",
         })
-        with pytest.raises(SchemaParseError):
-            ExecutionPlanDraft.from_llm_json(raw)
+        draft = ExecutionPlanDraft.from_llm_json(raw)
+        assert draft.scale_in is True
+        assert draft.new_signal_evidence is None
 
     def test_draft_scale_in_rejects_non_bool(self) -> None:
         """codex Medium: bool("false") is True の丸め込みを許さない。型は JSON bool のみ。"""
@@ -352,12 +358,6 @@ class TestExecutionPlanDraft:
         with pytest.raises(SchemaParseError):
             ExecutionPlanDraft.from_llm_json(
                 json.dumps({**base, "scale_in": True, "new_signal_evidence": 123}))
-
-    def test_scale_in_without_evidence_direct_construction(self) -> None:
-        """直接構築でも __post_init__ が効く (SchemaParseError ではなく素の ValueError)。"""
-        with pytest.raises(ValueError) as excinfo:
-            ExecutionPlanDraft(**{**self._valid_kwargs(), "scale_in": True})
-        assert not isinstance(excinfo.value, SchemaParseError)
 
 
 # ---------------------------------------------------------------------------

@@ -109,9 +109,9 @@ ExecutionOpinionAgent 両方に届く)。
   (codex plan review High): `scale_in = 建玉 items に draft.direction と同方向が存在`。
   LLM 申告が導出値と食い違えば導出値で上書きする (どちら向きの誤申告も矯正)
 - `new_signal_evidence: str | null` — scale_in (導出値)=true のとき必須。
-  空なら plan を作らない: redraft 予算が残っていれば feedback を積んで 1 回
-  再起案、尽きていれば決定的 reject (LLM schema 違反による SchemaParseError は
-  従来どおり fail-safe failed — 再起案経路ではない)
+  evidence 必須は pipeline の決定的 gate が一元処理する (schema は型検証のみ)。
+  scale_in=true + evidence 空も他の不備と同じ feedback 再起案経路に乗る:
+  redraft 予算が残っていれば 1 回再起案、尽きていれば決定的 reject
 - 型検証は厳格に: scale_in は JSON bool のみ (文字列 "false" は SchemaParseError)、
   new_signal_evidence は null | str のみ
 

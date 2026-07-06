@@ -245,12 +245,14 @@ class ExecutionPlanDraft:
     new_signal_evidence: str | None = None
 
     def __post_init__(self) -> None:
+        # scale_in × new_signal_evidence の cross-field 検証は schema では行わない:
+        # ここで raise すると SchemaParseError → run 全体 failed (再起案なし) となり、
+        # scale_in を申告しない LLM (feedback 再起案) と非対称になる (codex Medium)。
+        # evidence 必須は pipeline の決定的 gate が一元処理する (正本は同方向建玉の導出)。
         if self.direction not in _DRAFT_DIRECTION:
             raise ValueError(f"direction must be long/short, got {self.direction!r}")
         if not self.entry_conditions:
             raise ValueError("entry_conditions must not be empty")
-        if self.scale_in and not (self.new_signal_evidence or "").strip():
-            raise ValueError("scale_in=true requires non-empty new_signal_evidence")
 
     @classmethod
     def from_llm_json(cls, raw: str) -> "ExecutionPlanDraft":
