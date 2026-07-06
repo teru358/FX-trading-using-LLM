@@ -110,6 +110,7 @@ def test_current_plan_block_from_active_plan(tmp_path):
     assert cur["direction"] == "long"
     assert cur["status"] == "active"
     assert "price_at_or_below" in cur["entry_summary"]
+    assert orch.get_snapshot(ctx["snapshot_id"]).current_plan_json == ctx["current_plan"]
 
 
 def test_current_plan_entry_summary_non_price_conditions(tmp_path):

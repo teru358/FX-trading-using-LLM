@@ -302,20 +302,20 @@ class DecisionContextBuilder:
         """
         try:
             plans = self._orch.get_active_plans(pair)
+            if not plans:
+                return None
+            plan = plans[0]
+            return {
+                "plan_id": plan.plan_id,
+                "status": plan.status,
+                "direction": plan.direction,
+                "entry_summary": _entry_summary(plan.entry_conditions_json),
+                "expires_at": plan.expires_at.isoformat() if plan.expires_at else None,
+                "created_at": plan.created_at.isoformat() if plan.created_at else None,
+            }
         except Exception:
             logger.warning("[ORCH] current_plan read failed for %s", pair, exc_info=True)
             return None
-        if not plans:
-            return None
-        plan = plans[0]
-        return {
-            "plan_id": plan.plan_id,
-            "status": plan.status,
-            "direction": plan.direction,
-            "entry_summary": _entry_summary(plan.entry_conditions_json),
-            "expires_at": plan.expires_at.isoformat() if plan.expires_at else None,
-            "created_at": plan.created_at.isoformat() if plan.created_at else None,
-        }
 
     @staticmethod
     def _empty_position() -> dict[str, Any]:
