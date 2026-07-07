@@ -182,6 +182,13 @@ def setup_logging(cfg, base_dir: Path) -> None:
     # uvicorn アクセスログに [API] プレフィックスを付与 → activity.log に流す
     logging.getLogger("uvicorn.access").addFilter(_ApiAccessPrefixFilter())
 
+    # httpx は 1 リクエストごとに INFO で `HTTP Request: ...` を出し、quote-stream の
+    # 毎秒 polling でターミナル・main log が汚染されるため WARNING に降格する。
+    # プロセス内全 HTTP 成功行が消える意図的なグローバル抑制。エラー可視性への
+    # 影響評価は spec 2026-07-07-quote-tick-log-suppression-design.md を参照。
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
     # ターミナル（RichHandler — プレフィックス着色付き）
     _ColorRichHandler = type("_ColorRichHandler", (_PrefixRichHandler, RichHandler), {})
     rh = _ColorRichHandler(
