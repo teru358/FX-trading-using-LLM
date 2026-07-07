@@ -28,6 +28,10 @@ polling するようになって以降、成功した定常ポーリングの記
 
 - ターミナル・ログファイルの両方から定常ポーリングの成功行を消す。
 - エラー・発注系・その他エンドポイントのログは従来通り残す。
+- **app 側の抑制は quote 限定ではない**: httpx/httpcore ロガーのグローバル降格のため、
+  プロセス内の全 HTTP 成功ログ (LLM / Discord / Feedly / bridge /ohlcv 等) が消える。
+  これは意図的な選択 (ブレスト時に「LLM への httpx リクエスト行も消える」前提で承認済み)。
+  quote 限定のメッセージ内容フィルタは URL 文字列への結合が brittle なため不採用。
 - 検討した代替案:
   - ターミナルのみ抑制 (file には全行残す) — ログ肥大と grep 性の悪さが残るため不採用。
   - 完全抑制 + 定期サマリ行 — 実装増に見合う必要が現状ないため見送り
@@ -50,24 +54,36 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 - 毎リクエストの INFO 行がターミナル・main log 双方から消える。
   httpcore の DEBUG 行も main log から消える。
-- httpx の通信エラーは例外として呼び出し側 (fetcher / broker / LLM client) が
-  自前の prefix 付きログで記録する構造のため、エラー可視性は失われない。
-- 副作用: LLM (llama.cpp / OpenAI 等) への httpx リクエスト行も消えるが、
-  各 client が自前ログを持つため実害なし。
+- **エラー可視性への影響** (codex review 反映で厳密化):
+  - 降格で失われるのは httpx の成功/ステータス行 (非 2xx 含む) のみ。
+    transport エラー (timeout / 接続不能) は httpx 自体が元々ログせず例外で伝播する。
+  - 非 2xx は `raise_for_status()` で例外化され caller が捕捉してログする。
+    確認済みサイト: `mt5_ohlcv_fetcher.py:170,283` / `mt5_bridge_broker.py:144,308,326` /
+    `bridge_health_gate.py:132,175` / `twelvedata_fetcher.py:97,102` /
+    `llm_queue.py:115` (`logger.exception`) / `reflector.py:180`。
+  - **留意**: LLM client 自体は DEBUG 開始行のみ (`openai_client.py:64` 等) で
+    自前のエラーログを持たない。LLM のエラー可視性は queue / pipeline 層の
+    既存 exception ログに依存する (上記 llm_queue で担保)。
+- 副作用: LLM / Discord / Feedly 等への httpx 成功行も消える (§決定事項の通り意図的)。
 
 ### 変更 2 — bridge 側: uvicorn.access にポーリング除外フィルタ
 
 `mt5_bridge/server.py` に `_PollingAccessFilter(logging.Filter)` を追加し、
-`main()` の `log_config` で `access` ハンドラに配線する。
+`log_config` の `access` ハンドラに配線する。配線漏れをテストで検出できるよう、
+`main()` 内にインラインで書かれている log_config 生成を **`_build_log_config()`
+として関数化**する (codex review 反映)。
 
 判定仕様:
 
 - uvicorn.access のレコードは
   `record.args == (client_addr, method, full_path, http_version, status_code)`。
-- **drop 条件**: `method == "GET"` かつ
-  (`full_path.startswith("/quote/")` または `full_path == "/health"`) かつ
+- **drop 条件**: `method == "GET"` かつ `full_path.startswith("/quote/")` かつ
   `200 <= status_code < 300`。
 - それ以外 (POST /order、/close、4xx/5xx、他エンドポイント) は keep。
+- **`/health` は抑制しない** (codex review 反映): bridge /health へのアクセスは
+  発注プリフライト (`bridge_health_gate`) / halt resume / app `/api/health` プロキシ
+  経由の低頻度のみで毎秒ノイズに寄与しておらず、bridge 復旧確認・heartbeat 診断の
+  到達成功ログとして残す価値の方が大きい。
 - `record.args` が想定形状でない場合は **True を返す (fail-open)** —
   落とすより出す方が安全。
 
@@ -75,14 +91,16 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 - **app 側** (`tests/`): `setup_logging()` 実行後に `logging.getLogger("httpx")` /
   `logging.getLogger("httpcore")` の level が WARNING であることを検証。
-- **bridge 側** (`mt5_bridge/tests/`): uvicorn 形式の LogRecord を組み立てて
-  フィルタの drop/keep を検証:
-  - `GET /quote/USDJPY 200` → drop
-  - `GET /health 200` → drop
-  - `GET /quote/USDJPY 500` → keep
-  - `POST /order 200` → keep
-  - `GET /ohlcv/USDJPY 200` → keep
-  - args 形状不正 (None / 要素数不足) → keep (fail-open)
+- **bridge 側** (`mt5_bridge/tests/`):
+  - フィルタ単体: uvicorn 形式の LogRecord を組み立てて drop/keep を検証:
+    - `GET /quote/USDJPY 200` → drop
+    - `GET /quote/USDJPY 500` → keep
+    - `GET /health 200` → keep (抑制対象外)
+    - `POST /order 200` → keep
+    - `GET /ohlcv/USDJPY 200` → keep
+    - args 形状不正 (None / 要素数不足) → keep (fail-open)
+  - 配線: `_build_log_config()` の戻り値で `handlers["access"]["filters"]` に
+    `_PollingAccessFilter` が入っていることを検証 (main() 内配線漏れの検出)。
 
 ## デプロイ
 
