@@ -12,7 +12,9 @@ polling するようになって以降、成功した定常ポーリングの記
 1. **app 側 (stick / Fiosracht)**
    - httpx が 1 リクエストごとに INFO で
      `HTTP Request: GET http://.../quote/... "HTTP/1.1 200 OK"` を出力する。
-   - `src/logging_setup.py` は yfinance / trafilatura を抑制済みだが httpx は未抑制。
+   - 既存のサードパーティ抑制 (yfinance → `src/data/price_fetcher.py:21`、
+     trafilatura → `src/analysis/article_fetcher.py:29`、いずれも import 時) は
+     あるが httpx は未抑制。
    - root logger が DEBUG のため、main log ファイルには httpcore の DEBUG 行
      (接続・送受信で 1 リクエスト複数行) まで流入する。
    - 影響: ターミナル (RichHandler, INFO) + main log (file handler, DEBUG) の両方。
@@ -45,7 +47,8 @@ polling するようになって以降、成功した定常ポーリングの記
 
 ### 変更 1 — app 側: httpx / httpcore ロガーの降格
 
-`src/logging_setup.py` の `setup_logging()` に追加 (yfinance 等の既存抑制と同じ流儀):
+`src/logging_setup.py` の `setup_logging()` に追加 (既存の yfinance / trafilatura 抑制は
+消費モジュールの import 時に散在しているが、こちらは logging 設定の一元箇所に置く):
 
 ```python
 logging.getLogger("httpx").setLevel(logging.WARNING)
