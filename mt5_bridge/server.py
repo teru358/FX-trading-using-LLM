@@ -499,6 +499,28 @@ class _UvicornNameRewriter(logging.Filter):
         return True
 
 
+class _PollingAccessFilter(logging.Filter):
+    """quote polling の成功 access log を落とすフィルタ。
+
+    quote-stream producer (app 側) が全 trade pair を短周期 polling するため、
+    `GET /quote/{symbol} 2xx` の access log が毎秒出てターミナルを汚染する。
+    成功した定常ポーリングのみ drop し、エラー (非 2xx)・他 endpoint は keep する。
+    /health は低頻度 (発注 preflight / halt resume / app proxy) のため対象外。
+    uvicorn.access の record.args は
+    (client_addr, method, full_path, http_version, status_code) の 5-tuple。
+    想定外の形状は keep (fail-open — 落とすより出す方が安全)。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if not isinstance(args, tuple) or len(args) != 5:
+            return True
+        _client, method, path, _ver, status = args
+        if method != "GET" or not isinstance(path, str) or not path.startswith("/quote/"):
+            return True
+        return not (isinstance(status, int) and 200 <= status < 300)
+
+
 def main() -> None:
     """`python server.py` で uvicorn を直接起動する。"""
     import uvicorn
