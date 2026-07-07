@@ -62,3 +62,29 @@ def test_malformed_args_none_kept():
 
 def test_malformed_args_short_tuple_kept():
     assert _filter().filter(_access_record(("client", "GET", "/quote/USDJPY"))) is True
+
+
+def test_malformed_path_not_str_kept():
+    """5-tuple だが path が str でない場合も fail-open で keep。"""
+    assert _filter().filter(_access_record(("c", "GET", None, "1.1", 200))) is True
+
+
+def test_malformed_status_not_int_kept():
+    """5-tuple だが status が int でない場合も fail-open で keep。"""
+    assert _filter().filter(
+        _access_record(("c", "GET", "/quote/USDJPY", "1.1", "200"))
+    ) is True
+
+
+def test_log_config_wires_polling_filter_into_access_handler():
+    """main() 内の配線漏れを検出する: access ハンドラに polling filter が入っている。"""
+    cfg = server._build_log_config()
+    assert "polling_access" in cfg["handlers"]["access"]["filters"]
+    assert cfg["filters"]["polling_access"]["()"] is server._PollingAccessFilter
+
+
+def test_log_config_keeps_existing_uvicorn_name_fix():
+    """既存の uvicorn.error 表示名書き換えが関数化後も残っている (回帰防止)。"""
+    cfg = server._build_log_config()
+    assert "uvicorn_name_fix" in cfg["handlers"]["default"]["filters"]
+    assert cfg["loggers"]["uvicorn.access"]["handlers"] == ["access"]

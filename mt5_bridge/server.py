@@ -508,7 +508,9 @@ class _PollingAccessFilter(logging.Filter):
     /health は低頻度 (発注 preflight / halt resume / app proxy) のため対象外。
     uvicorn.access の record.args は
     (client_addr, method, full_path, http_version, status_code) の 5-tuple。
-    想定外の形状は keep (fail-open — 落とすより出す方が安全)。
+    想定外の形状は keep (fail-open — 落とすより出す方が安全)。args 形状は
+    uvicorn 0.46 時点の内部実装 (h11_impl / httptools_impl 共通)。将来の
+    uvicorn 更新で形状が変わっても fail-open で抑制が外れるだけで害はない。
     """
 
     def filter(self, record: logging.LogRecord) -> bool:
@@ -521,20 +523,26 @@ class _PollingAccessFilter(logging.Filter):
         return not (isinstance(status, int) and 200 <= status < 300)
 
 
-def main() -> None:
-    """`python server.py` で uvicorn を直接起動する。"""
-    import uvicorn
+def _build_log_config() -> dict:
+    """uvicorn 用 log_config を生成する。
 
-    cfg = load_settings()
+    main() インラインだと access ハンドラへのフィルタ配線漏れをテストで
+    検出できないため関数化している (tests/test_access_log_filter.py が検証)。
 
-    # uvicorn のデフォルトログは `INFO: ...` でタイムスタンプ無し
-    # → アプリと同じフォーマット (時刻付き) に統一、`uvicorn.error` 表記も整理
-    log_config = {
+    - uvicorn のデフォルトログは `INFO: ...` でタイムスタンプ無し
+      → アプリと同じフォーマット (時刻付き) に統一、`uvicorn.error` 表記も整理
+    - access ハンドラには _PollingAccessFilter を配線し、quote polling の
+      成功行 (GET /quote/* 2xx) を落とす
+    """
+    return {
         "version": 1,
         "disable_existing_loggers": False,
         "filters": {
             "uvicorn_name_fix": {
                 "()": _UvicornNameRewriter,
+            },
+            "polling_access": {
+                "()": _PollingAccessFilter,
             },
         },
         "formatters": {
@@ -562,6 +570,7 @@ def main() -> None:
                 "formatter": "access",
                 "class": "logging.StreamHandler",
                 "stream": "ext://sys.stdout",
+                "filters": ["polling_access"],
             },
         },
         "loggers": {
@@ -571,8 +580,18 @@ def main() -> None:
         },
     }
 
+
+def main() -> None:
+    """`python server.py` で uvicorn を直接起動する。"""
+    import uvicorn
+
+    cfg = load_settings()
+
     # app オブジェクト直渡し (reload 不要、import 文字列のパス問題を回避)
-    uvicorn.run(app, host=cfg.host, port=cfg.port, log_level="info", log_config=log_config)
+    uvicorn.run(
+        app, host=cfg.host, port=cfg.port,
+        log_level="info", log_config=_build_log_config(),
+    )
 
 
 if __name__ == "__main__":
