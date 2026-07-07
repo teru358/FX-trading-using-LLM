@@ -56,10 +56,16 @@ from src.logging_setup import setup_logging
 
 @pytest.fixture
 def restore_logging():
-    """setup_logging() が root logger をグローバルに書き換えるため、テスト後に復元する。"""
+    """setup_logging() が root logger をグローバルに書き換えるため、テスト後に復元する。
+
+    uvicorn.access は setup_logging() が呼び出しごとに _ApiAccessPrefixFilter を
+    addFilter するため、filters も復元しないと実行順によって蓄積する。
+    """
     root = logging.getLogger()
+    uvicorn_access = logging.getLogger("uvicorn.access")
     saved_handlers = root.handlers[:]
     saved_level = root.level
+    saved_access_filters = uvicorn_access.filters[:]
     saved_third_party = {
         name: logging.getLogger(name).level for name in ("httpx", "httpcore")
     }
@@ -69,6 +75,7 @@ def restore_logging():
             h.close()  # tmp_path 内のログファイルハンドルを解放
     root.handlers[:] = saved_handlers
     root.setLevel(saved_level)
+    uvicorn_access.filters[:] = saved_access_filters
     for name, lvl in saved_third_party.items():
         logging.getLogger(name).setLevel(lvl)
 
@@ -108,10 +115,10 @@ Expected: FAIL — `assert 0 == 30` (未設定ロガーの level は NOTSET=0 �
 の直後に追加:
 
 ```python
-    # httpx は 1 リクエストごとに INFO で `HTTP Request: ...` を出す。quote-stream の
+    # httpx は 1 リクエストごとに INFO で `HTTP Request: ...` を出し、quote-stream の
     # 毎秒 polling でターミナル・main log が汚染されるため WARNING に降格する。
-    # (プロセス内全 HTTP 成功行が消える意図的なグローバル抑制 — spec 2026-07-07 参照。
-    #  transport エラーは httpx 自体がログせず例外伝播、非 2xx は caller が捕捉ログする)
+    # プロセス内全 HTTP 成功行が消える意図的なグローバル抑制。エラー可視性への
+    # 影響評価は spec 2026-07-07-quote-tick-log-suppression-design.md を参照。
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 ```
@@ -401,7 +408,7 @@ Expected: 全件 PASS (直近の green 基準は 1388 passed。新規 1 件が�
 
 Run (mt5_bridge ディレクトリで): `uv run pytest`
 
-Expected: 全件 PASS (既存 4 ファイル + 新規 test_access_log_filter.py)
+Expected: 全件 PASS (既存 5 ファイル + 新規 test_access_log_filter.py)
 
 - [ ] **Step 3: 手動スモーク (任意、環境があれば)**
 
