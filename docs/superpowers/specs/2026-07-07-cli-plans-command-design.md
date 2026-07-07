@@ -56,10 +56,22 @@ def get_plans_by_status(
   クエリ前に `if not statuses: return []`)。
 - 承認ゲート spec F-5 の API はこのメソッドに `("pending_approval",)` を渡せばよい。
 
-### 3.2 整形層 — `_plan_row(plan) -> dict`
+### 3.2 整形層 — `src/orchestrator/plan_view.py` (新規モジュール)
 
-`src/cli.py` 内に plan 1件を表示用 dict にする純関数を置く。フィールドは承認ゲート
-spec F-5 の一覧 API 出力と揃える:
+plan 1件を表示用 dict にする純関数を **CLI の外** に置く。理由 (codex Medium 反映):
+`src/cli.py` は prompt_toolkit / Rich / PositionManager / VectorStore 等を import
+しており、将来 F-5 API が整形層を再利用しようとして `src.cli` を import すると
+これらの重い依存・取引サイクル系まで引き込み、責務が逆流する。整形は軽量な独立
+モジュール `src/orchestrator/plan_view.py` に置き、CLI と将来の F-5 API の双方が
+そこを使う。
+
+```python
+# src/orchestrator/plan_view.py
+def plan_to_row(plan: "_TradePlan") -> dict:
+    """_TradePlan 1件を表示/API 用の dict に整形する (純関数)。"""
+```
+
+フィールド (承認ゲート spec F-5 の一覧 API 出力とキー名を揃える):
 
 | キー | 由来 |
 |---|---|
@@ -73,8 +85,17 @@ spec F-5 の一覧 API 出力と揃える:
 | `created_at` | `plan.created_at` |
 
 - `_entry_summary` は `src/orchestrator/context_builder.py` の既存関数
-  (先頭2条件を短縮表記)。**再定義せず import して使う** (DRY)。
-- action_json に sl/tp が無い旧データや None は「-」表示にフォールバック。
+  (先頭2条件を短縮表記)。**再定義せず import して使う** (DRY)。両者とも
+  orchestrator パッケージ内なので依存方向は健全。
+- action_json に sl/tp が無い旧データや None は値をそのまま `None` で入れ、
+  表示層で「-」にフォールバックする (整形層は生値、表示整形は表示層の責務)。
+
+**reasoning_summary は今回含めない** (codex Medium 反映): F-5 API は reasoning 要約も
+返す想定だが、それは `_TradePlan` でなく `_OrchestratorDecision.reasoning_summary`
+(`orchestrator_store.py`) 側にあり、plan_id → 最新 decision の JOIN/追加クエリが要る。
+CLI 表示には不要なため今は `plan_to_row` に含めない。F-5 実装時に `plan_to_row` を
+拡張 (または reasoning を足した上位 DTO を用意) する。この分離方針なら後付けで矛盾なく
+拡張できる。
 
 ### 3.3 表示層 — `_cmd_plans(config)`
 
@@ -83,8 +104,9 @@ spec F-5 の一覧 API 出力と揃える:
 1. `OrchestratorStore(config.prices_db_path)` を構築 (bootstrap と同じパス)。
 2. pending = `get_plans_by_status(("pending_approval",))`、
    active = `get_plans_by_status(("active",))`。
-3. 2つの Rich テーブルをセクション見出し付きで出力 (既存 `_cmd_status` の Table 構築に倣う)。
-   0 件のセクションは見出し + `[dim](なし)[/dim]` を出す (承認ゲート稼働後に自然に埋まる)。
+3. 各 plan を `plan_view.plan_to_row()` で整形し、2つの Rich テーブルをセクション見出し
+   付きで出力 (既存 `_cmd_status` の Table 構築に倣う)。0 件のセクションは
+   見出し + `[dim](なし)[/dim]` を出す (承認ゲート稼働後に自然に埋まる)。
 
 テーブル列: ペア / 方向 / entry条件 / SL / TP / 期限 / 作成。
 - 方向は `📈 long` / `📉 short` (status の _cmd_status に倣った絵文字表記)。
@@ -106,27 +128,39 @@ spec F-5 の一覧 API 出力と揃える:
       → OrchestratorStore(config.prices_db_path)
       → get_plans_by_status(("pending_approval",))  → pending 行
       → get_plans_by_status(("active",))            → active 行
-      → 各 plan を _plan_row() で整形 (_entry_summary 再利用)
+      → 各 plan を plan_view.plan_to_row() で整形 (_entry_summary 再利用)
       → Rich Table 2枚を _console.print
 ```
 
 ## 5. エラー処理
 
-- DB / テーブル未初期化 (orchestrator を一度も起動していない環境): 取得層の例外は
-  `_cmd_plans` で捕捉し `[yellow]orchestrator plan なし (DB 未初期化)[/yellow]` を表示。
-  CLI ループ全体の `except Exception` にも守られるが、専用の分かりやすい文言を優先する。
-- action_json / entry_conditions_json の欠損・型不整合: 整形層で個別に「-」/空文字へ
-  フォールバックし、1件の不整合で全体が落ちないようにする。
+- **DB 未初期化は「plan なし」ではない** (codex Low 反映): `OrchestratorStore(...)` は
+  内部で `_get_engine()` → `create_all()` を行うため、orchestrator 未起動環境でも
+  空テーブルが作られ、取得層は正常に 0 件を返す。よって 0 件は**通常の (なし) 表示**
+  として扱う (エラー扱いしない)。
+- 取得層・DB 読み取りが**例外を投げた場合** (破損・権限・schema 不整合など) は
+  `_cmd_plans` で捕捉し `[red]DB 読み取り失敗: {type(e).__name__}: {e}[/red]` を表示する。
+  破損や権限問題を「plan なし」に見せて隠さない (運用上の安全)。
+- action_json / entry_conditions_json の欠損・型不整合: 整形層 (`plan_to_row`) が生値を
+  None/空へ倒し、表示層で「-」にフォールバック。1件の不整合で全体が落ちないようにする。
 
 ## 6. テスト観点
 
-- **取得層** (`tests/`): in-memory or tmp DB に status 違いの plan を複数投入し、
+- **取得層** (`tests/`): tmp DB に status 違いの plan を複数投入し、
   - `get_plans_by_status(("active",))` が active のみを created_at 降順で返す
   - `get_plans_by_status(("pending_approval",))` が pending のみ返す (該当0件なら空)
   - 空タプルで空リスト
   - pair 絞り込みが効く
-- **整形層**: `_plan_row()` が sl/tp あり plan・action_json 欠損 plan・entry 条件無し
-  plan で期待 dict / フォールバックを返す
+- **テストデータの seed 方針** (codex Medium 反映): `create_trade_plan()` は
+  `status not in PLAN_STATUSES` を `ValueError` で拒否するため、**`pending_approval` の
+  plan は public writer では作れない**。テストは:
+  - active plan は `create_trade_plan()` で seed する。
+  - `pending_approval` plan は **ORM で直接 seed する** (テスト内で `_TradePlan(...)` を
+    session.add — 取得層は status 文字列一致で引くだけなので DB に行があれば読める)。
+    これは「本コマンドは `PLAN_STATUSES` に pending_approval を追加しない」方針と整合する
+    (書き込み経路は承認ゲート F-1 の担当、本スコープは読み取りのみ)。
+- **整形層**: `plan_to_row()` が sl/tp あり plan・action_json 欠損 plan・entry 条件無し
+  plan で期待 dict / フォールバック (None) を返す
 - **表示層は薄いので手動確認中心**: 実 DB で `plans` を叩き pending 0 件表示 + active
   表示を目視 (Step は plan の実装計画側に記載)。
 
