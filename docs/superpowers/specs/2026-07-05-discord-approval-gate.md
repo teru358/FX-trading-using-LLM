@@ -1,6 +1,6 @@
 # Discord 承認ゲート (approval gate) 設計 spec
 
-日付: 2026-07-05
+日付: 2026-07-05 (**2026-07-09 codex spec レビュー 7件反映** — F-1/F-2/F-4/F-5/F-6/F-7 改訂)
 状態: 設計確定 (実装前)
 関連: `2026-07-04-consolidated-roadmap.md` §1-2 (承認ゲート採用推奨・却下=ラベルデータ),
 `2026-07-05-planner-position-plan-context.md` (独立 spec、依存なし・並行可)
@@ -36,70 +36,176 @@
 `PLAN_STATUSES` に `pending_approval` / `rejected` を追加。lifecycle:
 
 ```
-pipeline 作成 (gate ON)
-   └→ pending_approval ──承認──→ active ──成立──→ triggered (以降現行どおり)
-            │        └──却下──→ rejected   (terminal・反実仮想追跡は継続)
-            └──放置──→ expired  (TTL、既存 sweep)
+pipeline 作成 (gate ON では publish が pending_approval — F-6)
+   └→ pending_approval ──承認──────→ active ──成立──→ triggered (以降現行どおり)
+            ├──却下──────→ rejected    (terminal・status はもう動かない。反実仮想追跡は F-4)
+            ├──放置 (TTL)─→ expired     (watch の expiry 判定 (※)。gate_decision='unanswered' を刻印)
+            ├──invalidation→ invalidated (watch の invalidation 判定 — active と同じ扱い。
+            │                構造的に死んだ plan を承認可能なまま放置しない)
+            └──新 plan 置換→ superseded  (F-3。人間の判断なしラベル = gate_decision NULL のまま)
 ```
+
+(※) 「既存 sweep」の実体は watch loop の expiry 判定 (`_evaluate_plan` 優先順 1、
+`runtime.py`)。独立した janitor は無いので、pending_approval を watch 対象に加える
+こと (F-4) が expiry / invalidation 処理の前提になる。
 
 - position-context spec (P-2) の `current_plan` ブロックの対象を
   {active} → {active, pending_approval} に拡張する (返答待ち plan も planner から
   見えるようにする。status 追加とセットで本 spec 側の作業)
-- 遷移は既存 `try_claim_plan_status` を使う:
-  approve = claim(active, from=pending_approval) / reject = claim(rejected, from=pending_approval)。
-  二重クリック・承認と却下の競合は rowcount 排他で自然解決、負けた側は 409
-- gate OFF (既定) は現行どおり active で作成 — **挙動不変**
+- **approve / reject の遷移は専用 helper `try_decide_gate` で行う** (F-2b)。
+  既存 `try_claim_plan_status` は status + updated_at しか更新できず、
+  gate_decision / gate_decided_at / gate_reason を同一 UPDATE で残せないため
+  (codex Medium)。排他の考え方は同じ: `WHERE status='pending_approval'` の
+  条件付き単一 UPDATE、rowcount で勝敗判定。二重クリック・承認と却下の競合は
+  自然解決、負けた側は 409
+- gate OFF (既定) は現行どおり active で publish — **挙動不変** (新列はすべて NULL)
 
 ### F-2: trade_plans への nullable 列追加 (idempotent ALTER)
 
 | 列 | 内容 |
 |---|---|
+| `gate_decision` | **永続ラベル正本**: `approved` / `rejected` / `unanswered`。決定時 (approve/reject) または pending→expired 遷移時に一度だけ刻印し、以後不変。NULL = gate OFF plan・未決定・superseded/invalidated (判断なし) |
 | `gate_decided_at` | 承認/却下の時刻 (放置は NULL) |
 | `gate_reason` | 却下理由 自由記述 (任意) |
-| `gate_message_id` | Discord メッセージ ID (bot 再起動後の突合用) |
+| `gate_message_id` | Discord メッセージ ID (bot 再起動後の突合用。保存経路は F-5 の gate_message endpoint) |
+| `cf_state` | 反実仮想追跡の状態機械 (F-4): NULL=追跡中(または対象外) / `would_trigger`=pending 中に entry 初成立 (stamp 済・cf 行は未記録) / `triggered`=cf shadow_trigger 行を記録済 / `invalidated`=追跡窓を構造的に閉鎖 (latch) |
+| `cf_stamped_at` / `cf_stamp_price` / `cf_stamp_spread_pips` | stamp (pending 中の entry 初成立時点の時刻・mid・spread)。cf 行を後から記録する際の triggered_at / trigger_price / spread_pips になる (hindsight の spread 込み採点に必須) |
 
-ラベルは status から復元する (approved=active 以降 / rejected / unanswered=
-pending のまま expired)。新テーブルは作らない。
+**ラベルを status から復元する方式は廃止** (codex Medium): approved plan は後続で
+triggered / expired / invalidated / superseded 等へ遷移し、gate OFF の通常 plan と
+区別できなくなる。`gate_decision` が唯一の正本。新テーブルは作らない。
+
+**shadow_triggers 側のスキーマ変更は不要**: plan_id UNIQUE 制約 (uq_shadow_triggers_plan_id)
+により trigger 行は plan 1件につき生涯 1 本 (real か counterfactual のどちらか — F-4)。
+行の種別は `trade_plans.gate_decision` との JOIN で引ける (rejected / unanswered の plan の
+行 = counterfactual、それ以外 = real)。旧 spec の「記録時点の plan status を残す」列は不要。
+
+### F-2b: gate 決定の専用 helper (store)
+
+```python
+def try_decide_gate(plan_id, decision: Literal["approved", "rejected"],
+                    *, reason: str | None = None) -> bool:
+    # UPDATE trade_plans
+    #    SET status = ('active' if approved else 'rejected'),
+    #        gate_decision = decision, gate_decided_at = db_now(),
+    #        gate_reason = reason, updated_at = db_now()
+    #  WHERE plan_id = ? AND status = 'pending_approval'
+    # → rowcount == 1 で勝ち。単一文なので TOCTOU なし (try_claim_plan_status と同思想)
+```
+
+status 遷移とラベル・時刻・理由を**同一 UPDATE** で原子的に残す (codex Medium)。
+API 層は False → 409 に写像。unanswered の刻印は watch の pending→expired 遷移側で行う
+(同様に `WHERE status='pending_approval'` の条件付き UPDATE で status='expired' +
+gate_decision='unanswered' を一括更新 — approve との race も rowcount 排他で解決)。
 
 ### F-3: supersede の対象拡張
 
 `supersede_active_plans` の対象を status ∈ {active, **pending_approval**} に拡張。
 新 plan 作成時に返答待ち plan も置換される (G-6)。置換された pending plan は
-superseded であり rejected ではない (人間の判断なしラベル)。
+superseded であり rejected ではない (人間の判断なしラベル = gate_decision NULL)。
+superseded になった pending plan は反実仮想追跡の対象にもしない (F-4 の watch 対象から
+status 遷移で自然に外れる。システム自身が取り下げた plan の「承認していたら」は
+測定対象の判断が存在しないため。stamp が残っていても cf 行は起こさない)。
+rejected は置換対象外 (terminal のまま・追跡窓は expires_at まで継続)。
 
 ### F-4: watch の反実仮想追跡 (本体・要厚めレビュー)
 
-watch loop の評価対象を active のみ → **active + pending_approval + rejected** に拡張。
+**前提となる制約 (2026-07-09 判明):** `shadow_triggers` は `UNIQUE(plan_id)`
+(uq_shadow_triggers_plan_id、real trigger 二重記録の defense-in-depth)。pending 中に
+反実仮想行を書くと、その plan が後に承認→active→**本物の trigger** に至った時に
+UNIQUE 違反で本番記録が壊れる。制約の緩和 (partial index 化) は SQLite では table
+rebuild になるため採らない。→ **「stamp → 終端時に記録」方式**: cf 行は「もう real
+trigger が絶対に起こり得ない plan (rejected / expired-unanswered)」にのみ記録する。
+これにより real 行と cf 行は構造的に排反 (plan 1件 = trigger 行は生涯 1 本)。
 
-- 非 active plan は **trigger 記録のみ**: shadow_trigger 行を記録し、status claim
-  しない・執行経路に入らない・order_intent を作らない。既存の hindsight poll が
-  spread 込みで採点する (機構は現行のまま)
-- 執行境界は不変: live 執行と triggered claim は active のみ。rejected が誤執行
-  される経路は構造的に存在しない
-- **dedupe**: 非 active plan は status が動かないため、trigger 記録は plan_id 単位で
-  1回に制限する (「最初に条件成立した瞬間」が反実仮想のエントリー点)。
-  shadow_triggers に plan_id の既存記録があるかを事前確認し、あればスキップ
-- shadow_trigger に記録時点の plan status (pending_approval / rejected) を残し、
-  集計でラベル分割できるようにする (列追加 or 既存 JSON への付与は実装時判断)
+**設計原則: 評価意味論は active と同一、違うのは action 境界のみ。**
+非 active plan も `_evaluate_plan` と同じ順序 (invalidation/expiry → entry →
+freshness final wall) で評価する。承認済みとの成績比較が「同じ物差し」であるための
+要件。ただし action は分岐する:
 
-### F-5: API 3本 (既存 FastAPI 8811 / X-API-Key)
+| status | expiry 成立 | invalidation 成立 | entry 初成立 (freshness OK) |
+|---|---|---|---|
+| active (現行) | status=expired | status=invalidated | claim(active→triggered) + shadow 記録 + (live なら執行) |
+| pending_approval | status=expired + gate_decision='unanswered' 刻印。**stamp 済なら cf 行を記録** | status=invalidated (real 遷移 — 死んだ plan を承認可能なまま放置しない。bot が message edit) | **stamp のみ** (cf_state='would_trigger' + cf_stamped_at/price/spread_pips)。shadow 行は書かない。plan は pending のまま (承認可能) |
+| rejected | 追跡窓終了 (status は不変。watch 対象クエリの expires_at 条件で自然に外れる) | **cf_state='invalidated' で latch** (status は不変)。以後評価しない | **cf 行を即記録** + cf_state='triggered' (terminal なので real と衝突しない) |
+
+- **rejected の invalidation latch が必須な理由**: real 経路は invalidation で status が
+  遷移する (= latch) が、rejected は status が動かない。latch なしだと
+  「invalidation 成立 → 価格が戻る → entry 成立」の順で、承認世界なら invalidation で
+  死んでいたはずの plan に cf 行が付く (誤った反実仮想)。cf_state がその latch。
+- **reject 時の cf 化**: `try_decide_gate(rejected)` 成功後、stamp (cf_state='would_trigger')
+  があればその場で cf 行を記録する (triggered_at=cf_stamped_at、trigger_price=cf_stamp_price、
+  spread_pips=cf_stamp_spread_pips)。エントリー点は「最初に条件成立した瞬間」で正確。
+  stamp がなければ rejected のまま watch 継続 (expires_at まで)。
+- **cf 行の記録は専用関数** (`_record_shadow_trigger` の拡張ではない — codex High):
+  status claim しない / `_execute_live_trigger` に到達する経路がない / order_intent を
+  作らない / broker 参照を持たない。decision は `plan_cf_trigger` type で記録し、
+  real の `plan_trigger` と集計上も分離する。risk_gate_result は NULL、snapshot_id は
+  NULL 可 (hindsight は trigger 行の price/sl/tp/spread + OHLCV だけで採点できる)。
+  hindsight enqueue は real と同じ (`record_hindsight_evaluation`。過去時刻の
+  triggered_at でも elapsed 判定は正しく動く)。
+- **dedupe / 排他**: stamp と cf_state 遷移は plan 行への条件付き UPDATE
+  (`WHERE cf_state IS NULL` 等) の rowcount claim で行う。UNIQUE(plan_id) は最終
+  防衛線としてそのまま残す。
+- **執行境界は不変**: live 執行と triggered claim は active のみ。rejected / pending が
+  誤執行される経路は構造的に存在しない (cf 経路は執行コードを含まない)。
+- **watch 対象クエリ**: `status='active'` (現行) ∪ `status='pending_approval'` (全件 —
+  expiry/invalidation 遷移の責務があるため stamp 後も対象) ∪
+  `status='rejected' AND expires_at > now AND cf_state IS NULL` (cf 解決済み・窓閉鎖済みは
+  恒久的に外れる — rejected の無限蓄積で watch が肥大しない)。
+- **stamp 済みで承認された plan**: stamp は残るが cf 行にはならない (real trigger が
+  正本)。cf_stamped_at と実 trigger 時刻の差 = **承認遅延コストの測定素材** (副産物、
+  F-7 の headline 3 ラベルには含めない)。
+
+### F-5: API 5本 (既存 FastAPI 8811 / X-API-Key)
 
 | endpoint | 動作 |
 |---|---|
-| `GET /orchestrator/plans?status=pending_approval` | pending 一覧 (plan_id, pair, direction, entry_summary, SL/TP, expires_at, created_at, reasoning 要約) |
-| `POST /orchestrator/plans/{id}/approve` | claim 成功→200 {status: active}、失敗→409 (決定済み/期限切れ) |
-| `POST /orchestrator/plans/{id}/reject` body `{reason?: str}` | claim 成功→200、失敗→409。reason は gate_reason へ |
+| `GET /orchestrator/plans?status=pending_approval` | pending 一覧 (plan_id, pair, direction, entry_summary, SL/TP, expires_at, created_at, reasoning 要約, **gate_message_id** — bot 再起動時の投稿済み判定用) |
+| `GET /orchestrator/plans/{id}` | plan 詳細 (status + gate_decision + gate_decided_at + gate_reason)。polling で pending から消えた plan の結末判定 (bot の message edit 用) はこれで行う |
+| `POST /orchestrator/plans/{id}/approve` | `try_decide_gate(approved)` 成功→200 {status: active}、失敗→409 (決定済み/期限切れ) |
+| `POST /orchestrator/plans/{id}/reject` body `{reason?: str}` | 同上 (rejected)。reason は gate_reason へ |
+| `POST /orchestrator/plans/{id}/gate_message` body `{message_id: str}` | bot が Discord 投稿直後に呼ぶ (codex Medium: 保存経路がないと再起動突合が成立しない)。冪等 (同値上書き可)。404=plan なし |
+
+**reasoning 要約の取得元 (codex Medium で未定義だった点):** trade_plans には
+reasoning が無い。**最新の `plan_create` decision (orchestrator_decisions.plan_id で
+引く) と JOIN して返す**。plan 側への冗長保存はしない (真実源を二重化しない)。
+表示整形は `plan_view.plan_to_row` を共用 (CLI plans コマンドの「reasoning は F-5 時に
+追加」注記どおり、ここで reasoning フィールドを足す)。
 
 ### F-6: config
 
 `orchestrator.approval_gate: bool = False` (schema 既定 OFF = 挙動不変)。
-ON のとき pipeline の plan 最終 status を active でなく pending_approval にする
-(変更点は作成時 status の1箇所)。
+
+**分岐点は「作成時 status」ではなく「最後の publish」** (codex High): 現行 pipeline
+(`planning_pipeline._commit_plan`) は orphan 防止のため
+`create_trade_plan(status="requires_replan")` → decision → vote → supersede →
+最後に `update_plan_status('active')` の write 順序を持つ。途中クラッシュした plan が
+active として可視化されない保証はこの順序に依存する。gate ON でもこの順序は不変とし、
+**最後の publish の 1 箇所だけ** `'active'` / `'pending_approval'` に分岐する。
+supersede (F-3 拡張版) は publish 前に走る点も現行どおり。
+
+付随: PipelineResult / plan 作成通知・daily summary の status 集計が pending_approval
+を含み得ることを確認する (文言・集計の追従は実装時に洗う)。
 
 ### F-7: metrics / daily summary
 
 `get_shadow_metrics_raw` と daily summary に gate ラベル別の行を追加:
 approved / rejected / unanswered の件数・trigger 率・hindsight 平均 pnl_r。
+ラベルは `trade_plans.gate_decision` の GROUP BY (F-2 で正本化。status からの復元はしない)。
+
+**real / counterfactual の分離規則 (集計汚染の防止):**
+
+- trigger 行は plan 1件につき 1 本 (UNIQUE) で、cf 行は gate_decision ∈
+  {rejected, unanswered} の plan にしか存在しない (F-4)。→ **既存の実性能集計
+  (trigger 率・hindsight pnl_r・daily summary) は `gate_decision NOT IN
+  ('rejected','unanswered')` (NULL 含む) の plan の行に限定する**。この除外を
+  入れないと、gate 導入と同時に cf サンプルが実性能に混入する
+- decision 集計も同様: real は `plan_trigger`、cf は `plan_cf_trigger` で type から分離
+- superseded pending (gate_decision NULL) と invalidated pending は 3 ラベルの
+  どれでもない (判断が存在しない)。件数だけ別行で出す (放置率の解釈補助)
+- 副産物: stamp 済みで承認された plan の cf_stamped_at と実 trigger 時刻の差 =
+  **承認遅延コスト** (即承認なら幾ら取れたか)。headline には含めず別行
 
 人間ゲートの付加価値 = E[pnl_r|approved] − E[pnl_r|rejected 反実仮想]。
 放置の反実仮想が大きく正なら UI/運用の問題 (判断品質でなく通知到達の問題) と
@@ -116,28 +222,49 @@ approved / rejected / unanswered の件数・trigger 率・hindsight 平均 pnl_
 - クリック → 既存 `FinanceClient` で approve/reject POST → 応答でメッセージ edit
   (✅承認済み / ❌却下 / ⏰期限切れ / 🔄新 plan に置換)。409 は「既に決定済み」として edit
 - bot 側状態は plan_id→message_id の揮発キャッシュのみ (dedupe 用)。正本は finance DB。
-  再起動時は pending 一覧 GET と `gate_message_id` で突合し、未投稿分だけ再投稿
-- polling で pending から消えた plan は plan 詳細 (または一覧 API の decided 込み
-  レスポンス) で結末を判定してメッセージ edit
-- `FinanceClient` 追加メソッド: `pending_plans()` / `approve_plan(id)` /
-  `reject_plan(id, reason)`
+  投稿直後に `POST .../gate_message` で message_id を finance へ永続化 (F-5)。
+  再起動時は pending 一覧 GET の `gate_message_id` で突合し、未投稿分 (NULL) だけ再投稿
+- polling で pending から消えた plan は `GET /orchestrator/plans/{id}` (F-5) の
+  status + gate_decision で結末を判定してメッセージ edit
+- (任意) pending 一覧に cf_state を含め、stamp 済み (would_trigger) の plan は
+  メッセージに「⚡条件成立済み」を追記 edit — 判断催促の UX。実装は後回しで可
+- `FinanceClient` 追加メソッド: `pending_plans()` / `plan_detail(id)` /
+  `approve_plan(id)` / `reject_plan(id, reason)` / `set_gate_message(id, message_id)`
 
 ## 5. 実装順序 (両 spec の関係)
 
 1. `2026-07-05-planner-position-plan-context.md` (優先度高・独立) — 先行可
-2. 本 spec finance 側 (F-1→F-6 の順、F-4 は独立レビュー厚め)
+2. 本 spec finance 側 (F-1→F-7 の順、F-4 は独立レビュー厚め)
 3. 本 spec discord_bot 側 (finance API が生えてから)
 4. paper で gate ON → スコアカード運用開始
 
 ## 6. テスト観点
 
-- status 遷移: approve/reject の claim 排他 (並行 approve+reject で片方 409)、
-  gate OFF で現行挙動不変、pending の TTL sweep → expired
+- **publish 分岐** (F-6): gate ON で create は requires_replan のまま・最後の publish
+  だけ pending_approval になる (write 順序 = orphan 防止が gate ON でも保たれる)。
+  gate OFF で現行挙動不変 (新列すべて NULL)
+- **gate 決定 helper** (F-2b): try_decide_gate が status + gate_decision +
+  gate_decided_at + gate_reason を単一 UPDATE で残す。並行 approve+reject で
+  片方 409。expired 済み plan への approve は 409 (rowcount 0)
+- **unanswered**: pending 中に entry 成立 → stamp → TTL 到達で expired +
+  gate_decision='unanswered' + cf 行記録 (triggered_at=stamp 時刻)。
+  stamp なしで TTL 到達 → expired + unanswered、cf 行なし
+- **rejected の追跡**: reject 時 stamp 済 → 即 cf 行 / stamp なし → reject 後の
+  entry 初成立で cf 行 (1回だけ・status 不変)。**invalidation latch**: rejected で
+  invalidation 成立 → cf_state='invalidated'、その後 entry が成立しても cf 行を
+  記録しない
+- **pending の invalidation**: pending_approval → invalidated (real 遷移)。
+  承認不能になること
+- **UNIQUE 共存**: stamp 済み pending を承認 → active → real trigger が正常記録
+  される (cf 行が先に書かれていないので UNIQUE 衝突しない)。cf 行記録済み plan に
+  real trigger 経路が到達しないこと (rejected/expired は watch の active 集合にいない)
+- **cf 経路の分離**: order_intent 不作成、live mode + broker 注入でも執行されない、
+  decision type が plan_cf_trigger、hindsight が過去時刻 triggered_at でも拾うこと
 - supersede 拡張: pending_approval が置換されること、rejected は置換対象外
-  (terminal のまま)
-- 反実仮想 watch: 非 active plan の trigger 記録 (1回だけ)、status 不変、
-  order_intent 不作成、live mode でも執行されない、hindsight が拾うこと
-- API: 認証、409 系、reason の永続化
-- metrics: 3ラベル分割の件数・pnl_r 集計
+  (terminal のまま)。superseded pending は cf 行を起こさない
+- API: 認証、409 系、reason の永続化、gate_message の冪等性・404、
+  detail の gate_decision 反映
+- metrics: 3ラベル分割の件数・pnl_r 集計。**real 集計から cf 行が除外される**
+  (gate_decision NOT IN ('rejected','unanswered') フィルタ)
 - bot 側 (手動確認中心): persistent view の再起動生存、二重クリック、
-  channel 権限 (`cog_group` = finance の既存ゲート)
+  channel 権限 (`cog_group` = finance の既存ゲート)、再起動後の gate_message_id 突合
