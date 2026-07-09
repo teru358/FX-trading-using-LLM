@@ -220,6 +220,19 @@ def test_plan_to_row_missing_action_json():
 def test_plan_to_row_no_entry_conditions():
     row = plan_to_row(_plan(entry_conditions_json=[]))
     assert row["entry_summary"] == ""
+
+
+def test_plan_to_row_malformed_entry_conditions_does_not_raise():
+    """要素が dict でない壊れた entry_conditions でも落ちず空文字に倒す。"""
+    row = plan_to_row(_plan(entry_conditions_json=["broken", None]))
+    assert row["entry_summary"] == ""
+
+
+def test_plan_to_row_malformed_action_json_type():
+    """action_json が dict でない場合も sl/tp は None に倒す。"""
+    row = plan_to_row(_plan(action_json="not-a-dict"))
+    assert row["sl"] is None
+    assert row["tp"] is None
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -250,18 +263,35 @@ if TYPE_CHECKING:
     from src.data.orchestrator_store import _TradePlan
 
 
+def _safe_entry_summary(conditions: Any) -> str:
+    """entry_conditions_json が壊れていても落ちない _entry_summary ラッパ。
+
+    _entry_summary は各要素が dict である前提で c.get() を呼ぶため、要素が str や
+    None だと AttributeError になる。dict 要素だけに絞ってから渡し、それでも失敗
+    したら空文字に倒す (表示は best-effort)。
+    """
+    if not isinstance(conditions, list):
+        return ""
+    safe = [c for c in conditions if isinstance(c, dict)]
+    try:
+        return _entry_summary(safe)
+    except Exception:
+        return ""
+
+
 def plan_to_row(plan: "_TradePlan") -> dict[str, Any]:
     """_TradePlan 1件を表示/API 用の dict に整形する (純関数)。
 
-    sl/tp は action_json から生値を取り、欠損時は None。表示整形 (「-」等) は
+    sl/tp は action_json から生値を取り、欠損・型不整合時は None。表示整形 (「-」等) は
     呼び出し側 (表示層) の責務。フィールドキーは承認ゲート spec F-5 と揃える。
+    壊れた JSON でも 1件で全体が落ちないよう best-effort に倒す。
     """
-    action = plan.action_json or {}
+    action = plan.action_json if isinstance(plan.action_json, dict) else {}
     return {
         "plan_id": plan.plan_id,
         "pair": plan.pair,
         "direction": plan.direction,
-        "entry_summary": _entry_summary(plan.entry_conditions_json),
+        "entry_summary": _safe_entry_summary(plan.entry_conditions_json),
         "sl": action.get("sl"),
         "tp": action.get("tp"),
         "expires_at": plan.expires_at,
@@ -273,7 +303,7 @@ def plan_to_row(plan: "_TradePlan") -> dict[str, Any]:
 
 Run: `wsl.exe -d Ubuntu-24.04 --cd /home/teru/project/finance -- bash -lc "uv run pytest tests/test_plan_view.py -v 2>&1 | tail -20"`
 
-Expected: PASS (3 passed)
+Expected: PASS (5 passed — full / action欠損 / entry無し / malformed entry / malformed action型)
 
 - [ ] **Step 5: Commit**
 
@@ -306,8 +336,11 @@ Rich テーブル本体 (_cmd_plans) は手動確認だが、None フォール�
 from __future__ import annotations
 
 from datetime import datetime
+from io import StringIO
+from types import SimpleNamespace
 
-from src.cli import _fmt_dt, _fmt_num
+import src.cli as cli
+from src.cli import _cmd_plans, _fmt_dt, _fmt_num
 
 
 def test_fmt_dt_formats_month_day_hour_min():
@@ -324,6 +357,74 @@ def test_fmt_num_formats_three_decimals():
 
 def test_fmt_num_none_returns_dash():
     assert _fmt_num(None) == "-"
+
+
+def test_fmt_num_non_numeric_returns_dash():
+    """float 変換できない値 (壊れた action_json) でも落ちず「-」。"""
+    assert _fmt_num("bad") == "-"
+
+
+class _FakeStore:
+    """OrchestratorStore の get_plans_by_status だけ差し替える fake。"""
+
+    def __init__(self, mapping):
+        self._mapping = mapping  # status tuple の先頭 -> list[_TradePlan 相当]
+
+    def get_plans_by_status(self, statuses, pair=None):
+        return self._mapping.get(statuses[0], [])
+
+
+def _fake_plan(pair="USDJPY=X", direction="long"):
+    return SimpleNamespace(
+        plan_id=1, pair=pair, direction=direction,
+        entry_conditions_json=[{"type": "price_at_or_below", "value": 150.3}],
+        action_json={"sl": 149.8, "tp": 151.5},
+        expires_at=datetime(2026, 7, 8, 9, 0, 0),
+        created_at=datetime(2026, 7, 7, 22, 0, 0),
+    )
+
+
+def _capture_console(monkeypatch):
+    """_console を StringIO 出力の Console に差し替え、出力バッファを返す。"""
+    from rich.console import Console
+    buf = StringIO()
+    monkeypatch.setattr(cli, "_console", Console(file=buf, force_terminal=False, width=200))
+    return buf
+
+
+def test_cmd_plans_shows_pending_and_active(monkeypatch):
+    monkeypatch.setattr(
+        cli, "OrchestratorStore",
+        lambda _p: _FakeStore({"pending_approval": [_fake_plan()], "active": [_fake_plan()]}),
+    )
+    buf = _capture_console(monkeypatch)
+    _cmd_plans(SimpleNamespace(prices_db_path="ignored"))
+    out = buf.getvalue()
+    assert "pending_approval" in out
+    assert "active" in out
+    assert "USDJPY=X" in out
+
+
+def test_cmd_plans_empty_shows_nashi(monkeypatch):
+    monkeypatch.setattr(
+        cli, "OrchestratorStore",
+        lambda _p: _FakeStore({}),  # 両方 0 件
+    )
+    buf = _capture_console(monkeypatch)
+    _cmd_plans(SimpleNamespace(prices_db_path="ignored"))
+    out = buf.getvalue()
+    assert out.count("なし") == 2  # pending / active 両方 (なし)
+
+
+def test_cmd_plans_db_error_is_reported(monkeypatch):
+    def _boom(_p):
+        raise RuntimeError("db locked")
+    monkeypatch.setattr(cli, "OrchestratorStore", _boom)
+    buf = _capture_console(monkeypatch)
+    _cmd_plans(SimpleNamespace(prices_db_path="ignored"))
+    out = buf.getvalue()
+    assert "DB 読み取り失敗" in out
+    assert "RuntimeError" in out
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -351,8 +452,13 @@ def _fmt_dt(dt) -> str:
 
 
 def _fmt_num(v) -> str:
-    """数値を小数3桁に整形。None は「-」。"""
-    return f"{v:.3f}" if v is not None else "-"
+    """数値を小数3桁に整形。None・非数値 (壊れた action_json) は「-」。"""
+    if v is None:
+        return "-"
+    try:
+        return f"{float(v):.3f}"
+    except (TypeError, ValueError):
+        return "-"
 
 
 def _plans_table(title: str, rows: list[dict]) -> Table:
@@ -412,9 +518,13 @@ def _cmd_plans(config: AppConfig) -> None:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `wsl.exe -d Ubuntu-24.04 --cd /home/teru/project/finance -- bash -lc "uv run pytest tests/test_cli_plans.py -v 2>&1 | tail -20"`
+Run: `wsl.exe -d Ubuntu-24.04 --cd /home/teru/project/finance -- bash -lc "uv run pytest tests/test_cli_plans.py -v 2>&1 | tail -25"`
 
-Expected: PASS (4 passed)
+Expected: PASS (8 passed — _fmt_dt×2 / _fmt_num×3 / _cmd_plans×3)
+
+注意: `_cmd_plans` テストは `cli.OrchestratorStore` と `cli._console` を monkeypatch する。
+そのため Step 3(3a) の `from src.data.orchestrator_store import OrchestratorStore` は
+`src.cli` の名前空間に束縛されている必要がある (モジュール属性として差し替え可能)。
 
 - [ ] **Step 5: Commit**
 
@@ -432,7 +542,7 @@ cd //wsl.localhost/Ubuntu-24.04/home/teru/project/finance && git add src/cli.py 
 
 Run: `wsl.exe -d Ubuntu-24.04 --cd /home/teru/project/finance -- bash -lc "uv run pytest -q 2>&1 | tail -5"`
 
-Expected: 全件 PASS (直近 green 基準 1389 passed + 本実装の新規 12 件 = 1401 前後 passed / 0 failed)
+Expected: 全件 PASS (直近 green 基準 1389 passed + 本実装の新規: 取得層5 + 整形層5 + 表示層8 = 18 件 = 1407 前後 passed / 0 failed)
 
 - [ ] **Step 2: import 健全性チェック (plan_view が cli を引き込まないこと)**
 
@@ -455,8 +565,9 @@ Expected: 「承認待ち (pending_approval) (なし)」と、active plan があ
 
 ---
 
-## 実装後メモ (デプロイ不要)
+## 実装後メモ
 
-- 本コマンドは読み取り専用で config/DB スキーマを変更しないため、プロセス再起動やデプロイ手順は不要。
+- **DB migration 不要** (読み取り専用、schema 変更なし)。ただし**実行中の finance プロセスには
+  新しい CLI コマンドはロードされない** — 反映するには通常どおりプロセス再起動が必要。
 - 承認ゲート (spec 2026-07-05) 実装時: F-5 API は `get_plans_by_status(("pending_approval",))` と
   `plan_to_row` を再利用し、`plan_to_row` に reasoning_summary を追加拡張する。
