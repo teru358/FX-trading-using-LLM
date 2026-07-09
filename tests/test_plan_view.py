@@ -59,3 +59,9 @@ def test_plan_to_row_malformed_action_json_type():
     row = plan_to_row(_plan(action_json="not-a-dict"))
     assert row["sl"] is None
     assert row["tp"] is None
+
+
+def test_plan_to_row_entry_conditions_bare_dict_not_list():
+    """entry_conditions_json が list でなく dict そのものでも落ちず空文字。"""
+    row = plan_to_row(_plan(entry_conditions_json={"type": "x"}))
+    assert row["entry_summary"] == ""
