@@ -558,6 +558,27 @@ class OrchestratorStore:
                 session.expunge(p)
             return plans
 
+    def get_plans_by_status(
+        self, statuses: tuple[str, ...], pair: str | None = None,
+    ) -> list[_TradePlan]:
+        """指定 status 群の plan を created_at 降順で返す (pair 指定で絞り込み)。
+
+        get_active_plans と違い任意 status を引ける汎用メソッド。承認ゲート
+        (pending_approval) 表示や F-5 API がこれを共用する。空 statuses は
+        in_(()) の DB 依存を避けて空リストを返す。
+        """
+        if not statuses:
+            return []
+        with Session(self._engine) as session:
+            stmt = select(_TradePlan).where(_TradePlan.status.in_(statuses))
+            if pair is not None:
+                stmt = stmt.where(_TradePlan.pair == pair)
+            stmt = stmt.order_by(_TradePlan.created_at.desc())
+            plans = list(session.execute(stmt).scalars().all())
+            for p in plans:
+                session.expunge(p)
+            return plans
+
     # ── order_intents (§8.8) ───────────────────────────────────
 
     def try_insert_order_intent(

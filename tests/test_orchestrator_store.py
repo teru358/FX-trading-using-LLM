@@ -7,7 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from src.data.orchestrator_store import OrchestratorStore
+from src.data.orchestrator_store import OrchestratorStore, _TradePlan
+from sqlalchemy.orm import Session
 
 
 @pytest.fixture
@@ -831,3 +832,65 @@ def test_trade_plan_migration_adds_scale_in_columns(tmp_path: Path) -> None:
     plan = store.get_trade_plan(pid)
     assert plan.scale_in is True
     assert plan.new_signal_evidence == "new 1h breakout"
+
+
+# ── Task 1: get_plans_by_status (取得層) ───────────────────────
+
+
+def _seed_plan(store, *, pair, status, direction="long", created_offset_sec=0):
+    """任意 status の plan を ORM 直挿しで seed する (pending_approval も可能)。
+
+    create_trade_plan() は PLAN_STATUSES 外の status を拒否するため、テストでは
+    ORM で直接 insert する。取得層は status 文字列一致で引くだけなので DB に行が
+    あれば読める。created_at をずらして降順ソートを検証可能にする。
+    """
+    from datetime import timedelta
+    from src.utils.clock import db_now
+    now = db_now() + timedelta(seconds=created_offset_sec)
+    with Session(store._engine) as s:
+        plan = _TradePlan(
+            pair=pair, snapshot_id=1, horizon="day", direction=direction,
+            entry_conditions_json=[], action_json={"sl": 1.0, "tp": 2.0},
+            invalidation_json=[], expires_at=now + timedelta(hours=8),
+            status=status, created_by_run_id=1,
+            created_at=now, updated_at=now,
+        )
+        s.add(plan)
+        s.commit()
+        return plan.plan_id
+
+
+def test_get_plans_by_status_active_only(store: OrchestratorStore) -> None:
+    a = _seed_plan(store, pair="USDJPY=X", status="active")
+    _seed_plan(store, pair="USDJPY=X", status="suspended")
+    rows = store.get_plans_by_status(("active",))
+    ids = {p.plan_id for p in rows}
+    assert a in ids
+    assert all(p.status == "active" for p in rows)
+
+
+def test_get_plans_by_status_pending_approval(store: OrchestratorStore) -> None:
+    p = _seed_plan(store, pair="USDJPY=X", status="pending_approval")
+    _seed_plan(store, pair="USDJPY=X", status="active")
+    rows = store.get_plans_by_status(("pending_approval",))
+    ids = {r.plan_id for r in rows}
+    assert ids == {p}
+
+
+def test_get_plans_by_status_empty_tuple_returns_empty(store: OrchestratorStore) -> None:
+    _seed_plan(store, pair="USDJPY=X", status="active")
+    assert store.get_plans_by_status(()) == []
+
+
+def test_get_plans_by_status_orders_created_desc(store: OrchestratorStore) -> None:
+    older = _seed_plan(store, pair="USDJPY=X", status="active", created_offset_sec=0)
+    newer = _seed_plan(store, pair="USDJPY=X", status="active", created_offset_sec=10)
+    rows = store.get_plans_by_status(("active",))
+    assert [r.plan_id for r in rows[:2]] == [newer, older]
+
+
+def test_get_plans_by_status_pair_filter(store: OrchestratorStore) -> None:
+    usd = _seed_plan(store, pair="USDJPY=X", status="active")
+    _seed_plan(store, pair="EURUSD=X", status="active")
+    rows = store.get_plans_by_status(("active",), pair="USDJPY=X")
+    assert {r.plan_id for r in rows} == {usd}
