@@ -18,6 +18,8 @@ from src.notifications.notifier import OrderClosedEvent, create_notifier
 from src.persistence.state_store import StateStore
 from src.rag.vector_store import VectorStore
 from src.trading.position_manager import PositionManager
+from src.data.orchestrator_store import OrchestratorStore
+from src.orchestrator.plan_view import plan_to_row
 from src.commands.compare_models import run_compare
 from src.trading_cycle import run_trading_cycle
 from src.views import run_analysis_summary, run_ask, run_forecast_view, run_news_view, run_tech_view
@@ -37,6 +39,7 @@ _HELP = """\
   [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問・コメントを送信
   [cyan]audit[/cyan] (days)         — 過去トレードの統計診断レポート生成
   [cyan]audit review[/cyan] (days)  — audit + LLM 改善候補の対話選別 (教訓を audit_lessons.md に蓄積)
+  [cyan]plans[/cyan]           — 保持中の取引plan(承認待ち/監視中)を表示
   [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
   [cyan]halt[/cyan] soft|hard       — bridge を halt 状態にする (reason 任意)
   [cyan]resume[/cyan]               — soft halt を解除 (hard halt 中は手動 .env 編集が必要)
@@ -48,6 +51,63 @@ _HELP = """\
 
 
 # ── 個別コマンド ────────────────────────────────────────────────────────────
+
+def _fmt_dt(dt) -> str:
+    """datetime を MM-DD HH:MM に整形。None は「-」。"""
+    return dt.strftime("%m-%d %H:%M") if dt is not None else "-"
+
+
+def _fmt_num(v) -> str:
+    """数値を小数3桁に整形。None・非数値 (壊れた action_json) は「-」。"""
+    if v is None:
+        return "-"
+    try:
+        return f"{float(v):.3f}"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _plans_table(title: str, rows: list[dict]) -> Table:
+    """整形済み row 群から Rich テーブルを作る (0件でも見出しは呼び出し側で出す)。"""
+    tbl = Table(title=title, box=box.SIMPLE, show_header=True, padding=(0, 1))
+    tbl.add_column("ペア")
+    tbl.add_column("方向", justify="center")
+    tbl.add_column("entry条件")
+    tbl.add_column("SL", justify="right")
+    tbl.add_column("TP", justify="right")
+    tbl.add_column("期限", justify="right")
+    tbl.add_column("作成", justify="right")
+    for r in rows:
+        arrow = "📈 long" if r["direction"] == "long" else "📉 short"
+        tbl.add_row(
+            r["pair"], arrow, r["entry_summary"] or "-",
+            _fmt_num(r["sl"]), _fmt_num(r["tp"]),
+            _fmt_dt(r["expires_at"]), _fmt_dt(r["created_at"]),
+        )
+    return tbl
+
+
+def _cmd_plans(config: AppConfig) -> None:
+    try:
+        store = OrchestratorStore(config.prices_db_path)
+        pending = [plan_to_row(p) for p in store.get_plans_by_status(("pending_approval",))]
+        active = [plan_to_row(p) for p in store.get_plans_by_status(("active",))]
+    except Exception as e:
+        _console.print(f"[red]DB 読み取り失敗: {type(e).__name__}: {e}[/red]")
+        return
+
+    _console.print()
+    if pending:
+        _console.print(_plans_table("承認待ち (pending_approval)", pending))
+    else:
+        _console.print("[bold]承認待ち (pending_approval)[/bold]  [dim](なし)[/dim]")
+    _console.print()
+    if active:
+        _console.print(_plans_table("発注監視中 (active)", active))
+    else:
+        _console.print("[bold]発注監視中 (active)[/bold]  [dim](なし)[/dim]")
+    _console.print()
+
 
 def _cmd_status(config: AppConfig) -> None:
     state_store = StateStore(config.state_dir)
@@ -402,6 +462,8 @@ def run_commands(
                 _cmd_resume(config)
             elif cmd == "audit":
                 _cmd_audit(config, args)
+            elif cmd in ("plans", "plan"):
+                _cmd_plans(config)
             else:
                 _console.print(
                     f"[red]不明なコマンド: {cmd!r}[/red]  ([cyan]help[/cyan] で一覧)"
