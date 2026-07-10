@@ -570,6 +570,36 @@ class OrchestratorStore:
         """
         return self.try_claim_plan_status(plan_id, "triggered", from_status="active")
 
+    def try_decide_gate(
+        self, plan_id: int, decision: str, *, reason: str | None = None,
+    ) -> bool:
+        """pending_approval の plan に承認/却下を原子的に確定する (gate spec F-2b)。
+
+        status 遷移 (approved→active / rejected→rejected) と gate_decision /
+        gate_decided_at / gate_reason を**単一の条件付き UPDATE** で残す。
+        try_claim_plan_status では label/時刻/理由を同一 tx で残せないため専用化
+        (codex Medium)。二重クリック・承認と却下の競合は rowcount 排他で自然解決 —
+        勝てば True、既に pending でなければ False (API 層で 409 に写像)。
+        """
+        if decision not in ("approved", "rejected"):
+            raise ValueError(
+                f"decision must be 'approved' or 'rejected', got {decision!r}"
+            )
+        new_status = "active" if decision == "approved" else "rejected"
+        now = db_now()
+        with Session(self._engine) as session:
+            result = session.execute(
+                update(_TradePlan)
+                .where(_TradePlan.plan_id == plan_id)
+                .where(_TradePlan.status == "pending_approval")
+                .values(
+                    status=new_status, gate_decision=decision,
+                    gate_decided_at=now, gate_reason=reason, updated_at=now,
+                )
+            )
+            session.commit()
+            return result.rowcount == 1
+
     def get_active_plans(self, pair: str | None = None) -> list[_TradePlan]:
         """status=active の plan を返す (pair 指定で絞り込み)。"""
         with Session(self._engine) as session:

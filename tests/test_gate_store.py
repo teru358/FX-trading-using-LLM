@@ -66,3 +66,42 @@ def test_migration_idempotent(tmp_path):
     OrchestratorStore(db)
     store2 = OrchestratorStore(db)  # 2回目 — 既存列で例外にならない
     assert store2.get_trade_plan(999) is None  # 通常操作が生きている
+
+
+# ── Task 2: try_decide_gate ───────────────────────────────────
+
+
+def test_decide_gate_approve_sets_all_fields(store):
+    plan_id = _plan(store)
+    assert store.try_decide_gate(plan_id, "approved") is True
+    plan = store.get_trade_plan(plan_id)
+    assert plan.status == "active"
+    assert plan.gate_decision == "approved"
+    assert plan.gate_decided_at is not None
+    assert plan.gate_reason is None
+
+
+def test_decide_gate_reject_with_reason(store):
+    plan_id = _plan(store)
+    assert store.try_decide_gate(plan_id, "rejected", reason="RR悪い") is True
+    plan = store.get_trade_plan(plan_id)
+    assert plan.status == "rejected"
+    assert plan.gate_decision == "rejected"
+    assert plan.gate_reason == "RR悪い"
+
+
+def test_decide_gate_loses_when_not_pending(store):
+    """既に決定済み (active) の plan への二重決定は False (API 層で 409)。"""
+    plan_id = _plan(store)
+    assert store.try_decide_gate(plan_id, "approved") is True
+    assert store.try_decide_gate(plan_id, "rejected") is False
+    # 先勝ちの結果が保持される
+    plan = store.get_trade_plan(plan_id)
+    assert plan.status == "active"
+    assert plan.gate_decision == "approved"
+
+
+def test_decide_gate_invalid_decision_raises(store):
+    plan_id = _plan(store)
+    with pytest.raises(ValueError):
+        store.try_decide_gate(plan_id, "maybe")
