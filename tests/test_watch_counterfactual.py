@@ -137,3 +137,50 @@ def test_stamped_pending_approved_then_real_trigger_no_conflict(tmp_path):
     assert plan.cf_state == "would_trigger"           # stamp は残る (承認遅延コスト素材)
     trig = rt._orch.get_shadow_trigger(plan_id)
     assert trig is not None                           # real 行 1 本のみ
+
+
+# ── Task 10: pending の unanswered 終端 ───────────────────────
+
+
+def test_pending_expiry_marks_unanswered_no_stamp(tmp_path):
+    """stamp なしで TTL 到達 → expired + unanswered、cf 行なし。"""
+    rt = _make_runtime(tmp_path, mid=150.50)  # entry 未成立の価格
+    plan_id = _create_gate_plan(rt._orch, expires_at=PAST)
+    rt.run_watch_cycle(now=NOW)
+    plan = rt._orch.get_trade_plan(plan_id)
+    assert plan.status == "expired"
+    assert plan.gate_decision == "unanswered"
+    assert rt._orch.get_shadow_trigger(plan_id) is None
+
+
+def test_pending_expiry_with_stamp_finalizes_cf(tmp_path):
+    """stamp → TTL 到達 → expired + unanswered + cf 行 (triggered_at=stamp 時刻)。"""
+    rt = _make_runtime(tmp_path, mid=150.10, seed_technical=True)
+    plan_id = _create_gate_plan(rt._orch, expires_at=NOW + timedelta(seconds=30))
+    rt.run_watch_cycle(now=NOW)                          # stamp
+    stamped_at = rt._orch.get_trade_plan(plan_id).cf_stamped_at
+    rt.run_watch_cycle(now=NOW + timedelta(minutes=5))   # TTL 超過
+    plan = rt._orch.get_trade_plan(plan_id)
+    assert plan.status == "expired"
+    assert plan.gate_decision == "unanswered"
+    assert plan.cf_state == "triggered"
+    trig = rt._orch.get_shadow_trigger(plan_id)
+    assert trig is not None
+    assert trig.triggered_at == stamped_at               # エントリー点は stamp 時刻
+    assert trig.trigger_price == 150.10
+
+
+def test_pending_invalidation_marks_unanswered(tmp_path):
+    """invalidation 成立 → invalidated + unanswered (G-3 拡張解釈)。承認不能になる。"""
+    rt = _make_runtime(tmp_path, mid=147.50)  # invalidation (price_below 148) が成立
+    plan_id = _create_gate_plan(
+        rt._orch,
+        entry=[{"type": "price_at_or_below", "value": 147.0}],  # entry は未成立
+        invalidation=[{"type": "price_below", "value": 148.0}],
+    )
+    rt.run_watch_cycle(now=NOW)
+    plan = rt._orch.get_trade_plan(plan_id)
+    assert plan.status == "invalidated"
+    assert plan.gate_decision == "unanswered"
+    # 承認不能 (409 相当)
+    assert rt._orch.try_decide_gate(plan_id, "approved") is False
