@@ -222,18 +222,27 @@ def test_rejected_cf_recorded_once(tmp_path):
 
 
 def test_rejected_invalidation_latches_then_entry_ignored(tmp_path):
-    """invalidation latch 後は entry が成立しても cf 行を書かない (誤反実仮想の防止)。"""
+    """invalidation latch 後は entry が成立しても cf 行を書かない (誤反実仮想の防止)。
+
+    entry (price_at_or_below 149.0) と invalidation (price_below 148.0) は
+    非重複な閾値にしてある: tick2 の価格 148.5 は invalidation を再発火させず
+    (148.5 は 148.0 未満ではない) entry のみ成立させる。これにより「tick2 で
+    invalidation が再発火して entry 評価に到達しない」経路を排除し、
+    cf_state='invalidated' の latch そのものが cf 行書き込みを防いでいることを
+    ピンポイントで検証する。
+    """
     # tick1: mid=147.5 → invalidation (price_below 148) 成立 → latch
     rt = _make_runtime(tmp_path, mid=147.50, seed_technical=True)
     plan_id = _rejected_plan(
         rt,
-        entry=[{"type": "price_at_or_below", "value": 147.0}],
+        entry=[{"type": "price_at_or_below", "value": 149.0}],
         invalidation=[{"type": "price_below", "value": 148.0}],
     )
     rt.run_watch_cycle(now=NOW)
     assert rt._orch.get_trade_plan(plan_id).cf_state == "invalidated"
-    # tick2: 価格が戻って entry 成立圏 (146.9) でも記録しない
-    rt2_quote_mid = 146.90
+    # tick2: 148.5 は invalidation 非該当 (148.5 は 148.0 未満ではない) だが
+    # entry (≤149.0) は成立圏。latch がなければここで cf 行が書かれてしまう。
+    rt2_quote_mid = 148.50
     rt._quote_provider = lambda pair: QuoteSnapshot(
         bid=rt2_quote_mid - 0.005, ask=rt2_quote_mid + 0.005, mid=rt2_quote_mid,
         spread=0.01, source="test", observed_at=NOW,
@@ -322,3 +331,30 @@ def test_approved_after_exec_failure_not_cf_recovered(tmp_path):
     trig = rt._orch.get_shadow_trigger(plan_id)          # 行は real の 1 本のまま
     dec = rt._orch.get_decision(trig.decision_id)
     assert dec.decision_type == "plan_trigger"           # plan_cf_trigger が増えていない
+
+
+def test_approved_invalidated_before_real_trigger_not_cf_recovered(tmp_path):
+    """real trigger 前 (shadow_trigger 行なし) に承認済み plan が invalidated 化しても
+    cf 復旧されない (codex plan review High#1)。
+
+    test_approved_after_exec_failure_not_cf_recovered は real trigger 後に発注失敗を
+    simulate するため、既存 shadow_trigger 行の UNIQUE(plan_id) 制約が cf 行の
+    偽 INSERT を独立にブロックしてしまい、get_cf_finalize_pending の
+    gate_decision IN ('rejected','unanswered') ガードを外しても検知できない。
+    本テストは real trigger を一切起こさず (shadow_trigger 行なし) に
+    invalidated 化するため、UNIQUE 制約による保護がなく、ガードのみが
+    唯一の防波堤になる。
+    """
+    rt = _make_runtime(tmp_path, mid=150.10, seed_technical=True)
+    plan_id = _create_gate_plan(rt._orch)
+    rt.run_watch_cycle(now=NOW)                          # stamp (cf_state='would_trigger')
+    assert rt._orch.try_decide_gate(plan_id, "approved") is True
+    # real trigger は起こさない — shadow_trigger 行は存在しない状態を維持する。
+    assert rt._orch.get_shadow_trigger(plan_id) is None
+    # 発注失敗等で invalidated 化する経路を simulate (real trigger を経ていない点が
+    # test_approved_after_exec_failure_not_cf_recovered との違い)。
+    rt._orch.update_plan_status(plan_id, "invalidated")
+    rt.run_watch_cycle(now=NOW + timedelta(seconds=4))   # 回収 tick
+    plan = rt._orch.get_trade_plan(plan_id)
+    assert plan.cf_state == "would_trigger"               # triggered に進んでいない
+    assert rt._orch.get_shadow_trigger(plan_id) is None    # cf 行が書かれていない
