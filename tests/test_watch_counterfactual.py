@@ -256,3 +256,69 @@ def test_cf_paths_never_execute_in_live_mode(tmp_path):
     broker.assert_not_called()
     assert not broker.method_calls
     assert rt._orch.get_order_intent(pending_id) is None
+
+
+# ── Task 12: finalize 待ち回収 (crash recovery) ────────────────
+
+
+def test_crashed_rejected_finalize_recovered_next_tick(tmp_path):
+    """reject 直後 (finalize 前) にクラッシュした状態 → 次 tick で cf 行が揃う。"""
+    rt = _make_runtime(tmp_path, mid=150.50)  # entry 非成立の価格 (回収経路のみを検証)
+    plan_id = _create_gate_plan(rt._orch)
+    rt._orch.try_stamp_would_trigger(
+        plan_id, at=NOW - timedelta(minutes=10), price=150.25, spread_pips=1.2)
+    rt._orch.try_decide_gate(plan_id, "rejected")
+    # ここで crash した想定: rejected + would_trigger + 行なし
+    assert rt._orch.get_shadow_trigger(plan_id) is None
+
+    rt.run_watch_cycle(now=NOW)
+
+    plan = rt._orch.get_trade_plan(plan_id)
+    assert plan.cf_state == "triggered"
+    trig = rt._orch.get_shadow_trigger(plan_id)
+    assert trig is not None
+    assert trig.trigger_price == 150.25        # stamp 値で記録される
+    dec = rt._orch.get_decision(trig.decision_id)
+    assert dec.decision_type == "plan_cf_trigger"
+
+
+def test_crashed_expired_finalize_recovered(tmp_path):
+    """expiry 遷移後 (finalize 前) のクラッシュも回収される。"""
+    rt = _make_runtime(tmp_path, mid=150.50)
+    plan_id = _create_gate_plan(rt._orch)
+    rt._orch.try_stamp_would_trigger(
+        plan_id, at=NOW - timedelta(minutes=10), price=150.25, spread_pips=1.2)
+    rt._orch.try_close_pending_unanswered(plan_id, "expired")
+    rt.run_watch_cycle(now=NOW)
+    assert rt._orch.get_trade_plan(plan_id).cf_state == "triggered"
+    assert rt._orch.get_shadow_trigger(plan_id) is not None
+
+
+def test_recovery_idempotent_across_ticks(tmp_path):
+    rt = _make_runtime(tmp_path, mid=150.50)
+    plan_id = _create_gate_plan(rt._orch)
+    rt._orch.try_stamp_would_trigger(
+        plan_id, at=NOW - timedelta(minutes=10), price=150.25, spread_pips=1.2)
+    rt._orch.try_decide_gate(plan_id, "rejected")
+    rt.run_watch_cycle(now=NOW)
+    rt.run_watch_cycle(now=NOW + timedelta(seconds=1))  # 2 周しても行は増えない
+    assert rt._orch.get_shadow_trigger(plan_id) is not None
+    assert rt._orch.get_cf_finalize_pending("USDJPY=X") == []
+
+
+def test_approved_after_exec_failure_not_cf_recovered(tmp_path):
+    """stamp→approve→real trigger→発注失敗で invalidated → cf 復旧されない
+    (codex plan review High#1 の end-to-end 回帰)。"""
+    rt = _make_runtime(tmp_path, mid=150.10, seed_technical=True)
+    plan_id = _create_gate_plan(rt._orch)
+    rt.run_watch_cycle(now=NOW)                          # stamp
+    assert rt._orch.try_decide_gate(plan_id, "approved") is True
+    rt.run_watch_cycle(now=NOW + timedelta(seconds=2))   # real trigger
+    # live 発注失敗経路の simulate (runtime は is_executed=False で invalidated 化)
+    rt._orch.update_plan_status(plan_id, "invalidated")
+    rt.run_watch_cycle(now=NOW + timedelta(seconds=4))   # 回収 tick
+    plan = rt._orch.get_trade_plan(plan_id)
+    assert plan.cf_state == "would_trigger"              # cf 化されない (状態不変)
+    trig = rt._orch.get_shadow_trigger(plan_id)          # 行は real の 1 本のまま
+    dec = rt._orch.get_decision(trig.decision_id)
+    assert dec.decision_type == "plan_trigger"           # plan_cf_trigger が増えていない

@@ -536,6 +536,7 @@ class OrchestratorRuntime:
 
         評価 context は非永続 (assemble) で組み、trigger 確定時のみ build() で
         新規 snapshot を materialize する (§7.1)。
+        反実仮想版は _evaluate_cf_plan — 評価順序を変える時は両方を揃えること。
         """
         quote = self._quote_provider(pair)
         ctx = self._ctx.assemble(pair=pair, now=now, quote=quote)
