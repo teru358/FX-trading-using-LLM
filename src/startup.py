@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import concurrent.futures
+import logging
+import os
 from pathlib import Path
 
 from rich import box
@@ -10,6 +12,8 @@ from rich.table import Table
 from rich.text import Text
 
 from src.config import AppConfig, InstrumentConfig
+
+_logger = logging.getLogger(__name__)
 
 _SYMBOL_CHECK_TIMEOUT = 10  # 全シンボルの並列フェッチ最大待機秒数
 
@@ -251,6 +255,31 @@ def _build_symbol_table(instruments: list[InstrumentConfig]) -> tuple[Table, boo
     return table, all_ok
 
 
+def _check_approval_gate_config(config: AppConfig) -> tuple[bool, str | None]:
+    """approval gate (orchestrator.approval_gate) の設定整合性を確認する。
+
+    ON のとき plan は pending_approval になり、F-5 API 経由の承認でしか active
+    化されない。api.enabled=False か API_SECRET_KEY 未設定だと承認経路が存在せず
+    plan が永久に滞留する (無言の取引停止) ため、起動時エラーとして検出する
+    (実装後レビュー Medium)。既定の approval_gate=False では常に (True, None)。
+    """
+    if not config.orchestrator.approval_gate:
+        return True, None
+    if not config.api.enabled:
+        return False, (
+            "orchestrator.approval_gate=True ですが api.enabled=False です。"
+            "承認 API が起動しないため plan が pending_approval のまま滞留します。"
+            "api.enabled を true にするか approval_gate を無効化してください。"
+        )
+    if not os.environ.get("API_SECRET_KEY"):
+        return False, (
+            "orchestrator.approval_gate=True ですが環境変数 API_SECRET_KEY が"
+            "未設定です。承認 API を呼び出せないため plan が pending_approval の"
+            "まま滞留します。API_SECRET_KEY を設定してください。"
+        )
+    return True, None
+
+
 def startup_checks(config: AppConfig) -> bool:
     """起動時チェック（LLMプロバイダー・シンボル疎通・ディレクトリ）を実行して結果を表示する。"""
     # LLM / Embedding チェック (provider ごとに一括で /models を取りにいく)
@@ -268,24 +297,32 @@ def startup_checks(config: AppConfig) -> bool:
     watch_count = len(instruments) - trade_count
     symbol_table, symbol_ok = _build_symbol_table(instruments)
 
+    # Approval gate 設定チェック (実装後レビュー Medium)
+    gate_ok, gate_err = _check_approval_gate_config(config)
+
     # ディレクトリ作成
     config.state_dir.mkdir(parents=True, exist_ok=True)
     config.rag_db_path.mkdir(parents=True, exist_ok=True)
     (Path(__file__).parent.parent / "logs").mkdir(exist_ok=True)
 
     # レンダリング
-    ok = llm_ok and symbol_ok
+    ok = llm_ok and symbol_ok and gate_ok
     llm_header = Text("LLM / Embedding", style="bold")
     symbol_header = Text(
         f"Instruments  ({trade_count} trade / {watch_count} watch)", style="bold",
     )
-    body = Group(
+    body_items = [
         llm_header,
         llm_table,
         Text(""),  # spacer
         symbol_header,
         symbol_table,
-    )
+    ]
+    if gate_err:
+        body_items.append(Text(""))  # spacer
+        body_items.append(Text(f"✗ Approval gate: {gate_err}", style="bold red"))
+        _logger.error(f"[STARTUP] approval gate 設定エラー: {gate_err}")
+    body = Group(*body_items)
 
     overall = "[bold green]READY[/bold green]" if ok else "[bold red]FAILED[/bold red]"
     _console.print(Panel(

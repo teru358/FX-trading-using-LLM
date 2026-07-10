@@ -9,6 +9,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 from src.startup import (
+    _check_approval_gate_config,
     _collect_llm_role_entries,
     _llamacpp_required_models,
     _ollama_required_models,
@@ -154,3 +155,47 @@ def test_collect_llm_role_entries_unset_model_shown():
     entries = _collect_llm_role_entries(config)
     news_entry = next(e for e in entries if e[0] == "news")
     assert news_entry == ("news", "ollama", "(unset)")
+
+
+def _make_gate_config(*, approval_gate: bool, api_enabled: bool):
+    """approval gate 検証用の最小 config。"""
+    return SimpleNamespace(
+        orchestrator=SimpleNamespace(approval_gate=approval_gate),
+        api=SimpleNamespace(enabled=api_enabled),
+    )
+
+
+def test_approval_gate_requires_api_enabled(monkeypatch):
+    """approval_gate=True で api.enabled=False なら起動時エラー。"""
+    monkeypatch.setenv("API_SECRET_KEY", "secret")
+    config = _make_gate_config(approval_gate=True, api_enabled=False)
+    ok, err = _check_approval_gate_config(config)
+    assert ok is False
+    assert err is not None
+
+
+def test_approval_gate_requires_api_key(monkeypatch):
+    """approval_gate=True かつ api.enabled=True でも API_SECRET_KEY 未設定ならエラー。"""
+    monkeypatch.delenv("API_SECRET_KEY", raising=False)
+    config = _make_gate_config(approval_gate=True, api_enabled=True)
+    ok, err = _check_approval_gate_config(config)
+    assert ok is False
+    assert err is not None
+
+
+def test_approval_gate_ok_when_configured(monkeypatch):
+    """approval_gate=True で api.enabled=True かつ API_SECRET_KEY 設定済みなら OK。"""
+    monkeypatch.setenv("API_SECRET_KEY", "secret")
+    config = _make_gate_config(approval_gate=True, api_enabled=True)
+    ok, err = _check_approval_gate_config(config)
+    assert ok is True
+    assert err is None
+
+
+def test_approval_gate_off_skips_check(monkeypatch):
+    """approval_gate=False (既定) なら api.enabled / API_SECRET_KEY を問わず OK。"""
+    monkeypatch.delenv("API_SECRET_KEY", raising=False)
+    config = _make_gate_config(approval_gate=False, api_enabled=False)
+    ok, err = _check_approval_gate_config(config)
+    assert ok is True
+    assert err is None
