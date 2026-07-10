@@ -132,3 +132,24 @@ def test_auth_required(store, client):
 def test_store_not_configured_returns_503(client):
     state.orchestrator_store = None
     assert client.get("/orchestrator/plans", headers=HEADERS).status_code == 503
+
+
+def test_out_of_range_plan_id_rejected(store, client):
+    huge = 10 ** 30
+    assert client.get(
+        f"/orchestrator/plans/{huge}", headers=HEADERS).status_code == 422
+    assert client.post(
+        f"/orchestrator/plans/{huge}/approve", headers=HEADERS).status_code == 422
+
+
+def test_approve_missing_plan_404(store, client):
+    res = client.post("/orchestrator/plans/424242/approve", headers=HEADERS)
+    assert res.status_code == 404
+
+
+def test_reject_reason_too_long_422(store, client):
+    plan_id = _pending_plan(store)
+    res = client.post(
+        f"/orchestrator/plans/{plan_id}/reject",
+        headers=HEADERS, json={"reason": "a" * 501})
+    assert res.status_code == 422

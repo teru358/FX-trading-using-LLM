@@ -8,13 +8,16 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Path
+from pydantic import BaseModel, Field
 
 from src.api._state import state, verify_api_key
 from src.orchestrator.plan_view import plan_to_row
 
 router = APIRouter()
+
+# SQLite INTEGER max (signed 64bit). plan_id は正の autoincrement のため ge=1。
+_PLAN_ID = Path(..., ge=1, le=2**63 - 1)
 
 
 def _store():
@@ -50,7 +53,7 @@ def list_plans(
 
 
 @router.get("/orchestrator/plans/{plan_id}", dependencies=[Depends(verify_api_key)])
-def plan_detail(plan_id: int) -> dict[str, Any]:
+def plan_detail(plan_id: int = _PLAN_ID) -> dict[str, Any]:
     """plan 詳細 — polling で pending から消えた plan の結末判定 (bot の edit 用)。"""
     store = _store()
     plan = store.get_trade_plan(plan_id)
@@ -63,7 +66,7 @@ def plan_detail(plan_id: int) -> dict[str, Any]:
 
 
 class _RejectBody(BaseModel):
-    reason: str | None = None
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class _GateMessageBody(BaseModel):
@@ -74,8 +77,11 @@ class _GateMessageBody(BaseModel):
     "/orchestrator/plans/{plan_id}/approve",
     dependencies=[Depends(verify_api_key)],
 )
-def approve_plan(plan_id: int) -> dict[str, Any]:
-    if not _store().try_decide_gate(plan_id, "approved"):
+def approve_plan(plan_id: int = _PLAN_ID) -> dict[str, Any]:
+    store = _store()
+    if store.get_trade_plan(plan_id) is None:
+        raise HTTPException(status_code=404, detail="plan not found")
+    if not store.try_decide_gate(plan_id, "approved"):
         raise HTTPException(status_code=409, detail="plan is not pending_approval")
     return {"plan_id": plan_id, "status": "active"}
 
@@ -84,9 +90,14 @@ def approve_plan(plan_id: int) -> dict[str, Any]:
     "/orchestrator/plans/{plan_id}/reject",
     dependencies=[Depends(verify_api_key)],
 )
-def reject_plan(plan_id: int, body: _RejectBody | None = None) -> dict[str, Any]:
+def reject_plan(
+    plan_id: int = _PLAN_ID, body: _RejectBody | None = None
+) -> dict[str, Any]:
+    store = _store()
+    if store.get_trade_plan(plan_id) is None:
+        raise HTTPException(status_code=404, detail="plan not found")
     reason = body.reason if body is not None else None
-    if not _store().try_decide_gate(plan_id, "rejected", reason=reason):
+    if not store.try_decide_gate(plan_id, "rejected", reason=reason):
         raise HTTPException(status_code=409, detail="plan is not pending_approval")
     return {"plan_id": plan_id, "status": "rejected"}
 
@@ -95,7 +106,9 @@ def reject_plan(plan_id: int, body: _RejectBody | None = None) -> dict[str, Any]
     "/orchestrator/plans/{plan_id}/gate_message",
     dependencies=[Depends(verify_api_key)],
 )
-def set_gate_message(plan_id: int, body: _GateMessageBody) -> dict[str, Any]:
+def set_gate_message(
+    plan_id: int = _PLAN_ID, body: _GateMessageBody = ...
+) -> dict[str, Any]:
     """bot が Discord 投稿直後に呼ぶ (再起動突合の正本を finance 側へ)。冪等。"""
     if not _store().set_gate_message(plan_id, body.message_id):
         raise HTTPException(status_code=404, detail="plan not found")
