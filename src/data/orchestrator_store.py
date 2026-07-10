@@ -1537,20 +1537,23 @@ class OrchestratorStore:
         except_plan_id: int | None = None,
         reason: str = "superseded",
     ) -> list[int]:
-        """pair の active plan を全て status='superseded' にする。
+        """pair の active/pending_approval plan を全て status='superseded' にする。
 
         except_plan_id は除外する。pair 単位で active plan を最大 1 件に保つために
         使う。superseded にした plan_id のリストを返す。reason はログ用 (テーブルに
         reason 列が無いため status のみ変更し logger.info に残す)。
         """
-        # 読み取りと更新を 1 transaction にまとめ、status='active' 条件付きで UPDATE する。
+        # 読み取りと更新を 1 transaction にまとめ、status 条件付きで UPDATE する。
         # こうしないと get_active_plans → update の隙に watch loop が triggered/invalidated に
         # した plan を無条件に superseded で上書きし、trigger 記録や lifecycle metric を壊す。
         with Session(self._engine) as session:
             stmt = (
                 select(_TradePlan)
                 .where(_TradePlan.pair == pair)
-                .where(_TradePlan.status == "active")
+                # gate spec F-3: 返答待ち plan も新 plan で置換する (G-6)。置換された
+                # pending は superseded (gate_decision NULL = 人間の判断なしラベル)。
+                # rejected は terminal のまま対象外。
+                .where(_TradePlan.status.in_(("active", "pending_approval")))
                 .with_for_update()
             )
             if except_plan_id is not None:
@@ -1559,6 +1562,12 @@ class OrchestratorStore:
             now = db_now()
             ids = []
             for plan in plans:
+                # pending の置換は cf 窓終了マーカーを刻印 (F-7 の superseded pending
+                # 件数集計。gate_decision NULL だけでは gate OFF の superseded と
+                # 区別できない — codex plan review Medium)。stamp 済みなら上書きしてよい
+                # (窓は閉じた。finalize 対象には gate_decision 条件で元々ならない)。
+                if plan.status == "pending_approval":
+                    plan.cf_state = "superseded"
                 plan.status = "superseded"
                 plan.updated_at = now
                 ids.append(plan.plan_id)

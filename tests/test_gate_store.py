@@ -342,3 +342,24 @@ def test_cf_finalize_pending_excludes_approved(store):
     store.try_decide_gate(p, "approved")
     store.update_plan_status(p, "invalidated")   # 発注失敗経路の simulate
     assert store.get_cf_finalize_pending("USDJPY=X") == []
+
+
+# ── Task 7: supersede 拡張 ────────────────────────────────────
+
+
+def test_supersede_includes_pending_approval(store):
+    """新 plan 作成時、返答待ち plan も置換される (G-6)。判断なし = gate_decision NULL。"""
+    p_pending = _plan(store)
+    ids = store.supersede_active_plans("USDJPY=X")
+    assert ids == [p_pending]
+    plan = store.get_trade_plan(p_pending)
+    assert plan.status == "superseded"
+    assert plan.gate_decision is None  # rejected ではない (人間の判断なし)
+    assert plan.cf_state == "superseded"  # F-7 集計マーカー (gate OFF と区別する唯一の手段)
+
+
+def test_supersede_active_plan_no_cf_marker(store):
+    """active (gate OFF/approved) の置換には cf マーカーを付けない。"""
+    p_active = _plan(store, status="active")
+    store.supersede_active_plans("USDJPY=X")
+    assert store.get_trade_plan(p_active).cf_state is None
