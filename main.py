@@ -85,6 +85,19 @@ def _run_with_slot(fn, *args, **kwargs) -> None:
     ).start()
 
 
+def _api_orchestrator_store(config):
+    """API に渡す OrchestratorStore を返す (orchestrator 無効なら None)。
+
+    orchestrator.enabled=False のときに OrchestratorStore を生成しない
+    (不要な DB ファイル生成と、テストで config が MagicMock の場合の
+    working directory 汚染を防ぐ — 実装後レビュー Low-Med)。
+    """
+    if not config.orchestrator.enabled:
+        return None
+    from src.data.orchestrator_store import OrchestratorStore
+    return OrchestratorStore(config.prices_db_path)
+
+
 def _build_cadence_driver(config, run_watch_tech, run_trade_tech):
     """cadence driver を組む (§5.3/§5.6, Phase1 Task B)。
 
@@ -486,12 +499,12 @@ def main() -> None:
     # REST API サーバー（有効時のみ — Initial collection 前に起動）
     if config.api.enabled:
         from src.api.server import start_api_server
-        from src.data.orchestrator_store import OrchestratorStore
-        # gate spec F-5: API から plan gate を操作するための store。engine は
+        # gate spec F-5: API から plan gate を操作する store。orchestrator 有効時のみ
+        # 生成 (無効時に不要な DB を作らない — 実装後レビュー Low-Med)。engine は
         # _get_engine が db_path 単位で共有するため runtime 側と実体は同一。
         start_api_server(config, store, analysis_store, _llm_slot,
                          price_store, hold_store, forecast_store,
-                         OrchestratorStore(config.prices_db_path))
+                         _api_orchestrator_store(config))
 
     # 起動直後にニュース収集+テクニカル分析を1回実行
     # prices.db が存在しない場合（初回起動）は市場時間を無視して強制実行
