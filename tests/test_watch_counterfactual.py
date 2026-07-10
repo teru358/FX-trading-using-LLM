@@ -184,3 +184,75 @@ def test_pending_invalidation_marks_unanswered(tmp_path):
     assert plan.gate_decision == "unanswered"
     # 承認不能 (409 相当)
     assert rt._orch.try_decide_gate(plan_id, "approved") is False
+
+
+# ── Task 11: rejected の cf finalize / latch / 執行境界 ────────
+
+
+def _rejected_plan(rt, **kw) -> int:
+    plan_id = _create_gate_plan(rt._orch, **kw)
+    assert rt._orch.try_decide_gate(plan_id, "rejected") is True
+    return plan_id
+
+
+def test_rejected_entry_finalizes_cf_directly(tmp_path):
+    """reject 後の entry 初成立 → cf 行 (status は rejected のまま不変)。"""
+    rt = _make_runtime(tmp_path, mid=150.10, seed_technical=True)
+    plan_id = _rejected_plan(rt)
+    triggered = rt.run_watch_cycle(now=NOW)
+    assert triggered == []                     # real trigger には数えない
+    plan = rt._orch.get_trade_plan(plan_id)
+    assert plan.status == "rejected"           # terminal のまま
+    assert plan.cf_state == "triggered"
+    trig = rt._orch.get_shadow_trigger(plan_id)
+    assert trig is not None
+    assert trig.trigger_price == 150.10
+    dec = rt._orch.get_decision(trig.decision_id)
+    assert dec.decision_type == "plan_cf_trigger"   # real と集計分離
+
+
+def test_rejected_cf_recorded_once(tmp_path):
+    rt = _make_runtime(tmp_path, mid=150.10, seed_technical=True)
+    plan_id = _rejected_plan(rt)
+    rt.run_watch_cycle(now=NOW)
+    rt.run_watch_cycle(now=NOW + timedelta(seconds=1))  # 2 tick 目
+    # 行は 1 本のまま (UNIQUE + cf_state 解決済みで watch 対象から外れる)
+    trig = rt._orch.get_shadow_trigger(plan_id)
+    assert trig is not None
+
+
+def test_rejected_invalidation_latches_then_entry_ignored(tmp_path):
+    """invalidation latch 後は entry が成立しても cf 行を書かない (誤反実仮想の防止)。"""
+    # tick1: mid=147.5 → invalidation (price_below 148) 成立 → latch
+    rt = _make_runtime(tmp_path, mid=147.50, seed_technical=True)
+    plan_id = _rejected_plan(
+        rt,
+        entry=[{"type": "price_at_or_below", "value": 147.0}],
+        invalidation=[{"type": "price_below", "value": 148.0}],
+    )
+    rt.run_watch_cycle(now=NOW)
+    assert rt._orch.get_trade_plan(plan_id).cf_state == "invalidated"
+    # tick2: 価格が戻って entry 成立圏 (146.9) でも記録しない
+    rt2_quote_mid = 146.90
+    rt._quote_provider = lambda pair: QuoteSnapshot(
+        bid=rt2_quote_mid - 0.005, ask=rt2_quote_mid + 0.005, mid=rt2_quote_mid,
+        spread=0.01, source="test", observed_at=NOW,
+    )
+    rt.run_watch_cycle(now=NOW + timedelta(seconds=1))
+    assert rt._orch.get_shadow_trigger(plan_id) is None
+
+
+def test_cf_paths_never_execute_in_live_mode(tmp_path):
+    """live mode + broker 注入でも cf 経路は執行しない (spec F-4 執行境界)。"""
+    broker = MagicMock()
+    rt = _make_runtime(
+        tmp_path, mid=150.10, seed_technical=True,
+        mode="live", execution_broker=broker,
+    )
+    _rejected_plan(rt)
+    pending_id = _create_gate_plan(rt._orch)
+    rt.run_watch_cycle(now=NOW)
+    # rejected は cf 行化・pending は stamp、どちらも broker に触れない
+    broker.assert_not_called()
+    assert not broker.method_calls
+    assert rt._orch.get_order_intent(pending_id) is None
