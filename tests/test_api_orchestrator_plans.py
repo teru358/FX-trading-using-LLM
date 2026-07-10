@@ -131,6 +131,19 @@ def test_list_invalid_status_422(store, client):
     assert res.status_code == 422
 
 
+def test_posted_within_hours_out_of_range_422(store, client):
+    """posted_within_hours の負値・巨大値は 422 (OverflowError→500 防止)。"""
+    assert client.get(
+        "/orchestrator/plans?posted_within_hours=0", headers=HEADERS
+    ).status_code == 422
+    assert client.get(
+        "/orchestrator/plans?posted_within_hours=-5", headers=HEADERS
+    ).status_code == 422
+    assert client.get(
+        "/orchestrator/plans?posted_within_hours=100000", headers=HEADERS
+    ).status_code == 422
+
+
 def test_auth_required(store, client):
     assert client.get("/orchestrator/plans").status_code in (401, 403, 422)
 

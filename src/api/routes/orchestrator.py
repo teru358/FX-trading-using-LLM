@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 
 from src.api._state import state, verify_api_key
@@ -41,7 +41,9 @@ def _row(store, plan) -> dict[str, Any]:
 @router.get("/orchestrator/plans", dependencies=[Depends(verify_api_key)])
 def list_plans(
     status: str = "pending_approval",
-    posted_within_hours: int | None = None,
+    # 負値・巨大値は timedelta(hours=...) で OverflowError→500 を起こすため境界化
+    # (実装後レビュー Low)。720h = 30日を上限とする。
+    posted_within_hours: int | None = Query(default=None, ge=1, le=720),
 ) -> dict[str, Any]:
     """plan 一覧。posted_within_hours 指定時は reconcile モード (status 不問・
     gate_message_id あり・updated_at 窓 — bot 再起動復旧用)。"""
