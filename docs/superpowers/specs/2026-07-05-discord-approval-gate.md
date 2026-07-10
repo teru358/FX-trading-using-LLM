@@ -1,6 +1,6 @@
 # Discord 承認ゲート (approval gate) 設計 spec
 
-日付: 2026-07-05 (**2026-07-09 codex spec レビュー 1巡目 7件 + 2巡目 5件反映** — F-1/F-2/F-4/F-5/F-6/F-7 改訂)
+日付: 2026-07-05 (**2026-07-09 codex spec レビュー 1巡目 7件 + 2巡目 5件、2026-07-11 実装後レビュー 5件反映** — F-1/F-2b/F-3/F-4/F-5/F-6/F-7 改訂)
 状態: 設計確定 (実装前)
 関連: `2026-07-04-consolidated-roadmap.md` §1-2 (承認ゲート採用推奨・却下=ラベルデータ),
 `2026-07-05-planner-position-plan-context.md` (独立 spec、依存なし・並行可)
@@ -86,14 +86,21 @@ triggered / expired / invalidated / superseded 等へ遷移し、gate OFF の通
 
 ```python
 def try_decide_gate(plan_id, decision: Literal["approved", "rejected"],
-                    *, reason: str | None = None) -> bool:
+                    *, reason: str | None = None, now=None) -> bool:
     # UPDATE trade_plans
     #    SET status = ('active' if approved else 'rejected'),
     #        gate_decision = decision, gate_decided_at = db_now(),
     #        gate_reason = reason, updated_at = db_now()
     #  WHERE plan_id = ? AND status = 'pending_approval'
+    #    AND expires_at > :now         # ← 期限切れは操作不可 (実装後レビュー Medium)
     # → rowcount == 1 で勝ち。単一文なので TOCTOU なし (try_claim_plan_status と同思想)
 ```
+
+**TTL 条件 (実装後レビュー Medium):** approve/reject は `expires_at > now` も条件に含める。
+これが無いと、TTL 超過後・sweep (watch の unanswered 終端) 前の窓で approve が成立し、
+本来 unanswered であるべき plan が rejected/approved として記録され gate 指標が歪む。
+期限切れ plan への approve/reject は rowcount 0 → API 層で 409。`try_close_pending_unanswered`
+は逆に「期限切れだから閉じる」操作なので expires_at 条件を課さない (現状のまま)。
 
 status 遷移とラベル・時刻・理由を**同一 UPDATE** で原子的に残す (codex Medium)。
 API 層は False → 409 に写像。unanswered の刻印は watch の pending→expired /
@@ -131,6 +138,25 @@ expiry / invalidation) と finalize の**間**のクラッシュは F-4 の fina
 `supersede_active_plans` の対象を status ∈ {active, **pending_approval**} に拡張。
 新 plan 作成時に返答待ち plan も置換される (G-6)。置換された pending plan は
 superseded であり rejected ではない (人間の判断なしラベル = gate_decision NULL)。
+
+**原子性 (実装後レビュー High):** SELECT→ORM ループ更新では **terminal 状態の上書き**が
+起きる。SQLite は `with_for_update()` が行ロックにならないため、supersede が
+pending_approval を SELECT した後、その隙に API が reject して status='rejected' を
+commit → supersede が古い ORM 状態から superseded を commit、で rejected が
+上書きされ counterfactual 追跡から外れる (spec「rejected は置換対象外」違反)。
+→ **条件付き単一 UPDATE + RETURNING** に変更する:
+```sql
+UPDATE trade_plans
+   SET status='superseded',
+       cf_state = CASE status WHEN 'pending_approval' THEN 'superseded' ELSE cf_state END,
+       updated_at = :now
+ WHERE pair = :pair AND status IN ('active','pending_approval')
+   [AND plan_id != :except_plan_id]
+ RETURNING plan_id
+```
+これで status 条件が UPDATE 時点で再評価され、間に rejected/triggered へ遷移した plan は
+WHERE から外れて上書きされない (try_claim_plan_status と同じ TOCTOU 回避思想)。
+返り値は RETURNING の plan_id リスト。
 superseded になった pending plan は反実仮想追跡の対象にもしない (F-4 の watch 対象から
 status 遷移で自然に外れる。システム自身が取り下げた plan の「承認していたら」は
 測定対象の判断が存在しないため。stamp データが残っていても cf 行は起こさない)。
@@ -202,7 +228,7 @@ freshness final wall) で評価する。承認済みとの成績比較が「同�
 | endpoint | 動作 |
 |---|---|
 | `GET /orchestrator/plans?status=pending_approval` | pending 一覧 (plan_id, pair, direction, entry_summary, SL/TP, expires_at, created_at, reasoning 要約, **gate_message_id** — bot 再起動時の投稿済み判定用) |
-| `GET /orchestrator/plans?posted_within_hours=N` | **再起動 reconcile 用** (codex 2巡目 Low-Med): `gate_message_id IS NOT NULL AND updated_at >= now-N h` の plan を status 不問で返す (status / gate_decision 込み)。bot 停止中に pending から消えた投稿済み plan のメッセージ edit 復旧に使う |
+| `GET /orchestrator/plans?posted_within_hours=N` | **再起動 reconcile 用** (codex 2巡目 Low-Med): `gate_message_id IS NOT NULL AND updated_at >= now-N h` の plan を status 不問で返す (status / gate_decision 込み)。bot 停止中に pending から消えた投稿済み plan のメッセージ edit 復旧に使う。**`N` は `Query(ge=1, le=720)` で境界化** (実装後レビュー Low: 負値・巨大値→timedelta の OverflowError 500 を防ぐ) |
 | `GET /orchestrator/plans/{id}` | plan 詳細 (status + gate_decision + gate_decided_at + gate_reason)。polling で pending から消えた plan の結末判定 (bot の message edit 用) はこれで行う |
 | `POST /orchestrator/plans/{id}/approve` | `try_decide_gate(approved)` 成功→200 {status: active}、失敗→409 (決定済み/期限切れ) |
 | `POST /orchestrator/plans/{id}/reject` body `{reason?: str}` | 同上 (rejected)。reason は gate_reason へ |
@@ -239,6 +265,24 @@ supersede (F-3 拡張版) は publish 前に走る点も現行どおり。
 
 付随: PipelineResult / plan 作成通知・daily summary の status 集計が pending_approval
 を含み得ることを確認する (文言・集計の追従は実装時に洗う)。
+
+**起動時の構成整合性検証 (実装後レビュー Medium):** `approval_gate=True` は全 plan を
+pending_approval にするが、承認経路 (F-5 API) が無いと**静かにノートレード**になる。
+起動時に次を検証し、不整合なら**構成エラーで停止**する (リスク哲学 = 単一基準・
+明示失敗。曖昧な警告で流さない):
+- `approval_gate=True` かつ `api.enabled=False` → エラー (承認する手段がない)
+- `approval_gate=True` かつ `API_SECRET_KEY` 未設定 → エラー (verify_api_key が全 approve
+  を 503 で弾く = 承認不能)
+gate OFF (既定) 時はこの検証をしない (挙動不変)。検証箇所は config ロード後・
+デーモン起動前 (main の early validation)。
+
+**API 用 OrchestratorStore の生成条件 (実装後レビュー Low-Med):** `main` は
+`api.enabled` だけで無条件に `OrchestratorStore(prices_db_path)` を生成していたが、
+これは **orchestrator 無効時にも不要な DB を生成**する (テストで MagicMock を
+prices_db_path として渡すと作業ディレクトリに `<MagicMock ...>` ファイルが量産される
+実害あり)。→ **`api.enabled AND orchestrator.enabled` のときだけ生成**し API へ注入する。
+gate API は orchestrator が動いていて初めて意味を持つため、この AND 条件は
+機能的にも正しい。main 配線テストは tmp_path を使い作業ディレクトリを汚さないこと。
 
 ### F-7: metrics / daily summary
 
