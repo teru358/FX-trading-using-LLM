@@ -365,6 +365,50 @@ def test_supersede_active_plan_no_cf_marker(store):
     assert store.get_trade_plan(p_active).cf_state is None
 
 
+def test_supersede_only_touches_active_and_pending(store):
+    """既に terminal (rejected/triggered) な plan は対象外・状態不変 (実装後レビュー High)。
+
+    SELECT→ORM ループ更新だと、supersede が SELECT した時点で active/pending だった
+    plan が別 tx で terminal に遷移した後でも古い ORM 状態から上書きされ得る
+    (TOCTOU)。単一 UPDATE + RETURNING なら WHERE が UPDATE 時点で再評価されるため、
+    そもそも terminal な行は最初から対象に入らない。ここでは「呼び出し時点で既に
+    terminal」なケースで対象外を確認し、条件付き単一 UPDATE への書き換えの
+    観測可能な正しさ (correctness surface) を固定する。
+    """
+    p_rejected = _plan(store)
+    store.try_decide_gate(p_rejected, "rejected")
+    p_triggered = _plan(store, status="active")
+    store.try_mark_plan_triggered(p_triggered)
+    p_active = _plan(store, status="active")
+    p_pending = _plan(store)
+
+    ids = store.supersede_active_plans("USDJPY=X")
+
+    assert set(ids) == {p_active, p_pending}
+    assert store.get_trade_plan(p_rejected).status == "rejected"
+    assert store.get_trade_plan(p_rejected).gate_decision == "rejected"
+    assert store.get_trade_plan(p_triggered).status == "triggered"
+    assert store.get_trade_plan(p_active).status == "superseded"
+    assert store.get_trade_plan(p_pending).status == "superseded"
+
+
+def test_supersede_cf_marker_active_vs_pending(store):
+    """単一 UPDATE の CASE は SET 前 (旧) の status 値で分岐する (実測で確認済)。
+
+    active だった行は cf_state 不変 (None)、pending_approval だった行だけ
+    cf_state='superseded' が刻印される。CASE が新値 (全行 'superseded') で
+    分岐していたら active 側にもマーカーが付いてしまうため、これが両方の
+    観測結果を固定する回帰テスト。
+    """
+    p_active = _plan(store, status="active")
+    p_pending = _plan(store)
+
+    store.supersede_active_plans("USDJPY=X")
+
+    assert store.get_trade_plan(p_active).cf_state is None
+    assert store.get_trade_plan(p_pending).cf_state == "superseded"
+
+
 # ── Task 13: F-5 補助 (reasoning JOIN / gate_message / reconcile) ──
 
 

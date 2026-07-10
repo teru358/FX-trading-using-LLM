@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON, Boolean, Column, DateTime, Float, Integer, String, UniqueConstraint,
-    and_, func, or_, select, text, update,
+    and_, case, func, or_, select, text, update,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -1672,38 +1672,35 @@ class OrchestratorStore:
     ) -> list[int]:
         """pair の active/pending_approval plan を全て status='superseded' にする。
 
-        except_plan_id は除外する。pair 単位で active plan を最大 1 件に保つために
-        使う。superseded にした plan_id のリストを返す。reason はログ用 (テーブルに
-        reason 列が無いため status のみ変更し logger.info に残す)。
+        except_plan_id は除外する。pair 単位で active plan を最大 1 件に保つために使う。
+        superseded にした plan_id のリストを返す。reason はログ用 (テーブルに reason 列が
+        無いため status のみ変更し logger.info に残す)。
+
+        条件付き単一 UPDATE + RETURNING で行う (実装後レビュー High)。SELECT→ORM ループ
+        更新だと、SQLite で with_for_update が効かないため read→commit の隙に別 tx が
+        rejected/triggered へ遷移させた plan を stale ORM 状態から superseded で上書きし、
+        terminal 状態を壊す。UPDATE の WHERE は commit 時点で再評価されるので、間に
+        遷移した plan は WHERE から外れて上書きされない (try_claim_plan_status と同思想)。
+        pending_approval だった行だけ cf_state='superseded' を刻印する (F-7 集計マーカー)。
         """
-        # 読み取りと更新を 1 transaction にまとめ、status 条件付きで UPDATE する。
-        # こうしないと get_active_plans → update の隙に watch loop が triggered/invalidated に
-        # した plan を無条件に superseded で上書きし、trigger 記録や lifecycle metric を壊す。
+        now = db_now()
         with Session(self._engine) as session:
             stmt = (
-                select(_TradePlan)
+                update(_TradePlan)
                 .where(_TradePlan.pair == pair)
-                # gate spec F-3: 返答待ち plan も新 plan で置換する (G-6)。置換された
-                # pending は superseded (gate_decision NULL = 人間の判断なしラベル)。
-                # rejected は terminal のまま対象外。
                 .where(_TradePlan.status.in_(("active", "pending_approval")))
-                .with_for_update()
             )
             if except_plan_id is not None:
                 stmt = stmt.where(_TradePlan.plan_id != except_plan_id)
-            plans = list(session.execute(stmt).scalars().all())
-            now = db_now()
-            ids = []
-            for plan in plans:
-                # pending の置換は cf 窓終了マーカーを刻印 (F-7 の superseded pending
-                # 件数集計。gate_decision NULL だけでは gate OFF の superseded と
-                # 区別できない — codex plan review Medium)。stamp 済みなら上書きしてよい
-                # (窓は閉じた。finalize 対象には gate_decision 条件で元々ならない)。
-                if plan.status == "pending_approval":
-                    plan.cf_state = "superseded"
-                plan.status = "superseded"
-                plan.updated_at = now
-                ids.append(plan.plan_id)
+            stmt = stmt.values(
+                status="superseded",
+                cf_state=case(
+                    (_TradePlan.status == "pending_approval", "superseded"),
+                    else_=_TradePlan.cf_state,
+                ),
+                updated_at=now,
+            ).returning(_TradePlan.plan_id)
+            ids = [row[0] for row in session.execute(stmt).all()]
             session.commit()
         logger.info(
             f"[ORCH] superseded {len(ids)} active plan(s) for {pair}: {reason}"
