@@ -105,3 +105,72 @@ def test_decide_gate_invalid_decision_raises(store):
     plan_id = _plan(store)
     with pytest.raises(ValueError):
         store.try_decide_gate(plan_id, "maybe")
+
+
+# ── Task 3: unanswered 終端 / stamp / latch ────────────────────
+
+
+def test_close_pending_unanswered_expired(store):
+    plan_id = _plan(store)
+    assert store.try_close_pending_unanswered(plan_id, "expired") is True
+    plan = store.get_trade_plan(plan_id)
+    assert plan.status == "expired"
+    assert plan.gate_decision == "unanswered"
+    assert plan.gate_decided_at is None  # 放置は決定時刻なし
+
+
+def test_close_pending_unanswered_invalidated(store):
+    """invalidation による判断なし終端も unanswered (G-3 拡張解釈・内訳は status)。"""
+    plan_id = _plan(store)
+    assert store.try_close_pending_unanswered(plan_id, "invalidated") is True
+    plan = store.get_trade_plan(plan_id)
+    assert plan.status == "invalidated"
+    assert plan.gate_decision == "unanswered"
+
+
+def test_close_pending_loses_to_approve_race(store):
+    plan_id = _plan(store)
+    assert store.try_decide_gate(plan_id, "approved") is True
+    assert store.try_close_pending_unanswered(plan_id, "expired") is False
+    assert store.get_trade_plan(plan_id).status == "active"
+
+
+def test_close_pending_invalid_status_raises(store):
+    with pytest.raises(ValueError):
+        store.try_close_pending_unanswered(_plan(store), "superseded")
+
+
+def test_stamp_would_trigger_once(store):
+    plan_id = _plan(store)
+    now = db_now()
+    assert store.try_stamp_would_trigger(
+        plan_id, at=now, price=150.25, spread_pips=1.2) is True
+    plan = store.get_trade_plan(plan_id)
+    assert plan.cf_state == "would_trigger"
+    assert plan.cf_stamp_price == 150.25
+    assert plan.cf_stamp_spread_pips == 1.2
+    # dedupe: 2回目は負ける (最初の成立瞬間がエントリー点)
+    assert store.try_stamp_would_trigger(
+        plan_id, at=now, price=151.0, spread_pips=2.0) is False
+    assert store.get_trade_plan(plan_id).cf_stamp_price == 150.25
+
+
+def test_stamp_requires_pending_status(store):
+    """active plan (承認済み) には stamp しない (real 経路の領域)。"""
+    plan_id = _plan(store, status="active")
+    assert store.try_stamp_would_trigger(
+        plan_id, at=db_now(), price=150.0, spread_pips=1.0) is False
+
+
+def test_latch_cf_invalidated_on_rejected(store):
+    plan_id = _plan(store)
+    store.try_decide_gate(plan_id, "rejected")
+    assert store.try_latch_cf_invalidated(plan_id) is True
+    assert store.get_trade_plan(plan_id).cf_state == "invalidated"
+    # 冪等: 2回目は負け
+    assert store.try_latch_cf_invalidated(plan_id) is False
+
+
+def test_latch_requires_rejected_status(store):
+    plan_id = _plan(store)  # pending のまま
+    assert store.try_latch_cf_invalidated(plan_id) is False

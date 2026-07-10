@@ -600,6 +600,75 @@ class OrchestratorStore:
             session.commit()
             return result.rowcount == 1
 
+    def try_close_pending_unanswered(self, plan_id: int, to_status: str) -> bool:
+        """pending_approval を人間の判断なしに終端する (gate spec F-1/F-2b)。
+
+        status (expired=TTL 満了 / invalidated=構造死) と gate_decision='unanswered'
+        を単一 UPDATE で刻印。approve/reject との race は rowcount 排他で自然解決。
+        gate_decided_at は NULL のまま (放置に決定時刻はない)。
+        """
+        if to_status not in ("expired", "invalidated"):
+            raise ValueError(
+                f"to_status must be 'expired' or 'invalidated', got {to_status!r}"
+            )
+        with Session(self._engine) as session:
+            result = session.execute(
+                update(_TradePlan)
+                .where(_TradePlan.plan_id == plan_id)
+                .where(_TradePlan.status == "pending_approval")
+                .values(
+                    status=to_status, gate_decision="unanswered",
+                    updated_at=db_now(),
+                )
+            )
+            session.commit()
+            return result.rowcount == 1
+
+    def try_stamp_would_trigger(
+        self, plan_id: int, *, at: datetime, price: float,
+        spread_pips: float | None,
+    ) -> bool:
+        """pending 中の entry 初成立を plan 行に stamp する (gate spec F-4)。
+
+        shadow_triggers には**書かない** — UNIQUE(plan_id) 制約下で、後に承認され
+        real trigger が来た時の衝突を構造的に回避する (stamp→終端時に記録 方式)。
+        cf_state IS NULL 条件の rowcount claim で初回のみ成立 (dedupe =
+        「最初に条件成立した瞬間」がエントリー点)。
+        """
+        with Session(self._engine) as session:
+            result = session.execute(
+                update(_TradePlan)
+                .where(_TradePlan.plan_id == plan_id)
+                .where(_TradePlan.status == "pending_approval")
+                .where(_TradePlan.cf_state.is_(None))
+                .values(
+                    cf_state="would_trigger", cf_stamped_at=at,
+                    cf_stamp_price=price, cf_stamp_spread_pips=spread_pips,
+                    updated_at=db_now(),
+                )
+            )
+            session.commit()
+            return result.rowcount == 1
+
+    def try_latch_cf_invalidated(self, plan_id: int) -> bool:
+        """rejected plan の反実仮想追跡窓を閉じる latch (gate spec F-4)。
+
+        rejected は status が動かないため、invalidation 成立を cf_state='invalidated'
+        で記録し以後の entry 評価を止める。latch なしだと「invalidation 成立 →
+        価格戻り → entry 成立」で、承認世界なら invalidation で死んでいた plan に
+        cf 行が付く (誤った反実仮想)。
+        """
+        with Session(self._engine) as session:
+            result = session.execute(
+                update(_TradePlan)
+                .where(_TradePlan.plan_id == plan_id)
+                .where(_TradePlan.status == "rejected")
+                .where(_TradePlan.cf_state.is_(None))
+                .values(cf_state="invalidated", updated_at=db_now())
+            )
+            session.commit()
+            return result.rowcount == 1
+
     def get_active_plans(self, pair: str | None = None) -> list[_TradePlan]:
         """status=active の plan を返す (pair 指定で絞り込み)。"""
         with Session(self._engine) as session:
