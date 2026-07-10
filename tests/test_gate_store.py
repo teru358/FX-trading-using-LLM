@@ -174,3 +174,111 @@ def test_latch_cf_invalidated_on_rejected(store):
 def test_latch_requires_rejected_status(store):
     plan_id = _plan(store)  # pending のまま
     assert store.try_latch_cf_invalidated(plan_id) is False
+
+
+# ── Task 4: finalize_cf_trigger ───────────────────────────────
+
+
+def _stamped_rejected(store) -> int:
+    """stamp 済みで却下された plan (finalize 対象の代表形) を作る。
+
+    stamp は 2h 前 — horizon 3600s の評価期限を既に過ぎており、finalize 後の
+    hindsight「即 ready」assert の時刻条件を満たす (codex plan review Medium)。
+    """
+    plan_id = _plan(store)
+    store.try_stamp_would_trigger(
+        plan_id, at=db_now() - timedelta(hours=2), price=150.25, spread_pips=1.2)
+    store.try_decide_gate(plan_id, "rejected")
+    return plan_id
+
+
+def _run(store) -> int:
+    return store.start_run("OrchestratorRuntime", pair="USDJPY=X")
+
+
+def test_finalize_from_stamp_writes_row_decision_and_hindsight(store):
+    plan_id = _stamped_rejected(store)
+    trig_id = store.finalize_cf_trigger(
+        plan_id, run_id=_run(store), enqueue_hindsight=True, horizon_seconds=3600)
+    assert trig_id is not None
+    plan = store.get_trade_plan(plan_id)
+    assert plan.cf_state == "triggered"
+    trig = store.get_shadow_trigger(plan_id)
+    assert trig.trigger_price == 150.25          # stamp 値が使われる
+    assert trig.spread_pips == 1.2
+    assert trig.triggered_at == plan.cf_stamped_at
+    # decision も同一 tx で書かれ trigger と紐づく (claim 負けで偽 decision を残さない)
+    dec = store.get_decision(trig.decision_id)
+    assert dec.decision_type == "plan_cf_trigger"
+    assert dec.plan_id == plan_id
+    # hindsight が enqueue され、過去時刻 triggered_at (2h 前) なので即 ready になる
+    ready = store.get_pending_hindsight_evaluations(now=db_now())
+    assert any(ev.shadow_trigger_id == trig_id for ev in ready)
+
+
+def test_finalize_direct_uses_args(store):
+    """stamp なし rejected の直接記録 (from=NULL claim、gate_decision='rejected' 限定)。"""
+    plan_id = _plan(store)
+    store.try_decide_gate(plan_id, "rejected")
+    now = db_now()
+    trig_id = store.finalize_cf_trigger(
+        plan_id, run_id=_run(store), enqueue_hindsight=False, horizon_seconds=3600,
+        triggered_at=now, trigger_price=149.9, spread_pips=0.8)
+    assert trig_id is not None
+    trig = store.get_shadow_trigger(plan_id)
+    assert trig.trigger_price == 149.9
+    assert store.get_trade_plan(plan_id).cf_state == "triggered"
+
+
+def test_finalize_idempotent_second_call_loses(store):
+    plan_id = _stamped_rejected(store)
+    store.finalize_cf_trigger(
+        plan_id, run_id=_run(store), enqueue_hindsight=False, horizon_seconds=3600)
+    assert store.finalize_cf_trigger(
+        plan_id, run_id=_run(store), enqueue_hindsight=False,
+        horizon_seconds=3600) is None
+
+
+def test_finalize_refuses_non_terminal_plan(store):
+    """pending (承認可能) な plan には絶対に cf 行を書かない (UNIQUE 保護)。"""
+    plan_id = _plan(store)
+    store.try_stamp_would_trigger(
+        plan_id, at=db_now() - timedelta(hours=2), price=150.0, spread_pips=1.0)
+    assert store.finalize_cf_trigger(
+        plan_id, run_id=_run(store), enqueue_hindsight=False,
+        horizon_seconds=3600) is None
+    assert store.get_shadow_trigger(plan_id) is None
+
+
+def test_finalize_refuses_approved_plan(store):
+    """承認済み plan は terminal になっても claim 不可 (codex plan review High#1)。
+
+    stamp→approve→real trigger→live 発注失敗で invalidated、の経路で
+    「terminal + would_trigger」に一致しても gate_decision='approved' が排除する。
+    """
+    plan_id = _plan(store)
+    store.try_stamp_would_trigger(
+        plan_id, at=db_now() - timedelta(hours=2), price=150.0, spread_pips=1.0)
+    store.try_decide_gate(plan_id, "approved")
+    store.update_plan_status(plan_id, "invalidated")  # 発注失敗経路の simulate
+    assert store.finalize_cf_trigger(
+        plan_id, run_id=_run(store), enqueue_hindsight=False,
+        horizon_seconds=3600) is None
+    assert store.get_trade_plan(plan_id).cf_state == "would_trigger"  # 状態不変
+
+
+def test_finalize_unique_conflict_leaves_state_untouched(store):
+    """行が既にある病的状態 → 状態を進めず None を返す (codex plan review High#2)。
+
+    無条件で cf_state を進めると「state だけ進んだ孤児」を再発させるため、
+    rollback + 整合性エラーログに倒す。
+    """
+    plan_id = _stamped_rejected(store)
+    plan = store.get_trade_plan(plan_id)
+    store.record_shadow_trigger(
+        plan_id=plan_id, decision_id=None, pair=plan.pair, direction=plan.direction,
+        triggered_at=plan.cf_stamped_at, trigger_price=plan.cf_stamp_price)
+    assert store.finalize_cf_trigger(
+        plan_id, run_id=_run(store), enqueue_hindsight=False,
+        horizon_seconds=3600) is None
+    assert store.get_trade_plan(plan_id).cf_state == "would_trigger"  # 前進しない

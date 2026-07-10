@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON, Boolean, Column, DateTime, Float, Integer, String, UniqueConstraint,
-    func, or_, select, text, update,
+    and_, func, or_, select, text, update,
 )
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -668,6 +668,110 @@ class OrchestratorStore:
             )
             session.commit()
             return result.rowcount == 1
+
+    def finalize_cf_trigger(
+        self,
+        plan_id: int,
+        *,
+        run_id: int,
+        enqueue_hindsight: bool,
+        horizon_seconds: int,
+        triggered_at: datetime | None = None,
+        trigger_price: float | None = None,
+        spread_pips: float | None = None,
+        snapshot_id: int | None = None,
+        reasoning_summary: str = "counterfactual trigger",
+    ) -> int | None:
+        """反実仮想 trigger 行を単一 transaction で確定する (gate spec F-2b/F-4)。
+
+        (1) cf_state → 'triggered' の rowcount claim、(2) plan_cf_trigger decision
+        INSERT、(3) shadow_triggers INSERT、(4) hindsight enqueue、を 1 commit で行う。
+        個別 commit の record_* 群は流用しない — 中間クラッシュで「cf_state だけ進んで
+        行がない」孤児や、claim 負け時の偽 decision が出る (codex plan review High#2)。
+
+        claim の許可条件 (承認済み plan の保護 — codex plan review High#1):
+        - stamp 済み終端 (would_trigger→): gate_decision IN ('rejected','unanswered')
+        - stamp なし直接記録 (NULL→): status='rejected' AND gate_decision='rejected'
+        approved plan は real trigger 後に live 発注失敗で invalidated になり得る
+        (runtime の is_executed=False 経路) が、gate_decision='approved' なので
+        claim が構造的に成立しない。
+
+        triggered_at/trigger_price/spread_pips 省略時は stamp 値。claim 負けは None。
+        UNIQUE(plan_id) 違反は**状態を進めず** rollback して None (整合性エラーとして
+        ログ — 無条件前進は孤児を再発させる)。
+        """
+        with Session(self._engine) as session:
+            plan = session.get(_TradePlan, plan_id)
+            if plan is None:
+                logger.warning(f"finalize_cf_trigger: plan {plan_id} not found")
+                return None
+            at = triggered_at if triggered_at is not None else plan.cf_stamped_at
+            price = trigger_price if trigger_price is not None else plan.cf_stamp_price
+            spread = spread_pips if spread_pips is not None else plan.cf_stamp_spread_pips
+            if at is None:
+                logger.warning(
+                    f"finalize_cf_trigger: plan {plan_id} has neither stamp nor args"
+                )
+                return None
+            action = plan.action_json if isinstance(plan.action_json, dict) else {}
+            result = session.execute(
+                update(_TradePlan)
+                .where(_TradePlan.plan_id == plan_id)
+                .where(_TradePlan.status.in_(("rejected", "expired", "invalidated")))
+                .where(or_(
+                    and_(
+                        _TradePlan.cf_state == "would_trigger",
+                        _TradePlan.gate_decision.in_(("rejected", "unanswered")),
+                    ),
+                    and_(
+                        _TradePlan.cf_state.is_(None),
+                        _TradePlan.status == "rejected",
+                        _TradePlan.gate_decision == "rejected",
+                    ),
+                ))
+                .values(cf_state="triggered", updated_at=db_now())
+            )
+            if result.rowcount != 1:
+                session.rollback()
+                return None
+            dec = _OrchestratorDecision(
+                run_id=run_id, snapshot_id=plan.snapshot_id, pair=plan.pair,
+                decision_type="plan_cf_trigger",
+                decision="buy" if plan.direction == "long" else "sell",
+                plan_id=plan_id, reasoning_summary=reasoning_summary,
+                trade_horizon=plan.horizon, created_at=db_now(),
+            )
+            session.add(dec)
+            try:
+                session.flush()  # decision_id 採番
+                trig = _ShadowTrigger(
+                    plan_id=plan_id, decision_id=dec.decision_id, pair=plan.pair,
+                    direction=plan.direction, triggered_at=at, trigger_price=price,
+                    sl=action.get("sl"), tp=action.get("tp"), rr=action.get("rr"),
+                    spread_pips=spread, snapshot_id=snapshot_id,
+                    risk_gate_result_json=None,
+                )
+                session.add(trig)
+                session.flush()  # UNIQUE(plan_id) をここで検出 (commit 前)
+            except IntegrityError as exc:
+                session.rollback()
+                # 行が既に存在する病的状態。状態を進めず整合性エラーとして残す
+                # (無条件で cf_state を進めると孤児を再発させる — codex High#2)。
+                logger.error(
+                    f"[ORCH] finalize_cf_trigger integrity conflict for plan "
+                    f"{plan_id}: {getattr(exc, 'orig', exc)}"
+                )
+                return None
+            if enqueue_hindsight:
+                session.add(_ShadowHindsightEvaluation(
+                    shadow_trigger_id=trig.id, evaluated_at=None, status="pending",
+                    horizon_seconds=horizon_seconds, created_at=db_now(),
+                ))
+            session.commit()
+            logger.info(
+                f"[ORCH] cf trigger finalized: plan {plan_id} ({plan.pair}) @ {price}"
+            )
+            return trig.id
 
     def get_active_plans(self, pair: str | None = None) -> list[_TradePlan]:
         """status=active の plan を返す (pair 指定で絞り込み)。"""
