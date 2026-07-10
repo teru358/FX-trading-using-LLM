@@ -4,7 +4,7 @@
 
 **Goal:** PlannerAgent の plan を人間が Discord で承認してから発注待機させる承認ゲートの finance 側 (status lifecycle / 反実仮想追跡 / API / metrics) を実装する。
 
-**Architecture:** spec `docs/superpowers/specs/2026-07-05-discord-approval-gate.md` (codex 2巡レビュー反映済) の F-1〜F-7。中核は「stamp → 終端時に記録」方式 — `shadow_triggers` の `UNIQUE(plan_id)` を維持したまま、反実仮想 (cf) trigger 行を「real trigger が絶対起こり得ない plan (rejected / unanswered 終端)」にのみ原子 helper で記録する。評価意味論は active と同一、違うのは action 境界のみ。
+**Architecture:** spec `docs/superpowers/specs/2026-07-05-discord-approval-gate.md` (codex 3巡レビュー反映済) の F-1〜F-7。**本プランも codex plan review 1巡 (High2/Med2/LowMed1) 反映済み** — finalize の gate_decision claim 条件・decision の tx 内化・cf_state='superseded' マーカー・horizon 適用が主変更。中核は「stamp → 終端時に記録」方式 — `shadow_triggers` の `UNIQUE(plan_id)` を維持したまま、反実仮想 (cf) trigger 行を「real trigger が絶対起こり得ない plan (rejected / unanswered 終端)」にのみ原子 helper で記録する。評価意味論は active と同一、違うのは action 境界のみ。
 
 **Tech Stack:** Python 3.12 / SQLAlchemy ORM (SQLite) / FastAPI / pytest。既存 `OrchestratorStore` / `OrchestratorRuntime` / `PlanningPipeline` の拡張。
 
@@ -163,7 +163,7 @@ DECISION_TYPES = (
     gate_reason         = Column(String)   # 却下理由 (自由記述・任意)
     gate_message_id     = Column(String)   # Discord message ID (bot 再起動突合)
     # ── 反実仮想追跡 (F-4): stamp → 終端時に記録 ──
-    cf_state            = Column(String)   # would_trigger | triggered | invalidated
+    cf_state            = Column(String)   # would_trigger | triggered | invalidated | superseded
     cf_stamped_at       = Column(DateTime) # pending 中の entry 初成立時刻
     cf_stamp_price      = Column(Float)    # 同・成立時 mid
     cf_stamp_spread_pips = Column(Float)   # 同・成立時 spread (pips、hindsight 採点用)
@@ -490,18 +490,26 @@ git commit -m "feat: unanswered 終端/would_trigger stamp/cf latch の条件付
 
 
 def _stamped_rejected(store) -> int:
-    """stamp 済みで却下された plan (finalize 対象の代表形) を作る。"""
+    """stamp 済みで却下された plan (finalize 対象の代表形) を作る。
+
+    stamp は 2h 前 — horizon 3600s の評価期限を既に過ぎており、finalize 後の
+    hindsight「即 ready」assert の時刻条件を満たす (codex plan review Medium)。
+    """
     plan_id = _plan(store)
     store.try_stamp_would_trigger(
-        plan_id, at=db_now() - timedelta(minutes=30), price=150.25, spread_pips=1.2)
+        plan_id, at=db_now() - timedelta(hours=2), price=150.25, spread_pips=1.2)
     store.try_decide_gate(plan_id, "rejected")
     return plan_id
 
 
-def test_finalize_from_stamp_writes_row_and_hindsight(store):
+def _run(store) -> int:
+    return store.start_run("OrchestratorRuntime", pair="USDJPY=X")
+
+
+def test_finalize_from_stamp_writes_row_decision_and_hindsight(store):
     plan_id = _stamped_rejected(store)
     trig_id = store.finalize_cf_trigger(
-        plan_id, decision_id=None, enqueue_hindsight=True, horizon_seconds=3600)
+        plan_id, run_id=_run(store), enqueue_hindsight=True, horizon_seconds=3600)
     assert trig_id is not None
     plan = store.get_trade_plan(plan_id)
     assert plan.cf_state == "triggered"
@@ -509,18 +517,22 @@ def test_finalize_from_stamp_writes_row_and_hindsight(store):
     assert trig.trigger_price == 150.25          # stamp 値が使われる
     assert trig.spread_pips == 1.2
     assert trig.triggered_at == plan.cf_stamped_at
-    # hindsight が enqueue され、過去時刻 triggered_at なので即 ready になる
+    # decision も同一 tx で書かれ trigger と紐づく (claim 負けで偽 decision を残さない)
+    dec = store.get_decision(trig.decision_id)
+    assert dec.decision_type == "plan_cf_trigger"
+    assert dec.plan_id == plan_id
+    # hindsight が enqueue され、過去時刻 triggered_at (2h 前) なので即 ready になる
     ready = store.get_pending_hindsight_evaluations(now=db_now())
     assert any(ev.shadow_trigger_id == trig_id for ev in ready)
 
 
 def test_finalize_direct_uses_args(store):
-    """stamp なし rejected の直接記録 (from=NULL claim)。"""
+    """stamp なし rejected の直接記録 (from=NULL claim、gate_decision='rejected' 限定)。"""
     plan_id = _plan(store)
     store.try_decide_gate(plan_id, "rejected")
     now = db_now()
     trig_id = store.finalize_cf_trigger(
-        plan_id, decision_id=None, enqueue_hindsight=False, horizon_seconds=3600,
+        plan_id, run_id=_run(store), enqueue_hindsight=False, horizon_seconds=3600,
         triggered_at=now, trigger_price=149.9, spread_pips=0.8)
     assert trig_id is not None
     trig = store.get_shadow_trigger(plan_id)
@@ -531,9 +543,9 @@ def test_finalize_direct_uses_args(store):
 def test_finalize_idempotent_second_call_loses(store):
     plan_id = _stamped_rejected(store)
     store.finalize_cf_trigger(
-        plan_id, decision_id=None, enqueue_hindsight=False, horizon_seconds=3600)
+        plan_id, run_id=_run(store), enqueue_hindsight=False, horizon_seconds=3600)
     assert store.finalize_cf_trigger(
-        plan_id, decision_id=None, enqueue_hindsight=False,
+        plan_id, run_id=_run(store), enqueue_hindsight=False,
         horizon_seconds=3600) is None
 
 
@@ -541,25 +553,45 @@ def test_finalize_refuses_non_terminal_plan(store):
     """pending (承認可能) な plan には絶対に cf 行を書かない (UNIQUE 保護)。"""
     plan_id = _plan(store)
     store.try_stamp_would_trigger(
-        plan_id, at=db_now(), price=150.0, spread_pips=1.0)
+        plan_id, at=db_now() - timedelta(hours=2), price=150.0, spread_pips=1.0)
     assert store.finalize_cf_trigger(
-        plan_id, decision_id=None, enqueue_hindsight=False,
+        plan_id, run_id=_run(store), enqueue_hindsight=False,
         horizon_seconds=3600) is None
     assert store.get_shadow_trigger(plan_id) is None
 
 
-def test_finalize_converges_when_row_already_exists(store):
-    """trigger 行が既にあるのに cf_state が進んでいない孤児 → 収束する。"""
+def test_finalize_refuses_approved_plan(store):
+    """承認済み plan は terminal になっても claim 不可 (codex plan review High#1)。
+
+    stamp→approve→real trigger→live 発注失敗で invalidated、の経路で
+    「terminal + would_trigger」に一致しても gate_decision='approved' が排除する。
+    """
+    plan_id = _plan(store)
+    store.try_stamp_would_trigger(
+        plan_id, at=db_now() - timedelta(hours=2), price=150.0, spread_pips=1.0)
+    store.try_decide_gate(plan_id, "approved")
+    store.update_plan_status(plan_id, "invalidated")  # 発注失敗経路の simulate
+    assert store.finalize_cf_trigger(
+        plan_id, run_id=_run(store), enqueue_hindsight=False,
+        horizon_seconds=3600) is None
+    assert store.get_trade_plan(plan_id).cf_state == "would_trigger"  # 状態不変
+
+
+def test_finalize_unique_conflict_leaves_state_untouched(store):
+    """行が既にある病的状態 → 状態を進めず None を返す (codex plan review High#2)。
+
+    無条件で cf_state を進めると「state だけ進んだ孤児」を再発させるため、
+    rollback + 整合性エラーログに倒す。
+    """
     plan_id = _stamped_rejected(store)
     plan = store.get_trade_plan(plan_id)
-    # 孤児状態を人工的に作る: 行だけ先に存在 (crash-retry 相当)
     store.record_shadow_trigger(
         plan_id=plan_id, decision_id=None, pair=plan.pair, direction=plan.direction,
         triggered_at=plan.cf_stamped_at, trigger_price=plan.cf_stamp_price)
-    trig_id = store.finalize_cf_trigger(
-        plan_id, decision_id=None, enqueue_hindsight=False, horizon_seconds=3600)
-    assert trig_id is not None  # 既存行の id を返す
-    assert store.get_trade_plan(plan_id).cf_state == "triggered"
+    assert store.finalize_cf_trigger(
+        plan_id, run_id=_run(store), enqueue_hindsight=False,
+        horizon_seconds=3600) is None
+    assert store.get_trade_plan(plan_id).cf_state == "would_trigger"  # 前進しない
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -576,27 +608,32 @@ import 行に `or_` を追加 (ファイル冒頭の `from sqlalchemy import ...
         self,
         plan_id: int,
         *,
-        decision_id: int | None,
+        run_id: int,
         enqueue_hindsight: bool,
         horizon_seconds: int,
         triggered_at: datetime | None = None,
         trigger_price: float | None = None,
         spread_pips: float | None = None,
         snapshot_id: int | None = None,
+        reasoning_summary: str = "counterfactual trigger",
     ) -> int | None:
         """反実仮想 trigger 行を単一 transaction で確定する (gate spec F-2b/F-4)。
 
-        (1) cf_state → 'triggered' の rowcount claim (from: 'would_trigger'=stamp 済み
-        終端 / NULL=stamp なし rejected の直接記録)、(2) shadow_triggers INSERT、
-        (3) hindsight enqueue、を 1 commit で行う。個別 commit の record_shadow_trigger /
-        record_hindsight_evaluation は流用しない — 中間クラッシュで「cf_state だけ
-        進んで行がない」孤児が出る (codex 2巡目 High)。
+        (1) cf_state → 'triggered' の rowcount claim、(2) plan_cf_trigger decision
+        INSERT、(3) shadow_triggers INSERT、(4) hindsight enqueue、を 1 commit で行う。
+        個別 commit の record_* 群は流用しない — 中間クラッシュで「cf_state だけ進んで
+        行がない」孤児や、claim 負け時の偽 decision が出る (codex plan review High#2)。
 
-        terminal status (rejected/expired/invalidated) 以外では claim が成立しない =
-        承認可能な plan に cf 行が書かれることは構造的にない (UNIQUE(plan_id) 保護)。
-        triggered_at/trigger_price/spread_pips 省略時は stamp 値を使う。claim 負けは
-        None。UNIQUE 違反 = 行が既にある場合は「記録済み」として cf_state を進めて
-        既存 id を返す (crash-retry 収束)。
+        claim の許可条件 (承認済み plan の保護 — codex plan review High#1):
+        - stamp 済み終端 (would_trigger→): gate_decision IN ('rejected','unanswered')
+        - stamp なし直接記録 (NULL→): status='rejected' AND gate_decision='rejected'
+        approved plan は real trigger 後に live 発注失敗で invalidated になり得る
+        (runtime の is_executed=False 経路) が、gate_decision='approved' なので
+        claim が構造的に成立しない。
+
+        triggered_at/trigger_price/spread_pips 省略時は stamp 値。claim 負けは None。
+        UNIQUE(plan_id) 違反は**状態を進めず** rollback して None (整合性エラーとして
+        ログ — 無条件前進は孤児を再発させる)。
         """
         with Session(self._engine) as session:
             plan = session.get(_TradePlan, plan_id)
@@ -617,40 +654,49 @@ import 行に `or_` を追加 (ファイル冒頭の `from sqlalchemy import ...
                 .where(_TradePlan.plan_id == plan_id)
                 .where(_TradePlan.status.in_(("rejected", "expired", "invalidated")))
                 .where(or_(
-                    _TradePlan.cf_state == "would_trigger",
-                    _TradePlan.cf_state.is_(None),
+                    and_(
+                        _TradePlan.cf_state == "would_trigger",
+                        _TradePlan.gate_decision.in_(("rejected", "unanswered")),
+                    ),
+                    and_(
+                        _TradePlan.cf_state.is_(None),
+                        _TradePlan.status == "rejected",
+                        _TradePlan.gate_decision == "rejected",
+                    ),
                 ))
                 .values(cf_state="triggered", updated_at=db_now())
             )
             if result.rowcount != 1:
                 session.rollback()
                 return None
-            trig = _ShadowTrigger(
-                plan_id=plan_id, decision_id=decision_id, pair=plan.pair,
-                direction=plan.direction, triggered_at=at, trigger_price=price,
-                sl=action.get("sl"), tp=action.get("tp"), rr=action.get("rr"),
-                spread_pips=spread, snapshot_id=snapshot_id,
-                risk_gate_result_json=None,
+            dec = _OrchestratorDecision(
+                run_id=run_id, snapshot_id=plan.snapshot_id, pair=plan.pair,
+                decision_type="plan_cf_trigger",
+                decision="buy" if plan.direction == "long" else "sell",
+                plan_id=plan_id, reasoning_summary=reasoning_summary,
+                trade_horizon=plan.horizon, created_at=db_now(),
             )
-            session.add(trig)
+            session.add(dec)
             try:
+                session.flush()  # decision_id 採番
+                trig = _ShadowTrigger(
+                    plan_id=plan_id, decision_id=dec.decision_id, pair=plan.pair,
+                    direction=plan.direction, triggered_at=at, trigger_price=price,
+                    sl=action.get("sl"), tp=action.get("tp"), rr=action.get("rr"),
+                    spread_pips=spread, snapshot_id=snapshot_id,
+                    risk_gate_result_json=None,
+                )
+                session.add(trig)
                 session.flush()  # UNIQUE(plan_id) をここで検出 (commit 前)
-            except IntegrityError:
+            except IntegrityError as exc:
                 session.rollback()
-                # 行が既に存在 (crash-retry)。記録済みとして cf_state を進め、
-                # 既存行 id を返して収束させる。
-                with Session(self._engine) as s2:
-                    s2.execute(
-                        update(_TradePlan)
-                        .where(_TradePlan.plan_id == plan_id)
-                        .values(cf_state="triggered", updated_at=db_now())
-                    )
-                    existing = s2.execute(
-                        select(_ShadowTrigger)
-                        .where(_ShadowTrigger.plan_id == plan_id)
-                    ).scalars().first()
-                    s2.commit()
-                    return existing.id if existing else None
+                # 行が既に存在する病的状態。状態を進めず整合性エラーとして残す
+                # (無条件で cf_state を進めると孤児を再発させる — codex High#2)。
+                logger.error(
+                    f"[ORCH] finalize_cf_trigger integrity conflict for plan "
+                    f"{plan_id}: {getattr(exc, 'orig', exc)}"
+                )
+                return None
             if enqueue_hindsight:
                 session.add(_ShadowHindsightEvaluation(
                     shadow_trigger_id=trig.id, evaluated_at=None, status="pending",
@@ -702,7 +748,7 @@ def test_watch_cf_plans_excludes_resolved_and_out_of_window(store):
     p_done = _plan(store)
     store.try_decide_gate(p_done, "rejected")
     store.finalize_cf_trigger(
-        p_done, decision_id=None, enqueue_hindsight=False, horizon_seconds=3600,
+        p_done, run_id=_run(store), enqueue_hindsight=False, horizon_seconds=3600,
         triggered_at=db_now(), trigger_price=150.0, spread_pips=1.0)
     # latch 済み rejected → 外れる
     p_latched = _plan(store)
@@ -731,9 +777,19 @@ def test_cf_finalize_pending_returns_crashed_terminals(store):
     assert ids == {p1, p2}
     # finalize 後は集合から抜ける
     store.finalize_cf_trigger(
-        p1, decision_id=None, enqueue_hindsight=False, horizon_seconds=3600)
+        p1, run_id=_run(store), enqueue_hindsight=False, horizon_seconds=3600)
     ids = {p.plan_id for p in store.get_cf_finalize_pending("USDJPY=X")}
     assert ids == {p2}
+
+
+def test_cf_finalize_pending_excludes_approved(store):
+    """承認済み plan が発注失敗等で invalidated になっても回収対象にしない
+    (codex plan review High#1 — gate_decision 条件の検証)。"""
+    p = _plan(store)
+    store.try_stamp_would_trigger(p, at=db_now(), price=150.0, spread_pips=1.0)
+    store.try_decide_gate(p, "approved")
+    store.update_plan_status(p, "invalidated")   # 発注失敗経路の simulate
+    assert store.get_cf_finalize_pending("USDJPY=X") == []
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -774,17 +830,21 @@ import に `and_` を追加し、`get_plans_by_status` の直後へ:
             return plans
 
     def get_cf_finalize_pending(self, pair: str | None = None) -> list[_TradePlan]:
-        """finalize 待ち集合 (crash recovery — gate spec F-4 / codex 2巡目 High)。
+        """finalize 待ち集合 (crash recovery — gate spec F-4)。
 
         status 遷移 tx と finalize tx の間で落ちた plan (terminal status かつ
-        cf_state='would_trigger') を返す。watch tick が finalize_cf_trigger を
-        再実行する (claim ベースで冪等) — 復旧不能な取りこぼしを作らない。
+        cf_state='would_trigger'、**かつ gate_decision が rejected/unanswered**) を
+        返す。gate_decision 条件は必須 — approved plan は real trigger 後に live
+        発注失敗で invalidated になり得るが、それは cf 復旧対象ではない
+        (codex plan review High#1)。watch tick が finalize_cf_trigger を再実行する
+        (claim ベースで冪等) — 復旧不能な取りこぼしを作らない。
         """
         with Session(self._engine) as session:
             stmt = (
                 select(_TradePlan)
                 .where(_TradePlan.status.in_(("rejected", "expired", "invalidated")))
                 .where(_TradePlan.cf_state == "would_trigger")
+                .where(_TradePlan.gate_decision.in_(("rejected", "unanswered")))
             )
             if pair is not None:
                 stmt = stmt.where(_TradePlan.pair == pair)
@@ -949,6 +1009,14 @@ def test_supersede_includes_pending_approval(store):
     plan = store.get_trade_plan(p_pending)
     assert plan.status == "superseded"
     assert plan.gate_decision is None  # rejected ではない (人間の判断なし)
+    assert plan.cf_state == "superseded"  # F-7 集計マーカー (gate OFF と区別する唯一の手段)
+
+
+def test_supersede_active_plan_no_cf_marker(store):
+    """active (gate OFF/approved) の置換には cf マーカーを付けない。"""
+    p_active = _plan(store, status="active")
+    store.supersede_active_plans("USDJPY=X")
+    assert store.get_trade_plan(p_active).cf_state is None
 
 
 def test_supersede_excludes_rejected(store):
@@ -980,6 +1048,21 @@ Expected: FAIL — `test_supersede_includes_pending_approval` で ids == [] (pen
                 # pending は superseded (gate_decision NULL = 人間の判断なしラベル)。
                 # rejected は terminal のまま対象外。
                 .where(_TradePlan.status.in_(("active", "pending_approval")))
+```
+
+さらに更新ループ (`for plan in plans:`) を次の形に変更 — pending だった plan には
+cf 窓終了マーカーを刻印する (F-7 の superseded pending 件数集計。gate_decision NULL
+だけでは gate OFF の superseded と区別できない — codex plan review Medium):
+
+```python
+            for plan in plans:
+                # pending の置換は cf 窓終了マーカーを刻印 (stamp 済みなら上書きしてよい
+                # — 窓は閉じた。finalize 対象には gate_decision 条件で元々ならない)。
+                if plan.status == "pending_approval":
+                    plan.cf_state = "superseded"
+                plan.status = "superseded"
+                plan.updated_at = now
+                ids.append(plan.plan_id)
 ```
 
 docstring 1 行目も「pair の active/pending_approval plan を全て status='superseded' にする。」に更新。
@@ -1398,31 +1481,27 @@ Expected: FAIL — stamp 系 4 件 (cf_state None のまま)。`test_stamped_pen
         self, plan, pair: str, now: datetime,
         *, trigger_price: float | None = None, spread_pips: float | None = None,
     ) -> None:
-        """cf trigger を decision 付きで確定する (gate spec F-4)。
+        """cf trigger を確定する (gate spec F-4)。
 
-        trigger_price 省略時は stamp 値を使う (stamp 済み終端 / finalize 待ち回収)。
-        decision (plan_cf_trigger) は finalize tx の外 — 失敗しても cf 行の原子性には
-        影響しない (trace のみ。crash-retry で稀に重複し得るが append-only として許容)。
+        decision (plan_cf_trigger) / trigger 行 / hindsight は store.finalize_cf_trigger
+        が**単一 tx** で書く — claim 負け・クラッシュで偽 decision を残さない
+        (codex plan review High#2)。trigger_price 省略時は stamp 値 (stamp 済み終端 /
+        finalize 待ち回収)。run は trace 用に外側で開閉する (dangling は無害)。
         """
         run_id = self._orch.start_run(
             "OrchestratorRuntime", pair=pair, trigger_type="watch_counterfactual",
         )
         ok = False
         try:
-            decision_id = self._orch.record_decision(
-                run_id=run_id, snapshot_id=plan.snapshot_id, pair=pair,
-                decision_type="plan_cf_trigger", decision=_side_of(plan.direction),
-                plan_id=plan.plan_id,
-                reasoning_summary=f"counterfactual trigger ({plan.status})",
-            )
             trig_id = self._orch.finalize_cf_trigger(
                 plan.plan_id,
-                decision_id=decision_id,
+                run_id=run_id,
                 enqueue_hindsight=self._hindsight is not None,
                 horizon_seconds=self._config.hindsight.horizon_seconds,
                 triggered_at=now if trigger_price is not None else None,
                 trigger_price=trigger_price,
                 spread_pips=spread_pips,
+                reasoning_summary=f"counterfactual trigger ({plan.status})",
             )
             ok = True
             if trig_id is not None:
@@ -1672,6 +1751,24 @@ def test_recovery_idempotent_across_ticks(tmp_path):
     rt.run_watch_cycle(now=NOW + timedelta(seconds=1))  # 2 周しても行は増えない
     assert rt._orch.get_shadow_trigger(plan_id) is not None
     assert rt._orch.get_cf_finalize_pending("USDJPY=X") == []
+
+
+def test_approved_after_exec_failure_not_cf_recovered(tmp_path):
+    """stamp→approve→real trigger→発注失敗で invalidated → cf 復旧されない
+    (codex plan review High#1 の end-to-end 回帰)。"""
+    rt = _make_runtime(tmp_path, mid=150.10, seed_technical=True)
+    plan_id = _create_gate_plan(rt._orch)
+    rt.run_watch_cycle(now=NOW)                          # stamp
+    assert rt._orch.try_decide_gate(plan_id, "approved") is True
+    rt.run_watch_cycle(now=NOW + timedelta(seconds=2))   # real trigger
+    # live 発注失敗経路の simulate (runtime は is_executed=False で invalidated 化)
+    rt._orch.update_plan_status(plan_id, "invalidated")
+    rt.run_watch_cycle(now=NOW + timedelta(seconds=4))   # 回収 tick
+    plan = rt._orch.get_trade_plan(plan_id)
+    assert plan.cf_state == "would_trigger"              # cf 化されない (状態不変)
+    trig = rt._orch.get_shadow_trigger(plan_id)          # 行は real の 1 本のまま
+    dec = rt._orch.get_decision(trig.decision_id)
+    assert dec.decision_type == "plan_trigger"           # plan_cf_trigger が増えていない
 ```
 
 - [ ] **Step 2: Run tests**
@@ -2198,13 +2295,17 @@ def test_real_plan_counts_exclude_cf_labels(tmp_path):
     assert raw["plan_counts"].get("expired") is None
 
 
+def _cf_run(store) -> int:
+    return store.start_run("OrchestratorRuntime", pair="USDJPY=X")
+
+
 def test_cf_hindsight_excluded_from_real_aggregates(tmp_path):
     """cf 行の hindsight は実性能 avg_pnl_r に混入しない。"""
     store = OrchestratorStore(tmp_path / "orch.db")
     p_rej = _gate_plan(store)
     store.try_decide_gate(p_rej, "rejected")
     trig_id = store.finalize_cf_trigger(
-        p_rej, decision_id=None, enqueue_hindsight=True, horizon_seconds=60,
+        p_rej, run_id=_cf_run(store), enqueue_hindsight=True, horizon_seconds=60,
         triggered_at=db_now() - timedelta(hours=2), trigger_price=150.0,
         spread_pips=1.0)
     ev = store.get_pending_hindsight_evaluations(now=db_now())[0]
@@ -2224,14 +2325,48 @@ def test_gate_label_counts(tmp_path):
     assert raw["gate_plan_counts"] == {"approved": 1, "rejected": 1, "unanswered": 1}
 
 
+def test_gate_labels_respect_horizon(tmp_path):
+    """daily summary の horizon 絞りが gate 行にも効く (swing 混入防止 —
+    codex plan review Medium)。"""
+    store = OrchestratorStore(tmp_path / "orch.db")
+    p_day = _gate_plan(store)
+    store.try_decide_gate(p_day, "rejected")
+    snap = store.create_snapshot(pair="USDJPY=X", as_of_time=db_now())
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    p_swing = store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=snap, horizon="swing", direction="long",
+        entry_conditions_json=[{"type": "price_at_or_below", "value": 150.3}],
+        action_json={"sl": 149.4, "tp": 151.5, "rr": 2.0}, invalidation_json=[],
+        expires_at=db_now() + timedelta(hours=8), created_by_run_id=run_id,
+        status="pending_approval")
+    store.try_decide_gate(p_swing, "rejected")
+    raw = store.get_shadow_metrics_raw(trade_horizon="day")
+    assert raw["gate_plan_counts"] == {"rejected": 1}    # swing は数えない
+
+
 def test_compute_metrics_gate_labels_shape(tmp_path):
     from src.orchestrator.shadow_metrics import compute_shadow_metrics
     store = OrchestratorStore(tmp_path / "orch.db")
     p = _gate_plan(store); store.try_decide_gate(p, "rejected")
+    store.finalize_cf_trigger(
+        p, run_id=_cf_run(store), enqueue_hindsight=False, horizon_seconds=3600,
+        triggered_at=db_now(), trigger_price=150.0, spread_pips=1.0)
     m = compute_shadow_metrics(store, now=db_now())
-    assert m.gate_labels["rejected"]["plans"] == 1
-    assert "triggers" in m.gate_labels["rejected"]
-    assert "avg_pnl_r" in m.gate_labels["rejected"]
+    g = m.gate_labels["rejected"]
+    assert g["plans"] == 1
+    assert g["triggers"] == 1
+    assert g["trigger_rate"] == 1.0              # spec F-7 要求の構造化値
+    assert "avg_pnl_r" in g
+
+
+def test_superseded_pending_count(tmp_path):
+    """superseded pending 件数は cf_state='superseded' マーカーで数える (F-7)。"""
+    from src.orchestrator.shadow_metrics import compute_shadow_metrics
+    store = OrchestratorStore(tmp_path / "orch.db")
+    _gate_plan(store)                            # pending → supersede される
+    store.supersede_active_plans("USDJPY=X")
+    m = compute_shadow_metrics(store, now=db_now())
+    assert m.gate_superseded_pending == 1
 ```
 
 **注**: `update_hindsight_evaluation` のシグネチャ (pnl_r を kwargs で受けるか) は
@@ -2302,25 +2437,27 @@ hs_stmt / evaluated_stmt は **常に** triggers→plans を join して `_real`
                 evaluated_stmt = evaluated_stmt.where(_TradePlan.horizon == trade_horizon)
 ```
 
-freshness の後・return の前に gate label 集計を追加:
+freshness の後・return の前に gate label 集計を追加。**全 gate クエリに
+trade_horizon を適用する** — daily summary は運用中 horizon で絞るため、gate 行だけ
+全期間値になると swing が混入する (codex plan review Medium):
 
 ```python
             # gate label 別集計 (F-7): plan 件数 / trigger 行数 / hindsight 平均 pnl_r。
             # approved の行は real、rejected/unanswered の行は cf — plan 1件=行1本
             # (UNIQUE) なので gate_decision の JOIN だけで排反に分離できる。
-            gate_plan_counts = dict(session.execute(
+            gate_plan_stmt = (
                 select(_TradePlan.gate_decision, func.count())
                 .where(_TradePlan.gate_decision.is_not(None))
                 .group_by(_TradePlan.gate_decision)
-            ).all())
-            gate_trigger_counts = dict(session.execute(
+            )
+            gate_trigger_stmt = (
                 select(_TradePlan.gate_decision, func.count())
                 .select_from(_ShadowTrigger)
                 .join(_TradePlan, _TradePlan.plan_id == _ShadowTrigger.plan_id)
                 .where(_TradePlan.gate_decision.is_not(None))
                 .group_by(_TradePlan.gate_decision)
-            ).all())
-            gate_avg_pnl_r = dict(session.execute(
+            )
+            gate_pnl_stmt = (
                 select(
                     _TradePlan.gate_decision,
                     func.avg(_ShadowHindsightEvaluation.pnl_r),
@@ -2334,7 +2471,43 @@ freshness の後・return の前に gate label 集計を追加:
                 .where(_ShadowHindsightEvaluation.status == "evaluated")
                 .where(_TradePlan.gate_decision.is_not(None))
                 .group_by(_TradePlan.gate_decision)
-            ).all())
+            )
+            # superseded pending 件数 (F-7): cf_state='superseded' マーカーで数える
+            # (gate_decision NULL だけでは gate OFF の superseded と区別できない)。
+            gate_superseded_stmt = (
+                select(func.count())
+                .select_from(_TradePlan)
+                .where(_TradePlan.cf_state == "superseded")
+            )
+            # 承認遅延コスト (F-7 副産物): stamp 済み承認 plan の
+            # 実 trigger 時刻 − stamp 時刻。件数は少ないため Python 側で平均する。
+            gate_latency_stmt = (
+                select(_ShadowTrigger.triggered_at, _TradePlan.cf_stamped_at)
+                .select_from(_ShadowTrigger)
+                .join(_TradePlan, _TradePlan.plan_id == _ShadowTrigger.plan_id)
+                .where(_TradePlan.gate_decision == "approved")
+                .where(_TradePlan.cf_stamped_at.is_not(None))
+            )
+            if trade_horizon is not None:
+                # daily summary は運用中 horizon で絞る — gate 行だけ全期間値に
+                # ならないようにする (codex plan review Medium)
+                gate_plan_stmt = gate_plan_stmt.where(_TradePlan.horizon == trade_horizon)
+                gate_trigger_stmt = gate_trigger_stmt.where(_TradePlan.horizon == trade_horizon)
+                gate_pnl_stmt = gate_pnl_stmt.where(_TradePlan.horizon == trade_horizon)
+                gate_superseded_stmt = gate_superseded_stmt.where(_TradePlan.horizon == trade_horizon)
+                gate_latency_stmt = gate_latency_stmt.where(_TradePlan.horizon == trade_horizon)
+            gate_plan_counts = dict(session.execute(gate_plan_stmt).all())
+            gate_trigger_counts = dict(session.execute(gate_trigger_stmt).all())
+            gate_avg_pnl_r = dict(session.execute(gate_pnl_stmt).all())
+            gate_superseded_pending = session.execute(gate_superseded_stmt).scalar() or 0
+            latencies = [
+                (t - s).total_seconds()
+                for t, s in session.execute(gate_latency_stmt).all()
+                if t is not None and s is not None
+            ]
+            gate_approval_latency_avg_sec = (
+                sum(latencies) / len(latencies) if latencies else None
+            )
 ```
 
 return dict に追加:
@@ -2343,6 +2516,8 @@ return dict に追加:
             "gate_plan_counts": gate_plan_counts,
             "gate_trigger_counts": gate_trigger_counts,
             "gate_avg_pnl_r": gate_avg_pnl_r,
+            "gate_superseded_pending": gate_superseded_pending,
+            "gate_approval_latency_avg_sec": gate_approval_latency_avg_sec,
 ```
 
 (b) `src/orchestrator/shadow_metrics.py`:
@@ -2350,39 +2525,56 @@ return dict に追加:
 `dataclass` import 行を `from dataclasses import dataclass, field` に変更。`ShadowMetrics` 末尾に:
 
 ```python
-    # 6. approval gate (spec F-7): label 別 {plans, triggers, avg_pnl_r}。
+    # 6. approval gate (spec F-7): label 別 {plans, triggers, trigger_rate, avg_pnl_r}。
     # approved=real 成績 / rejected・unanswered=反実仮想成績。空 dict = gate 未使用。
     gate_labels: dict = field(default_factory=dict)
+    # superseded pending 件数 (cf_state='superseded' マーカー、放置率の解釈補助)
+    gate_superseded_pending: int = 0
+    # 承認遅延コスト: stamp 済み承認 plan の 実trigger − stamp の平均秒 (副産物)
+    gate_approval_latency_avg_sec: float | None = None
 ```
 
 `compute_shadow_metrics` の return 直前に:
 
 ```python
-    gate_labels = {
-        label: {
+    gate_labels = {}
+    for label, count in raw["gate_plan_counts"].items():
+        triggers = raw["gate_trigger_counts"].get(label, 0)
+        gate_labels[label] = {
             "plans": count,
-            "triggers": raw["gate_trigger_counts"].get(label, 0),
+            "triggers": triggers,
+            "trigger_rate": _rate(triggers, count),
             "avg_pnl_r": raw["gate_avg_pnl_r"].get(label),
         }
-        for label, count in raw["gate_plan_counts"].items()
-    }
 ```
 
-return に `gate_labels=gate_labels,` を追加。
+return に追加:
+
+```python
+        gate_labels=gate_labels,
+        gate_superseded_pending=raw["gate_superseded_pending"],
+        gate_approval_latency_avg_sec=raw["gate_approval_latency_avg_sec"],
+```
 
 (c) `src/orchestrator/shadow_notifier.py` `notify_daily_summary` — `lines` リストの
 `freshness blocks` 行の後に:
 
 ```python
-        if metrics.gate_labels:
+        if metrics.gate_labels or metrics.gate_superseded_pending:
             parts = []
             for label in ("approved", "rejected", "unanswered"):
                 g = metrics.gate_labels.get(label)
                 if g:
                     parts.append(
-                        f"{label}={g['plans']}p/{g['triggers']}t/"
-                        f"{_fmt_opt(g['avg_pnl_r'])}R"
+                        f"{label}={g['plans']}p/{g['triggers']}t"
+                        f"({g['trigger_rate']:.0%})/{_fmt_opt(g['avg_pnl_r'])}R"
                     )
+            if metrics.gate_superseded_pending:
+                parts.append(f"superseded_pending={metrics.gate_superseded_pending}")
+            if metrics.gate_approval_latency_avg_sec is not None:
+                parts.append(
+                    f"approval_latency={metrics.gate_approval_latency_avg_sec / 60:.0f}m"
+                )
             if parts:
                 lines.append("gate: " + " | ".join(parts))
 ```

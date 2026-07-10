@@ -70,7 +70,7 @@ pipeline 作成 (gate ON では publish が pending_approval — F-6)
 | `gate_decided_at` | 承認/却下の時刻 (放置は NULL) |
 | `gate_reason` | 却下理由 自由記述 (任意) |
 | `gate_message_id` | Discord メッセージ ID (bot 再起動後の突合用。保存経路は F-5 の gate_message endpoint) |
-| `cf_state` | 反実仮想追跡の状態機械 (F-4): NULL=追跡中(または対象外) / `would_trigger`=pending 中に entry 初成立 (stamp 済・cf 行は未記録) / `triggered`=cf shadow_trigger 行を記録済 / `invalidated`=追跡窓を構造的に閉鎖 (latch) |
+| `cf_state` | 反実仮想追跡の状態機械 (F-4): NULL=追跡中(または対象外) / `would_trigger`=pending 中に entry 初成立 (stamp 済・cf 行は未記録) / `triggered`=cf shadow_trigger 行を記録済 / `invalidated`=追跡窓を構造的に閉鎖 (latch) / `superseded`=pending が新 plan に置換され窓終了 (F-3。件数集計用マーカー — gate_decision は NULL のままなので、これが無いと gate OFF の superseded と区別できない) |
 | `cf_stamped_at` / `cf_stamp_price` / `cf_stamp_spread_pips` | stamp (pending 中の entry 初成立時点の時刻・mid・spread)。cf 行を後から記録する際の triggered_at / trigger_price / spread_pips になる (hindsight の spread 込み採点に必須) |
 
 **ラベルを status から復元する方式は廃止** (codex Medium): approved plan は後続で
@@ -101,15 +101,28 @@ pending→invalidated 遷移側で行う (同様に `WHERE status='pending_appro
 条件付き UPDATE で status + gate_decision='unanswered' を一括更新 — approve との
 race も rowcount 排他で解決)。
 
-**cf finalize の原子 helper (codex 2巡目 High):** cf 行化はすべて
+**cf finalize の原子 helper (codex 2巡目 High / 3巡目 High×2 反映):** cf 行化はすべて
 `finalize_cf_trigger(plan_id, ...)` として store に置き、**単一 transaction** で
-(1) `UPDATE cf_state → 'triggered'` の rowcount claim — from は 2 通り:
-`'would_trigger'` (stamp 済み終端) / `NULL` (stamp なし rejected の watch 中 entry 成立)
-(2) shadow_triggers INSERT (3) hindsight enqueue INSERT を行う (既存
-`record_shadow_trigger` / `record_hindsight_evaluation` は個別 commit なので流用
-しない — 中間クラッシュで「cf_state だけ進んで行がない」等の孤児が出る)。
+(1) `UPDATE cf_state → 'triggered'` の rowcount claim
+(2) `plan_cf_trigger` decision INSERT (3) shadow_triggers INSERT
+(4) hindsight enqueue INSERT を行う (既存 `record_shadow_trigger` /
+`record_hindsight_evaluation` / `record_decision` は個別 commit なので流用しない —
+中間クラッシュで「cf_state だけ進んで行がない」等の孤児が出る。decision も tx 内に
+含めることで claim 負け・再試行時に偽 decision が残らない)。
+
+**claim の許可条件 (3巡目 High#1 — 承認済み plan の保護):**
+- from `'would_trigger'` (stamp 済み終端): `gate_decision IN ('rejected','unanswered')` 必須
+- from `NULL` (stamp なしの直接記録): `status='rejected' AND gate_decision='rejected'` のみ
+
+承認済み plan (gate_decision='approved') は stamp が残ったまま real trigger →
+**live 発注失敗で invalidated** (runtime の is_executed=False 経路) になり得る。
+gate_decision 条件が無いと「terminal + would_trigger」に一致して誤 cf 復旧され、
+偽 decision + real 行との UNIQUE 衝突を起こす。gate_decision で構造的に排除する。
+
 hindsight 行は real と同内容の pending 行 (evaluator 未注入時は real 同様 enqueue
-しない)。rowcount 0 なら何もしない (冪等・再試行安全)。status 遷移 (try_decide_gate /
+しない)。rowcount 0 なら何もしない (冪等・再試行安全)。**UNIQUE(plan_id) 違反時は
+状態を進めず rollback し整合性エラーとしてログ** (無条件で cf_state を進めると
+「state だけ進んだ孤児」を再発させる — 3巡目 High#2)。status 遷移 (try_decide_gate /
 expiry / invalidation) と finalize の**間**のクラッシュは F-4 の finalize 待ち集合が
 次 tick で回収する。
 
@@ -120,7 +133,10 @@ expiry / invalidation) と finalize の**間**のクラッシュは F-4 の fina
 superseded であり rejected ではない (人間の判断なしラベル = gate_decision NULL)。
 superseded になった pending plan は反実仮想追跡の対象にもしない (F-4 の watch 対象から
 status 遷移で自然に外れる。システム自身が取り下げた plan の「承認していたら」は
-測定対象の判断が存在しないため。stamp が残っていても cf 行は起こさない)。
+測定対象の判断が存在しないため。stamp データが残っていても cf 行は起こさない)。
+置換時、旧 status が pending_approval だった plan には **`cf_state='superseded'` を刻印**
+する (F-7 の superseded pending 件数の集計マーカー。stamp 済みなら would_trigger を
+上書きしてよい — 窓は閉じた)。
 rejected は置換対象外 (terminal のまま・追跡窓は expires_at まで継続)。
 
 ### F-4: watch の反実仮想追跡 (本体・要厚めレビュー)
@@ -170,10 +186,13 @@ freshness final wall) で評価する。承認済みとの成績比較が「同�
   `status='rejected' AND expires_at > now AND cf_state IS NULL` (cf 解決済み・窓閉鎖済みは
   恒久的に外れる — rejected の無限蓄積で watch が肥大しない) ∪
   **finalize 待ち集合 (crash recovery — codex 2巡目 High)**:
-  `status IN ('rejected','expired','invalidated') AND cf_state='would_trigger'`。
-  status 遷移 tx と finalize tx の間でクラッシュした plan がここに残る。watch tick が
-  見つけ次第 `finalize_cf_trigger` を再実行 (claim ベースで冪等)。成功すると
-  cf_state='triggered' になり集合から恒久的に抜ける — 復旧不能な取りこぼしを作らない。
+  `status IN ('rejected','expired','invalidated') AND cf_state='would_trigger'
+  AND gate_decision IN ('rejected','unanswered')`。gate_decision 条件は必須 —
+  承認済み plan (approved) が real trigger 後に発注失敗で invalidated になった場合を
+  除外する (3巡目 High#1)。status 遷移 tx と finalize tx の間でクラッシュした plan が
+  ここに残る。watch tick が見つけ次第 `finalize_cf_trigger` を再実行 (claim ベースで
+  冪等)。成功すると cf_state='triggered' になり集合から恒久的に抜ける —
+  復旧不能な取りこぼしを作らない。
 - **stamp 済みで承認された plan**: stamp は残るが cf 行にはならない (real trigger が
   正本)。cf_stamped_at と実 trigger 時刻の差 = **承認遅延コストの測定素材** (副産物、
   F-7 の headline 3 ラベルには含めない)。
@@ -189,13 +208,16 @@ freshness final wall) で評価する。承認済みとの成績比較が「同�
 | `POST /orchestrator/plans/{id}/reject` body `{reason?: str}` | 同上 (rejected)。reason は gate_reason へ |
 | `POST /orchestrator/plans/{id}/gate_message` body `{message_id: str}` | bot が Discord 投稿直後に呼ぶ (codex Medium: 保存経路がないと再起動突合が成立しない)。冪等 (同値上書き可)。404=plan なし |
 
-**API → OrchestratorStore の経路 (codex 2巡目 Medium):** 現状 `APIState`
-(`src/api/_state.py`) に orchestrator store は無く、`start_api_server()` でも注入されて
-いない。既存パターン踏襲で **`APIState.orchestrator_store` フィールドを追加し、
-`start_api_server()` の引数に加えて main/bootstrap から注入する** (runtime が使う
-OrchestratorStore と同一インスタンスを共有 — Session は呼び出し毎に開くので
-スレッド間共有は既存 store 群と同条件)。route 内で prices_db_path から都度開く案は
-採らない (常駐 API で毎 request engine 生成は無駄・注入パターンからの逸脱)。
+**API → OrchestratorStore の経路 (codex 2巡目 Medium / 3巡目 Low-Med で文言確定):**
+現状 `APIState` (`src/api/_state.py`) に orchestrator store は無く、`start_api_server()`
+でも注入されていない。既存パターン踏襲で **`APIState.orchestrator_store` フィールドを
+追加し、`start_api_server()` の引数に加えて main から注入する**。注入するのは main で
+生成した OrchestratorStore で、runtime (bootstrap) 側とはインスタンスが別だが、
+**engine は `_get_engine` の path 単位キャッシュで同一実体**を共有する。Store は
+Session-per-call で engine 以外の状態を持たないため、インスタンス分離に挙動差はない
+(「同一 DB・同一 engine を参照」が正確な要件。bootstrap への引き回しはしない)。
+route 内で prices_db_path から都度開く案は採らない (毎 request の Store 生成は無駄・
+注入パターンからの逸脱)。
 
 **reasoning 要約の取得元 (codex Medium で未定義だった点):** trade_plans には
 reasoning が無い。**最新の `plan_create` decision (orchestrator_decisions.plan_id で
@@ -235,10 +257,13 @@ approved / rejected / unanswered の件数・trigger 率・hindsight 平均 pnl_
   (codex 2巡目 Medium — SQLAlchemy 実装時も同じ罠)。この除外を入れないと、
   gate 導入と同時に cf サンプルが実性能に混入する
 - decision 集計も同様: real は `plan_trigger`、cf は `plan_cf_trigger` で type から分離
+- **gate ラベル別集計にも trade_horizon を適用する** (3巡目 Medium): daily summary は
+  運用中 horizon で絞って集計するため、gate 行だけ全期間値になると swing が混入する
 - **unanswered の内訳は status で分離可能**: expired = TTL 満了まで無応答 /
   invalidated = 応答前に構造死 (応答機会が短かった可能性あり — 放置率の解釈時に
   区別する)。superseded pending (gate_decision NULL) は 3 ラベル外 (システム都合の
-  取り下げ・判断が存在しない)。件数だけ別行で出す
+  取り下げ・判断が存在しない)。件数だけ別行で出す — 集計は `cf_state='superseded'`
+  マーカー (F-3。gate_decision NULL だけでは gate OFF の superseded と区別できない)
 - 副産物: stamp 済みで承認された plan の cf_stamped_at と実 trigger 時刻の差 =
   **承認遅延コスト** (即承認なら幾ら取れたか)。headline には含めず別行
 
