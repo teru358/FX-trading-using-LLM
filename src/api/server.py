@@ -24,7 +24,7 @@ import threading
 from fastapi import FastAPI
 
 from src.api._state import state
-from src.api.routes import account, admin, ask, data, health, trading
+from src.api.routes import account, admin, ask, data, health, orchestrator, trading
 from src.concurrency.priority_job_slot import PriorityJobSlot
 from src.config import AppConfig
 from src.data.analysis_store import AnalysisStore
@@ -42,6 +42,7 @@ app.include_router(admin.router)
 app.include_router(data.router)
 app.include_router(trading.router)
 app.include_router(ask.router)
+app.include_router(orchestrator.router)
 
 
 # uvicorn のログ設定:
@@ -66,6 +67,7 @@ def start_api_server(
     price_store: PriceStore,
     hold_store,        # HoldDecisionStore
     forecast_store,    # ForecastStore
+    orchestrator_store=None,  # OrchestratorStore (gate spec F-5)
 ) -> threading.Thread:
     """バックグラウンドスレッドで uvicorn を起動する。"""
     state.config = config
@@ -75,6 +77,7 @@ def start_api_server(
     state.price_store = price_store
     state.hold_store = hold_store
     state.forecast_store = forecast_store
+    state.orchestrator_store = orchestrator_store
     state.started_at = db_now()
 
     def _run() -> None:

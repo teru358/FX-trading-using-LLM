@@ -31,6 +31,7 @@ class APIState:
     price_store: PriceStore | None = None
     hold_store: Any = None        # HoldDecisionStore
     forecast_store: Any = None    # ForecastStore
+    orchestrator_store: Any = None  # OrchestratorStore (gate spec F-5)
     started_at: datetime | None = None
 
 

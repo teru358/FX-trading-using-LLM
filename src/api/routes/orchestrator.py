@@ -1,0 +1,102 @@
+"""orchestrator plan 系 endpoint (approval gate spec F-5)。
+
+権威は finance 側 — discord_bot は UI アダプタとしてここを呼ぶ。
+認証は既存 X-API-Key (verify_api_key)。store は APIState.orchestrator_store
+(start_api_server で注入。未注入は 503 — headless 構成の保護)。
+"""
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+
+from src.api._state import state, verify_api_key
+from src.orchestrator.plan_view import plan_to_row
+
+router = APIRouter()
+
+
+def _store():
+    store = state.orchestrator_store
+    if store is None:
+        raise HTTPException(status_code=503, detail="orchestrator store not configured")
+    return store
+
+
+def _row(store, plan) -> dict[str, Any]:
+    row = plan_to_row(
+        plan, reasoning=store.get_latest_plan_create_reasoning(plan.plan_id)
+    )
+    row["status"] = plan.status
+    row["gate_decision"] = plan.gate_decision
+    row["gate_message_id"] = plan.gate_message_id
+    return row
+
+
+@router.get("/orchestrator/plans", dependencies=[Depends(verify_api_key)])
+def list_plans(
+    status: str = "pending_approval",
+    posted_within_hours: int | None = None,
+) -> dict[str, Any]:
+    """plan 一覧。posted_within_hours 指定時は reconcile モード (status 不問・
+    gate_message_id あり・updated_at 窓 — bot 再起動復旧用)。"""
+    store = _store()
+    if posted_within_hours is not None:
+        plans = store.get_gate_posted_plans(within_hours=posted_within_hours)
+    else:
+        plans = store.get_plans_by_status((status,))
+    return {"plans": [_row(store, p) for p in plans]}
+
+
+@router.get("/orchestrator/plans/{plan_id}", dependencies=[Depends(verify_api_key)])
+def plan_detail(plan_id: int) -> dict[str, Any]:
+    """plan 詳細 — polling で pending から消えた plan の結末判定 (bot の edit 用)。"""
+    store = _store()
+    plan = store.get_trade_plan(plan_id)
+    if plan is None:
+        raise HTTPException(status_code=404, detail="plan not found")
+    row = _row(store, plan)
+    row["gate_decided_at"] = plan.gate_decided_at
+    row["gate_reason"] = plan.gate_reason
+    return row
+
+
+class _RejectBody(BaseModel):
+    reason: str | None = None
+
+
+class _GateMessageBody(BaseModel):
+    message_id: str
+
+
+@router.post(
+    "/orchestrator/plans/{plan_id}/approve",
+    dependencies=[Depends(verify_api_key)],
+)
+def approve_plan(plan_id: int) -> dict[str, Any]:
+    if not _store().try_decide_gate(plan_id, "approved"):
+        raise HTTPException(status_code=409, detail="plan is not pending_approval")
+    return {"plan_id": plan_id, "status": "active"}
+
+
+@router.post(
+    "/orchestrator/plans/{plan_id}/reject",
+    dependencies=[Depends(verify_api_key)],
+)
+def reject_plan(plan_id: int, body: _RejectBody | None = None) -> dict[str, Any]:
+    reason = body.reason if body is not None else None
+    if not _store().try_decide_gate(plan_id, "rejected", reason=reason):
+        raise HTTPException(status_code=409, detail="plan is not pending_approval")
+    return {"plan_id": plan_id, "status": "rejected"}
+
+
+@router.post(
+    "/orchestrator/plans/{plan_id}/gate_message",
+    dependencies=[Depends(verify_api_key)],
+)
+def set_gate_message(plan_id: int, body: _GateMessageBody) -> dict[str, Any]:
+    """bot が Discord 投稿直後に呼ぶ (再起動突合の正本を finance 側へ)。冪等。"""
+    if not _store().set_gate_message(plan_id, body.message_id):
+        raise HTTPException(status_code=404, detail="plan not found")
+    return {"plan_id": plan_id, "gate_message_id": body.message_id}

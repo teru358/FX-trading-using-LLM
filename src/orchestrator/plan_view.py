@@ -31,12 +31,13 @@ def _safe_entry_summary(conditions: Any) -> str:
         return ""
 
 
-def plan_to_row(plan: "_TradePlan") -> dict[str, Any]:
+def plan_to_row(plan: "_TradePlan", *, reasoning: str | None = None) -> dict[str, Any]:
     """_TradePlan 1件を表示/API 用の dict に整形する (純関数)。
 
     sl/tp は action_json から生値を取り、欠損・型不整合時は None。表示整形 (「-」等) は
     呼び出し側 (表示層) の責務。フィールドキーは承認ゲート spec F-5 と揃える。
-    壊れた JSON でも 1件で全体が落ちないよう best-effort に倒す。
+    壊れた JSON でも 1件で全体が落ちないよう best-effort に倒す。reasoning は呼び出し側が
+    `get_latest_plan_create_reasoning` で引いて渡す (F-5)。
     """
     action = plan.action_json if isinstance(plan.action_json, dict) else {}
     return {
@@ -48,4 +49,5 @@ def plan_to_row(plan: "_TradePlan") -> dict[str, Any]:
         "tp": action.get("tp"),
         "expires_at": plan.expires_at,
         "created_at": plan.created_at,
+        "reasoning": reasoning,
     }

@@ -486,8 +486,12 @@ def main() -> None:
     # REST API サーバー（有効時のみ — Initial collection 前に起動）
     if config.api.enabled:
         from src.api.server import start_api_server
+        from src.data.orchestrator_store import OrchestratorStore
+        # gate spec F-5: API から plan gate を操作するための store。engine は
+        # _get_engine が db_path 単位で共有するため runtime 側と実体は同一。
         start_api_server(config, store, analysis_store, _llm_slot,
-                         price_store, hold_store, forecast_store)
+                         price_store, hold_store, forecast_store,
+                         OrchestratorStore(config.prices_db_path))
 
     # 起動直後にニュース収集+テクニカル分析を1回実行
     # prices.db が存在しない場合（初回起動）は市場時間を無視して強制実行
