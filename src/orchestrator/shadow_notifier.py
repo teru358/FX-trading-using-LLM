@@ -184,6 +184,23 @@ class ShadowNotifier:
             f"({metrics.agent_runs_failed}/{metrics.agent_runs_total})",
             f"freshness blocks: {metrics.freshness_blocks}",
         ]
+        if metrics.gate_labels or metrics.gate_superseded_pending:
+            parts = []
+            for label in ("approved", "rejected", "unanswered"):
+                g = metrics.gate_labels.get(label)
+                if g:
+                    parts.append(
+                        f"{label}={g['plans']}p/{g['triggers']}t"
+                        f"({g['trigger_rate']:.0%})/{_fmt_opt(g['avg_pnl_r'])}R"
+                    )
+            if metrics.gate_superseded_pending:
+                parts.append(f"superseded_pending={metrics.gate_superseded_pending}")
+            if metrics.gate_approval_latency_avg_sec is not None:
+                parts.append(
+                    f"approval_latency={metrics.gate_approval_latency_avg_sec / 60:.0f}m"
+                )
+            if parts:
+                lines.append("gate: " + " | ".join(parts))
         await self._send_chunked(header, lines)
 
     # ── 内部 ──────────────────────────────────────────────────

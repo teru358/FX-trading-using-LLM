@@ -125,3 +125,115 @@ def test_freshness_block_count(store: OrchestratorStore) -> None:
     store.record_freshness(snapshot_id=snap, pair="USDJPY=X", issues=[])  # block でない
     m = compute_shadow_metrics(store, now=NOW)
     assert m.freshness_blocks == 1
+
+
+# ── gate spec F-7: real/cf 分離 + label 集計 ──────────────────
+
+from datetime import timedelta
+
+from src.utils.clock import db_now
+
+
+def _gate_plan(store, *, status="pending_approval") -> int:
+    snap = store.create_snapshot(pair="USDJPY=X", as_of_time=db_now())
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    return store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=snap, horizon="day", direction="long",
+        entry_conditions_json=[{"type": "price_at_or_below", "value": 150.3}],
+        action_json={"sl": 149.4, "tp": 151.5, "rr": 2.0}, invalidation_json=[],
+        expires_at=db_now() + timedelta(hours=8), created_by_run_id=run_id,
+        status=status,
+    )
+
+
+def test_real_plan_counts_exclude_cf_labels(tmp_path):
+    """rejected/unanswered は実性能 plan_counts から除外。gate OFF (NULL) は含む
+    (NOT IN の NULL 罠 — codex 2巡目 Medium の回帰テスト)。"""
+    store = OrchestratorStore(tmp_path / "orch.db")
+    _gate_plan(store, status="active")           # gate OFF 相当 (gate_decision NULL)
+    p_rej = _gate_plan(store)
+    store.try_decide_gate(p_rej, "rejected")
+    p_un = _gate_plan(store)
+    store.try_close_pending_unanswered(p_un, "expired")
+    p_appr = _gate_plan(store)
+    store.try_decide_gate(p_appr, "approved")    # approved は real 側に含む
+
+    raw = store.get_shadow_metrics_raw()
+    # active 2 件 (NULL + approved)。rejected/expired(unanswered) は数えない
+    assert raw["plan_counts"].get("active") == 2
+    assert "rejected" not in raw["plan_counts"]
+    assert raw["plan_counts"].get("expired") is None
+
+
+def _cf_run(store) -> int:
+    return store.start_run("OrchestratorRuntime", pair="USDJPY=X")
+
+
+def test_cf_hindsight_excluded_from_real_aggregates(tmp_path):
+    """cf 行の hindsight は実性能 avg_pnl_r に混入しない。"""
+    store = OrchestratorStore(tmp_path / "orch.db")
+    p_rej = _gate_plan(store)
+    store.try_decide_gate(p_rej, "rejected")
+    trig_id = store.finalize_cf_trigger(
+        p_rej, run_id=_cf_run(store), enqueue_hindsight=True, horizon_seconds=60,
+        triggered_at=db_now() - timedelta(hours=2), trigger_price=150.0,
+        spread_pips=1.0)
+    ev = store.get_pending_hindsight_evaluations(now=db_now())[0]
+    store.update_hindsight_evaluation(
+        ev.id, status="evaluated", evaluated_at=db_now(), pnl_r=5.0)
+    raw = store.get_shadow_metrics_raw()
+    assert raw["avg_pnl_r"] is None              # real 側は空 (cf の 5.0 が混ざらない)
+    assert raw["gate_avg_pnl_r"].get("rejected") == 5.0
+
+
+def test_gate_label_counts(tmp_path):
+    store = OrchestratorStore(tmp_path / "orch.db")
+    p1 = _gate_plan(store); store.try_decide_gate(p1, "approved")
+    p2 = _gate_plan(store); store.try_decide_gate(p2, "rejected")
+    p3 = _gate_plan(store); store.try_close_pending_unanswered(p3, "expired")
+    raw = store.get_shadow_metrics_raw()
+    assert raw["gate_plan_counts"] == {"approved": 1, "rejected": 1, "unanswered": 1}
+
+
+def test_gate_labels_respect_horizon(tmp_path):
+    """daily summary の horizon 絞りが gate 行にも効く (swing 混入防止 —
+    codex plan review Medium)。"""
+    store = OrchestratorStore(tmp_path / "orch.db")
+    p_day = _gate_plan(store)
+    store.try_decide_gate(p_day, "rejected")
+    snap = store.create_snapshot(pair="USDJPY=X", as_of_time=db_now())
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    p_swing = store.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=snap, horizon="swing", direction="long",
+        entry_conditions_json=[{"type": "price_at_or_below", "value": 150.3}],
+        action_json={"sl": 149.4, "tp": 151.5, "rr": 2.0}, invalidation_json=[],
+        expires_at=db_now() + timedelta(hours=8), created_by_run_id=run_id,
+        status="pending_approval")
+    store.try_decide_gate(p_swing, "rejected")
+    raw = store.get_shadow_metrics_raw(trade_horizon="day")
+    assert raw["gate_plan_counts"] == {"rejected": 1}    # swing は数えない
+
+
+def test_compute_metrics_gate_labels_shape(tmp_path):
+    from src.orchestrator.shadow_metrics import compute_shadow_metrics
+    store = OrchestratorStore(tmp_path / "orch.db")
+    p = _gate_plan(store); store.try_decide_gate(p, "rejected")
+    store.finalize_cf_trigger(
+        p, run_id=_cf_run(store), enqueue_hindsight=False, horizon_seconds=3600,
+        triggered_at=db_now(), trigger_price=150.0, spread_pips=1.0)
+    m = compute_shadow_metrics(store, now=db_now())
+    g = m.gate_labels["rejected"]
+    assert g["plans"] == 1
+    assert g["triggers"] == 1
+    assert g["trigger_rate"] == 1.0              # spec F-7 要求の構造化値
+    assert "avg_pnl_r" in g
+
+
+def test_superseded_pending_count(tmp_path):
+    """superseded pending 件数は cf_state='superseded' マーカーで数える (F-7)。"""
+    from src.orchestrator.shadow_metrics import compute_shadow_metrics
+    store = OrchestratorStore(tmp_path / "orch.db")
+    _gate_plan(store)                            # pending → supersede される
+    store.supersede_active_plans("USDJPY=X")
+    m = compute_shadow_metrics(store, now=db_now())
+    assert m.gate_superseded_pending == 1

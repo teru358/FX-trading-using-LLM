@@ -6,7 +6,7 @@ ShadowMetrics dataclass にまとめる。Phase 3 移行判断 (trigger rate + h
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -40,6 +40,13 @@ class ShadowMetrics:
     llm_failure_rate: float = 0.0
     # 5. freshness block
     freshness_blocks: int = 0
+    # 6. approval gate (spec F-7): label 別 {plans, triggers, trigger_rate, avg_pnl_r}。
+    # approved=real 成績 / rejected・unanswered=反実仮想成績。空 dict = gate 未使用。
+    gate_labels: dict = field(default_factory=dict)
+    # superseded pending 件数 (cf_state='superseded' マーカー、放置率の解釈補助)
+    gate_superseded_pending: int = 0
+    # 承認遅延コスト: stamp 済み承認 plan の 実trigger − stamp の平均秒 (副産物)
+    gate_approval_latency_avg_sec: float | None = None
 
 
 def _rate(numerator: int, denominator: int) -> float:
@@ -69,6 +76,16 @@ def compute_shadow_metrics(
 
     hindsight_evaluated = hs_counts.get("evaluated", 0)
 
+    gate_labels = {}
+    for label, count in raw["gate_plan_counts"].items():
+        triggers = raw["gate_trigger_counts"].get(label, 0)
+        gate_labels[label] = {
+            "plans": count,
+            "triggers": triggers,
+            "trigger_rate": _rate(triggers, count),
+            "avg_pnl_r": raw["gate_avg_pnl_r"].get(label),
+        }
+
     return ShadowMetrics(
         plans_created=plans_created,
         plans_triggered=plans_triggered,
@@ -92,4 +109,7 @@ def compute_shadow_metrics(
         agent_runs_failed=agent_runs_failed,
         llm_failure_rate=_rate(agent_runs_failed, agent_runs_total),
         freshness_blocks=raw["freshness_blocks"],
+        gate_labels=gate_labels,
+        gate_superseded_pending=raw["gate_superseded_pending"],
+        gate_approval_latency_avg_sec=raw["gate_approval_latency_avg_sec"],
     )

@@ -1504,8 +1504,20 @@ class OrchestratorStore:
         集計 (後方互換)。
         """
         with Session(self._engine) as session:
+            # gate spec F-7: 実性能集計から反実仮想 plan (rejected/unanswered) を除外。
+            # SQL の NOT IN は NULL を落とすため IS NULL OR が必須 — gate OFF plan
+            # (gate_decision NULL) が集計から消える (codex 2巡目 Medium)。
+            _real = or_(
+                _TradePlan.gate_decision.is_(None),
+                _TradePlan.gate_decision.notin_(("rejected", "unanswered")),
+            )
+
             # plan lifecycle: status 別件数
-            plan_stmt = select(_TradePlan.status, func.count()).group_by(_TradePlan.status)
+            plan_stmt = (
+                select(_TradePlan.status, func.count())
+                .where(_real)
+                .group_by(_TradePlan.status)
+            )
             if trade_horizon is not None:
                 plan_stmt = plan_stmt.where(_TradePlan.horizon == trade_horizon)
             plan_rows = session.execute(plan_stmt).all()
@@ -1518,38 +1530,39 @@ class OrchestratorStore:
             run_rows = session.execute(run_stmt).all()
             run_counts = {status: count for status, count in run_rows}
 
-            # hindsight: status 別件数 + evaluated 行の集計。horizon 絞り込みは
-            # shadow_hindsight_evaluations -> shadow_triggers -> trade_plans の
-            # join 経由 (hindsight/trigger 自体に horizon 列が無いため)。
-            hs_stmt = select(
-                _ShadowHindsightEvaluation.status, func.count()
+            # hindsight: status 別件数 + evaluated 行の集計。常に
+            # shadow_hindsight_evaluations -> shadow_triggers -> trade_plans を join し
+            # 実性能フィルタ (_real) を適用する (cf 行の混入防止, gate spec F-7)。
+            # horizon 絞り込みも同じ join 経由 (hindsight/trigger 自体に horizon 列が無いため)。
+            hs_stmt = (
+                select(_ShadowHindsightEvaluation.status, func.count())
+                .join(
+                    _ShadowTrigger,
+                    _ShadowTrigger.id == _ShadowHindsightEvaluation.shadow_trigger_id,
+                )
+                .join(_TradePlan, _TradePlan.plan_id == _ShadowTrigger.plan_id)
+                .where(_real)
             )
-            evaluated_stmt = select(
-                func.avg(_ShadowHindsightEvaluation.mfe_r),
-                func.avg(_ShadowHindsightEvaluation.mae_r),
-                func.avg(_ShadowHindsightEvaluation.pnl_r),
-                func.sum(_ShadowHindsightEvaluation.would_hit_sl),
-                func.sum(_ShadowHindsightEvaluation.would_hit_tp),
-            ).where(_ShadowHindsightEvaluation.status == "evaluated")
+            evaluated_stmt = (
+                select(
+                    func.avg(_ShadowHindsightEvaluation.mfe_r),
+                    func.avg(_ShadowHindsightEvaluation.mae_r),
+                    func.avg(_ShadowHindsightEvaluation.pnl_r),
+                    func.sum(_ShadowHindsightEvaluation.would_hit_sl),
+                    func.sum(_ShadowHindsightEvaluation.would_hit_tp),
+                )
+                .select_from(_ShadowHindsightEvaluation)
+                .join(
+                    _ShadowTrigger,
+                    _ShadowTrigger.id == _ShadowHindsightEvaluation.shadow_trigger_id,
+                )
+                .join(_TradePlan, _TradePlan.plan_id == _ShadowTrigger.plan_id)
+                .where(_ShadowHindsightEvaluation.status == "evaluated")
+                .where(_real)
+            )
             if trade_horizon is not None:
-                hs_stmt = (
-                    hs_stmt
-                    .join(
-                        _ShadowTrigger,
-                        _ShadowTrigger.id == _ShadowHindsightEvaluation.shadow_trigger_id,
-                    )
-                    .join(_TradePlan, _TradePlan.plan_id == _ShadowTrigger.plan_id)
-                    .where(_TradePlan.horizon == trade_horizon)
-                )
-                evaluated_stmt = (
-                    evaluated_stmt
-                    .join(
-                        _ShadowTrigger,
-                        _ShadowTrigger.id == _ShadowHindsightEvaluation.shadow_trigger_id,
-                    )
-                    .join(_TradePlan, _TradePlan.plan_id == _ShadowTrigger.plan_id)
-                    .where(_TradePlan.horizon == trade_horizon)
-                )
+                hs_stmt = hs_stmt.where(_TradePlan.horizon == trade_horizon)
+                evaluated_stmt = evaluated_stmt.where(_TradePlan.horizon == trade_horizon)
             hs_stmt = hs_stmt.group_by(_ShadowHindsightEvaluation.status)
             hs_rows = session.execute(hs_stmt).all()
             hindsight_counts = {status: count for status, count in hs_rows}
@@ -1564,6 +1577,73 @@ class OrchestratorStore:
             ).all()
             freshness_blocks = sum(1 for (issues,) in issues_rows if issues)
 
+            # gate label 別集計 (F-7): plan 件数 / trigger 行数 / hindsight 平均 pnl_r。
+            # approved の行は real、rejected/unanswered の行は cf — plan 1件=行1本
+            # (UNIQUE) なので gate_decision の JOIN だけで排反に分離できる。
+            gate_plan_stmt = (
+                select(_TradePlan.gate_decision, func.count())
+                .where(_TradePlan.gate_decision.is_not(None))
+                .group_by(_TradePlan.gate_decision)
+            )
+            gate_trigger_stmt = (
+                select(_TradePlan.gate_decision, func.count())
+                .select_from(_ShadowTrigger)
+                .join(_TradePlan, _TradePlan.plan_id == _ShadowTrigger.plan_id)
+                .where(_TradePlan.gate_decision.is_not(None))
+                .group_by(_TradePlan.gate_decision)
+            )
+            gate_pnl_stmt = (
+                select(
+                    _TradePlan.gate_decision,
+                    func.avg(_ShadowHindsightEvaluation.pnl_r),
+                )
+                .select_from(_ShadowHindsightEvaluation)
+                .join(
+                    _ShadowTrigger,
+                    _ShadowTrigger.id == _ShadowHindsightEvaluation.shadow_trigger_id,
+                )
+                .join(_TradePlan, _TradePlan.plan_id == _ShadowTrigger.plan_id)
+                .where(_ShadowHindsightEvaluation.status == "evaluated")
+                .where(_TradePlan.gate_decision.is_not(None))
+                .group_by(_TradePlan.gate_decision)
+            )
+            # superseded pending 件数 (F-7): cf_state='superseded' マーカーで数える
+            # (gate_decision NULL だけでは gate OFF の superseded と区別できない)。
+            gate_superseded_stmt = (
+                select(func.count())
+                .select_from(_TradePlan)
+                .where(_TradePlan.cf_state == "superseded")
+            )
+            # 承認遅延コスト (F-7 副産物): stamp 済み承認 plan の
+            # 実 trigger 時刻 − stamp 時刻。件数は少ないため Python 側で平均する。
+            gate_latency_stmt = (
+                select(_ShadowTrigger.triggered_at, _TradePlan.cf_stamped_at)
+                .select_from(_ShadowTrigger)
+                .join(_TradePlan, _TradePlan.plan_id == _ShadowTrigger.plan_id)
+                .where(_TradePlan.gate_decision == "approved")
+                .where(_TradePlan.cf_stamped_at.is_not(None))
+            )
+            if trade_horizon is not None:
+                # daily summary は運用中 horizon で絞る — gate 行だけ全期間値に
+                # ならないようにする (codex plan review Medium)
+                gate_plan_stmt = gate_plan_stmt.where(_TradePlan.horizon == trade_horizon)
+                gate_trigger_stmt = gate_trigger_stmt.where(_TradePlan.horizon == trade_horizon)
+                gate_pnl_stmt = gate_pnl_stmt.where(_TradePlan.horizon == trade_horizon)
+                gate_superseded_stmt = gate_superseded_stmt.where(_TradePlan.horizon == trade_horizon)
+                gate_latency_stmt = gate_latency_stmt.where(_TradePlan.horizon == trade_horizon)
+            gate_plan_counts = dict(session.execute(gate_plan_stmt).all())
+            gate_trigger_counts = dict(session.execute(gate_trigger_stmt).all())
+            gate_avg_pnl_r = dict(session.execute(gate_pnl_stmt).all())
+            gate_superseded_pending = session.execute(gate_superseded_stmt).scalar() or 0
+            latencies = [
+                (t - s).total_seconds()
+                for t, s in session.execute(gate_latency_stmt).all()
+                if t is not None and s is not None
+            ]
+            gate_approval_latency_avg_sec = (
+                sum(latencies) / len(latencies) if latencies else None
+            )
+
         return {
             "plan_counts": plan_counts,
             "run_counts": run_counts,
@@ -1574,6 +1654,11 @@ class OrchestratorStore:
             "sl_hits": int(evaluated[3] or 0),
             "tp_hits": int(evaluated[4] or 0),
             "freshness_blocks": freshness_blocks,
+            "gate_plan_counts": gate_plan_counts,
+            "gate_trigger_counts": gate_trigger_counts,
+            "gate_avg_pnl_r": gate_avg_pnl_r,
+            "gate_superseded_pending": gate_superseded_pending,
+            "gate_approval_latency_avg_sec": gate_approval_latency_avg_sec,
         }
 
     # ── plan supersede helper (§8.9) ───────────────────────────
