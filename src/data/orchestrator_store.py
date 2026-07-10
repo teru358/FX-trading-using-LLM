@@ -81,6 +81,8 @@ class _AgentRun(_Base):
 PLAN_STATUSES = (
     "active", "triggered", "expired", "invalidated",
     "superseded", "suspended", "requires_replan",
+    # approval gate (spec 2026-07-05 F-1): 承認待ち / 却下 (terminal)
+    "pending_approval", "rejected",
 )
 
 
@@ -101,6 +103,16 @@ class _TradePlan(_Base):
     created_by_run_id     = Column(Integer)
     scale_in              = Column(Boolean)  # P-2b: 建玉ありでの同方向 plan (null=旧データ)
     new_signal_evidence   = Column(String)   # P-2b: scale_in の新シグナル根拠
+    # ── approval gate (spec 2026-07-05 F-2): nullable — gate OFF plan は全て NULL ──
+    gate_decision         = Column(String)   # approved | rejected | unanswered (永続ラベル正本)
+    gate_decided_at       = Column(DateTime) # 承認/却下の時刻 (放置=unanswered は NULL)
+    gate_reason           = Column(String)   # 却下理由 (自由記述・任意)
+    gate_message_id       = Column(String)   # Discord message ID (bot 再起動突合)
+    # ── 反実仮想追跡 (F-4): stamp → 終端時に記録 ──
+    cf_state              = Column(String)   # would_trigger | triggered | invalidated | superseded
+    cf_stamped_at         = Column(DateTime) # pending 中の entry 初成立時刻
+    cf_stamp_price        = Column(Float)    # 同・成立時 mid
+    cf_stamp_spread_pips  = Column(Float)    # 同・成立時 spread (pips、hindsight 採点用)
     created_at            = Column(DateTime, nullable=False)
     updated_at            = Column(DateTime, nullable=False)
 
@@ -141,6 +153,8 @@ class _OrderIntent(_Base):
 DECISION_TYPES = (
     "plan_create", "plan_update", "plan_invalidate",
     "plan_trigger", "direct_hold", "reject",
+    # approval gate (F-4): 反実仮想 trigger。real の plan_trigger と集計分離
+    "plan_cf_trigger",
 )
 
 
@@ -329,6 +343,15 @@ class OrchestratorStore:
             ("decision_snapshots", "current_plan_json", "JSON"),
             ("trade_plans", "scale_in", "BOOLEAN"),
             ("trade_plans", "new_signal_evidence", "VARCHAR"),
+            # approval gate (spec 2026-07-05 F-2)
+            ("trade_plans", "gate_decision", "VARCHAR"),
+            ("trade_plans", "gate_decided_at", "DATETIME"),
+            ("trade_plans", "gate_reason", "VARCHAR"),
+            ("trade_plans", "gate_message_id", "VARCHAR"),
+            ("trade_plans", "cf_state", "VARCHAR"),
+            ("trade_plans", "cf_stamped_at", "DATETIME"),
+            ("trade_plans", "cf_stamp_price", "FLOAT"),
+            ("trade_plans", "cf_stamp_spread_pips", "FLOAT"),
         ]
         with self._engine.connect() as conn:
             for table, col, col_type in migrations:
