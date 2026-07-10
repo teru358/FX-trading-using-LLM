@@ -112,6 +112,7 @@ def _build_orchestrator_config(data: dict) -> OrchestratorConfig:
     return OrchestratorConfig(
         enabled=data.get("enabled", False),
         mode=data.get("mode", "shadow"),
+        approval_gate=data.get("approval_gate", False),
         pairs=list(data.get("pairs", []) or []),
         policy=_from_dict(OrchestratorPolicyConfig, data.get("policy", {}) or {}),
         market_state=_from_dict(OrchestratorMarketStateConfig, data.get("market_state", {}) or {}),

@@ -357,8 +357,14 @@ class PlanningPipeline:
         # active plan policy: pair 単位最大 1 (§6.1)。旧 active を superseded に
         # (新 plan はまだ requires_replan なので except 不要だが、明示で安全側)。
         superseded = self._orch.supersede_active_plans(pair, except_plan_id=plan_id)
-        # 全 write 成功 → ここで初めて active 化 (orphan window を閉じる)。
-        self._orch.update_plan_status(plan_id, "active")
+        # 全 write 成功 → ここで初めて publish (orphan window を閉じる)。gate ON なら
+        # active でなく pending_approval で公開し、人間の承認を待つ (gate spec F-6)。
+        # 分岐は publish の 1 箇所のみ — create(requires_replan)→decision→vote→
+        # supersede の write 順序は gate に依らず不変 (codex High)。
+        publish_status = (
+            "pending_approval" if self._config.approval_gate else "active"
+        )
+        self._orch.update_plan_status(plan_id, publish_status)
         return PipelineResult(
             outcome="plan_create", plan_id=plan_id, decision_ids=[did],
             redraft_count=redraft_count,

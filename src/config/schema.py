@@ -727,6 +727,9 @@ class OrchestratorConfig:
     """orchestrator agent loop の設定 (spec §12)。既定は安全側 (enabled=false)。"""
     enabled: bool = False
     mode: str = "shadow"   # observe | shadow | live
+    # approval gate (spec 2026-07-05): ON のとき plan の publish が pending_approval
+    # になり、人間の承認 (API approve) を経てから active 化する。既定 OFF = 挙動不変。
+    approval_gate: bool = False
     pairs: list[str] = field(default_factory=list)  # 空なら tradeable instruments を使う
     # market state 検知 (§4.8/§5.2, Phase1 Task C)。既定 false。enabled 時のみ state ループ
     # 起動 + cadence②/regime 接続。orchestrator.enabled とは独立に on/off できる。

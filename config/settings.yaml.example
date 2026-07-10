@@ -384,6 +384,9 @@ orchestrator:
   #   - mode=live + AppConfig.mode=live_test → paper + MT5 observer (実発注なし。bridge DRY_RUN=true 必須)
   #   - mode=live + AppConfig.mode=live      → 本番発注 (live_broker 必須、未設定は起動時エラー)
   mode: shadow  # shadow | live
+  # 承認ゲート (spec 2026-07-05): true で plan が pending_approval で公開され、
+  # Discord 承認 (API approve) を経てから発注待機 (active) になる。既定 false。
+  approval_gate: false
   pairs: [USDJPY=X, EURUSD=X]  # 空なら tradeable instruments を使う
   # 発注直前の ExecutionOpinion 再点火 (material change 時)。既定 OFF (決定的・高速執行)。
   execution_opinion_recheck_enabled: false

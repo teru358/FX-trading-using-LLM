@@ -109,14 +109,16 @@ def store(tmp_path: Path) -> OrchestratorStore:
     return OrchestratorStore(tmp_path / "orch.db")
 
 
-def _make_pipeline(store: OrchestratorStore, llm) -> PlanningPipeline:
+def _make_pipeline(
+    store: OrchestratorStore, llm, config: OrchestratorConfig | None = None,
+) -> PlanningPipeline:
     bundle = AgentLlm(client=llm, temperature=0.1)
     return PlanningPipeline(
         orch_store=store,
         planner=PlannerAgent(bundle),
         execution_agent=ExecutionOpinionAgent(bundle),
         risk_gate=RiskGateWorker(min_rr=1.5, spread_max_pips=2.0, pip_size=0.01),
-        config=OrchestratorConfig(),
+        config=config or OrchestratorConfig(),
     )
 
 
@@ -602,3 +604,34 @@ async def test_usage_limit_is_failsafe_warning_not_unexpected_error(
         r.levelno == logging.WARNING and "fail-safe" in r.getMessage()
         for r in caplog.records
     )
+
+
+# ── approval gate (F-6) ──────────────────────────────────────
+
+
+async def test_gate_on_publishes_pending_approval(store: OrchestratorStore) -> None:
+    """gate ON: create は requires_replan のまま、最後の publish だけ pending_approval。"""
+    llm = _ScriptedLLM([OPP_YES, _draft_json(), FINAL_ACCEPT])
+    pipe = _make_pipeline(store, llm, config=OrchestratorConfig(approval_gate=True))
+    ctx = _ctx(store)
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+
+    result = await pipe.run(pair="USDJPY=X", context=ctx, run_id=run_id)
+
+    assert result.outcome == "plan_create"
+    plan = store.get_trade_plan(result.plan_id)
+    assert plan.status == "pending_approval"
+    assert plan.gate_decision is None
+    assert result.decision_ids
+
+
+async def test_gate_off_publishes_active_unchanged(store: OrchestratorStore) -> None:
+    """gate OFF (既定): 現行どおり active で publish — 挙動不変。"""
+    llm = _ScriptedLLM([OPP_YES, _draft_json(), FINAL_ACCEPT])
+    pipe = _make_pipeline(store, llm)
+    ctx = _ctx(store)
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+
+    result = await pipe.run(pair="USDJPY=X", context=ctx, run_id=run_id)
+
+    assert store.get_trade_plan(result.plan_id).status == "active"
