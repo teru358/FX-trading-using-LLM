@@ -318,6 +318,23 @@ class OrchestratorRuntime:
                     logger.exception(
                         f"[ORCH] watch eval failed for plan {plan.plan_id} ({pair})"
                     )
+            # ── gate spec F-4: 反実仮想 watch (pending_approval / rejected) ──
+            # 評価意味論は active と同一・action 境界のみ違う (記録専用・執行なし)。
+            for plan in self._orch.get_watch_cf_plans(pair):
+                try:
+                    self._evaluate_cf_plan(plan, pair, now)
+                except Exception:
+                    logger.exception(
+                        f"[ORCH] cf watch eval failed for plan {plan.plan_id} ({pair})"
+                    )
+            # finalize 待ち回収 (status 遷移と finalize の間のクラッシュ復旧、冪等)。
+            for plan in self._orch.get_cf_finalize_pending(pair):
+                try:
+                    self._finalize_cf(plan, pair, now)
+                except Exception:
+                    logger.exception(
+                        f"[ORCH] cf finalize recovery failed for plan {plan.plan_id}"
+                    )
         return triggered
 
     def run_hindsight_cycle(self, now: datetime | None = None) -> int:
@@ -567,6 +584,156 @@ class OrchestratorRuntime:
         # 4. trigger 確定。新規 snapshot を materialize し shadow trigger を記録する。
         # claim に負けた (既に非 active) 場合は False が返り、triggered には数えない。
         return self._record_shadow_trigger(plan, pair, quote, now)
+
+    def _evaluate_cf_plan(self, plan, pair: str, now: datetime) -> None:
+        """非 active plan (pending_approval / rejected) の反実仮想評価 (gate spec F-4)。
+
+        _evaluate_plan と同一の評価意味論 (invalidation/expiry → entry → freshness) で、
+        action だけが違う:
+        - pending: expiry/invalidation → unanswered 終端 (+stamp 済なら cf finalize) /
+          entry 初成立 → stamp のみ (shadow 行は書かない — UNIQUE(plan_id) 衝突回避)
+        - rejected: invalidation → cf_state latch / entry 初成立 → cf 行を直接 finalize
+        執行経路 (_record_shadow_trigger / _execute_live_trigger / order_intents) には
+        一切入らない (spec F-4 執行境界)。
+        """
+        quote = self._quote_provider(pair)
+        ctx = self._ctx.assemble(pair=pair, now=now, quote=quote)
+        self._enrich_ages(ctx, now)
+        ctx["news_conflict"] = self._news_conflicts(ctx, plan.direction)
+
+        is_pending = plan.status == "pending_approval"
+        try:
+            entry_conds = [
+                EntryCondition.from_dict(c) for c in (plan.entry_conditions_json or [])
+            ]
+            inval_conds = [
+                InvalidationCondition.from_dict(c) for c in (plan.invalidation_json or [])
+            ]
+        except SchemaParseError as exc:
+            logger.warning(
+                f"[ORCH] cf plan {plan.plan_id} ({pair}) has unparseable conditions: {exc}"
+            )
+            self._close_cf_window(plan, pair, "unparseable_conditions", now)
+            return
+
+        # 1. expiry / invalidation 最優先 (active と同一意味論)。
+        reason = self._evaluator.invalidation_reason(
+            inval_conds, ctx, now=now, expires_at=plan.expires_at
+        )
+        if reason is not None:
+            self._close_cf_window(plan, pair, reason, now)
+            return
+
+        # 2. entry 未成立なら何もしない。
+        if not self._evaluator.entry_conditions_hold(entry_conds, ctx):
+            return
+
+        # stamp 済み pending は entry 記録済み — 以後は expiry/invalidation 監視のみ。
+        if is_pending and plan.cf_state == "would_trigger":
+            return
+
+        # 3. freshness final wall (active と同一 — 承認済みとの比較が同じ物差し)。
+        issues = self._evaluator.freshness_issues(ctx)
+        if issues:
+            self._orch.record_freshness(
+                snapshot_id=plan.snapshot_id, pair=pair, issues=issues
+            )
+            return
+
+        # 4. action 境界 (ここだけ active と違う)。
+        if is_pending:
+            if self._orch.try_stamp_would_trigger(
+                plan.plan_id, at=now, price=quote.mid,
+                spread_pips=self._spread_pips(pair, quote.spread),
+            ):
+                logger.info(
+                    f"[ORCH] ⚡ would-trigger stamped: plan {plan.plan_id} {pair} "
+                    f"{plan.direction} @ {quote.mid} (pending approval)"
+                )
+        else:  # rejected — terminal なので直接 cf finalize (from=NULL claim)
+            self._finalize_cf(
+                plan, pair, now,
+                trigger_price=quote.mid,
+                spread_pips=self._spread_pips(pair, quote.spread),
+            )
+
+    def _close_cf_window(self, plan, pair: str, reason: str, now: datetime) -> None:
+        """cf 追跡窓の終端処理 (gate spec F-4 の expiry/invalidation 列)。
+
+        pending: real 遷移 (expired/invalidated) + gate_decision='unanswered' を単一
+        UPDATE で刻印し plan_invalidate decision を記録。stamp 済なら cf finalize
+        (「承認待ち中に entry できたのに判断前に死んだ」— gate 遅延サンプル、捨てない)。
+        rejected: status は動かさず cf_state='invalidated' の latch のみ (expiry は
+        watch クエリの expires_at 条件で自然に外れるため何もしない)。
+        """
+        if plan.status == "rejected":
+            if reason != "expired":
+                if self._orch.try_latch_cf_invalidated(plan.plan_id):
+                    logger.info(
+                        f"[ORCH] cf window latched (invalidated): plan {plan.plan_id} "
+                        f"({pair}): {reason}"
+                    )
+            return
+
+        # pending_approval → expired / invalidated (+unanswered 刻印、race は rowcount)
+        to_status = "expired" if reason == "expired" else "invalidated"
+        if not self._orch.try_close_pending_unanswered(plan.plan_id, to_status):
+            return  # approve/reject に負けた — 何もしない
+        run_id = self._orch.start_run(
+            "OrchestratorRuntime", pair=pair, trigger_type="watch_cycle",
+        )
+        ok = False
+        try:
+            self._orch.record_decision(
+                run_id=run_id, snapshot_id=plan.snapshot_id, pair=pair,
+                decision_type="plan_invalidate", plan_id=plan.plan_id,
+                reasoning_summary=f"pending gate close: {reason}",
+            )
+            ok = True
+            logger.info(
+                f"[ORCH] pending plan {plan.plan_id} ({pair}) {to_status} "
+                f"(unanswered): {reason}"
+            )
+        finally:
+            self._orch.finish_run(run_id, status="ok" if ok else "failed")
+        # stamp 済なら同 tick で cf finalize (crash 時は finalize 待ち集合が回収)。
+        if plan.cf_state == "would_trigger":
+            self._finalize_cf(plan, pair, now)
+
+    def _finalize_cf(
+        self, plan, pair: str, now: datetime,
+        *, trigger_price: float | None = None, spread_pips: float | None = None,
+    ) -> None:
+        """cf trigger を確定する (gate spec F-4)。
+
+        decision (plan_cf_trigger) / trigger 行 / hindsight は store.finalize_cf_trigger
+        が**単一 tx** で書く — claim 負け・クラッシュで偽 decision を残さない
+        (codex plan review High#2)。trigger_price 省略時は stamp 値 (stamp 済み終端 /
+        finalize 待ち回収)。run は trace 用に外側で開閉する (dangling は無害)。
+        """
+        run_id = self._orch.start_run(
+            "OrchestratorRuntime", pair=pair, trigger_type="watch_counterfactual",
+        )
+        ok = False
+        try:
+            trig_id = self._orch.finalize_cf_trigger(
+                plan.plan_id,
+                run_id=run_id,
+                enqueue_hindsight=self._hindsight is not None,
+                horizon_seconds=self._config.hindsight.horizon_seconds,
+                triggered_at=now if trigger_price is not None else None,
+                trigger_price=trigger_price,
+                spread_pips=spread_pips,
+                reasoning_summary=f"counterfactual trigger ({plan.status})",
+            )
+            ok = True
+            if trig_id is not None:
+                logger.info(
+                    f"[ORCH] 🧪 cf trigger plan {plan.plan_id} {pair} "
+                    f"{plan.direction} ({plan.status})"
+                )
+        finally:
+            self._orch.finish_run(run_id, status="ok" if ok else "failed")
 
     @staticmethod
     def _enrich_ages(ctx: dict, now: datetime) -> None:
