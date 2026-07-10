@@ -7,7 +7,7 @@ TEXT に格納される)。
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -851,6 +851,54 @@ class OrchestratorStore:
             )
             if pair is not None:
                 stmt = stmt.where(_TradePlan.pair == pair)
+            plans = list(session.execute(stmt).scalars().all())
+            for p in plans:
+                session.expunge(p)
+            return plans
+
+    def get_latest_plan_create_reasoning(self, plan_id: int) -> str | None:
+        """plan の最新 plan_create decision の reasoning_summary を返す (gate spec F-5)。
+
+        trade_plans に reasoning は冗長保存しない — 真実源は decision 側の 1 箇所
+        (codex Medium)。pending 一覧 API / plan 詳細がこれを JOIN 相当で使う。
+        """
+        with Session(self._engine) as session:
+            stmt = (
+                select(_OrchestratorDecision.reasoning_summary)
+                .where(_OrchestratorDecision.plan_id == plan_id)
+                .where(_OrchestratorDecision.decision_type == "plan_create")
+                .order_by(_OrchestratorDecision.decision_id.desc())
+            )
+            return session.execute(stmt).scalars().first()
+
+    def set_gate_message(self, plan_id: int, message_id: str) -> bool:
+        """Discord message ID を保存する (gate spec F-5 gate_message endpoint)。
+
+        bot が投稿直後に呼ぶ。冪等 (同値・別値とも上書き可)。plan なしは False (404)。
+        """
+        with Session(self._engine) as session:
+            plan = session.get(_TradePlan, plan_id)
+            if plan is None:
+                return False
+            plan.gate_message_id = message_id
+            plan.updated_at = db_now()
+            session.commit()
+            return True
+
+    def get_gate_posted_plans(self, *, within_hours: int) -> list[_TradePlan]:
+        """投稿済み (gate_message_id あり) plan を status 不問で返す (F-5 reconcile)。
+
+        bot 再起動時に「停止中に pending から消えた投稿済み plan」のメッセージ edit
+        復旧に使う (codex 2巡目 Low-Med)。updated_at 窓で有界。
+        """
+        cutoff = db_now() - timedelta(hours=within_hours)
+        with Session(self._engine) as session:
+            stmt = (
+                select(_TradePlan)
+                .where(_TradePlan.gate_message_id.is_not(None))
+                .where(_TradePlan.updated_at >= cutoff)
+                .order_by(_TradePlan.created_at.desc())
+            )
             plans = list(session.execute(stmt).scalars().all())
             for p in plans:
                 session.expunge(p)

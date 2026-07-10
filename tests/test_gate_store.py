@@ -363,3 +363,46 @@ def test_supersede_active_plan_no_cf_marker(store):
     p_active = _plan(store, status="active")
     store.supersede_active_plans("USDJPY=X")
     assert store.get_trade_plan(p_active).cf_state is None
+
+
+# ── Task 13: F-5 補助 (reasoning JOIN / gate_message / reconcile) ──
+
+
+def test_latest_plan_create_reasoning(store):
+    plan_id = _plan(store)
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    snap = store.create_snapshot(pair="USDJPY=X", as_of_time=db_now())
+    store.record_decision(
+        run_id=run_id, snapshot_id=snap, pair="USDJPY=X",
+        decision_type="plan_create", decision="buy", plan_id=plan_id,
+        reasoning_summary="古い理由")
+    store.record_decision(
+        run_id=run_id, snapshot_id=snap, pair="USDJPY=X",
+        decision_type="plan_create", decision="buy", plan_id=plan_id,
+        reasoning_summary="最新の理由")
+    assert store.get_latest_plan_create_reasoning(plan_id) == "最新の理由"
+
+
+def test_latest_reasoning_none_when_missing(store):
+    assert store.get_latest_plan_create_reasoning(_plan(store)) is None
+
+
+def test_set_gate_message_idempotent(store):
+    plan_id = _plan(store)
+    assert store.set_gate_message(plan_id, "msg-123") is True
+    assert store.set_gate_message(plan_id, "msg-123") is True  # 冪等
+    assert store.get_trade_plan(plan_id).gate_message_id == "msg-123"
+    assert store.set_gate_message(99999, "msg-x") is False     # 404 相当
+
+
+def test_gate_posted_plans_window_and_any_status(store):
+    p1 = _plan(store)
+    store.set_gate_message(p1, "m1")
+    store.try_decide_gate(p1, "rejected")     # 非 pending でも返る (status 不問)
+    p2 = _plan(store)                          # 未投稿 → 返らない
+    p3 = _plan(store)
+    store.set_gate_message(p3, "m3")
+    rows = store.get_gate_posted_plans(within_hours=24)
+    ids = {p.plan_id for p in rows}
+    assert ids == {p1, p3}
+    assert p2 not in ids
