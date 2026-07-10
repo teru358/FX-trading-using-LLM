@@ -282,3 +282,63 @@ def test_finalize_unique_conflict_leaves_state_untouched(store):
         plan_id, run_id=_run(store), enqueue_hindsight=False,
         horizon_seconds=3600) is None
     assert store.get_trade_plan(plan_id).cf_state == "would_trigger"  # 前進しない
+
+
+# ── Task 5: watch-set queries ─────────────────────────────────
+
+
+def test_watch_cf_plans_includes_pending_and_windowed_rejected(store):
+    p_pending = _plan(store)
+    p_rejected = _plan(store)
+    store.try_decide_gate(p_rejected, "rejected")
+    ids = {p.plan_id for p in store.get_watch_cf_plans("USDJPY=X")}
+    assert ids == {p_pending, p_rejected}
+
+
+def test_watch_cf_plans_excludes_resolved_and_out_of_window(store):
+    # cf 解決済み rejected → 恒久的に外れる
+    p_done = _plan(store)
+    store.try_decide_gate(p_done, "rejected")
+    store.finalize_cf_trigger(
+        p_done, run_id=_run(store), enqueue_hindsight=False, horizon_seconds=3600,
+        triggered_at=db_now(), trigger_price=150.0, spread_pips=1.0)
+    # latch 済み rejected → 外れる
+    p_latched = _plan(store)
+    store.try_decide_gate(p_latched, "rejected")
+    store.try_latch_cf_invalidated(p_latched)
+    # 窓外 (expires_at 過去) rejected → 外れる
+    p_old = _plan(store, expires_at=db_now() - timedelta(hours=1))
+    store.try_decide_gate(p_old, "rejected")
+    # stamp 済み pending は残る (expiry/invalidation 遷移の責務があるため)
+    p_stamped = _plan(store)
+    store.try_stamp_would_trigger(
+        p_stamped, at=db_now(), price=150.0, spread_pips=1.0)
+    ids = {p.plan_id for p in store.get_watch_cf_plans("USDJPY=X")}
+    assert ids == {p_stamped}
+
+
+def test_cf_finalize_pending_returns_crashed_terminals(store):
+    """status 遷移後・finalize 前にクラッシュした plan を回収対象として返す。"""
+    p1 = _plan(store)
+    store.try_stamp_would_trigger(p1, at=db_now(), price=150.0, spread_pips=1.0)
+    store.try_decide_gate(p1, "rejected")     # rejected + would_trigger (finalize 前)
+    p2 = _plan(store)
+    store.try_stamp_would_trigger(p2, at=db_now(), price=150.1, spread_pips=1.0)
+    store.try_close_pending_unanswered(p2, "expired")  # expired + would_trigger
+    ids = {p.plan_id for p in store.get_cf_finalize_pending("USDJPY=X")}
+    assert ids == {p1, p2}
+    # finalize 後は集合から抜ける
+    store.finalize_cf_trigger(
+        p1, run_id=_run(store), enqueue_hindsight=False, horizon_seconds=3600)
+    ids = {p.plan_id for p in store.get_cf_finalize_pending("USDJPY=X")}
+    assert ids == {p2}
+
+
+def test_cf_finalize_pending_excludes_approved(store):
+    """承認済み plan が発注失敗等で invalidated になっても回収対象にしない
+    (codex plan review High#1 — gate_decision 条件の検証)。"""
+    p = _plan(store)
+    store.try_stamp_would_trigger(p, at=db_now(), price=150.0, spread_pips=1.0)
+    store.try_decide_gate(p, "approved")
+    store.update_plan_status(p, "invalidated")   # 発注失敗経路の simulate
+    assert store.get_cf_finalize_pending("USDJPY=X") == []

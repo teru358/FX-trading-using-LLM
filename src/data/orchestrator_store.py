@@ -805,6 +805,57 @@ class OrchestratorStore:
                 session.expunge(p)
             return plans
 
+    def get_watch_cf_plans(self, pair: str) -> list[_TradePlan]:
+        """反実仮想 watch の評価対象を返す (gate spec F-4)。
+
+        pending_approval は全件 (expiry/invalidation 遷移の責務があるため stamp 後も
+        対象)。rejected は追跡窓内 (expires_at > now) かつ未解決 (cf_state IS NULL)
+        のみ — 解決済み・窓閉鎖済みは恒久的に外れ、rejected の蓄積で watch が
+        肥大しない。
+        """
+        now = db_now()
+        with Session(self._engine) as session:
+            stmt = (
+                select(_TradePlan)
+                .where(_TradePlan.pair == pair)
+                .where(or_(
+                    _TradePlan.status == "pending_approval",
+                    and_(
+                        _TradePlan.status == "rejected",
+                        _TradePlan.expires_at > now,
+                        _TradePlan.cf_state.is_(None),
+                    ),
+                ))
+            )
+            plans = list(session.execute(stmt).scalars().all())
+            for p in plans:
+                session.expunge(p)
+            return plans
+
+    def get_cf_finalize_pending(self, pair: str | None = None) -> list[_TradePlan]:
+        """finalize 待ち集合 (crash recovery — gate spec F-4)。
+
+        status 遷移 tx と finalize tx の間で落ちた plan (terminal status かつ
+        cf_state='would_trigger'、**かつ gate_decision が rejected/unanswered**) を
+        返す。gate_decision 条件は必須 — approved plan は real trigger 後に live
+        発注失敗で invalidated になり得るが、それは cf 復旧対象ではない
+        (codex plan review High#1)。watch tick が finalize_cf_trigger を再実行する
+        (claim ベースで冪等) — 復旧不能な取りこぼしを作らない。
+        """
+        with Session(self._engine) as session:
+            stmt = (
+                select(_TradePlan)
+                .where(_TradePlan.status.in_(("rejected", "expired", "invalidated")))
+                .where(_TradePlan.cf_state == "would_trigger")
+                .where(_TradePlan.gate_decision.in_(("rejected", "unanswered")))
+            )
+            if pair is not None:
+                stmt = stmt.where(_TradePlan.pair == pair)
+            plans = list(session.execute(stmt).scalars().all())
+            for p in plans:
+                session.expunge(p)
+            return plans
+
     # ── order_intents (§8.8) ───────────────────────────────────
 
     def try_insert_order_intent(
