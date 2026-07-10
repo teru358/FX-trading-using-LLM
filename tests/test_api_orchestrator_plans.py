@@ -125,6 +125,12 @@ def test_reconcile_posted_within_hours(store, client):
     assert rows[0]["gate_decision"] == "rejected"
 
 
+def test_list_invalid_status_422(store, client):
+    """未知 status は空リストで黙って返さず 422 (API 衛生)。"""
+    res = client.get("/orchestrator/plans?status=bogus", headers=HEADERS)
+    assert res.status_code == 422
+
+
 def test_auth_required(store, client):
     assert client.get("/orchestrator/plans").status_code in (401, 403, 422)
 

@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path
 from pydantic import BaseModel, Field
 
 from src.api._state import state, verify_api_key
+from src.data.orchestrator_store import PLAN_STATUSES
 from src.orchestrator.plan_view import plan_to_row
 
 router = APIRouter()
@@ -48,6 +49,9 @@ def list_plans(
     if posted_within_hours is not None:
         plans = store.get_gate_posted_plans(within_hours=posted_within_hours)
     else:
+        # 未知 status を空リストで黙って返さず 422 (API 衛生・final review Minor)。
+        if status not in PLAN_STATUSES:
+            raise HTTPException(status_code=422, detail=f"invalid status: {status!r}")
         plans = store.get_plans_by_status((status,))
     return {"plans": [_row(store, p) for p in plans]}
 
