@@ -596,7 +596,21 @@ class OrchestratorRuntime:
         - rejected: invalidation → cf_state latch / entry 初成立 → cf 行を直接 finalize
         執行経路 (_record_shadow_trigger / _execute_live_trigger / order_intents) には
         一切入らない (spec F-4 執行境界)。
+
+        pending の TTL 超過判定は quote 取得より前に行う (実装後レビュー Medium)。
+        価格プロバイダ障害中でも expiry 終端 (unanswered 化) は生き残らせる必要が
+        あるため — ここで quote を先に取ると障害時に例外で抜け、TTL 超過 plan が
+        pending_approval のまま宙に浮く。rejected 側の expiry は watch クエリの
+        expires_at 条件で自然に外れる (_close_cf_window 参照) ので対象外。
         """
+        if (
+            plan.status == "pending_approval"
+            and plan.expires_at is not None
+            and plan.expires_at <= now
+        ):
+            self._close_cf_window(plan, pair, "expired", now)
+            return
+
         quote = self._quote_provider(pair)
         ctx = self._ctx.assemble(pair=pair, now=now, quote=quote)
         self._enrich_ages(ctx, now)

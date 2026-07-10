@@ -107,6 +107,25 @@ def test_decide_gate_invalid_decision_raises(store):
         store.try_decide_gate(plan_id, "maybe")
 
 
+def test_decide_gate_fails_when_expired(store):
+    """TTL 超過後の approve/reject は不可 (実装後レビュー Medium)。
+
+    sweep (watch の unanswered 終端) が入る前の窓でも expires_at<=now な plan への
+    決定は成立させない。rowcount 0 → API 層で 409、status は pending_approval のまま。
+    """
+    plan_id = _plan(store, expires_at=db_now() - timedelta(hours=1))
+    assert store.try_decide_gate(plan_id, "approved") is False
+    plan = store.get_trade_plan(plan_id)
+    assert plan.status == "pending_approval"
+    assert plan.gate_decision is None
+
+
+def test_decide_gate_succeeds_before_expiry(store):
+    plan_id = _plan(store, expires_at=db_now() + timedelta(hours=1))
+    assert store.try_decide_gate(plan_id, "approved") is True
+    assert store.get_trade_plan(plan_id).status == "active"
+
+
 # ── Task 3: unanswered 終端 / stamp / latch ────────────────────
 
 
@@ -306,9 +325,14 @@ def test_watch_cf_plans_excludes_resolved_and_out_of_window(store):
     p_latched = _plan(store)
     store.try_decide_gate(p_latched, "rejected")
     store.try_latch_cf_invalidated(p_latched)
-    # 窓外 (expires_at 過去) rejected → 外れる
-    p_old = _plan(store, expires_at=db_now() - timedelta(hours=1))
-    store.try_decide_gate(p_old, "rejected")
+    # 窓外 (expires_at 過去) rejected → 外れる。reject 成立時点では expires_at が
+    # まだ未来である必要がある (実装後レビュー Medium: expires_at<=now な決定は
+    # 拒否される) ので、reject 自体は過去の仮想 now (expires_at より前) で行い、
+    # expires_at 自体はクエリ時点の db_now() より過去にしておく。
+    old_expiry = db_now() - timedelta(hours=1)
+    p_old = _plan(store, expires_at=old_expiry)
+    store.try_decide_gate(
+        p_old, "rejected", now=old_expiry - timedelta(hours=1))
     # stamp 済み pending は残る (expiry/invalidation 遷移の責務があるため)
     p_stamped = _plan(store)
     store.try_stamp_would_trigger(

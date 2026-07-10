@@ -170,6 +170,31 @@ def test_pending_expiry_with_stamp_finalizes_cf(tmp_path):
     assert trig.trigger_price == 150.10
 
 
+def test_cf_expiry_terminalizes_without_quote(tmp_path):
+    """TTL 超過した pending plan は quote provider 障害中でも expired 化する
+    (実装後レビュー Medium)。
+
+    _evaluate_cf_plan が expiry チェックより先に quote/context を組み立てていると、
+    価格プロバイダ障害中は expired 遷移が一切走らず、TTL 超過 plan が
+    pending_approval のまま宙に浮く。価格不要な expiry 判定を quote 取得より
+    前に置くことで、障害中でも終端処理が生き残ることを確認する。
+    """
+    rt = _make_runtime(tmp_path, mid=150.10, seed_technical=True)
+    plan_id = _create_gate_plan(rt._orch, expires_at=PAST)
+
+    def raising_quote_provider(pair: str):
+        raise RuntimeError("quote provider outage (simulated)")
+
+    rt._quote_provider = raising_quote_provider
+
+    triggered = rt.run_watch_cycle(now=NOW)
+
+    assert triggered == []
+    plan = rt._orch.get_trade_plan(plan_id)
+    assert plan.status == "expired"
+    assert plan.gate_decision == "unanswered"
+
+
 def test_pending_invalidation_marks_unanswered(tmp_path):
     """invalidation 成立 → invalidated + unanswered (G-3 拡張解釈)。承認不能になる。"""
     rt = _make_runtime(tmp_path, mid=147.50)  # invalidation (price_below 148) が成立

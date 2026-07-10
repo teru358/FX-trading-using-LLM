@@ -572,6 +572,7 @@ class OrchestratorStore:
 
     def try_decide_gate(
         self, plan_id: int, decision: str, *, reason: str | None = None,
+        now: datetime | None = None,
     ) -> bool:
         """pending_approval の plan に承認/却下を原子的に確定する (gate spec F-2b)。
 
@@ -580,18 +581,21 @@ class OrchestratorStore:
         try_claim_plan_status では label/時刻/理由を同一 tx で残せないため専用化
         (codex Medium)。二重クリック・承認と却下の競合は rowcount 排他で自然解決 —
         勝てば True、既に pending でなければ False (API 層で 409 に写像)。
+        TTL 超過 (expires_at <= now) は操作不可 (409) — sweep (watch の unanswered
+        終端) が入る前の窓でも期限切れ plan への決定は成立させない (実装後レビュー Medium)。
         """
         if decision not in ("approved", "rejected"):
             raise ValueError(
                 f"decision must be 'approved' or 'rejected', got {decision!r}"
             )
         new_status = "active" if decision == "approved" else "rejected"
-        now = db_now()
+        now = now or db_now()
         with Session(self._engine) as session:
             result = session.execute(
                 update(_TradePlan)
                 .where(_TradePlan.plan_id == plan_id)
                 .where(_TradePlan.status == "pending_approval")
+                .where(_TradePlan.expires_at > now)
                 .values(
                     status=new_status, gate_decision=decision,
                     gate_decided_at=now, gate_reason=reason, updated_at=now,
