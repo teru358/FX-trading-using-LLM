@@ -305,7 +305,11 @@ class DecisionContextBuilder:
         unavailable が残るため事後検証可能。
         """
         try:
-            plans = self._orch.get_active_plans(pair)
+            # gate spec F-1: 返答待ち plan も planner から見える (承認待ち中の重複
+            # 起案を防ぐ)。supersede により pair 単位で active+pending は最大 1 件。
+            plans = self._orch.get_plans_by_status(
+                ("active", "pending_approval"), pair
+            )
             if not plans:
                 return None
             plan = plans[0]
