@@ -47,6 +47,7 @@ def plan_to_row(plan: "_TradePlan", *, reasoning: str | None = None) -> dict[str
         "entry_summary": _safe_entry_summary(plan.entry_conditions_json),
         "sl": action.get("sl"),
         "tp": action.get("tp"),
+        "rr": action.get("rr"),
         "expires_at": plan.expires_at,
         "created_at": plan.created_at,
         "reasoning": reasoning,

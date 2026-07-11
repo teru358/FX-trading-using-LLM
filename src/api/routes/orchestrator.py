@@ -35,6 +35,8 @@ def _row(store, plan) -> dict[str, Any]:
     row["status"] = plan.status
     row["gate_decision"] = plan.gate_decision
     row["gate_message_id"] = plan.gate_message_id
+    row["gate_reason"] = plan.gate_reason          # 一覧/詳細の対称化 — bot reconcile 用
+    row["gate_decided_at"] = plan.gate_decided_at
     return row
 
 
@@ -65,10 +67,8 @@ def plan_detail(plan_id: int = _PLAN_ID) -> dict[str, Any]:
     plan = store.get_trade_plan(plan_id)
     if plan is None:
         raise HTTPException(status_code=404, detail="plan not found")
-    row = _row(store, plan)
-    row["gate_decided_at"] = plan.gate_decided_at
-    row["gate_reason"] = plan.gate_reason
-    return row
+    # gate_decided_at / gate_reason は _row に統合済み
+    return _row(store, plan)
 
 
 class _RejectBody(BaseModel):
@@ -76,7 +76,9 @@ class _RejectBody(BaseModel):
 
 
 class _GateMessageBody(BaseModel):
-    message_id: str
+    # Discord snowflake (数字文字列) のみ許可 — bot 側が int(message_id) で
+    # fetch_message するため、非数値が入ると bot の poll 処理が壊れる (bot spec §3)
+    message_id: str = Field(pattern=r"^[0-9]{1,20}$")
 
 
 @router.post(

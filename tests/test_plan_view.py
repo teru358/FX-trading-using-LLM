@@ -17,7 +17,7 @@ def _plan(**over):
     base = dict(
         plan_id=7, pair="USDJPY=X", direction="long",
         entry_conditions_json=[{"type": "price_at_or_below", "value": 150.30}],
-        action_json={"sl": 149.8, "tp": 151.5},
+        action_json={"sl": 149.8, "tp": 151.5, "rr": 2.0},
         expires_at=datetime(2026, 6, 27, 12, 0, 0),
         created_at=datetime(2026, 6, 20, 12, 0, 0),
     )
@@ -33,6 +33,7 @@ def test_plan_to_row_full():
     assert row["entry_summary"] == "price_at_or_below 150.3"
     assert row["sl"] == 149.8
     assert row["tp"] == 151.5
+    assert row["rr"] == 2.0
     assert row["expires_at"] == datetime(2026, 6, 27, 12, 0, 0)
     assert row["created_at"] == datetime(2026, 6, 20, 12, 0, 0)
 
@@ -65,3 +66,9 @@ def test_plan_to_row_entry_conditions_bare_dict_not_list():
     """entry_conditions_json が list でなく dict そのものでも落ちず空文字。"""
     row = plan_to_row(_plan(entry_conditions_json={"type": "x"}))
     assert row["entry_summary"] == ""
+
+
+def test_plan_to_row_missing_rr():
+    """action_json に rr が無い plan (旧データ) は None に倒す。"""
+    row = plan_to_row(_plan(action_json={"sl": 149.8, "tp": 151.5}))
+    assert row["rr"] is None

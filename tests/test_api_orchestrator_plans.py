@@ -57,15 +57,18 @@ def _pending_plan(store, *, reasoning: str | None = None) -> int:
 
 def test_list_pending_includes_reasoning_and_message_id(store, client):
     plan_id = _pending_plan(store, reasoning="pullback long")
-    store.set_gate_message(plan_id, "msg-1")
+    store.set_gate_message(plan_id, "1001")
     res = client.get("/orchestrator/plans", headers=HEADERS)
     assert res.status_code == 200
     rows = res.json()["plans"]
     assert len(rows) == 1
     assert rows[0]["plan_id"] == plan_id
     assert rows[0]["reasoning"] == "pullback long"
-    assert rows[0]["gate_message_id"] == "msg-1"
+    assert rows[0]["gate_message_id"] == "1001"
     assert rows[0]["status"] == "pending_approval"
+    assert rows[0]["rr"] == 2.0
+    assert rows[0]["gate_reason"] is None       # 未決定 plan は NULL (キー自体は存在する)
+    assert rows[0]["gate_decided_at"] is None
 
 
 def test_detail_returns_gate_fields(store, client):
@@ -106,23 +109,35 @@ def test_gate_message_endpoint(store, client):
     plan_id = _pending_plan(store)
     res = client.post(
         f"/orchestrator/plans/{plan_id}/gate_message",
-        headers=HEADERS, json={"message_id": "m-42"})
+        headers=HEADERS, json={"message_id": "424242"})
     assert res.status_code == 200
-    assert store.get_trade_plan(plan_id).gate_message_id == "m-42"
+    assert store.get_trade_plan(plan_id).gate_message_id == "424242"
     assert client.post(
         "/orchestrator/plans/999/gate_message",
-        headers=HEADERS, json={"message_id": "m"}).status_code == 404
+        headers=HEADERS, json={"message_id": "9"}).status_code == 404
+
+
+def test_gate_message_non_numeric_422(store, client):
+    """message_id は Discord snowflake (数字文字列) のみ — bot が int 変換する契約
+    (bot plan レビュー High: 非数値が 1 件でも DB に入ると bot の poll が壊れる)。"""
+    plan_id = _pending_plan(store)
+    res = client.post(
+        f"/orchestrator/plans/{plan_id}/gate_message",
+        headers=HEADERS, json={"message_id": "m-42"})
+    assert res.status_code == 422
 
 
 def test_reconcile_posted_within_hours(store, client):
     plan_id = _pending_plan(store)
-    store.set_gate_message(plan_id, "m-1")
-    store.try_decide_gate(plan_id, "rejected")   # pending から消えた投稿済み plan
+    store.set_gate_message(plan_id, "3101")
+    store.try_decide_gate(plan_id, "rejected", reason="RR悪い")
     res = client.get(
         "/orchestrator/plans?posted_within_hours=24", headers=HEADERS)
     rows = res.json()["plans"]
     assert [r["plan_id"] for r in rows] == [plan_id]
     assert rows[0]["gate_decision"] == "rejected"
+    assert rows[0]["gate_reason"] == "RR悪い"
+    assert rows[0]["gate_decided_at"] is not None
 
 
 def test_list_invalid_status_422(store, client):
