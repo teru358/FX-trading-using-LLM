@@ -581,6 +581,7 @@ def test_run_trading_cycle_calls_gate_probe(tmp_path, monkeypatch):
 
     config = MagicMock()
     config.state_dir = tmp_path
+    config.prices_db_path = tmp_path / "prices.db"
     gate = MagicMock()
     gate.probe.return_value = MagicMock(ok=True)
     monkeypatch.setattr(
@@ -603,7 +604,7 @@ def test_run_trading_cycle_calls_gate_probe(tmp_path, monkeypatch):
     gate.probe.assert_called_once_with(caller="trading", sync_balance=True)
 
 
-def test_run_trading_cycle_proceeds_when_gate_fails(monkeypatch):
+def test_run_trading_cycle_proceeds_when_gate_fails(monkeypatch, tmp_path):
     """gate.probe ok=False でも trading_cycle は呼ばれる (Phase 1〜2.5 継続)。
 
     spec section 7: soft halt は新規発注停止であり、既存ポジ管理 (close/reflection
@@ -615,6 +616,8 @@ def test_run_trading_cycle_proceeds_when_gate_fails(monkeypatch):
     from unittest.mock import MagicMock
 
     config = MagicMock()
+    config.state_dir = tmp_path
+    config.prices_db_path = tmp_path / "prices.db"
     gate = MagicMock()
     gate.probe.return_value = MagicMock(ok=False)
     inner = MagicMock(return_value=None)

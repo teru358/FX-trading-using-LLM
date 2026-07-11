@@ -40,7 +40,14 @@ def _migrate_schema(engine) -> None:
 
 
 def _get_engine(db_path: Path):
-    key = str(db_path.resolve())
+    # db_path が Path/str 以外 (テストの未設定 MagicMock config を store に渡す等) だと、
+    # str(mock) がファイル名として扱われ作業ディレクトリに `<MagicMock ...>` SQLite が
+    # 量産される。全 store 共通の engine 入口で早期に弾き汚染源を断つ。
+    if not isinstance(db_path, (str, Path)):
+        raise TypeError(
+            f"db_path must be a str or Path, got {type(db_path).__name__}"
+        )
+    key = str(Path(db_path).resolve())
     if key not in _engines:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         engine = create_engine(f"sqlite:///{db_path}", echo=False)
