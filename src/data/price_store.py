@@ -47,7 +47,8 @@ def _get_engine(db_path: Path):
         raise TypeError(
             f"db_path must be a str or Path, got {type(db_path).__name__}"
         )
-    key = str(Path(db_path).resolve())
+    db_path = Path(db_path)  # str も受けられるよう正規化 (後続の .parent 等が効くように)
+    key = str(db_path.resolve())
     if key not in _engines:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         engine = create_engine(f"sqlite:///{db_path}", echo=False)
