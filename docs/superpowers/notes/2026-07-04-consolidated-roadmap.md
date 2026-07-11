@@ -1,6 +1,6 @@
 # orchestrator version2 — 検討事項 統合ロードマップ
 
-**Date:** 2026-07-04 (**Updated: 2026-07-05** — §0b 進捗更新を追加)
+**Date:** 2026-07-04 (**Updated: 2026-07-11** — §0c 承認ゲート実装完了を追加)
 **Status:** 検討メモ統合版 (spec ではない)。判断は順次ユーザー。
 **Supersedes (統合元):** 以下 4 note の有効内容を本 note に統合した。旧 note は経緯・詳細根拠の記録として残す。
 
@@ -64,6 +64,35 @@
 ### 反映待ち
 
 上記はすべて branch `feat/planner-watch-loop` 上。**稼働中デーモンへの反映は再起動時**。Fiosracht へは live_test 切替 (Phase 0) 後の rsync で。
+
+---
+
+## 0c. 進捗更新 (2026-07-11) — 承認ゲート実装完了 (Phase 2-3)
+
+§0b-3 で spec 化した承認ゲートを、**finance 側・discord_bot 側とも実装完了**。設計は codex レビューを finance 側 spec 3巡 + plan 2巡、bot 側 spec 1巡 + plan 1巡かけて固めた。
+
+### 完了 5: 承認ゲート finance 側 (F-1〜F-7) — 実装完了
+
+- spec: `2026-07-05-discord-approval-gate.md` (codex spec 2巡 + 実装後レビュー 1巡 = 計17件反映)。中核は **「stamp → 終端時に記録」方式**: `shadow_triggers` の `UNIQUE(plan_id)` を維持したまま反実仮想 (cf) trigger 行を「real trigger が起こり得ない plan (rejected / unanswered 終端)」にのみ原子 helper で記録し、real 行と cf 行を構造的に排反にする。
+- plan: `2026-07-09-discord-approval-gate-finance.md` (16 タスク TDD)。
+- 実装: 16 タスク subagent-driven + 各 2 段レビュー + 最終横断レビュー + **codex 実装後レビュー 5 件 (High: supersede の TOCTOU 状態破壊 / Medium: TTL 超過後の approve バイパス・gate 構成の silent no-trade) + 派生 2 件 (MagicMock ファイル汚染を `_get_engine` 型ガードで根絶) 対応** = **branch `feat/planner-watch-loop` HEAD 9b3d6c6、suite 1492 passed**。
+- 主要ポイント: gate_decision 永続ラベル正本 / `try_decide_gate` 原子 UPDATE + `expires_at > now` / supersede は条件付き単一 UPDATE+RETURNING (SQLite の with_for_update no-op 対策) / finalize claim・待ち集合に `gate_decision IN (rejected,unanswered)` 条件 (承認済み plan の誤 cf 復旧を構造排除) / metrics は real/cf 分離 (NULL-safe フィルタ) / **approval_gate=True で api.enabled + API_SECRET_KEY を起動時検証しエラー停止**。
+- API 5 本: `GET /orchestrator/plans` (一覧 + posted_within_hours reconcile) / `GET .../{id}` / `POST .../{id}/approve|reject|gate_message`。plan 一覧応答に rr/gate_reason/gate_decided_at + message_id snowflake pattern (§3b、bot 向け契約、c8b90a1)。
+- 既定 OFF = 挙動不変を実機確認済 (approval_gate=False で全 API 登録済・CLI plans 正常・実 DB idempotent migration 成功)。
+
+### 完了 6: 承認ゲート discord_bot 側 (GateCog) — 実装完了・master マージ済
+
+- spec: `discord_bot/docs/superpowers/specs/2026-07-11-discord-approval-gate-bot-design.md` (codex 6 件) / plan: `.../plans/2026-07-11-discord-approval-gate-bot.md` (codex 6 件)。
+- 実装: 12 タスク subagent-driven + 各 2 段レビュー + 最終統合レビュー (Ready to merge) + **codex 追加レビュー 4 件 (自己回復の穴)** 対応 = **discord_bot `master` にマージ済み (208f18e + 修正 ba5bd27)、suite 116 passed**。discord_bot はリモート無しのローカルリポジトリ。
+- 構成 (cogs/finance/): `settings.py` (secret/.env と非 secret/settings.yaml 分離) / `client.py` gate 6 メソッド (approve/reject/detail_status は (status,body) タプルで 409 と通信断を区別、per-request 10s timeout で Interaction 3 秒制限対応) / `gate_ui.py` (結末マッピング/deny-by-default 権限/embed/DynamicItem ボタン/RejectModal) / `gate_cog.py` (polling tick/実在確認取り込み/三状態重複ガード/reconcile/承認却下ハンドラ)。
+- 核心: bot 内は揮発キャッシュ (_posted/_unsynced/_needs_reconcile) のみ・正本は finance DB。全障害 (再起動/API断/Discord断/DBリセット/メッセージ削除) から TTL 内に自己回復。DynamicItem で再起動を跨いでボタン生存。bot.py は default_notify_channel_id 属性 1 行のみ変更。
+- memory: [[discord_approval_gate_bot_impl]] / [[finance_approval_gate_spec_r2]] / [[finance_api_key_timing_comparison]] (既存の非定数時間比較・別件)。
+
+### gate 有効化に必要な運用手順 (未実施)
+
+1. **finance 側 `feat/planner-watch-loop` のマージ判断** (承認ゲート本体 + §3b、未マージ・origin 未 push) — Fiosracht デプロイ判断とセット
+2. **gate 有効化**: finance `config/settings.yaml` (gitignore) に `orchestrator.approval_gate: true` (起動時検証: api.enabled + API_SECRET_KEY 必須) + bot `cogs/finance/settings.yaml` に `gate_channel_id` (または config.yaml `default_notify_channel_id`) + `gate_approver_role_ids` 設定 → 両者再起動 → paper で即ラベル蓄積開始
+3. **spec §8 手動チェックリスト** (実 Discord 接続でのボタン動作・再起動生存確認)
 
 ---
 
@@ -147,7 +176,7 @@
 |---|---|---|
 | 2-1 | **technical LLM オミット** (移行作業 3 点) | day より先: boost 増でも slot 枯渇しない状態を先に作る |
 | 2-2 | ~~**day 移行実装**~~ **✅ 実装完了 (2026-07-05, §0b-1)** — 適用は live_test 切替後の rsync + 再起動 | live_test (Phase 0) が前提。数値はスケール縮小の第一次値で観察→実測検算 |
-| 2-3 | **承認ゲート** — **spec 化済み (2026-07-05, §0b-3)**: `2026-07-05-discord-approval-gate.md`。実装未着手 | paper で即起動しラベル蓄積開始 |
+| 2-3 | **✅ 承認ゲート — finance 側 (F-1〜F-7) + discord_bot 側 (GateCog) 実装完了 (2026-07-11, §0c)**。bot は master マージ済 / finance は feat/planner-watch-loop 未マージ。**残: gate 有効化の運用手順** (config + 再起動 + 手動確認) | paper で即起動しラベル蓄積開始 |
 | 2-3b | **✅ planner 建玉・plan 参照配線 — 実装完了 (2026-07-05, §0b-4)** (優先度高でユーザー指示・前倒し) | §1.1 ①の恒久対応。スコアカード①の測定材料も同梱 |
 | 2-4 | → paper の day モード検証 = **5 問題スコアカードの本番** | 2-1〜2-3 が揃った状態で |
 
@@ -175,7 +204,8 @@
 live_test 切替 (Phase 0) ──→ day_profile (MT5 データ鮮度が前提)
 tech オミット (2-1) ──→ day boost 増でも slot 枯渇しない (2-2 の前)
 plan 品質修正 (1-1) ──→ 以後の全検証データの信頼性
-webhook (1-3) ──→ 承認ゲート (2-3) ──→ ラベル蓄積 ──→ 卒業判定 (3-1)
+承認ゲート (2-3 ✅実装完了) ──→ gate 有効化 (config+再起動) ──→ ラベル蓄積 ──→ 卒業判定 (3-1)
+    (webhook 1-3 は shadow 通知用で承認ゲート REST polling とは独立)
 forecast 退役+outlook (1-2) ──→ confidence 較正・RAG 検証 (取引を待たない)
 ```
 
@@ -187,7 +217,7 @@ forecast 退役+outlook (1-2) ──→ confidence 較正・RAG 検証 (取引�
 
 | 項目 | 決めること |
 |---|---|
-| ~~承認ゲート~~ | **採用決定・spec 化済み (§0b-3)**。残: 実装着手時期 / 卒業基準の数値 |
+| ~~承認ゲート~~ | **実装完了 (§0c)**。残: gate 有効化の運用手順 (config + 再起動 + 手動確認) / finance ブランチのマージ / 卒業基準の数値 |
 | ~~day 移行~~ | **実装完了 (§0b-1)**。残: 適用タイミング (live_test 切替とセット) |
 | **watch MTF 縮退** (新規) | day 設定下で watch 銘柄が 1h 単一 TF 分析に縮退。受容 (a) vs watch 専用 MTF 設定 (b) |
 | forecast 退役 | 実施判断 / outlook フィールド仕様 |
@@ -236,7 +266,7 @@ forecast 退役+outlook (1-2) ──→ confidence 較正・RAG 検証 (取引�
 | §13 watch=yfinance 固定 | 存続・任意 | Phase 4-5 |
 | §14 テクニカル判定可視性 | **tech オミットに吸収** | Phase 2-1 (パターン DB 保存) |
 | §15 reflection 発火確認 | 存続 | Phase 3-2 |
-| §16 手動 SL/TP reflection | **承認/却下ラベルが実質代替** | Phase 2-3 に統合 |
+| §16 手動 SL/TP reflection | **承認/却下ラベルが実質代替** | Phase 2-3 に統合 → ✅実装完了 (§0c) |
 | §17 llama.cpp バッティング | 存続・条件付き | Phase 4-4 |
 | §18 24B ctx 上限 | 存続・条件付き | Phase 4-3 |
 | §19 RAG 2 軸検証 | **スコアカード測定枠組みに統合** | Phase 1-4 → 検証 |
