@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class _TechnicalSnapshot(_Base):
-    """15分ごとのテクニカル分析スナップショット。"""
+    """15分ごとのテクニカル分析スナップショット (決定的計算のみ、LLM 無し)。"""
     __tablename__ = "technical_snapshots"
 
     id              = Column(Integer, primary_key=True, autoincrement=True)
@@ -28,15 +28,12 @@ class _TechnicalSnapshot(_Base):
     bias_score      = Column(Float)
     confidence      = Column(Float)
     direction_bias  = Column(String)
-    stop_loss       = Column(Float)
-    take_profit     = Column(Float)
-    entry_zone_low  = Column(Float)
-    entry_zone_high = Column(Float)
-    risk_reward_ratio = Column(Float)
-    reasoning_summary = Column(String)
-    market_regime     = Column(String)
-    confidence_modifier = Column(Float)
-    collect_status    = Column(String, nullable=False)
+    collect_status  = Column(String, nullable=False)
+    reason          = Column(String)   # sentinel 理由 (ok 行は NULL)
+    mtf_alignment   = Column(Float)     # 単一 TF fallback 時 NULL
+    tf_scores_json  = Column(String)    # {"long": {"score":..,"direction":..}, ...}
+    components_json = Column(String)    # {"sma":.., "rsi":.., "adx_factor":..}
+    patterns_json   = Column(String)    # ["engulfing_bullish", ...]
 
 
 class AnalysisStore:
@@ -48,21 +45,41 @@ class AnalysisStore:
         self._engine = _get_engine(db_path)
         self._migrate()
 
+    # 新スキーマの必須列 (欠けていれば再作成が必要)
+    _REQUIRED_COLS = frozenset({
+        "reason", "mtf_alignment", "tf_scores_json",
+        "components_json", "patterns_json",
+    })
+    # 旧スキーマの痕跡列 (残っていれば再作成が必要)
+    _LEGACY_COLS = frozenset({
+        "stop_loss", "take_profit", "entry_zone_low", "entry_zone_high",
+        "risk_reward_ratio", "reasoning_summary", "market_regime",
+        "confidence_modifier",
+    })
+
     def _migrate(self) -> None:
-        """既存テーブルに新カラムを追加する (ALTER TABLE、既にあれば何もしない)。"""
-        migrations = [
-            ("technical_snapshots", "market_regime", "VARCHAR"),
-            ("technical_snapshots", "confidence_modifier", "FLOAT"),
-            ("technical_snapshots", "collect_status", "VARCHAR NOT NULL DEFAULT 'ok'"),
-        ]
+        """0 ベース再設計 (spec §2.B)。shape guard で一回性・冪等性を担保する。
+
+        旧列が残っている / 新列が欠けている場合のみ DROP→CREATE する
+        (データ移行なし)。新形状が揃っていれば no-op (ストア生成毎に走っても安全)。
+        """
         with self._engine.connect() as conn:
-            for table, col, col_type in migrations:
-                try:
-                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {col_type}"))
+            existing = {
+                row[1]
+                for row in conn.execute(
+                    text("PRAGMA table_info(technical_snapshots)")
+                ).fetchall()
+            }
+            if existing:  # テーブルが既存
+                needs_rebuild = bool(existing & self._LEGACY_COLS) or not (
+                    self._REQUIRED_COLS <= existing
+                )
+                if needs_rebuild:
+                    conn.execute(text("DROP TABLE technical_snapshots"))
                     conn.commit()
-                    logger.info(f"[MIGRATE] Added {table}.{col}")
-                except Exception:
-                    pass  # カラムが既に存在
+                    logger.info("[MIGRATE] technical_snapshots dropped for 0-based rebuild")
+        # 新形状で作成 (存在すれば no-op)
+        _Base.metadata.create_all(self._engine, tables=[_TechnicalSnapshot.__table__])
 
     def add_snapshot(self, analysis: "PriceAnalysis") -> None:  # type: ignore[name-defined]
         """成功した分析を ok status で保存する。
