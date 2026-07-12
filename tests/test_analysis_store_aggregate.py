@@ -1,6 +1,8 @@
 # tests/test_analysis_store_aggregate.py
 from datetime import timedelta
 
+import pytest
+
 from src.analysis.technical_snapshot_data import TechnicalSnapshotData
 from src.data.analysis_store import AnalysisStore
 from src.utils.clock import db_now
@@ -18,7 +20,10 @@ def test_aggregate_returns_defaults_for_removed_fields(tmp_path):
     price = store.aggregate("USDJPY=X", hours=8)
     assert price is not None
     assert price.direction_bias == "long"
-    assert price.bias_score > 0
+    # 3 件とも bias=0.4 seed なので集約 bias もほぼ 0.4
+    assert price.bias_score == pytest.approx(0.4, abs=0.05)
+    # 削除した "latest:" tail の回帰ガード
+    assert "latest:" not in price.reasoning_summary
     # 削除列は既定値
     assert price.stop_loss == 0.0
     assert price.take_profit == 0.0

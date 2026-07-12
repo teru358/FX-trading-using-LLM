@@ -1,6 +1,6 @@
 """AnalysisStore.aggregate() のテスト。
 
-方向閾値・時間加重・SL/TP 選択ロジックを検証する。
+方向閾値・時間加重・consistency 減衰を検証する。
 """
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from src.analysis.price_analyzer import PriceAnalysis
+from src.analysis.technical_snapshot_data import TechnicalSnapshotData
 from src.data.analysis_store import AnalysisStore
 from src.utils.clock import db_now
 
@@ -25,20 +25,13 @@ def _snapshot(
     bias: float = 0.3,
     confidence: float = 0.7,
     hours_ago: float = 0,
-    sl: float = 149.0,
-    tp: float = 152.0,
-) -> PriceAnalysis:
-    return PriceAnalysis(
+) -> TechnicalSnapshotData:
+    return TechnicalSnapshotData(
         pair=symbol,
-        direction_bias=direction,
+        analyzed_at=db_now() - timedelta(hours=hours_ago),
         bias_score=bias,
         confidence=confidence,
-        entry_zone=(149.5, 150.5),
-        stop_loss=sl,
-        take_profit=tp,
-        risk_reward_ratio=2.0,
-        reasoning_summary=f"test {direction}",
-        analyzed_at=db_now() - timedelta(hours=hours_ago),
+        direction_bias=direction,
     )
 
 
@@ -90,21 +83,21 @@ def test_aggregate_recent_weighted_more(store: AnalysisStore):
     assert result.bias_score > 0.5
 
 
-# ── SL/TP 選択 ────────────────────────────────────────────
+# ── SL/TP 等の削除列は既定値 ──────────────────────────────
 
 
-def test_aggregate_sltp_from_direction_matched_snapshot(store: AnalysisStore):
-    """集約方向と一致するスナップショットの SL/TP が採用される。"""
-    # 最新は short だが、集約方向が long になるケース
-    store.add_snapshot(_snapshot(direction="long", bias=0.6, hours_ago=0,
-                                   sl=148.0, tp=153.0))
-    store.add_snapshot(_snapshot(direction="short", bias=-0.1, hours_ago=2,
-                                   sl=152.0, tp=147.0))
+def test_aggregate_removed_columns_return_defaults(store: AnalysisStore):
+    """LLM 廃止で削除された SL/TP/RR/regime は常に既定値で返る。"""
+    store.add_snapshot(_snapshot(direction="long", bias=0.6, hours_ago=0))
+    store.add_snapshot(_snapshot(direction="short", bias=-0.1, hours_ago=2))
     result = store.aggregate("USDJPY=X", hours=8)
     assert result is not None
-    assert result.direction_bias == "long"
-    assert result.stop_loss == 148.0
-    assert result.take_profit == 153.0
+    assert result.stop_loss == 0.0
+    assert result.take_profit == 0.0
+    assert result.entry_zone == (0.0, 0.0)
+    assert result.risk_reward_ratio == 2.0
+    assert result.market_regime == "unknown"
+    assert result.confidence_modifier == 0.0
 
 
 # ── 空データ ──────────────────────────────────────────────
@@ -135,46 +128,6 @@ def test_aggregate_confidence_reduced_by_inconsistency(store: AnalysisStore):
     assert consistent is not None
     assert inconsistent is not None
     assert inconsistent.confidence < consistent.confidence
-
-
-def test_migration_adds_collect_status_column_with_ok_default(tmp_path):
-    """ALTER TABLE で collect_status が追加され、既存行は 'ok' で埋まる。"""
-    from sqlalchemy import create_engine, text
-
-    db_path = tmp_path / "test.db"
-    # 旧スキーマで 1 行 INSERT (collect_status カラム無し状態をシミュレート)。
-    # _get_engine は create_all で全 ORM カラムを作ってしまうので、ここでは raw engine を使う。
-    raw_engine = create_engine(f"sqlite:///{db_path}", echo=False)
-    with raw_engine.connect() as conn:
-        conn.execute(text(
-            "CREATE TABLE technical_snapshots ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-            "symbol VARCHAR NOT NULL, "
-            "analyzed_at DATETIME NOT NULL, "
-            "bias_score FLOAT, confidence FLOAT, direction_bias VARCHAR, "
-            "stop_loss FLOAT, take_profit FLOAT, "
-            "entry_zone_low FLOAT, entry_zone_high FLOAT, "
-            "risk_reward_ratio FLOAT, reasoning_summary VARCHAR, "
-            "market_regime VARCHAR, confidence_modifier FLOAT)"
-        ))
-        conn.execute(text(
-            "INSERT INTO technical_snapshots (symbol, analyzed_at) "
-            "VALUES ('USDJPY=X', '2026-05-01 12:00:00')"
-        ))
-        conn.commit()
-    raw_engine.dispose()
-
-    # 新 AnalysisStore を生成 → migration 走行
-    AnalysisStore(db_path)
-
-    # 既存行に collect_status='ok' が埋まる
-    verify_engine = create_engine(f"sqlite:///{db_path}", echo=False)
-    with verify_engine.connect() as conn:
-        result = conn.execute(text(
-            "SELECT collect_status FROM technical_snapshots WHERE symbol='USDJPY=X'"
-        )).scalar_one()
-    verify_engine.dispose()
-    assert result == "ok"
 
 
 def test_add_snapshot_writes_ok_status_row(store: AnalysisStore):
@@ -217,14 +170,7 @@ def test_add_sentinel_writes_stale_price_row(store: AnalysisStore):
     assert r.direction_bias == "neutral"
     assert r.bias_score == 0.0
     assert r.confidence == 0.0
-    assert r.stop_loss == 0.0
-    assert r.take_profit == 0.0
-    assert r.entry_zone_low == 0.0
-    assert r.entry_zone_high == 0.0
-    assert r.risk_reward_ratio == 0.0
-    assert r.market_regime == "unknown"
-    assert r.confidence_modifier == 0.0
-    assert r.reasoning_summary == "latest bar 7:00:00 ago"
+    assert r.reason == "latest bar 7:00:00 ago"
 
 
 def test_add_sentinel_writes_failed_row(store: AnalysisStore):
@@ -239,7 +185,7 @@ def test_add_sentinel_writes_failed_row(store: AnalysisStore):
             select(_TechnicalSnapshot).where(_TechnicalSnapshot.symbol == "USDJPY=X")
         ).scalar_one()
     assert r.collect_status == "failed"
-    assert r.reasoning_summary == "llm_error: TimeoutError"
+    assert r.reason == "llm_error: TimeoutError"
 
 
 def test_add_sentinel_invalid_status_raises(store: AnalysisStore):
@@ -260,9 +206,9 @@ def test_add_sentinel_long_reason_truncated(store: AnalysisStore):
         r = session.execute(
             select(_TechnicalSnapshot).where(_TechnicalSnapshot.symbol == "USDJPY=X")
         ).scalar_one()
-    assert len(r.reasoning_summary) <= 512 + len(" ... [truncated]")
-    assert r.reasoning_summary.endswith(" ... [truncated]")
-    assert r.reasoning_summary.startswith("x" * 512)
+    assert len(r.reason) <= 512 + len(" ... [truncated]")
+    assert r.reason.endswith(" ... [truncated]")
+    assert r.reason.startswith("x" * 512)
 
 
 def test_get_recent_ok_snapshots_excludes_sentinel(store: AnalysisStore):
