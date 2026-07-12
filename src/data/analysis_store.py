@@ -224,7 +224,8 @@ class AnalysisStore:
 
         重み: exp(-0.693 * hours_ago / half_life) — 半減期で重みが半分に。
         直近 _MAX_SNAPSHOTS 件に限定し、トレンド転換時の古いノイズを排除する。
-        SL/TP/エントリーゾーンは集約方向に一致する最新スナップショットを採用。
+        SL/TP/エントリーゾーン/market_regime/confidence_modifier は
+        LLM廃止に伴い削除済みの列のため既定値 (0.0 等) を返す。
         """
         import math
         from src.analysis.price_analyzer import PriceAnalysis  # local import
@@ -272,36 +273,30 @@ class AnalysisStore:
             d = snap.direction_bias or "neutral"
             dir_counts[d] = dir_counts.get(d, 0) + 1
 
-        # SL/TP は集約方向に一致する最新スナップショットを採用 (後方互換)。
-        # 新規スナップショットでは 0.0 が入る (ATR で上書きされるため LLM は SL/TP を出力しない)。
-        latest = snapshots[0]
-        ref = next((s for s in snapshots if s.direction_bias == direction), latest)
-
         logger.info(
             f"[AGGREGATE] {symbol}: {len(snapshots)} snapshots | "
             f"bias={agg_bias:+.2f} conf={agg_conf:.2f} dir={direction} "
-            f"consistency={consistency:.0%} (L={dir_counts.get('long', 0)} S={dir_counts.get('short', 0)} N={dir_counts.get('neutral', 0)})"
-            + ("" if ref is latest else " (SL/TP from direction-matched snapshot)")
+            f"consistency={consistency:.0%} (L={dir_counts.get('long', 0)} "
+            f"S={dir_counts.get('short', 0)} N={dir_counts.get('neutral', 0)})"
         )
         return PriceAnalysis(
             pair=symbol,
             direction_bias=direction,
             bias_score=max(-1.0, min(1.0, agg_bias)),
             confidence=agg_conf,
-            entry_zone=(ref.entry_zone_low or 0.0, ref.entry_zone_high or 0.0),
-            stop_loss=ref.stop_loss or 0.0,
-            take_profit=ref.take_profit or 0.0,
-            risk_reward_ratio=ref.risk_reward_ratio or 2.0,
+            entry_zone=(0.0, 0.0),
+            stop_loss=0.0,
+            take_profit=0.0,
+            risk_reward_ratio=2.0,
             reasoning_summary=(
                 f"Aggregated {len(snapshots)} snapshots over {hours}h "
                 f"(weighted bias={agg_bias:+.2f}, consistency={consistency:.0%}, "
                 f"long={dir_counts.get('long', 0)} short={dir_counts.get('short', 0)} "
-                f"neutral={dir_counts.get('neutral', 0)}, "
-                f"latest: {latest.reasoning_summary or ''})"
+                f"neutral={dir_counts.get('neutral', 0)})"
             ),
             analyzed_at=db_now(),
-            market_regime=latest.market_regime or "unknown",
-            confidence_modifier=latest.confidence_modifier or 0.0,
+            market_regime="unknown",
+            confidence_modifier=0.0,
         )
 
     def _prune_old(self, symbol: str) -> None:
