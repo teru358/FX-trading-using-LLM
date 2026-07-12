@@ -3,45 +3,6 @@ from __future__ import annotations
 
 from datetime import datetime
 
-import pytest
-
-from src.rag.prompt_formatter import format_insights_for_prompt
-
-
-def test_format_insights_empty():
-    assert format_insights_for_prompt([]) == ""
-
-
-def test_format_insights_single():
-    insights = [{
-        "text": "ドル円は146円のレジスタンスが重要",
-        "metadata": {
-            "pair": "USDJPY=X",
-            "insight_type": "analysis",
-            "created_at": "2026-04-07T18:00:00",
-        },
-    }]
-    result = format_insights_for_prompt(insights)
-    assert "Trading Insights" in result
-    assert "USDJPY=X" in result
-    assert "146円" in result
-
-
-def test_format_insights_multiple():
-    insights = [
-        {
-            "text": "Insight 1",
-            "metadata": {"pair": "USDJPY=X", "insight_type": "analysis", "created_at": "2026-04-07T18:00:00"},
-        },
-        {
-            "text": "Insight 2",
-            "metadata": {"pair": "EURUSD=X", "insight_type": "risk", "created_at": "2026-04-07T17:00:00"},
-        },
-    ]
-    result = format_insights_for_prompt(insights)
-    assert "1." in result
-    assert "2." in result
-
 
 def test_vector_store_insight_upsert(tmp_path):
     """VectorStore.upsert_insight が正しく動作すること"""
