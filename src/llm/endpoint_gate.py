@@ -12,6 +12,10 @@ threading.Semaphore を使うのは、系統 A (main スケジューラの各 jo
 cancellation-safe (codex 3巡目 #1): 取得待ち中に task が cancel されても worker
 thread の sem.acquire() は止まらない。acquire future を shield し、cancel 時は
 「取得完了したら即 release する」done callback を仕込んで re-raise する。
+
+注意 (high fan-out 非対応): 各 waiter は取得待ちの間ずっと default
+ThreadPoolExecutor のスレッドを 1 本消費する。多数の同時 caller から呼ぶと
+pool を枯渇させるため使わないこと (現状は scheduler + planning thread の 2 経路想定)。
 """
 from __future__ import annotations
 
