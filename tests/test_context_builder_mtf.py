@@ -67,3 +67,26 @@ def test_corrupt_json_columns_fail_safe(tmp_path):
     assert ctx["mtf"] is None        # tf_scores corrupt → mtf can't be built
     assert ctx["components"] == {}
     assert ctx["patterns"] == []
+
+
+def test_inner_shape_corruption_does_not_crash(tmp_path):
+    from sqlalchemy import text
+    from src.orchestrator.context_builder import _format_technical_ok
+    store = AnalysisStore(tmp_path / "c4.db")
+    store.add_snapshot(TechnicalSnapshotData(
+        pair="AUDUSD=X", analyzed_at=db_now(),
+        bias_score=0.2, confidence=0.5, direction_bias="long", mtf_alignment=0.67,
+    ))
+    with store._engine.connect() as conn:
+        conn.execute(text(
+            "UPDATE technical_snapshots SET tf_scores_json='{\"long\": \"notadict\", \"short\": 5}' "
+            "WHERE symbol='AUDUSD=X'"
+        ))
+        conn.commit()
+    row = _row(store, "AUDUSD=X")
+    ctx = _format_technical_ok(row, now=db_now())  # must not raise
+    assert ctx["status"] == "ok"
+    # 不正な inner entry はスキップされ、alignment だけの mtf になる
+    assert ctx["mtf"]["alignment"] == 0.67
+    assert "long" not in ctx["mtf"]  # notadict はスキップ
+    assert "short" not in ctx["mtf"]  # 5 (非dict) はスキップ
