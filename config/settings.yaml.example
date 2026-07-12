@@ -92,6 +92,9 @@ llm:
   news_analysis:
     model: "claude-haiku-4-5"
     temperature: 0.3
+  # price_analysis: 直接の price 分析 LLM は廃止済み (technical-llm-omit)。
+  # この枠は planner/execution_opinion の fallback 役として残存する
+  # (agents.yaml 未作成時に両者がこのモデル/温度に落ちる)。削除しないこと。
   price_analysis:
     model: "claude-sonnet-4-6"
     temperature: 0.1

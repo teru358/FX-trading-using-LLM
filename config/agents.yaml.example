@@ -9,9 +9,11 @@
 # llm.provider_configs[provider] に接続設定が必須 (未定義は起動時 ConfigError)。
 #
 # 現状の実配線: planner / execution_opinion のみが実 LLM client を受け取る。
-# news / technical は既存 collector が役割 LLM を使うため、ここの設定は
-# 「設定枠」であり現時点では LLM 呼出に効かない (将来 collector refactor で接続予定)。
-# context_summary は agent 未実装のため同じく設定枠のみ。
+# technical collector は決定的計算のみで LLM を使わない (technical-llm-omit)。
+# news は既存 news collector が news_analysis 役割 LLM を使う。
+# context_summary は agent 未実装のため設定枠のみ。
+# price_analysis 役割は planner/execution_opinion の fallback 先として残存する
+# (agents.yaml 未作成時、両者がこのモデル/温度に落ちる)。直接の price 分析呼出は廃止済み。
 
 agents:
   # 実配線される 2 agent。下記は top-level llm.provider が claude-cli の前提の例。
