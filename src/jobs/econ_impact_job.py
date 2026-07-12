@@ -63,7 +63,12 @@ async def collect_econ_impact(
     analysis_store: AnalysisStore,
     tradeable: list[InstrumentConfig],
 ) -> None:
-    """経済指標影響分析 (spec §2.K)。enabled でなければ即 return。"""
+    """経済指標影響分析 (spec §2.K)。
+
+    economic_calendar.enabled でなければ即 return する。この場合 _status は
+    一切更新されない (last_attempt も進まない) ため、/status は前回実行時の値を
+    保持する — 無効化中は status が静止することで判別できる。
+    """
     if not config.economic_calendar.enabled:
         return
     with _status_lock:
