@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
@@ -109,45 +109,15 @@ def mock_price_store(monkeypatch):
     monkeypatch.setattr(performance_audit, "_load_pair_ohlcv", _fake_ohlcv)
 
 
-def test_run_audit_non_review_writes_report(audit_config, populated_session_store, mock_price_store):
-    """run_audit(review=False) で markdown ファイルが生成される。"""
-    result = run_audit(audit_config, days=30, review=False)
+def test_run_audit_writes_report(audit_config, populated_session_store, mock_price_store):
+    """run_audit で markdown ファイルが生成される。"""
+    result = run_audit(audit_config, days=30)
     assert result.report_path.exists()
     text = result.report_path.read_text(encoding="utf-8")
     assert "## Section 1" in text
     assert "## Section 5" in text
     assert "## Section 6" in text
     assert result.session_count == 5
-
-
-def test_run_audit_review_mode_mocks_llm_and_input(
-    audit_config, populated_session_store, mock_price_store
-):
-    """review=True で LLM 候補 mock + input mock → audit_lessons.md に追記。"""
-    from src.analysis.audit_post_hoc import LessonCandidate
-    from src.analysis import performance_audit as pa
-
-    fake_cands = [LessonCandidate(
-        rule_text="test rule",
-        rationale="test rationale",
-        applicability="all",
-    )]
-
-    # audit_config にパスを追加
-    audit_config.audit_lessons_path = audit_config.config_dir / "audit_lessons.md"
-
-    # generate_candidates と input を mock
-    # side_effect=["1","1","1","1","1"] は losses 分を十分カバー
-    with patch("src.analysis.performance_audit.generate_candidates",
-               new=AsyncMock(return_value=fake_cands)), \
-         patch("src.analysis.performance_audit._default_input_reader",
-               side_effect=["1", "1", "1", "1", "1"]):
-        result = pa.run_audit(audit_config, days=30, review=True)
-
-    assert result.lessons_added >= 1
-    assert audit_config.audit_lessons_path.exists()
-    content = audit_config.audit_lessons_path.read_text(encoding="utf-8")
-    assert "test rule" in content
 
 
 def test_cmd_audit_dispatch(audit_config, populated_session_store, mock_price_store, capsys):

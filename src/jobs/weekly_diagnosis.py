@@ -153,7 +153,6 @@ def _build_existing_features_section(config: AppConfig) -> str:
         "- TV consensus 矛盾検出: TV 方向と price 方向が逆なら conf ×0.7",
         "- drawdown_kill_switch: peak から閾値以上落ちたら新規 entry 停止",
         "- vol_regime: ATR/EWMA に基づく risk_per_trade スケーリング",
-        "- audit_lesson_generator: クローズトレードから RAG に教訓蓄積",
         "- reflection cycle: クローズトレード振り返りを insights collection に保存",
     ]
     return "\n".join(items)

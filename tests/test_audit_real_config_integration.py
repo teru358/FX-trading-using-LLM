@@ -17,9 +17,6 @@ def test_real_appconfig_has_audit_properties():
     # These properties must exist and return Path objects
     assert isinstance(cfg.config_dir, Path)
     assert isinstance(cfg.audit_output_dir, Path)
-    assert isinstance(cfg.audit_lessons_path, Path)
 
     assert cfg.config_dir.name == "config"
     assert cfg.audit_output_dir.name == "audit"
-    assert cfg.audit_lessons_path.name == "audit_lessons.md"
-    assert cfg.audit_lessons_path.parent == cfg.config_dir

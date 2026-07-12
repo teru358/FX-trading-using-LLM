@@ -36,7 +36,6 @@ _HELP = """\
   [cyan]run trade[/cyan]            — 取引判定ループを今すぐ実行（動作確認用）
   [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問・コメントを送信
   [cyan]audit[/cyan] (days)         — 過去トレードの統計診断レポート生成
-  [cyan]audit review[/cyan] (days)  — audit + LLM 改善候補の対話選別 (教訓を audit_lessons.md に蓄積)
   [cyan]plans[/cyan]  (plan)        — 保持中の取引plan(承認待ち/監視中)を表示
   [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
   [cyan]halt[/cyan] soft|hard       — bridge を halt 状態にする (reason 任意)
@@ -208,30 +207,20 @@ def _cmd_close(config: AppConfig, pair_arg: str) -> None:
 
 
 def _cmd_audit(config: AppConfig, args: list[str]) -> None:
-    """audit [days] / audit review [days] を実行する。"""
+    """audit [days] を実行する。"""
     from src.analysis.performance_audit import run_audit
 
-    review = False
     days = 30
     if args:
-        if args[0] == "review":
-            review = True
-            if len(args) > 1:
-                try:
-                    days = int(args[1])
-                except ValueError:
-                    _console.print(f"[red]days が数値ではありません: {args[1]}[/red]")
-                    return
-        else:
-            try:
-                days = int(args[0])
-            except ValueError:
-                _console.print(f"[red]引数が不正: {args[0]}[/red]")
-                return
+        try:
+            days = int(args[0])
+        except ValueError:
+            _console.print(f"[red]引数が不正: {args[0]}[/red]")
+            return
 
-    _console.print(f"[cyan]audit 実行中 (days={days}, review={review})...[/cyan]")
+    _console.print(f"[cyan]audit 実行中 (days={days})...[/cyan]")
     try:
-        result = run_audit(config, days=days, review=review)
+        result = run_audit(config, days=days)
     except Exception as e:
         _console.print(f"[red]audit 失敗: {type(e).__name__}: {e}[/red]")
         logger.exception("[AUDIT] run_audit failed")

@@ -887,10 +887,6 @@ class AppConfig:
         return BASE_DIR / "docs" / "audit"
 
     @property
-    def audit_lessons_path(self) -> Path:
-        return self.config_dir / "audit_lessons.md"
-
-    @property
     def enabled_instruments(self) -> list[InstrumentConfig]:
         """有効な全銘柄。"""
         return [i for i in self.instruments if i.enabled]

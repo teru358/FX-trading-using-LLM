@@ -202,18 +202,3 @@ class SessionStore:
                 rec.reflection_text = reflection_text
                 session.commit()
 
-    def set_post_hoc_cache(self, session_id: str, cache_json: str) -> None:
-        """post_hoc 計算結果 + LLM 候補の JSON を保存する。"""
-        with Session(self._engine) as session:
-            rec = session.get(_TradingSession, session_id)
-            if rec is None:
-                logger.warning(f"[SESSION] set_post_hoc_cache: {session_id} not found")
-                return
-            rec.post_hoc_cache = cache_json
-            session.commit()
-
-    def get_post_hoc_cache(self, session_id: str) -> str | None:
-        """post_hoc_cache の JSON 文字列を取得。未設定なら None。"""
-        with Session(self._engine) as session:
-            rec = session.get(_TradingSession, session_id)
-            return rec.post_hoc_cache if rec else None
