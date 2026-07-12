@@ -24,6 +24,7 @@ import httpx
 from tenacity import Retrying, retry_if_not_exception_type, stop_after_attempt, wait_fixed
 
 from src.llm.client import LLMClient
+from src.llm.endpoint_gate import endpoint_gate
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,12 @@ class LlamaCppClient(LLMClient):
             # user メッセージが無い場合は system を user として先頭に置く
             folded.insert(0, {"role": "user", "content": system_content})
         return folded
+
+    async def chat(self, messages: list[dict], temperature: float = 0.1) -> str:
+        # endpoint 排他 (spec §2.M): gate 取得後に CB 判定 → 送信 → 記録が走る。
+        # 待機中に circuit が OPEN になった場合も送信せず即 fail できる。
+        async with endpoint_gate(self._base_url):
+            return await super().chat(messages, temperature=temperature)
 
     async def _do_chat(self, messages: list[dict], temperature: float = 0.1) -> str:
         payload = {

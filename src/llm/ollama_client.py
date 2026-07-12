@@ -6,6 +6,7 @@ import httpx
 from tenacity import Retrying, retry_if_not_exception_type, stop_after_attempt, wait_fixed
 
 from src.llm.client import LLMClient
+from src.llm.endpoint_gate import endpoint_gate
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,10 @@ class OllamaClient(LLMClient):
     @property
     def provider_name(self) -> str:
         return "ollama"
+
+    async def chat(self, messages: list[dict], temperature: float = 0.1) -> str:
+        async with endpoint_gate(self._base_url):
+            return await super().chat(messages, temperature=temperature)
 
     async def _do_chat(self, messages: list[dict], temperature: float = 0.1) -> str:
         payload = {
