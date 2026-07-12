@@ -57,16 +57,15 @@ def test_collect_one_stale_writes_stale_price_sentinel(tmp_path):
     price_data = _stale_price_data("USDJPY=X", hours_ago=10)  # FX 6h を超える stale
 
     asyncio.run(_collect_one(
-        inst=inst, config=_config(), store=MagicMock(),
+        inst=inst, config=_config(),
         price_store=MagicMock(), analysis_store=store,
-        llm=MagicMock(),
         price_data=price_data,
     ))
 
     latest = store.get_latest_collect_row("USDJPY=X")
     assert latest is not None
     assert latest.collect_status == "stale_price"
-    assert "ago" in (latest.reasoning_summary or "")
+    assert "ago" in (latest.reason or "")
     assert store.get_latest_ok_row("USDJPY=X") is None
 
 
@@ -93,77 +92,55 @@ def test_collect_one_indicator_error_writes_failed_sentinel(tmp_path, monkeypatc
     )
 
     asyncio.run(_collect_one(
-        inst=_inst(), config=_config(), store=MagicMock(),
+        inst=_inst(), config=_config(),
         price_store=MagicMock(), analysis_store=store,
-        llm=MagicMock(), price_data=_fresh_price_data(),
+        price_data=_fresh_price_data(),
     ))
 
     latest = store.get_latest_collect_row("USDJPY=X")
     assert latest is not None
     assert latest.collect_status == "failed"
-    assert "indicator_error" in (latest.reasoning_summary or "")
-    assert "boom" in (latest.reasoning_summary or "")
+    assert "indicator_error" in (latest.reason or "")
+    assert "boom" in (latest.reason or "")
 
 
-def test_collect_one_rag_context_error_writes_failed_sentinel(tmp_path, monkeypatch):
-    """_build_rag_contexts が raise → failed sentinel + skip。"""
+def test_collect_one_ok_writes_snapshot(tmp_path, monkeypatch):
+    """正常系: フレッシュな価格データ → add_snapshot が呼ばれ ok 行が書かれる。"""
+    from src.signals.technical_scorer import TechnicalScore
+
     store = AnalysisStore(tmp_path / "test.db")
 
+    fake_score = TechnicalScore(
+        sma_score=0.5, rsi_score=0.2, macd_score=0.1, ichimoku_score=0.3,
+        bb_score=0.0, pattern_score=0.0, adx_factor=1.0,
+        total_score=0.4, confidence=0.7, direction="long",
+    )
+    fake_summary = SimpleNamespace(chart_patterns=["engulfing_bullish"])
     monkeypatch.setattr(
         "src.jobs.technical_collector._compute_summary_and_score",
-        lambda *a, **kw: (MagicMock(), MagicMock(), None),
-    )
-
-    def _raise(*a, **kw):
-        raise RuntimeError("rag down")
-
-    monkeypatch.setattr(
-        "src.jobs.technical_collector._build_rag_contexts", _raise,
+        lambda *a, **kw: (fake_summary, fake_score, None),
     )
 
     asyncio.run(_collect_one(
-        inst=_inst(), config=_config(), store=MagicMock(),
+        inst=_inst(), config=_config(),
         price_store=MagicMock(), analysis_store=store,
-        llm=MagicMock(), price_data=_fresh_price_data(),
+        price_data=_fresh_price_data(),
     ))
 
     latest = store.get_latest_collect_row("USDJPY=X")
     assert latest is not None
-    assert latest.collect_status == "failed"
-    assert "rag_context_error" in (latest.reasoning_summary or "")
+    assert latest.collect_status == "ok"
+    assert latest.reason is None
 
-
-def test_collect_one_llm_error_writes_failed_sentinel(tmp_path, monkeypatch):
-    """analyze_price_action が raise → failed sentinel + skip。"""
-    store = AnalysisStore(tmp_path / "test.db")
-
-    monkeypatch.setattr(
-        "src.jobs.technical_collector._compute_summary_and_score",
-        lambda *a, **kw: (MagicMock(), MagicMock(), None),
-    )
-    monkeypatch.setattr(
-        "src.jobs.technical_collector._build_rag_contexts",
-        lambda *a, **kw: ("", "", ""),
-    )
-
-    async def _raise_async(*a, **kw):
-        raise TimeoutError("llm timeout")
-
-    monkeypatch.setattr(
-        "src.jobs.technical_collector.analyze_price_action", _raise_async,
-    )
-
-    asyncio.run(_collect_one(
-        inst=_inst(), config=_config(), store=MagicMock(),
-        price_store=MagicMock(), analysis_store=store,
-        llm=MagicMock(), price_data=_fresh_price_data(),
-    ))
-
-    latest = store.get_latest_collect_row("USDJPY=X")
-    assert latest is not None
-    assert latest.collect_status == "failed"
-    assert "llm_error" in (latest.reasoning_summary or "")
-    assert "timeout" in (latest.reasoning_summary or "").lower()
+    ok_row = store.get_latest_ok_row("USDJPY=X")
+    assert ok_row is not None
+    assert ok_row.bias_score is not None
+    assert ok_row.confidence is not None
+    assert ok_row.direction_bias is not None
+    # 決定的スコアの新カラムがある (LLM 無し経路)
+    assert ok_row.tf_scores_json is not None
+    assert ok_row.components_json is not None
+    assert ok_row.patterns_json is not None
 
 
 def test_collect_all_prefetch_failure_writes_failed_sentinel(tmp_path, monkeypatch):
@@ -203,8 +180,8 @@ def test_collect_all_prefetch_failure_writes_failed_sentinel(tmp_path, monkeypat
     latest = store.get_latest_collect_row("USDJPY=X")
     assert latest is not None
     assert latest.collect_status == "failed"
-    assert "prefetch_failed" in (latest.reasoning_summary or "")
-    assert "ConnectionError" in (latest.reasoning_summary or "")
+    assert "prefetch_failed" in (latest.reason or "")
+    assert "ConnectionError" in (latest.reason or "")
 
 
 def test_collect_all_unexpected_raise_in_collect_one_writes_sentinel(tmp_path, monkeypatch):
@@ -248,7 +225,7 @@ def test_collect_all_unexpected_raise_in_collect_one_writes_sentinel(tmp_path, m
     latest = store.get_latest_collect_row("USDJPY=X")
     assert latest is not None
     assert latest.collect_status == "failed"
-    assert "unexpected_raise" in (latest.reasoning_summary or "")
+    assert "unexpected_raise" in (latest.reason or "")
 
 
 def test_collect_all_phase1_prefetch_failure_writes_failed_sentinel(tmp_path, monkeypatch):
@@ -288,8 +265,8 @@ def test_collect_all_phase1_prefetch_failure_writes_failed_sentinel(tmp_path, mo
     latest = store.get_latest_collect_row("SPY")
     assert latest is not None
     assert latest.collect_status == "failed"
-    assert "prefetch_failed" in (latest.reasoning_summary or "")
-    assert "ConnectionError" in (latest.reasoning_summary or "")
+    assert "prefetch_failed" in (latest.reason or "")
+    assert "ConnectionError" in (latest.reason or "")
 
 
 _JST_TC = ZoneInfo("Asia/Tokyo")
