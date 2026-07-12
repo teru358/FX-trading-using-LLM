@@ -58,3 +58,17 @@ def test_build_snapshot_data_single_tf_nulls_mtf():
     assert data.mtf_alignment is None
     assert data.tf_scores == {}
     assert data.components["sma"] == 0.0
+
+
+def test_build_snapshot_data_none_patterns():
+    from src.signals.technical_scorer import TechnicalScore
+    ts = TechnicalScore(
+        sma_score=0.0, rsi_score=0.0, macd_score=0.0, ichimoku_score=0.0,
+        bb_score=0.0, pattern_score=0.0, adx_factor=1.0,
+        total_score=0.1, confidence=0.5, direction="long",
+    )
+    data = tc._build_snapshot_data(
+        pair="X", analyzed_at=datetime(2026, 7, 11, 12, 0),
+        tech_score=ts, mtf_score=None, chart_patterns=None,
+    )
+    assert data.patterns == []

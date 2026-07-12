@@ -1,11 +1,12 @@
 """テクニカル分析スナップショットの収集ジョブ。
 
-OHLCVデータ取得 → テクニカル指標計算 → LLM分析 → スナップショット保存。
+OHLCV取得 → テクニカル指標計算 → 決定的スコア算出 → スナップショット保存
+(LLM 不使用)。
 
 trade/watch 別経路 (Task 6.2):
-  - ``collect_watch_technical``: 監視専用銘柄のみ収集 (macro/相関なし)。
-  - ``collect_trade_technical``: 取引対象を収集 (watch snapshot からの macro +
-    watch 価格を PriceStore 再ロードした相関 + 経済指標影響分析)。
+  - ``collect_watch_technical``: 監視専用銘柄のみ収集。
+  - ``collect_trade_technical``: 取引対象を収集 (経済指標影響分析付き。
+    macro/相関は LLM 廃止に伴い除去)。
   - ``collect_all_technical``: watch → trade を順に回す後方互換 wrapper。
 watch/trade は別 public wrapper を持ち、main では union 時刻の単一 dispatch で
 watch→trade 順に実行する (`build_technical_dispatch`)。watch は base interval 固定、
