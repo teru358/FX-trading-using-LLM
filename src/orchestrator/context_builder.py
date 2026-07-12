@@ -46,6 +46,53 @@ _SAFE_RISK_STATE = {
 }
 
 
+def _load_json_column(raw, default):
+    """JSON 列を安全に読む。NULL/空/破損 JSON/型不一致は default に倒す (spec §2.B)。"""
+    import json
+    if not raw:
+        return default
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return default
+    return value if isinstance(value, type(default)) else default
+
+
+def _format_technical_ok(row, now: datetime) -> dict[str, Any]:
+    """ok snapshot 行を planner context の technical ブロックに整形する (spec §2.D)。"""
+    direction = (
+        "long" if row.direction_bias == "long"
+        else "short" if row.direction_bias == "short"
+        else "neutral"
+    )
+    tf_raw = _load_json_column(row.tf_scores_json, {})
+    if row.mtf_alignment is not None and tf_raw:
+        mtf: dict[str, Any] | None = {"alignment": round(row.mtf_alignment, 2)}
+        for name in ("long", "medium", "short"):
+            if name in tf_raw:
+                mtf[name] = {
+                    "dir": tf_raw[name].get("direction"),
+                    "score": round(tf_raw[name].get("score", 0.0), 2),
+                }
+    else:
+        mtf = None
+    components_raw = _load_json_column(row.components_json, {})
+    components = {k: round(v, 2) for k, v in components_raw.items()
+                  if isinstance(v, (int, float))}
+    patterns = _load_json_column(row.patterns_json, [])
+    return {
+        "status": "ok",
+        "bias_score": round(row.bias_score, 2) if row.bias_score is not None else None,
+        "confidence": round(row.confidence, 2) if row.confidence is not None else None,
+        "direction": direction,
+        "last_ok_at": row.analyzed_at.isoformat() if row.analyzed_at else None,
+        "mtf": mtf,
+        "patterns": patterns,
+        "components": components,
+        "_ref": {"snapshot_id": row.id, "analyzed_at": row.analyzed_at.isoformat()},
+    }
+
+
 @dataclass
 class QuoteSnapshot:
     """watch 側から渡される瞬間 quote (planning は snapshot 経由で読む)。"""
@@ -213,19 +260,7 @@ class DecisionContextBuilder:
                 "_ref": {"snapshot_id": row.id, "analyzed_at": row.analyzed_at.isoformat()},
             }
 
-        direction = (
-            "long" if row.direction_bias == "long"
-            else "short" if row.direction_bias == "short"
-            else "neutral"
-        )
-        return {
-            "status": "ok",
-            "bias_score": row.bias_score,
-            "confidence": row.confidence,
-            "direction": direction,
-            "last_ok_at": row.analyzed_at.isoformat() if row.analyzed_at else None,
-            "_ref": {"snapshot_id": row.id, "analyzed_at": row.analyzed_at.isoformat()},
-        }
+        return _format_technical_ok(row, now)
 
     def _build_news(self, pair: str, now: datetime) -> dict[str, Any]:
         """注入された news_provider から §7 news ブロックを組む。
