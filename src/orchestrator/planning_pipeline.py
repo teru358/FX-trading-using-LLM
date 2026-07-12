@@ -33,7 +33,7 @@ from src.data.orchestrator_store import OrchestratorStore
 from src.llm.claude_cli_client import ClaudeCliUsageLimitError
 from src.llm.client import CircuitOpenError
 from src.orchestrator.execution_opinion_agent import ExecutionOpinionAgent
-from src.orchestrator.planner_agent import PlannerAgent
+from src.orchestrator.planner_agent import PlannerAgent, PromptBudgetExceeded
 from src.orchestrator.risk_gate import RiskGateWorker
 from src.orchestrator.schemas import (
     ExecutionPlanDraft,
@@ -49,7 +49,13 @@ logger = logging.getLogger(__name__)
 # ClaudeCliUsageLimitError: LLM の usage/session limit (claude-cli 429 等)。レート制限は
 #   運用上の想定内事象なので、ERROR + スタックトレース (unexpected error) ではなく
 #   WARNING (planning fail-safe) に倒す。リセット後の次 tick で再評価される。
-_FAILSAFE_EXC = (SchemaParseError, CircuitOpenError, TimeoutError, ClaudeCliUsageLimitError)
+# PromptBudgetExceeded: base prompt (notes 抜き) が ctx 予算超過。notes を落としても
+#   収まらない = 切り詰め/信頼できないプロンプトなので、その pair の planning を
+#   この cycle だけ skip する (新規 plan なし = 安全側)。想定内の fail-safe。
+_FAILSAFE_EXC = (
+    SchemaParseError, CircuitOpenError, TimeoutError, ClaudeCliUsageLimitError,
+    PromptBudgetExceeded,
+)
 
 
 def clamp_draft_ttl(draft: ExecutionPlanDraft, *, max_hours: int) -> ExecutionPlanDraft:

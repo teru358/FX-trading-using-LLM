@@ -1,8 +1,13 @@
 # tests/test_planner_user_notes.py
 import asyncio
+import logging
 from pathlib import Path
+from unittest.mock import AsyncMock
 
-from src.orchestrator.planner_agent import PlannerAgent
+import pytest
+
+from src.orchestrator.planner_agent import PlannerAgent, PromptBudgetExceeded
+from src.orchestrator.schemas import ExecutionPlanDraft
 
 
 class _FakeLLM:
@@ -50,16 +55,44 @@ def test_notes_truncated_to_limit(tmp_path):
 
 
 def test_notes_dropped_when_budget_exhausted(tmp_path, caplog):
-    import logging
+    """base prompt は予算内だが notes の残余ゼロ以下 → notes 落とし + chat は呼ばれる。
+
+    (new guard は base 超過のみが対象。base が収まる notes-drop は従来どおり。)
+    """
+    import json
+
+    from src.orchestrator.planner_agent import _PROMPT_BUDGET_CHARS, _SCAN_SYSTEM, _compact_context
+    from src.orchestrator.execution_opinion_agent import _horizon_guidance, _position_guidance
+
     notes = tmp_path / "user_notes.md"
     notes.write_text("## plan\nMARKER_NOTE\n", encoding="utf-8")
     llm = _FakeLLM()
     agent = PlannerAgent(_AgentLlm(llm), user_notes_path=notes)
-    huge_context = {"technical": {"pad": "y" * 20_000}}
+
+    # base (system+user) を予算直下 (remaining<=0 だが base<=budget) に合わせる。
+    def _base_len(pad: str) -> int:
+        ctx = {"technical": {"pad": pad}}
+        base = [
+            "pair: USDJPY=X",
+            _horizon_guidance(ctx),
+            _position_guidance(ctx),
+            "decision_context:",
+            json.dumps(_compact_context(ctx), ensure_ascii=False),
+            "Decide if there is a tradeable opportunity. Return STRICT JSON.",
+        ]
+        return len(_SCAN_SYSTEM) + len("\n".join(p for p in base if p))
+
+    overhead0 = _base_len("")
+    pad_len = _PROMPT_BUDGET_CHARS - overhead0  # base をちょうど予算に張り付ける
+    assert pad_len > 0
+    pad = "y" * pad_len
+    assert _base_len(pad) <= _PROMPT_BUDGET_CHARS  # base は予算内 (guard は発火しない)
+    ctx = {"technical": {"pad": pad}}
     with caplog.at_level(logging.WARNING):
-        asyncio.run(agent.scan_opportunity(pair="USDJPY=X", context=huge_context))
+        asyncio.run(agent.scan_opportunity(pair="USDJPY=X", context=ctx))
     user_msg = next(m["content"] for m in llm.last_messages if m["role"] == "user")
-    assert "MARKER_NOTE" not in user_msg
+    assert "MARKER_NOTE" not in user_msg  # notes は落ちた
+    assert llm.last_messages is not None  # chat は呼ばれた
     assert any("notes" in r.message.lower() for r in caplog.records)
 
 
@@ -142,3 +175,59 @@ def test_total_within_budget_when_remaining_is_binding(tmp_path):
     assert total <= _PROMPT_BUDGET_CHARS  # ヘッダ込みで予算を超えない
     # notes は remaining 由来の cap で切られている (1500 未満) が一部は注入されている
     assert "n" in user_msg
+
+
+def _make_draft() -> ExecutionPlanDraft:
+    from datetime import datetime, timedelta
+
+    from src.orchestrator.schemas import EntryCondition, InvalidationCondition
+
+    return ExecutionPlanDraft(
+        direction="long",
+        entry_conditions=[EntryCondition(type="price_at_or_below", value=157.0)],
+        action={"sl": 156.5, "tp": 158.0, "rr": 2.0},
+        invalidation=[InvalidationCondition(type="price_below", value=156.0)],
+        expires_at=datetime.now() + timedelta(hours=6),
+        reasoning_summary="ok",
+    )
+
+
+def test_scan_raises_when_base_prompt_over_budget_without_notes():
+    """notes 抜きの base prompt が予算超過なら scan は fail-safe で raise し LLM を呼ばない。"""
+    chat = AsyncMock()
+    agent = PlannerAgent(_AgentLlm(chat))  # notes_path なし → notes は関与しない
+    over_budget_context = {"technical": {"pad": "y" * 30_000}}
+    with pytest.raises(PromptBudgetExceeded):
+        asyncio.run(
+            agent.scan_opportunity(pair="USDJPY=X", context=over_budget_context)
+        )
+    chat.chat.assert_not_awaited()
+
+
+def test_scan_over_budget_logs_size_and_budget(caplog):
+    chat = AsyncMock()
+    agent = PlannerAgent(_AgentLlm(chat))
+    over_budget_context = {"technical": {"pad": "y" * 30_000}}
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(PromptBudgetExceeded):
+            asyncio.run(
+                agent.scan_opportunity(pair="USDJPY=X", context=over_budget_context)
+            )
+    from src.orchestrator.planner_agent import _PROMPT_BUDGET_CHARS
+
+    warnings = [r.message for r in caplog.records if r.levelno >= logging.WARNING]
+    assert any(str(_PROMPT_BUDGET_CHARS) in m for m in warnings)
+
+
+def test_final_decision_raises_when_base_prompt_over_budget_without_notes():
+    """final_decision も base prompt 予算超過なら fail-safe で raise し LLM を呼ばない。"""
+    chat = AsyncMock()
+    agent = PlannerAgent(_AgentLlm(chat))
+    over_budget_context = {"technical": {"pad": "y" * 30_000}}
+    with pytest.raises(PromptBudgetExceeded):
+        asyncio.run(
+            agent.final_decision(
+                pair="USDJPY=X", context=over_budget_context, draft=_make_draft()
+            )
+        )
+    chat.chat.assert_not_awaited()

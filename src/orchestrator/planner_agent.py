@@ -30,6 +30,16 @@ from src.orchestrator.schemas import (
 
 logger = logging.getLogger(__name__)
 
+
+class PromptBudgetExceeded(Exception):
+    """notes 抜きの base prompt (system + user_without_notes) が総予算を超過した。
+
+    fail-safe トリガ (spec §2.D)。notes を落としても収まらない = ctx4096 を割る
+    危険があるため、切り詰めた/信頼できないプロンプトを LLM に投げず raise する。
+    PlanningPipeline.run() が捕捉し、その pair の planning をこの cycle だけ skip する
+    (新規 plan なし = 安全側)。
+    """
+
 # プロンプト総予算 (spec §2.D): ctx4096 から出力予約 ~512 tok と余裕を引いた
 # 入力上限の目安 (~3k tok ≒ 12,000 chars)。ctx 拡張 (将来) 時はこの定数を上げる。
 _PROMPT_BUDGET_CHARS = 12_000
@@ -68,6 +78,24 @@ class PlannerAgent:
         self._llm = agent_llm.client
         self._temperature = agent_llm.temperature
         self._user_notes_path = user_notes_path
+
+    def _enforce_prompt_budget(self, system: str, user_without_notes: str) -> None:
+        """base prompt (system + user_without_notes) が総予算内であることを保証する。
+
+        notes を落としても収まらない場合 (= 予算が真の上限として機能しない) は、
+        切り詰め/信頼できないプロンプトを LLM に投げず PromptBudgetExceeded を raise
+        する (fail-safe)。notes-dropping は base が収まる場合のみの二次的措置であり、
+        この guard は base 自体の超過を扱う。
+        """
+        base_size = len(system) + len(user_without_notes)
+        if base_size > _PROMPT_BUDGET_CHARS:
+            logger.warning(
+                "[PLANNER] base prompt over budget: %d > %d chars — failing safe",
+                base_size, _PROMPT_BUDGET_CHARS,
+            )
+            raise PromptBudgetExceeded(
+                f"base prompt {base_size} chars exceeds budget {_PROMPT_BUDGET_CHARS}"
+            )
 
     def _plan_notes_block(self, system: str, user_without_notes: str) -> str | None:
         """user_notes の ## plan セクションを advisory ブロックとして返す (毎回再読込)。
@@ -114,6 +142,7 @@ class PlannerAgent:
         ]
         tail = "Decide if there is a tradeable opportunity. Return STRICT JSON."
         user_without_notes = "\n".join(p for p in [*base_parts, tail] if p)
+        self._enforce_prompt_budget(_SCAN_SYSTEM, user_without_notes)
         notes_block = self._plan_notes_block(_SCAN_SYSTEM, user_without_notes)
         user = "\n".join(p for p in [*base_parts, notes_block, tail] if p)
         raw = await self._llm.chat(
@@ -142,6 +171,7 @@ class PlannerAgent:
         ]
         tail = "Make the final decision (accept/revise/reject). Return STRICT JSON."
         user_without_notes = "\n".join(p for p in [*base_parts, tail] if p)
+        self._enforce_prompt_budget(_FINAL_SYSTEM, user_without_notes)
         notes_block = self._plan_notes_block(_FINAL_SYSTEM, user_without_notes)
         user = "\n".join(p for p in [*base_parts, notes_block, tail] if p)
         raw = await self._llm.chat(
