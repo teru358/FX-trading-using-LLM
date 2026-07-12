@@ -61,6 +61,8 @@ _FINAL_SYSTEM = (
 
 
 class PlannerAgent:
+    _NOTES_HEADER = "User notes (advisory, data takes priority):\n"
+
     def __init__(self, agent_llm, user_notes_path: "Path | None" = None) -> None:
         # agent_llm: src.config.schema.AgentLlm (client + 解決済 temperature)
         self._llm = agent_llm.client
@@ -72,13 +74,19 @@ class PlannerAgent:
 
         総予算契約 (spec §2.D): notes は最低優先。notes 抜きプロンプト
         (system + user) の残余予算内でのみ注入し、残余ゼロ以下なら落とす。
+        remaining はヘッダ (_NOTES_HEADER) + 最終 join 改行1つ分の overhead も
+        差し引く — notes_block 全体が予算内に収まるようにするため。
         """
         if self._user_notes_path is None:
             return None
         notes = load_user_notes(self._user_notes_path, "plan")
         if not notes:
             return None
-        remaining = _PROMPT_BUDGET_CHARS - len(system) - len(user_without_notes)
+        # notes_block 全体 (ヘッダ + notes) + join 改行1つ分を予算から引く
+        overhead = len(self._NOTES_HEADER) + 1
+        remaining = (
+            _PROMPT_BUDGET_CHARS - len(system) - len(user_without_notes) - overhead
+        )
         cap = min(_USER_NOTES_MAX_CHARS, remaining)
         if cap <= 0:
             logger.warning(
@@ -91,7 +99,7 @@ class PlannerAgent:
                 "[PLANNER] user plan notes truncated (%d > %d chars)", len(notes), cap,
             )
             notes = notes[:cap]
-        return f"User notes (advisory, data takes priority):\n{notes}"
+        return f"{self._NOTES_HEADER}{notes}"
 
     async def scan_opportunity(
         self, *, pair: str, context: dict[str, Any], temperature: float | None = None

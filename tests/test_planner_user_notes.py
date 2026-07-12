@@ -94,3 +94,51 @@ def test_no_notes_path_no_injection():
     asyncio.run(agent.scan_opportunity(pair="USDJPY=X", context={}))
     user_msg = next(m["content"] for m in llm.last_messages if m["role"] == "user")
     assert "advisory" not in user_msg.lower()
+
+
+def test_total_within_budget_when_remaining_is_binding(tmp_path):
+    import json
+    from src.orchestrator.planner_agent import (
+        _PROMPT_BUDGET_CHARS,
+        _SCAN_SYSTEM,
+        _USER_NOTES_MAX_CHARS,
+        _compact_context,
+    )
+    from src.orchestrator.execution_opinion_agent import (
+        _horizon_guidance,
+        _position_guidance,
+    )
+
+    notes = tmp_path / "user_notes.md"
+    notes.write_text("## plan\n" + ("n" * 3000) + "\n", encoding="utf-8")  # notes は上限超だが
+    llm = _FakeLLM()
+    agent = PlannerAgent(_AgentLlm(llm), user_notes_path=notes)
+
+    # remaining が数百 char (0 < remaining < _USER_NOTES_MAX_CHARS) になるよう pad を
+    # 実測 base overhead から逆算する (horizon guidance / json 構造 / tail 込み)。
+    def _base_len(pad: str) -> int:
+        ctx = {"technical": {"pad": pad}}
+        base = [
+            "pair: USDJPY=X",
+            _horizon_guidance(ctx),
+            _position_guidance(ctx),
+            "decision_context:",
+            json.dumps(_compact_context(ctx), ensure_ascii=False),
+            "Decide if there is a tradeable opportunity. Return STRICT JSON.",
+        ]
+        return len(_SCAN_SYSTEM) + len("\n".join(p for p in base if p))
+
+    # 目標 remaining ≈ 500: pad を増やして base をその分埋める。
+    overhead0 = _base_len("")  # pad=0 の時の system+user 長
+    pad_len = _PROMPT_BUDGET_CHARS - overhead0 - 500
+    assert pad_len > 0
+    pad = "z" * pad_len
+    remaining = _PROMPT_BUDGET_CHARS - _base_len(pad)
+    assert 0 < remaining < _USER_NOTES_MAX_CHARS  # binding constraint であることを確認
+
+    asyncio.run(agent.scan_opportunity(pair="USDJPY=X", context={"technical": {"pad": pad}}))
+    user_msg = next(m["content"] for m in llm.last_messages if m["role"] == "user")
+    total = len(_SCAN_SYSTEM) + len(user_msg)
+    assert total <= _PROMPT_BUDGET_CHARS  # ヘッダ込みで予算を超えない
+    # notes は remaining 由来の cap で切られている (1500 未満) が一部は注入されている
+    assert "n" in user_msg
