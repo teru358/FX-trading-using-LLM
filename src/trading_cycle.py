@@ -32,7 +32,6 @@ from src.cycles.trading import (
 # 共通ヘルパー: tests / views.py / api/server.py から参照される
 from src.cycles._helpers import (
     _build_macro_context,
-    _build_rag_context,
     _compute_atr_from_price_data,
     _fetch_and_compute_atr,
     _get_ohlcv,
@@ -53,7 +52,6 @@ __all__ = [
     "_get_ohlcv",
     "_compute_atr_from_price_data",
     "_fetch_and_compute_atr",
-    "_build_rag_context",
     "_build_macro_context",
     "_summarize_pair",
     # trading.py 内部ヘルパー (テスト / 内部参照のため公開維持)

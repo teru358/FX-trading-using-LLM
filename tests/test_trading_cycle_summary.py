@@ -28,15 +28,19 @@ async def test_phase_analyze_pairs_collects_data_health(monkeypatch):
 
     async def fake_process(pair_cfg, *a, **k):
         if pair_cfg.symbol == "USDJPY=X":
-            return PairAnalysisOutcome(signal=sig_ok, macro_ctx="m", tech_fallback=True)
-        return PairAnalysisError(pair="EURUSD=X", error=RuntimeError("boom"))
+            return PairAnalysisOutcome(signal=sig_ok, macro_ctx="m")
+        if pair_cfg.symbol == "EURUSD=X":
+            return PairAnalysisError(pair="EURUSD=X", error=RuntimeError("boom"))
+        return None  # スナップショット未取得によるスキップ
 
     monkeypatch.setattr("src.cycles.trading._process_pair", fake_process)
 
     config = MagicMock()
     config.llm.provider_config.max_concurrent = 2
+    skipped_pair = MagicMock(symbol="GBPUSD=X")
+    skipped_pair.display_name = "GBPUSD=X"
     config.tradeable_instruments = [
-        MagicMock(symbol="USDJPY=X"), MagicMock(symbol="EURUSD=X"),
+        MagicMock(symbol="USDJPY=X"), MagicMock(symbol="EURUSD=X"), skipped_pair,
     ]
     signals, macro_ctxs, data_health = await _phase_analyze_pairs(
         config, MagicMock(), MagicMock(), MagicMock(), MagicMock(), MagicMock(), None,
@@ -44,7 +48,7 @@ async def test_phase_analyze_pairs_collects_data_health(monkeypatch):
     assert signals == [sig_ok]
     assert macro_ctxs == {"USDJPY=X": "m"}
     assert any("EURUSD=X 分析失敗" in d for d in data_health)
-    assert any("USDJPY=X" in d and "fallback" in d for d in data_health)
+    assert any("GBPUSD=X" in d and "スキップ" in d for d in data_health)
 
 
 def test_format_decision_line_rag_demotes_sell_to_hold():

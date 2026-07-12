@@ -15,18 +15,16 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from src.analysis.price_analyzer import analyze_price_action, load_user_notes
+from src.analysis.price_analyzer import load_user_notes
 from src.analysis.reflector import generate_close_reflection
 from src.config import AppConfig
 from src.cycles._helpers import (
     _build_macro_context,
-    _build_rag_context,
     _compute_atr_from_price_data,
     _get_ohlcv,
     _get_price,
 )
 from src.data.analysis_store import AnalysisStore, HoldDecisionStore
-from src.data.indicators import compute_indicators
 from src.data.price_provider import PriceProvider
 from src.data.price_store import PriceStore
 from src.llm.client import LLMClient
@@ -72,7 +70,7 @@ class PairAnalysisOutcome:
     """_process_pair の成功戻り値。"""
     signal: "TradeSignal"
     macro_ctx: str
-    tech_fallback: bool = False  # 蓄積スナップショットがなく即時 Ollama 分析へ fallback した
+    tech_fallback: bool = False  # 廃止済み fallback の残置フィールド (常に False; dataclass 形状維持用)
 
 
 @dataclass
@@ -100,8 +98,8 @@ async def _process_pair(
     """1ペアの分析→シグナル生成。
 
     テクニカル分析は収集ジョブで蓄積済みのスナップショットを集約して使用する。
-    スナップショットが存在しない場合 (初回起動直後など) は Ollama 即時分析にフォールバック。
-    戻り値: PairAnalysisOutcome (成功) / PairAnalysisError (失敗)
+    スナップショットが存在しない場合 (初回起動直後など) は当該ペアをスキップする。
+    戻り値: PairAnalysisOutcome (成功) / PairAnalysisError (失敗) / None (スキップ)
     """
     from src.analysis.news_aggregator import aggregate_news_sentiment
     from src.signals.signal_combiner import combine_signals
@@ -121,36 +119,12 @@ async def _process_pair(
             pair_cfg.symbol,
             hours=config.rag.analysis_lookback_hours,
         )
-        tech_fallback = price is None
         if price is None:
             logger.warning(
-                f"{pair_cfg.display_name}: no stored snapshots, "
-                "running immediate Ollama analysis as fallback..."
+                f"{pair_cfg.display_name}: no stored snapshots, skipping "
+                "(LLM-less collector will backfill within minutes)"
             )
-            _, summary = compute_indicators(
-                price_data.df,
-                indicator_cfg=config.analysis.indicators,
-                pattern_cfg=config.analysis.chart_patterns,
-            )
-            from src.signals.technical_scorer import compute_technical_score
-            tech_score = compute_technical_score(
-                summary,
-                indicator_cfg=config.analysis.indicators,
-                pattern_cfg=config.analysis.chart_patterns,
-            )
-            news_ctx, refl_ctx = await _build_rag_context(pair_cfg, config, store)
-            price = await analyze_price_action(
-                pair_cfg=pair_cfg,
-                price_data=price_data,
-                summary=summary,
-                llm=llm,
-                temperature=config.llm.price_analysis.temperature,
-                news_context=news_ctx,
-                reflection_context=refl_ctx,
-                macro_context=macro_ctx,
-                user_notes_path=config.user_notes_path,
-                tech_score=tech_score,
-            )
+            return None
 
         news = aggregate_news_sentiment(pair_cfg, store, config)
 
@@ -185,9 +159,7 @@ async def _process_pair(
             accuracy_provider=accuracy_provider,
             accuracy_config=config.trading.forecast_accuracy_feedback,
         )
-        return PairAnalysisOutcome(
-            signal=signal, macro_ctx=macro_ctx, tech_fallback=tech_fallback,
-        )
+        return PairAnalysisOutcome(signal=signal, macro_ctx=macro_ctx)
     except Exception as e:
         logger.error(f"Failed to process {pair_cfg.display_name}: {e}", exc_info=True)
         return PairAnalysisError(pair=pair_cfg.symbol, error=e)
@@ -526,20 +498,22 @@ async def _phase_analyze_pairs(
                 )
                 return PairAnalysisError(pair=pair_cfg.symbol, error=e)
 
+    pairs = config.tradeable_instruments
     results = await asyncio.gather(
-        *[bounded(p) for p in config.tradeable_instruments],
+        *[bounded(p) for p in pairs],
         return_exceptions=True,
     )
 
     outcomes: list[PairAnalysisOutcome] = []
     data_health: list[str] = []
-    for r in results:
+    for pair_cfg, r in zip(pairs, results):
         if isinstance(r, PairAnalysisOutcome):
             outcomes.append(r)
-            if r.tech_fallback:
-                data_health.append(
-                    f"{r.signal.pair} スナップショット未取得(即時分析 fallback)"
-                )
+        elif r is None:
+            # スナップショット未取得によるスキップ (_process_pair の skip 経路)
+            data_health.append(
+                f"{pair_cfg.display_name} スナップショット未取得でスキップ"
+            )
         elif isinstance(r, PairAnalysisError):
             data_health.append(f"{r.pair} 分析失敗")
             logger.warning(f"[ANALYZE] {r.pair} failed: {r.error}")
@@ -1031,7 +1005,7 @@ def _build_trading_runtime(config: AppConfig):
             "tp_atr_mult_max": config.trading.tp_atr_mult_max,
         },
     )
-    llm_price = create_llm_client(config, "price_analysis")
+    llm_price = None  # price 分析 LLM は廃止済み (technical-llm-omit)
     llm_reflect = create_llm_client(config, "reflection")
 
     _dd_kwargs = {
@@ -1084,7 +1058,6 @@ async def trading_cycle(
     logger.info(
         f"[TRADE] mode={config.mode} broker={type(broker).__name__} "
         f"notifier={type(notifier).__name__} "
-        f"price={type(llm_price).__name__}({llm_price.model_name}) "
         f"reflect={type(llm_reflect).__name__}({llm_reflect.model_name})"
     )
 

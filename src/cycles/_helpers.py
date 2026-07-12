@@ -15,11 +15,7 @@ from src.config import AppConfig
 from src.data.analysis_store import AnalysisStore
 from src.data.price_fetcher import fetch_current_price, fetch_ohlcv
 from src.data.price_provider import PriceProvider
-from src.rag.prompt_formatter import (
-    format_macro_context_for_prompt,
-    format_news_for_prompt,
-    format_reflections_for_prompt,
-)
+from src.rag.prompt_formatter import format_macro_context_for_prompt
 from src.rag.vector_store import VectorStore
 from src.signals.signal_combiner import combine_signals
 
@@ -115,54 +111,6 @@ def _fetch_and_compute_atr(
 # RAG / マクロコンテキスト
 # ──────────────────────────────────────────────────────────────────────
 
-async def _build_rag_context(
-    pair_cfg, config: AppConfig, store: VectorStore
-) -> tuple[str, str]:
-    """RAG からニュースと振り返りコンテキストを取得する。"""
-    news_entries = store.get_recent_category_news(
-        categories=pair_cfg.news_categories,
-        lookback_hours=config.rag.news_lookback_hours,
-    )
-    news_ctx = format_news_for_prompt(news_entries)
-
-    reflections = store.get_recent_reflections(
-        pair=pair_cfg.symbol,
-        limit=config.rag.reflection_lookback_count,
-    )
-    refl_ctx = format_reflections_for_prompt(reflections)
-
-    # 経済指標分析レポートを reflection_context に付加
-    if config.economic_calendar.enabled:
-        try:
-            currencies = [
-                c for c in (pair_cfg.base_currency, pair_cfg.quote_currency) if c
-            ]
-            econ_reports = store.get_recent_econ_analyses(
-                currencies=currencies,
-                lookback_minutes=config.economic_calendar.post_event_window_min,
-                limit=3,
-            )
-            if econ_reports:
-                lines = ["=== 直近の経済指標発表影響分析 ==="]
-                for r in econ_reports:
-                    meta = r["metadata"]
-                    lines.append(
-                        f"[{meta.get('event_time', '')}] {meta.get('title', '')} "
-                        f"({meta.get('currency', '')}, surprise={meta.get('surprise', '')})"
-                    )
-                    lines.append(r["text"][:400])
-                econ_ctx = "\n".join(lines)
-                refl_ctx = f"{refl_ctx}\n\n{econ_ctx}" if refl_ctx else econ_ctx
-                logger.info(
-                    f"[ECON] Injected {len(econ_reports)} econ analyses into "
-                    f"{pair_cfg.display_name} context"
-                )
-        except Exception as e:
-            logger.debug(f"[ECON] RAG injection failed: {e}")
-
-    return news_ctx, refl_ctx
-
-
 def _build_macro_context(config: AppConfig, analysis_store: AnalysisStore) -> str:
     """watch_only 銘柄の直近スナップショットからマクロコンテキストを構築する。"""
     watch_only = config.watch_only_instruments
@@ -230,7 +178,6 @@ __all__ = [
     "_get_ohlcv",
     "_compute_atr_from_price_data",
     "_fetch_and_compute_atr",
-    "_build_rag_context",
     "_build_macro_context",
     "_summarize_pair",
     "datetime",
