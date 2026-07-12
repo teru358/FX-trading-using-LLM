@@ -177,7 +177,6 @@ class TuiApp(App):
                 "  [cyan]run analyze[/cyan]          — 総合分析シグナルを表示\n"
                 "  [cyan]run forecast[/cyan] (pair)  — 予測サイクルデータを表示\n"
                 "  [cyan]run trade[/cyan]            — 取引判定ループを実行\n"
-                "  [cyan]compare[/cyan]  (pair)      — 複数モデルで分析を比較 (--no-tui モード)\n"
                 "  [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問\n"
                 "  [cyan]close[/cyan] (pair)         — ポジションを手動決済\n"
                 "  [cyan]feeds[/cyan]                — RSSフィード疎通確認\n"
@@ -191,13 +190,6 @@ class TuiApp(App):
             self._write(
                 "[yellow]TUIモードでは edit は使用できません。別ターミナルで実行してください:[/yellow]\n"
                 "  vim config/user_notes.md"
-            )
-            return
-
-        if cmd == "compare":
-            self._write(
-                "[yellow]compare は prompt_toolkit を使用するため TUI モードでは利用できません。[/yellow]\n"
-                "  --no-tui モードで実行してください: python main.py --no-tui"
             )
             return
 

@@ -20,7 +20,6 @@ from src.rag.vector_store import VectorStore
 from src.trading.position_manager import PositionManager
 from src.data.orchestrator_store import OrchestratorStore
 from src.orchestrator.plan_view import plan_to_row
-from src.commands.compare_models import run_compare
 from src.trading_cycle import run_trading_cycle
 from src.views import run_analysis_summary, run_ask, run_forecast_view, run_news_view, run_tech_view
 
@@ -35,7 +34,6 @@ _HELP = """\
   [cyan]run analyze[/cyan]          — 総合分析シグナルを表示（保存済みデータ）
   [cyan]run forecast[/cyan] (pair)  — 直近24hの予測サイクルデータを表示  例: run forecast EURUSD=X
   [cyan]run trade[/cyan]            — 取引判定ループを今すぐ実行（動作確認用）
-  [cyan]compare[/cyan]  (pair)      — 複数モデルで分析を比較  例: compare USDJPY=X
   [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問・コメントを送信
   [cyan]audit[/cyan] (days)         — 過去トレードの統計診断レポート生成
   [cyan]audit review[/cyan] (days)  — audit + LLM 改善候補の対話選別 (教訓を audit_lessons.md に蓄積)
@@ -432,9 +430,6 @@ def run_commands(
                     _console.print(
                         f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | forecast | trade"
                     )
-            elif cmd == "compare":
-                pair_arg = args[0] if args else None
-                run_compare(config, store, analysis_store, pair_arg)
             elif cmd == "ask":
                 if not args:
                     _console.print("[red]使い方: ask <メッセージ>  例: ask 今のUSDJPYはどう見る？[/red]")

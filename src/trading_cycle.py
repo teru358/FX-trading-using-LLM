@@ -1,7 +1,7 @@
 """後方互換 shim — 実体は ``src/cycles/`` パッケージに移動した。
 
 歴史的に多くのモジュール (main.py / cli.py / tui.py / api/server.py / views.py /
-commands/compare_models.py / tests) が ``from src.trading_cycle import ...`` で
+tests) が ``from src.trading_cycle import ...`` で
 公開関数・私有ヘルパーの両方を import している。一括置換する代わりに、
 このファイルが ``src/cycles/`` から全シンボルを re-export することで既存呼び出しを
 無傷のまま動かす。
@@ -29,7 +29,7 @@ from src.cycles.trading import (
     trading_cycle,
 )
 
-# 共通ヘルパー: tests / views.py / api/server.py / compare_models.py から参照される
+# 共通ヘルパー: tests / views.py / api/server.py から参照される
 from src.cycles._helpers import (
     _build_macro_context,
     _build_rag_context,
