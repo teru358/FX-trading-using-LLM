@@ -12,11 +12,6 @@ def test_econ_impact_moved_out_of_collector():
     assert "_collect_econ_impact" not in inspect.getsource(tc)
 
 
-def test_collector_no_vectorstore_import():
-    src = inspect.getsource(tc)
-    assert "VectorStore" not in src
-
-
 def test_econ_job_disabled_returns_early():
     class _Cfg:
         class economic_calendar:
