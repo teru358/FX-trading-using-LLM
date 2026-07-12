@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
@@ -89,7 +90,6 @@ class AnalysisStore:
 
         保存後 _prune_old(symbol) を呼び 48h 超の古い行を消す。
         """
-        import json
         with Session(self._engine) as session:
             snap = _TechnicalSnapshot(
                 symbol=data.pair,
