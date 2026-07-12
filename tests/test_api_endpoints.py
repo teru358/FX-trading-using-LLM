@@ -829,7 +829,7 @@ def test_tech_endpoint_returns_latest_collect_and_latest_ok(
     from datetime import timedelta
     from types import SimpleNamespace
     from src.data.analysis_store import AnalysisStore
-    from src.analysis.price_analyzer import PriceAnalysis
+    from src.analysis.technical_snapshot_data import TechnicalSnapshotData
     from src.utils.clock import db_now
 
     store = AnalysisStore(tmp_path / "prices.db")
@@ -842,10 +842,10 @@ def test_tech_endpoint_returns_latest_collect_and_latest_ok(
     state.config.watch_only_instruments = []
 
     # 古い ok + 直近 sentinel を投入
-    store.add_snapshot(PriceAnalysis(
+    store.add_snapshot(TechnicalSnapshotData(
         pair="USDJPY=X", direction_bias="long", bias_score=0.2, confidence=0.6,
-        entry_zone=(149.5, 150.5), stop_loss=149.0, take_profit=152.0,
-        risk_reward_ratio=2.0, reasoning_summary="ok",
+        mtf_alignment=0.8, tf_scores={"long": {"score": 0.2, "direction": "long"}},
+        components={"sma": 0.1}, patterns=["engulfing_bullish"],
         analyzed_at=db_now() - timedelta(hours=4),
     ))
     store.add_sentinel(symbol="USDJPY=X", status="stale_price", reason="latest bar 7h ago")
@@ -860,8 +860,13 @@ def test_tech_endpoint_returns_latest_collect_and_latest_ok(
     assert s["symbol"] == "USDJPY=X"
     assert s["latest_collect"] is not None
     assert s["latest_collect"]["collect_status"] == "stale_price"
+    assert s["latest_collect"]["reason"] == "latest bar 7h ago"
     assert s["latest_ok"] is not None
     assert s["latest_ok"]["direction_bias"] == "long"
+    assert s["latest_ok"]["bias_score"] == 0.2
+    assert s["latest_ok"]["confidence"] == 0.6
+    assert s["latest_ok"]["mtf_alignment"] == 0.8
+    assert s["latest_ok"]["patterns"] == ["engulfing_bullish"]
 
 
 def test_tech_endpoint_returns_null_when_no_data(

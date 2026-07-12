@@ -78,7 +78,7 @@ def test_print_tech_summary_shows_collect_status_and_latest_ok(monkeypatch):
     latest_collect = SimpleNamespace(
         analyzed_at=db_now() - timedelta(minutes=5),
         collect_status="stale_price",
-        reasoning_summary="latest bar 7:00:00 ago",
+        reason="latest bar 7:00:00 ago",
     )
     latest_ok = SimpleNamespace(
         analyzed_at=db_now() - timedelta(hours=4),
@@ -141,7 +141,7 @@ def test_print_tech_summary_only_sentinel(monkeypatch):
     latest_collect = SimpleNamespace(
         analyzed_at=db_now() - timedelta(minutes=10),
         collect_status="failed",
-        reasoning_summary="llm_error: TimeoutError",
+        reason="llm_error: TimeoutError",
     )
 
     reporter.print_tech_summary([(inst, latest_collect, None)])

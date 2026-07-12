@@ -9,6 +9,7 @@ GET /feeds     — RSS フィード疎通確認
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -65,7 +66,7 @@ def tech() -> dict[str, Any]:
             latest_collect_dict = {
                 "analyzed_at": latest_collect.analyzed_at.isoformat() if latest_collect.analyzed_at else None,
                 "collect_status": latest_collect.collect_status,
-                "reason": latest_collect.reasoning_summary,
+                "reason": latest_collect.reason,
             }
 
         latest_ok_dict = None
@@ -75,13 +76,8 @@ def tech() -> dict[str, Any]:
                 "direction_bias": latest_ok.direction_bias,
                 "bias_score": latest_ok.bias_score,
                 "confidence": latest_ok.confidence,
-                "entry_zone_low": latest_ok.entry_zone_low,
-                "entry_zone_high": latest_ok.entry_zone_high,
-                "stop_loss": latest_ok.stop_loss,
-                "take_profit": latest_ok.take_profit,
-                "risk_reward_ratio": latest_ok.risk_reward_ratio,
-                "reasoning_summary": latest_ok.reasoning_summary,
-                "market_regime": latest_ok.market_regime,
+                "mtf_alignment": latest_ok.mtf_alignment,
+                "patterns": json.loads(latest_ok.patterns_json) if latest_ok.patterns_json else [],
             }
 
         snapshots.append({

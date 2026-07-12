@@ -277,7 +277,7 @@ class AskContextBuilder:
                 s = snaps[0]
                 lines.append(
                     f"{inst.display_name}: bias={s.bias_score:+.2f} conf={s.confidence:.2f} "
-                    f"dir={s.direction_bias} RR={s.risk_reward_ratio:.1f} | {s.reasoning_summary}"
+                    f"dir={s.direction_bias} mtf={s.mtf_alignment if s.mtf_alignment is not None else '-'}"
                 )
             else:
                 lines.append(f"{inst.display_name}: no snapshot")

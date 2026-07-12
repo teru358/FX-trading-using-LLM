@@ -327,7 +327,7 @@ def print_tech_summary(
             )
             if latest_collect.collect_status != "ok":
                 reasons_below.append(
-                    (name, latest_collect.collect_status, latest_collect.reasoning_summary or "")
+                    (name, latest_collect.collect_status, latest_collect.reason or "")
                 )
         else:
             collect_str = "[dim](no data)[/dim]"
@@ -349,7 +349,7 @@ def print_tech_summary(
 
         notes = ""
         if latest_collect is not None and latest_collect.collect_status != "ok":
-            notes = (latest_collect.reasoning_summary or "")[:60]
+            notes = (latest_collect.reason or "")[:60]
 
         tbl.add_row(
             name, mode, collect_str, status_str, ok_str,
