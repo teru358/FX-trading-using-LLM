@@ -48,7 +48,6 @@ class _TradingSession(_Base):
     llm_tp          = Column(Float)
     key_support     = Column(Float)
     key_resistance  = Column(Float)
-    post_hoc_cache = Column(Text)  # audit で計算した post-hoc 結果 + LLM 候補の JSON
 
 
 class SessionStore:
@@ -64,7 +63,6 @@ class SessionStore:
             "computed_sl", "computed_tp", "llm_sl", "llm_tp",
             "key_support", "key_resistance",
         ]
-        new_text_columns = ["post_hoc_cache"]
         from sqlalchemy import text, inspect
         insp = inspect(self._engine)
         if "trading_sessions" not in insp.get_table_names():
@@ -74,10 +72,6 @@ class SessionStore:
             for col in new_real_columns:
                 if col not in existing:
                     conn.execute(text(f"ALTER TABLE trading_sessions ADD COLUMN {col} REAL"))
-                    logger.info(f"[SESSION] Migration: added column {col}")
-            for col in new_text_columns:
-                if col not in existing:
-                    conn.execute(text(f"ALTER TABLE trading_sessions ADD COLUMN {col} TEXT"))
                     logger.info(f"[SESSION] Migration: added column {col}")
 
     def create_session(
