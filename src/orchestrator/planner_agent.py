@@ -13,8 +13,11 @@ LLM raw text を直接使わず schema で厳格 parse。parse 失敗は SchemaP
 from __future__ import annotations
 
 import json
+import logging
+from pathlib import Path
 from typing import Any
 
+from src.analysis.price_analyzer import load_user_notes
 from src.orchestrator.execution_opinion_agent import (
     _horizon_guidance,
     _position_guidance,
@@ -25,12 +28,25 @@ from src.orchestrator.schemas import (
     PlannerOpportunity,
 )
 
+logger = logging.getLogger(__name__)
+
+# プロンプト総予算 (spec §2.D): ctx4096 から出力予約 ~512 tok と余裕を引いた
+# 入力上限の目安 (~3k tok ≒ 12,000 chars)。ctx 拡張 (将来) 時はこの定数を上げる。
+_PROMPT_BUDGET_CHARS = 12_000
+_USER_NOTES_MAX_CHARS = 1_500
+
+_ADVISORY_RULE = (
+    "User notes, if present, are ADVISORY only: when they conflict with market "
+    "data or technical signals, prioritize the data. Mention in reasoning_summary "
+    "whether you followed or overrode any user note."
+)
+
 _SCAN_SYSTEM = (
     "You are an FX planning supervisor. Decide whether there is a tradeable "
     "opportunity right now. Return STRICT JSON only (no prose, no markdown fences):\n"
     '{"opportunity": "yes"|"no", "direction": "long"|"short"|"none", '
     '"score": number in [0,1], "confidence": number in [0,1], '
-    '"reasoning_summary": string, "missing_inputs": [string]}'
+    '"reasoning_summary": string, "missing_inputs": [string]}\n' + _ADVISORY_RULE
 )
 
 _FINAL_SYSTEM = (
@@ -40,32 +56,58 @@ _FINAL_SYSTEM = (
     '"confidence": number in [0,1] or null, "reasoning_summary": string, '
     '"revision_request": object or null}\n'
     'If decision is "revise", revision_request MUST be a non-null object describing '
-    "the change."
+    "the change.\n" + _ADVISORY_RULE
 )
 
 
 class PlannerAgent:
-    def __init__(self, agent_llm) -> None:
+    def __init__(self, agent_llm, user_notes_path: "Path | None" = None) -> None:
         # agent_llm: src.config.schema.AgentLlm (client + 解決済 temperature)
         self._llm = agent_llm.client
         self._temperature = agent_llm.temperature
+        self._user_notes_path = user_notes_path
+
+    def _plan_notes_block(self, system: str, user_without_notes: str) -> str | None:
+        """user_notes の ## plan セクションを advisory ブロックとして返す (毎回再読込)。
+
+        総予算契約 (spec §2.D): notes は最低優先。notes 抜きプロンプト
+        (system + user) の残余予算内でのみ注入し、残余ゼロ以下なら落とす。
+        """
+        if self._user_notes_path is None:
+            return None
+        notes = load_user_notes(self._user_notes_path, "plan")
+        if not notes:
+            return None
+        remaining = _PROMPT_BUDGET_CHARS - len(system) - len(user_without_notes)
+        cap = min(_USER_NOTES_MAX_CHARS, remaining)
+        if cap <= 0:
+            logger.warning(
+                "[PLANNER] user plan notes dropped: prompt budget exhausted "
+                "(remaining=%d)", remaining,
+            )
+            return None
+        if len(notes) > cap:
+            logger.warning(
+                "[PLANNER] user plan notes truncated (%d > %d chars)", len(notes), cap,
+            )
+            notes = notes[:cap]
+        return f"User notes (advisory, data takes priority):\n{notes}"
 
     async def scan_opportunity(
         self, *, pair: str, context: dict[str, Any], temperature: float | None = None
     ) -> PlannerOpportunity:
         temp = self._temperature if temperature is None else temperature
-        user = "\n".join(
-            part
-            for part in [
-                f"pair: {pair}",
-                _horizon_guidance(context),
-                _position_guidance(context),
-                "decision_context:",
-                json.dumps(_compact_context(context), ensure_ascii=False),
-                "Decide if there is a tradeable opportunity. Return STRICT JSON.",
-            ]
-            if part
-        )
+        base_parts = [
+            f"pair: {pair}",
+            _horizon_guidance(context),
+            _position_guidance(context),
+            "decision_context:",
+            json.dumps(_compact_context(context), ensure_ascii=False),
+        ]
+        tail = "Decide if there is a tradeable opportunity. Return STRICT JSON."
+        user_without_notes = "\n".join(p for p in [*base_parts, tail] if p)
+        notes_block = self._plan_notes_block(_SCAN_SYSTEM, user_without_notes)
+        user = "\n".join(p for p in [*base_parts, notes_block, tail] if p)
         raw = await self._llm.chat(
             [{"role": "system", "content": _SCAN_SYSTEM}, {"role": "user", "content": user}],
             temperature=temp,
@@ -81,20 +123,19 @@ class PlannerAgent:
         temperature: float | None = None,
     ) -> PlannerFinalDecision:
         temp = self._temperature if temperature is None else temperature
-        user = "\n".join(
-            part
-            for part in [
-                f"pair: {pair}",
-                _horizon_guidance(context),
-                _position_guidance(context),
-                "decision_context:",
-                json.dumps(_compact_context(context), ensure_ascii=False),
-                "proposed_draft:",
-                json.dumps(_draft_summary(draft), ensure_ascii=False),
-                "Make the final decision (accept/revise/reject). Return STRICT JSON.",
-            ]
-            if part
-        )
+        base_parts = [
+            f"pair: {pair}",
+            _horizon_guidance(context),
+            _position_guidance(context),
+            "decision_context:",
+            json.dumps(_compact_context(context), ensure_ascii=False),
+            "proposed_draft:",
+            json.dumps(_draft_summary(draft), ensure_ascii=False),
+        ]
+        tail = "Make the final decision (accept/revise/reject). Return STRICT JSON."
+        user_without_notes = "\n".join(p for p in [*base_parts, tail] if p)
+        notes_block = self._plan_notes_block(_FINAL_SYSTEM, user_without_notes)
+        user = "\n".join(p for p in [*base_parts, notes_block, tail] if p)
         raw = await self._llm.chat(
             [{"role": "system", "content": _FINAL_SYSTEM}, {"role": "user", "content": user}],
             temperature=temp,

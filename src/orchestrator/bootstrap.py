@@ -449,7 +449,7 @@ def _build_pipeline(config: "AppConfig", orch_store: "OrchestratorStore"):
     exec_llm = create_agent_llm(config, "execution_opinion")
     return PlanningPipeline(
         orch_store=orch_store,
-        planner=PlannerAgent(planner_llm),
+        planner=PlannerAgent(planner_llm, user_notes_path=config.user_notes_path),
         execution_agent=ExecutionOpinionAgent(exec_llm),
         risk_gate=RiskGateWorker(
             spread_max_pips=config.orchestrator.entry.spread_max_pips
