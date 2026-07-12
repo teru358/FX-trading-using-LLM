@@ -37,7 +37,6 @@ from src.data.analysis_store import ForecastStore, HoldDecisionStore
 from src.data.price_provider import PriceProvider
 from src.trading.market_state import market_skip_check
 from src.trading_cycle import run_exit_check_cycle, run_forecast_cycle, run_trading_cycle
-from src.analysis.prompt_stats import estimate_prompt_size
 
 _console = Console()
 _stop = threading.Event()
@@ -335,18 +334,6 @@ def main() -> None:
     sched_table.add_row(
         "Price monitor",
         monitor_status if config.price_monitor.enabled else "[dim]disabled[/dim]",
-    )
-    prompt_est = estimate_prompt_size(config)
-    ind_parts = [f"classic={prompt_est.classic_chars}c"]
-    if prompt_est.ichimoku_chars:
-        ind_parts.append(f"+ichimoku={prompt_est.ichimoku_chars}c")
-    if prompt_est.pattern_chars:
-        ind_parts.append(f"+patterns={prompt_est.pattern_chars}c({prompt_est.active_patterns}pat)")
-    sched_table.add_row(
-        "Prompt budget (price)",
-        f"indicators [cyan]{' '.join(ind_parts)}[/cyan] = [cyan]{prompt_est.indicator_total}c[/cyan]  "
-        f"fixed total [cyan]{prompt_est.fixed_total}c[/cyan] (~[cyan]{prompt_est.fixed_tokens_est}tok[/cyan])  "
-        f"[dim]+news/rag/reflect at runtime[/dim]",
     )
     def _run_rag_cleanup() -> None:
         """古いRAGエントリを削除する（24時間に1回）。"""
