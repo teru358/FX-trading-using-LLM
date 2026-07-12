@@ -9,7 +9,6 @@ news / similar_cases / recent_trade_stats は後続 plan で埋める (今は空
 """
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -18,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from src.config.schema import OrchestratorConfig
 from src.data.analysis_store import AnalysisStore
 from src.data.orchestrator_store import OrchestratorStore
+from src.utils.json_safe import load_json_column as _load_json_column
 
 if TYPE_CHECKING:
     from src.config.schema import AppConfig
@@ -45,17 +45,6 @@ PositionProvider = Callable[[str], list[dict]]
 _SAFE_RISK_STATE = {
     "halt": "soft", "bridge_health": "unknown", "market_open": False, "cooldown": True,
 }
-
-
-def _load_json_column(raw, default):
-    """JSON 列を安全に読む。NULL/空/破損 JSON/型不一致は default に倒す (spec §2.B)。"""
-    if not raw:
-        return default
-    try:
-        value = json.loads(raw)
-    except (ValueError, TypeError):
-        return default
-    return value if isinstance(value, type(default)) else default
 
 
 def _format_technical_ok(row, now: datetime) -> dict[str, Any]:

@@ -9,7 +9,6 @@ GET /feeds     — RSS フィード疎通確認
 from __future__ import annotations
 
 import asyncio
-import json
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -17,6 +16,7 @@ from fastapi import APIRouter, Depends
 from src.api._state import state, verify_api_key
 from src.persistence.state_store import StateStore
 from src.trading.position_manager import PositionManager
+from src.utils.json_safe import load_json_column
 
 router = APIRouter()
 
@@ -77,7 +77,7 @@ def tech() -> dict[str, Any]:
                 "bias_score": latest_ok.bias_score,
                 "confidence": latest_ok.confidence,
                 "mtf_alignment": latest_ok.mtf_alignment,
-                "patterns": json.loads(latest_ok.patterns_json) if latest_ok.patterns_json else [],
+                "patterns": load_json_column(latest_ok.patterns_json, []),
             }
 
         snapshots.append({

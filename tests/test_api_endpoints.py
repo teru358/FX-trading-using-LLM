@@ -893,6 +893,87 @@ def test_tech_endpoint_returns_null_when_no_data(
     assert s["latest_ok"] is None
 
 
+def test_tech_endpoint_survives_corrupt_patterns_json(
+    _state_setup, tmp_path,
+):
+    """破損した patterns_json でも /tech は 500 でなく 200 + patterns=[] を返す。"""
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    from sqlalchemy import text
+
+    from src.data.analysis_store import AnalysisStore
+    from src.analysis.technical_snapshot_data import TechnicalSnapshotData
+    from src.utils.clock import db_now
+
+    store = AnalysisStore(tmp_path / "prices.db")
+    state.analysis_store = store
+
+    inst = SimpleNamespace(
+        symbol="USDJPY=X", display_name="USD/JPY", mode="trade",
+    )
+    state.config.tradeable_instruments = [inst]
+    state.config.watch_only_instruments = []
+
+    store.add_snapshot(TechnicalSnapshotData(
+        pair="USDJPY=X", direction_bias="long", bias_score=0.2, confidence=0.6,
+        mtf_alignment=0.8, tf_scores={"long": {"score": 0.2, "direction": "long"}},
+        components={"sma": 0.1}, patterns=["engulfing_bullish"],
+        analyzed_at=db_now() - timedelta(hours=4),
+    ))
+    # 破損 JSON を直接注入 (手動デバッグ / 部分書き込みを再現)
+    with store._engine.connect() as conn:
+        conn.execute(
+            text(
+                "UPDATE technical_snapshots SET patterns_json = :bad "
+                "WHERE symbol = :sym"
+            ),
+            {"bad": "{not valid", "sym": "USDJPY=X"},
+        )
+        conn.commit()
+
+    resp = _client_get("/tech")
+    assert resp.status_code == 200
+    body = resp.json()
+    s = body["snapshots"][0]
+    assert s["latest_ok"] is not None
+    assert s["latest_ok"]["patterns"] == []
+
+
+def test_tech_endpoint_valid_patterns_json_still_decodes(
+    _state_setup, tmp_path,
+):
+    """正常な patterns_json は従来どおり list へデコードされる (回帰防止)。"""
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    from src.data.analysis_store import AnalysisStore
+    from src.analysis.technical_snapshot_data import TechnicalSnapshotData
+    from src.utils.clock import db_now
+
+    store = AnalysisStore(tmp_path / "prices.db")
+    state.analysis_store = store
+
+    inst = SimpleNamespace(
+        symbol="EURUSD=X", display_name="EUR/USD", mode="trade",
+    )
+    state.config.tradeable_instruments = [inst]
+    state.config.watch_only_instruments = []
+
+    store.add_snapshot(TechnicalSnapshotData(
+        pair="EURUSD=X", direction_bias="short", bias_score=-0.3, confidence=0.5,
+        mtf_alignment=0.7, tf_scores={"short": {"score": -0.3, "direction": "short"}},
+        components={"sma": -0.1}, patterns=["doji", "hammer"],
+        analyzed_at=db_now() - timedelta(hours=2),
+    ))
+
+    resp = _client_get("/tech")
+    assert resp.status_code == 200
+    body = resp.json()
+    s = body["snapshots"][0]
+    assert s["latest_ok"]["patterns"] == ["doji", "hammer"]
+
+
 def test_status_includes_reconciliation_skipped_on_success(_state_setup, tmp_path, monkeypatch):
     """bridge 応答成功時の /status に reconciliation_skipped_consecutive が含まれる。"""
     from src.persistence import reconciliation_state
