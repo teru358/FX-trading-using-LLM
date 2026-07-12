@@ -14,6 +14,7 @@ from src.utils.clock import db_now
 
 if TYPE_CHECKING:
     from src.analysis.price_analyzer import PriceAnalysis
+    from src.analysis.technical_snapshot_data import TechnicalSnapshotData
 
 logger = logging.getLogger(__name__)
 
@@ -83,32 +84,30 @@ class AnalysisStore:
         # 新形状で作成 (存在すれば no-op)
         _Base.metadata.create_all(self._engine, tables=[_TechnicalSnapshot.__table__])
 
-    def add_snapshot(self, analysis: "PriceAnalysis") -> None:  # type: ignore[name-defined]
-        """成功した分析を ok status で保存する。
+    def add_snapshot(self, data: "TechnicalSnapshotData") -> None:
+        """決定的 technical snapshot を ok status で保存する (spec §2.B)。
 
         保存後 _prune_old(symbol) を呼び 48h 超の古い行を消す。
         """
+        import json
         with Session(self._engine) as session:
             snap = _TechnicalSnapshot(
-                symbol=analysis.pair,
-                analyzed_at=analysis.analyzed_at,
-                bias_score=analysis.bias_score,
-                confidence=analysis.confidence,
-                direction_bias=analysis.direction_bias,
-                stop_loss=analysis.stop_loss,
-                take_profit=analysis.take_profit,
-                entry_zone_low=analysis.entry_zone[0],
-                entry_zone_high=analysis.entry_zone[1],
-                risk_reward_ratio=analysis.risk_reward_ratio,
-                reasoning_summary=analysis.reasoning_summary,
-                market_regime=analysis.market_regime,
-                confidence_modifier=analysis.confidence_modifier,
+                symbol=data.pair,
+                analyzed_at=data.analyzed_at,
+                bias_score=data.bias_score,
+                confidence=data.confidence,
+                direction_bias=data.direction_bias,
                 collect_status="ok",
+                reason=None,
+                mtf_alignment=data.mtf_alignment,
+                tf_scores_json=json.dumps(data.tf_scores, ensure_ascii=False),
+                components_json=json.dumps(data.components, ensure_ascii=False),
+                patterns_json=json.dumps(data.patterns, ensure_ascii=False),
             )
             session.add(snap)
             session.commit()
-        logger.debug(f"Stored ok snapshot for {analysis.pair} (bias={analysis.bias_score:+.2f})")
-        self._prune_old(analysis.pair)
+        logger.debug(f"Stored ok snapshot for {data.pair} (bias={data.bias_score:+.2f})")
+        self._prune_old(data.pair)
 
     _SENTINEL_ALLOWED = ("stale_price", "failed")
     _SENTINEL_REASON_MAX_LEN = 512
@@ -148,15 +147,12 @@ class AnalysisStore:
                 bias_score=0.0,
                 confidence=0.0,
                 direction_bias="neutral",
-                stop_loss=0.0,
-                take_profit=0.0,
-                entry_zone_low=0.0,
-                entry_zone_high=0.0,
-                risk_reward_ratio=0.0,
-                reasoning_summary=reason,
-                market_regime="unknown",
-                confidence_modifier=0.0,
                 collect_status=status,
+                reason=reason,
+                mtf_alignment=None,
+                tf_scores_json="{}",
+                components_json="{}",
+                patterns_json="[]",
             )
             session.add(snap)
             session.commit()
