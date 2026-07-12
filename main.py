@@ -402,9 +402,9 @@ def main() -> None:
     # 4. テクニカル分析。cadence_enabled なら可変 interval driver、そうでなければ
     #    現行の union 時刻 dispatch (後方互換・ロールバック先)。
     if _cadence_driver is not None:
-        # driver tick を毎分 technical guard 経由で回す。guard busy (前回収集が実行中) で
-        # skip されても driver の last_run は進まないため次 tick で backfill される
-        # (CadenceDriver._dispatch が False で last_run を進めない設計)。
+        # driver tick を毎分 technical guard 経由で回す。guard busy (前回の技術収集が
+        # まだ実行中) の間は tick 関数自体が呼ばれず、両 batch pair の last_run が凍結される。
+        # 次 tick で due 判定が再び真になり自然に backfill される (定期周期を待たない)。
         def _cadence_tick() -> None:
             _cadence_driver.tick()
         schedule.every(1).minutes.do(
