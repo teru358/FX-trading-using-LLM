@@ -160,10 +160,6 @@ def test_collect_all_prefetch_failure_writes_failed_sentinel(tmp_path, monkeypat
         "src.jobs.technical_collector.is_market_open",
         lambda *a, **kw: True,
     )
-    monkeypatch.setattr(
-        "src.jobs.technical_collector.create_llm_client",
-        lambda *a, **kw: MagicMock(model_name="test"),
-    )
 
     def _fetch_fail(*a, **kw):
         raise ConnectionError("bridge down")
@@ -200,10 +196,6 @@ def test_collect_all_unexpected_raise_in_collect_one_writes_sentinel(tmp_path, m
     monkeypatch.setattr(
         "src.jobs.technical_collector.is_market_open",
         lambda *a, **kw: True,
-    )
-    monkeypatch.setattr(
-        "src.jobs.technical_collector.create_llm_client",
-        lambda *a, **kw: MagicMock(model_name="test"),
     )
     monkeypatch.setattr(
         "src.jobs.technical_collector._fetch_instrument_ohlcv",
@@ -244,10 +236,6 @@ def test_collect_all_phase1_prefetch_failure_writes_failed_sentinel(tmp_path, mo
     monkeypatch.setattr(
         "src.jobs.technical_collector.is_market_open",
         lambda *a, **kw: True,
-    )
-    monkeypatch.setattr(
-        "src.jobs.technical_collector.create_llm_client",
-        lambda *a, **kw: MagicMock(model_name="test"),
     )
 
     def _fetch_fail(*a, **kw):

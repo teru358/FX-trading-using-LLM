@@ -25,7 +25,6 @@ from src.data.analysis_store import AnalysisStore
 from src.data.indicators import compute_indicators
 from src.data.price_provider import PriceProvider
 from src.data.price_store import PriceStore
-from src.llm.factory import create_llm_client
 from src.rag.vector_store import VectorStore
 from src.trading.market_hours import is_market_open
 from src.utils.clock import to_db_naive_datetime
@@ -391,146 +390,6 @@ async def collect_watch_technical(
             await asyncio.sleep(delay)
 
 
-async def _collect_econ_impact(
-    config: AppConfig,
-    store: VectorStore,
-    price_store: PriceStore,
-    analysis_store: AnalysisStore,
-    tradeable: list[InstrumentConfig],
-) -> None:
-    """経済指標影響分析 (オプション)。現 collect_all_technical Phase 3 をそのまま移植。"""
-    if not config.economic_calendar.enabled:
-        return
-    try:
-        from src.utils.clock import db_now
-
-        from src.data.econ_event_store import EconEventStore
-        from src.jobs.econ_calendar_fetcher import refresh_recent_events
-        from src.analysis.econ_impact_analyzer import (
-            analyze_event_impact, PairReaction, SnapshotBrief
-        )
-        from src.analysis.economic_calendar import classify_surprise
-        from src.rag.embedder import make_embed_fn
-
-        econ_store = EconEventStore(config.econ_db_path)
-
-        # 3a. actual更新
-        refresh_recent_events(
-            econ_store,
-            lookback_min=config.economic_calendar.refresh_lookback_min,
-            currencies=config.economic_calendar.currencies,
-        )
-
-        # 3b. 未分析イベントを取得
-        events_to_analyze = econ_store.get_unanalyzed_with_actual(
-            lookback_min=config.economic_calendar.refresh_lookback_min,
-            min_importance=config.economic_calendar.post_event_impact_min,
-        )
-
-        if events_to_analyze:
-            llm_reflect = create_llm_client(config, "reflection")
-            logger.info(f"[ECON] {len(events_to_analyze)} events to analyze")
-
-            for ev in events_to_analyze:
-                try:
-                    # 関連ペアを特定 (base または quote が該当通貨)
-                    related_pairs = [
-                        p for p in tradeable
-                        if ev.currency in (p.base_currency, p.quote_currency)
-                    ]
-                    if not related_pairs:
-                        econ_store.mark_analyzed(ev.event_id)
-                        continue
-
-                    # 価格反応データ収集
-                    pair_reactions = []
-                    snapshot_briefs = []
-                    for p in related_pairs:
-                        try:
-                            event_time_naive = to_db_naive_datetime(ev.event_time)
-                            _win_start, _win_end = _econ_window_for(ev.event_time)
-                            # p は tradeable 由来 → cache は _ohlcv_interval_for
-                            # (= ohlcv_interval) で書かれる。interval 無指定だと
-                            # day モードで "1h" バケットを読み空になる (codex Med#1 同族)
-                            pd_ = price_store.load_ohlcv(
-                                p.symbol, _win_start, _win_end,
-                                interval=_ohlcv_interval_for(p, config),
-                            )
-                            if pd_.empty or len(pd_) < 2:
-                                continue
-
-                            def _close_at(offset_min: int) -> float:
-                                target = event_time_naive + timedelta(minutes=offset_min)
-                                best_idx = 0
-                                best_diff = None
-                                for i, ts in enumerate(pd_.index):
-                                    ts_py = ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts
-                                    if hasattr(ts_py, "tzinfo") and ts_py.tzinfo is not None:
-                                        ts_py = ts_py.replace(tzinfo=None)
-                                    diff = abs((ts_py - target).total_seconds())
-                                    if best_diff is None or diff < best_diff:
-                                        best_diff = diff
-                                        best_idx = i
-                                return float(pd_["Close"].iloc[best_idx])
-
-                            pair_reactions.append(PairReaction(
-                                pair=p.display_name,
-                                t_minus_5=_close_at(-5),
-                                t_zero=_close_at(0),
-                                t_plus_5=_close_at(5),
-                                t_plus_15=_close_at(15),
-                                t_plus_30=_close_at(30),
-                            ))
-                        except Exception as e:
-                            logger.debug(f"[ECON] price reaction failed for {p.symbol}: {e}")
-
-                        snaps = analysis_store.get_recent_ok_snapshots(p.symbol, hours=2)
-                        if snaps:
-                            s = snaps[0]
-                            snapshot_briefs.append(SnapshotBrief(
-                                pair=p.display_name,
-                                bias_score=s.bias_score,
-                                confidence=s.confidence,
-                                direction_bias=s.direction_bias,
-                            ))
-
-                    if not pair_reactions:
-                        econ_store.mark_analyzed(ev.event_id)
-                        continue
-
-                    # LLM分析実行
-                    report = await analyze_event_impact(
-                        event=ev,
-                        pair_reactions=pair_reactions,
-                        snapshots=snapshot_briefs,
-                        llm=llm_reflect,
-                        temperature=config.llm.reflection.temperature,
-                    )
-
-                    # RAG保存
-                    embed_fn = make_embed_fn(config)
-                    embedding = await embed_fn(report)
-                    store.upsert_econ_analysis(
-                        event_id=ev.event_id,
-                        text=report,
-                        embedding=embedding,
-                        title=ev.title,
-                        currency=ev.currency,
-                        importance=ev.importance,
-                        event_time=ev.event_time,
-                        actual=ev.actual,
-                        forecast=ev.forecast,
-                        surprise=classify_surprise(ev.actual, ev.forecast),
-                        analyzed_at=db_now(),
-                    )
-                    econ_store.mark_analyzed(ev.event_id)
-                    logger.info(f"[ECON] Analyzed {ev.event_id}: {ev.title[:40]}")
-                except Exception as e:
-                    logger.error(f"[ECON] Analysis failed for {ev.event_id}: {e}", exc_info=True)
-    except Exception as e:
-        logger.warning(f"[ECON] Economic calendar phase failed: {e}")
-
-
 async def collect_trade_technical(
     config: AppConfig,
     store: VectorStore,
@@ -596,7 +455,6 @@ async def collect_trade_technical(
         if i < len(tradeable) - 1:
             await asyncio.sleep(delay)
 
-    await _collect_econ_impact(config, store, price_store, analysis_store, tradeable)
     logger.info("=== Trade technical collection complete ===")
 
 

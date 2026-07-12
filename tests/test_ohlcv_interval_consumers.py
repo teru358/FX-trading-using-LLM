@@ -2,7 +2,7 @@
 
 - performance_audit._load_pair_ohlcv: audit CLI が traded pair の OHLCV を読む経路。
   cache は ohlcv_interval で書かれるため、interval 無指定だと day モードで空になる。
-- technical_collector._collect_econ_impact: econ カレンダー反応窓の読み出し。
+- econ_impact_job.collect_econ_impact: econ カレンダー反応窓の読み出し。
   tradeable pair の cache は _ohlcv_interval_for (= ohlcv_interval) で書かれる。
 """
 from __future__ import annotations
@@ -56,7 +56,7 @@ def test_audit_load_pair_ohlcv_default_interval_is_1h(monkeypatch):
     assert store.calls == [("USDJPY=X", "1h")]
 
 
-# ── technical_collector._collect_econ_impact ──────────────────
+# ── econ_impact_job.collect_econ_impact ──────────────────
 
 
 async def test_econ_impact_reads_ohlcv_at_trade_interval(monkeypatch):
@@ -66,7 +66,7 @@ async def test_econ_impact_reads_ohlcv_at_trade_interval(monkeypatch):
     進まずに mark_analyzed で終わる (interval 伝搬の配線のみを検証する)。
     """
     from src.config import load_config
-    from src.jobs import technical_collector
+    from src.jobs import econ_impact_job
 
     config = load_config()
     monkeypatch.setattr(config.trading, "ohlcv_interval", "15m")
@@ -95,7 +95,7 @@ async def test_econ_impact_reads_ohlcv_at_trade_interval(monkeypatch):
         econ_calendar_fetcher_mod, "refresh_recent_events", lambda *a, **k: None,
     )
     monkeypatch.setattr(
-        technical_collector, "create_llm_client", lambda *a, **k: object(),
+        econ_impact_job, "create_llm_client", lambda *a, **k: object(),
     )
 
     price_store = _RecordingStore()  # 空 df → 反応収集は continue
@@ -109,7 +109,7 @@ async def test_econ_impact_reads_ohlcv_at_trade_interval(monkeypatch):
         base_currency="USD", quote_currency="JPY", is_tradeable=True,
     )
 
-    await technical_collector._collect_econ_impact(
+    await econ_impact_job.collect_econ_impact(
         config, store=None, price_store=price_store,
         analysis_store=_FakeAnalysisStore(), tradeable=[trade_inst],
     )

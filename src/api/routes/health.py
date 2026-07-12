@@ -124,6 +124,9 @@ def status() -> dict[str, Any]:
             except Exception as e:
                 snapshots_status.append({"symbol": inst.symbol, "error": str(e)})
 
+    from src.jobs.econ_impact_job import get_econ_impact_status
+    econ_status = get_econ_impact_status()
+
     return {
         "status":               "ok",
         "mode":                 mode,
@@ -140,6 +143,10 @@ def status() -> dict[str, Any]:
         "price_provider":       price_provider_status,
         "snapshots":            snapshots_status,
         "mt5_bridge":           _get_mt5_bridge_status(),
+        "econ_impact_last_attempt": econ_status["last_attempt"],
+        "econ_impact_last_success": econ_status["last_success"],
+        "econ_impact_pending":      econ_status["pending"],
+        "econ_impact_failed":       econ_status["failed"],
     }
 
 

@@ -45,8 +45,6 @@ def _patch_collectible(monkeypatch):
     import src.jobs.technical_collector as tc
 
     monkeypatch.setattr(tc, "is_market_open", lambda *a, **kw: True)
-    monkeypatch.setattr(tc, "create_llm_client",
-                        lambda *a, **kw: MagicMock(model_name="test"))
     monkeypatch.setattr(tc, "_fetch_instrument_ohlcv",
                         lambda inst, *a, **kw: _fresh_price_data(inst.symbol))
 
