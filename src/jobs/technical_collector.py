@@ -351,7 +351,7 @@ async def collect_watch_technical(
     if not watch_only:
         return
 
-    delay = config.news_collection.inter_pair_delay_seconds
+    delay = config.schedule.technical_inter_pair_delay_seconds
     logger.info(f"[COLLECT] Watch technical: {len(watch_only)} watch-only instruments")
 
     for i, inst in enumerate(watch_only):
@@ -547,7 +547,7 @@ async def collect_trade_technical(
     if not tradeable:
         return
 
-    delay = config.news_collection.inter_pair_delay_seconds
+    delay = config.schedule.technical_inter_pair_delay_seconds
     logger.info(f"[COLLECT] Trade technical: {len(tradeable)} tradeable instruments")
 
     prices: dict[str, "PriceData"] = {}

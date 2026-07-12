@@ -328,6 +328,16 @@ class ScheduleConfig:
     # FX technical 鮮度閾値 (分)。既定 360 = 従来の 6h 定数と等価 (挙動不変)。
     # day horizon では 90 に短縮する (spec 2026-07-05 S-3)。watch 側 (120h) は定数のまま。
     technical_max_staleness_fx_minutes: int = 360
+    # technical collector の pair 間待機 (秒)。LLM ペーシングは廃止され provider
+    # (yfinance 等) レート緩和のみが目的のため news 側 (60s) と分離し既定 5s。
+    technical_inter_pair_delay_seconds: int = 5
+
+    def __post_init__(self) -> None:
+        if not (0 <= self.technical_inter_pair_delay_seconds <= 60):
+            raise ValueError(
+                f"schedule.technical_inter_pair_delay_seconds must be in [0, 60], "
+                f"got {self.technical_inter_pair_delay_seconds!r}"
+            )
 
     def effective_trade_interval_seconds(self) -> int:
         """cadence base 用の有効 trade 収集間隔 (秒)。minutes 優先。"""

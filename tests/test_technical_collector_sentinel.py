@@ -152,7 +152,7 @@ def test_collect_all_prefetch_failure_writes_failed_sentinel(tmp_path, monkeypat
     config = MagicMock()
     config.watch_only_instruments = []
     config.tradeable_instruments = [_inst()]
-    config.news_collection.inter_pair_delay_seconds = 0.0
+    config.schedule.technical_inter_pair_delay_seconds = 0
     config.economic_calendar.enabled = False
     config.paper_provider = "twelvedata"
 
@@ -193,7 +193,7 @@ def test_collect_all_unexpected_raise_in_collect_one_writes_sentinel(tmp_path, m
     config = MagicMock()
     config.watch_only_instruments = []
     config.tradeable_instruments = [_inst()]
-    config.news_collection.inter_pair_delay_seconds = 0.0
+    config.schedule.technical_inter_pair_delay_seconds = 0
     config.economic_calendar.enabled = False
     config.paper_provider = "twelvedata"
 
@@ -237,7 +237,7 @@ def test_collect_all_phase1_prefetch_failure_writes_failed_sentinel(tmp_path, mo
     config = MagicMock()
     config.watch_only_instruments = [_inst(symbol="SPY", asset_type="index")]
     config.tradeable_instruments = []
-    config.news_collection.inter_pair_delay_seconds = 0.0
+    config.schedule.technical_inter_pair_delay_seconds = 0
     config.economic_calendar.enabled = False
     config.paper_provider = "twelvedata"
 

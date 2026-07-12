@@ -228,6 +228,9 @@ schedule:
   # FX technical 鮮度閾値 (分)。既定 360 = 従来の 6h と等価。day horizon では 90 に
   # 短縮 (15m 足 6 本分 = 収集 interval×3, spec 2026-07-05 S-3)。watch 側は定数のまま。
   technical_max_staleness_fx_minutes: 90
+  # technical collector の pair 間待機 (秒)。news 収集 (news_collection.inter_pair_delay_seconds)
+  # とは分離。LLM 廃止後は provider レート緩和のみが目的なので短め。
+  technical_inter_pair_delay_seconds: 5
 
 analysis:
   # テクニカル指標の有効/無効
