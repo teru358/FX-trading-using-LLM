@@ -12,10 +12,19 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from src.analysis.technical_snapshot_data import TechnicalSnapshotData
 from src.config.schema import OrchestratorConfig, OrchestratorEntryConfig
 from src.data.analysis_store import AnalysisStore
 from src.data.orchestrator_store import OrchestratorStore
 from src.orchestrator.context_builder import DecisionContextBuilder, QuoteSnapshot
+
+
+def _as_snapshot(price) -> TechnicalSnapshotData:
+    return TechnicalSnapshotData(
+        pair=price.pair, analyzed_at=price.analyzed_at,
+        bias_score=price.bias_score, confidence=price.confidence,
+        direction_bias=price.direction_bias,
+    )
 
 
 def _make_builder(tmp_path: Path, config: OrchestratorConfig) -> DecisionContextBuilder:
@@ -31,7 +40,7 @@ def test_default_config_marks_45min_old_snapshot_as_stale(tmp_path: Path, bullis
     """既定 config (max_technical_age_seconds=1800=30min) では 45 分前の ok snapshot は stale。"""
     builder = _make_builder(tmp_path, OrchestratorConfig())
     bullish_price.analyzed_at = datetime.now() - timedelta(minutes=45)
-    builder._analysis.add_snapshot(bullish_price)
+    builder._analysis.add_snapshot(_as_snapshot(bullish_price))
     quote = QuoteSnapshot(
         bid=150.0, ask=150.02, mid=150.01, spread=0.02,
         source="mt5", observed_at=datetime.now(),
@@ -49,7 +58,7 @@ def test_extended_max_technical_age_marks_45min_old_snapshot_as_ok(
     )
     builder = _make_builder(tmp_path, config)
     bullish_price.analyzed_at = datetime.now() - timedelta(minutes=45)
-    builder._analysis.add_snapshot(bullish_price)
+    builder._analysis.add_snapshot(_as_snapshot(bullish_price))
     quote = QuoteSnapshot(
         bid=150.0, ask=150.02, mid=150.01, spread=0.02,
         source="mt5", observed_at=datetime.now(),

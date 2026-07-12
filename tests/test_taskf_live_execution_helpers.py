@@ -11,7 +11,7 @@ from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
-from src.analysis.price_analyzer import PriceAnalysis
+from src.analysis.technical_snapshot_data import TechnicalSnapshotData
 from src.config.schema import AppConfig, InstrumentConfig, OrchestratorConfig, TradingConfig
 from src.data.analysis_store import AnalysisStore
 from src.data.orchestrator_store import OrchestratorStore
@@ -83,9 +83,8 @@ def _app_config():
 
 def _seed_ok_technical(db: Path) -> None:
     AnalysisStore(db).add_snapshot(
-        PriceAnalysis(
+        TechnicalSnapshotData(
             pair="USDJPY=X", direction_bias="long", bias_score=0.5, confidence=0.7,
-            entry_zone=(149.0, 151.0), reasoning_summary="seed",
             analyzed_at=NOW - timedelta(seconds=60),
         )
     )

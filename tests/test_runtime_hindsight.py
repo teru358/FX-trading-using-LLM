@@ -17,7 +17,7 @@ from src.data.orchestrator_store import OrchestratorStore
 from src.orchestrator.context_builder import DecisionContextBuilder, QuoteSnapshot
 from src.orchestrator.hindsight_evaluator import HindsightEvaluator
 from src.orchestrator.runtime import OrchestratorRuntime
-from src.analysis.price_analyzer import PriceAnalysis
+from src.analysis.technical_snapshot_data import TechnicalSnapshotData
 from src.utils.clock import db_now
 
 # NOW は db_now() 相対 (全時刻系を揃え date-flake を避ける、review Medium)。
@@ -28,9 +28,8 @@ FUTURE = NOW + timedelta(days=1)
 def _seed_ok_technical(db: Path) -> None:
     # analyzed_at=NOW-60s は実 db_now lookback 窓内かつ age=60s で fresh (正の age で検証)。
     AnalysisStore(db).add_snapshot(
-        PriceAnalysis(
+        TechnicalSnapshotData(
             pair="USDJPY=X", direction_bias="long", bias_score=0.5, confidence=0.7,
-            entry_zone=(149.0, 151.0), reasoning_summary="seed",
             analyzed_at=NOW - timedelta(seconds=60),
         )
     )

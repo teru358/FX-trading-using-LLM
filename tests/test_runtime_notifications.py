@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from src.analysis.price_analyzer import PriceAnalysis
+from src.analysis.technical_snapshot_data import TechnicalSnapshotData
 from src.config.schema import OrchestratorConfig
 from src.data.analysis_store import AnalysisStore
 from src.data.orchestrator_store import OrchestratorStore
@@ -73,9 +73,8 @@ class FakePipeline:
 def _seed_ok_technical(db: Path) -> None:
     # analyzed_at=NOW-60s は実 db_now lookback 窓内かつ age=60s で fresh (正の age で検証)。
     AnalysisStore(db).add_snapshot(
-        PriceAnalysis(
+        TechnicalSnapshotData(
             pair="USDJPY=X", direction_bias="long", bias_score=0.5, confidence=0.7,
-            entry_zone=(149.0, 151.0), reasoning_summary="seed",
             analyzed_at=NOW - timedelta(seconds=60),
         )
     )

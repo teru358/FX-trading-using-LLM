@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from rich.console import Console
 
-from src.analysis.price_analyzer import PriceAnalysis
+from src.analysis.technical_snapshot_data import TechnicalSnapshotData
 from src.data.analysis_store import AnalysisStore
 from src.utils.clock import db_now
 
@@ -22,17 +22,12 @@ def _config(*, lookback_hours: int = 8):
     )
 
 
-def _snapshot(symbol: str = "USDJPY=X", *, hours_ago: float = 24) -> PriceAnalysis:
-    return PriceAnalysis(
+def _snapshot(symbol: str = "USDJPY=X", *, hours_ago: float = 24) -> TechnicalSnapshotData:
+    return TechnicalSnapshotData(
         pair=symbol,
         direction_bias="long",
         bias_score=0.3,
         confidence=0.7,
-        entry_zone=(149.5, 150.5),
-        stop_loss=149.0,
-        take_profit=152.0,
-        risk_reward_ratio=2.0,
-        reasoning_summary="old but latest trade snapshot",
         analyzed_at=db_now() - timedelta(hours=hours_ago),
     )
 

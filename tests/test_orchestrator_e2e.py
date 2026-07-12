@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from src.analysis.price_analyzer import PriceAnalysis
+from src.analysis.technical_snapshot_data import TechnicalSnapshotData
 from src.config.schema import AgentLlm, OrchestratorConfig
 from src.data.analysis_store import AnalysisStore
 from src.data.orchestrator_store import OrchestratorStore
@@ -85,9 +85,8 @@ def _seed_ok_technical(db: Path, *, bias: float = 0.5) -> None:
     # NOW が db_now() 相対なので analyzed_at=NOW-60s は実 db_now lookback 窓内かつ
     # age=60s で fresh (正の age で検証、review Medium)。
     AnalysisStore(db).add_snapshot(
-        PriceAnalysis(
+        TechnicalSnapshotData(
             pair="USDJPY=X", direction_bias="long", bias_score=bias, confidence=0.7,
-            entry_zone=(149.0, 151.0), reasoning_summary="seed",
             analyzed_at=NOW - timedelta(seconds=60),
         )
     )

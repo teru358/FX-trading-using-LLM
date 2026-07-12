@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from src.analysis.technical_snapshot_data import TechnicalSnapshotData
 from src.config.schema import AppConfig, InstrumentConfig, OrchestratorConfig
 from src.data.analysis_store import AnalysisStore
 from src.data.orchestrator_store import OrchestratorStore
@@ -14,6 +15,14 @@ from src.orchestrator.context_builder import (
     QuoteSnapshot,
     make_news_provider,
 )
+
+
+def _as_snapshot(price) -> TechnicalSnapshotData:
+    return TechnicalSnapshotData(
+        pair=price.pair, analyzed_at=price.analyzed_at,
+        bias_score=price.bias_score, confidence=price.confidence,
+        direction_bias=price.direction_bias,
+    )
 
 
 @pytest.fixture
@@ -54,7 +63,7 @@ def test_build_materializes_snapshot_and_returns_context(builder: DecisionContex
 def test_build_reads_fresh_technical_from_store(builder: DecisionContextBuilder, bullish_price) -> None:
     """直近 (max_stale 内) の ok snapshot は status=ok で取り込む。"""
     # bullish_price.analyzed_at は conftest で datetime.now() (≒ 直近) なので fresh。
-    builder._analysis.add_snapshot(bullish_price)
+    builder._analysis.add_snapshot(_as_snapshot(bullish_price))
     quote = QuoteSnapshot(
         bid=150.0, ask=150.02, mid=150.01, spread=0.02,
         source="mt5", observed_at=datetime.now(),
@@ -78,7 +87,7 @@ def test_build_falls_to_stale_when_latest_ok_is_too_old(
 
     # analyzed_at を max_stale (既定 30min) より十分前にずらして保存する。
     bullish_price.analyzed_at = datetime.now() - timedelta(hours=6)
-    builder._analysis.add_snapshot(bullish_price)
+    builder._analysis.add_snapshot(_as_snapshot(bullish_price))
     quote = QuoteSnapshot(
         bid=150.0, ask=150.02, mid=150.01, spread=0.02,
         source="mt5", observed_at=datetime.now(),
@@ -100,7 +109,7 @@ def test_build_treats_row_older_than_lookback_as_missing(
     from datetime import timedelta
 
     bullish_price.analyzed_at = datetime.now() - timedelta(hours=25)
-    builder._analysis.add_snapshot(bullish_price)
+    builder._analysis.add_snapshot(_as_snapshot(bullish_price))
     quote = QuoteSnapshot(
         bid=150.0, ask=150.02, mid=150.01, spread=0.02,
         source="mt5", observed_at=datetime.now(),
@@ -116,7 +125,7 @@ def test_build_strips_internal_ref_from_returned_technical(
     """内部キー _ref は返り値 technical ブロックから除去される (DB 内部 ID を露出しない)。
 
     ただし snapshot の technical_ref には保存される。"""
-    builder._analysis.add_snapshot(bullish_price)
+    builder._analysis.add_snapshot(_as_snapshot(bullish_price))
     quote = QuoteSnapshot(
         bid=150.0, ask=150.02, mid=150.01, spread=0.02,
         source="mt5", observed_at=datetime.now(),
@@ -346,7 +355,7 @@ def test_build_maps_neutral_direction(builder: DecisionContextBuilder, bearish_p
 
     bearish_price を neutral に書き換えて neutral 分岐を踏ませる。"""
     bearish_price.direction_bias = "neutral"
-    builder._analysis.add_snapshot(bearish_price)
+    builder._analysis.add_snapshot(_as_snapshot(bearish_price))
     quote = QuoteSnapshot(
         bid=150.0, ask=150.02, mid=150.01, spread=0.02,
         source="mt5", observed_at=datetime.now(),
