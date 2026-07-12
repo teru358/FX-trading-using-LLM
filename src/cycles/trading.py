@@ -91,7 +91,7 @@ async def _process_pair(
     store: VectorStore,
     price_store: PriceStore,
     analysis_store: AnalysisStore,
-    llm: LLMClient,
+    llm: LLMClient,  # 常に None (technical-llm-omit); シグネチャ互換のため残置・本体未使用
     price_provider: PriceProvider | None = None,
     forecast_store=None,
 ):
