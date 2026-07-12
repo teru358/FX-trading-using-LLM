@@ -378,6 +378,7 @@ def _build_detector(
     return MaterialLandingDetector(
         get_latest_technical=get_latest_technical,
         material_bias_delta_min=orch_cfg.firing.material_bias_delta_min,
+        material_direction_flip_min=orch_cfg.firing.material_direction_flip_min,
         get_news_impact=get_news_impact,
         material_news_impact_min=orch_cfg.firing.material_news_impact_min,
         get_news_key=get_news_key,

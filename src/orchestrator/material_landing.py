@@ -45,6 +45,7 @@ class MaterialLandingDetector:
         *,
         get_latest_technical: Callable[[str], Any],
         material_bias_delta_min: float,
+        material_direction_flip_min: float = 0.10,
         get_news_impact: Callable[[str], float] | None = None,
         material_news_impact_min: float = 0.5,
         get_news_key: Callable[[str], str | None] | None = None,
@@ -56,6 +57,7 @@ class MaterialLandingDetector:
     ) -> None:
         self._get_tech = get_latest_technical
         self._bias_delta_min = material_bias_delta_min
+        self._flip_min = material_direction_flip_min
         self._get_news_impact = get_news_impact
         self._news_impact_min = material_news_impact_min
         self._get_news_key = get_news_key
@@ -91,9 +93,13 @@ class MaterialLandingDetector:
         if prev.collect_status != "ok" and status == "ok":
             return True  # stale/missing → ok 復帰
         direction = getattr(snap, "direction_bias", None)
-        if prev.direction_bias != direction:
-            return True  # direction_bias 反転
         bias = getattr(snap, "bias_score", None)
+        # direction 反転 かつ 前後いずれかの bias が閾値以上 (強い方向性の変化) → material。
+        # 両側とも弱い (deadband 出入りの振動) 反転は抑制する (spec §2.C, codex Medium-2)。
+        if prev.direction_bias != direction and bias is not None and prev.bias_score is not None:
+            if max(abs(prev.bias_score), abs(bias)) >= self._flip_min:
+                return True
+        # bias 変化量 (方向不変でも大きく動けば material)
         if prev.bias_score is not None and bias is not None:
             if abs(bias - prev.bias_score) >= self._bias_delta_min:
                 return True

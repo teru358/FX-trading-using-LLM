@@ -678,6 +678,7 @@ class OrchestratorFiringConfig:
     """PlannerAgent 発火条件 (spec §5.4)。material landing + debounce + periodic floor。"""
     material_news_impact_min: float = 0.5
     material_bias_delta_min: float = 0.20
+    material_direction_flip_min: float = 0.10  # direction 反転を material とみなす |bias| 閾値
     debounce_window_seconds: int = 180
     min_planning_interval_seconds: int = 1800
 

@@ -103,12 +103,23 @@ def _from_dict(cls, data: dict):
     return cls(**kwargs)
 
 
+def _validate_firing_ranges(firing: OrchestratorFiringConfig) -> None:
+    """firing の 0..1 スカラを検証する (spec §2.C)。"""
+    for name in ("material_news_impact_min", "material_bias_delta_min",
+                 "material_direction_flip_min"):
+        v = getattr(firing, name)
+        if not (0.0 <= v <= 1.0):
+            raise ConfigError(f"orchestrator.firing.{name} must be in [0,1], got {v!r}")
+
+
 def _build_orchestrator_config(data: dict) -> OrchestratorConfig:
     """orchestrator YAML ブロックを OrchestratorConfig に組み立てる (spec §12)。
 
     各ネスト dict は _from_dict でフラット構築する (キーはフィールド名と 1:1)。
     欠落キーは dataclass デフォルトで補完される。
     """
+    firing = _from_dict(OrchestratorFiringConfig, data.get("firing", {}) or {})
+    _validate_firing_ranges(firing)
     return OrchestratorConfig(
         enabled=data.get("enabled", False),
         mode=data.get("mode", "shadow"),
@@ -119,7 +130,7 @@ def _build_orchestrator_config(data: dict) -> OrchestratorConfig:
         llm=_from_dict(OrchestratorLlmConfig, data.get("llm", {}) or {}),
         locks=_from_dict(OrchestratorLocksConfig, data.get("locks", {}) or {}),
         entry=_from_dict(OrchestratorEntryConfig, data.get("entry", {}) or {}),
-        firing=_from_dict(OrchestratorFiringConfig, data.get("firing", {}) or {}),
+        firing=firing,
         hindsight=_from_dict(
             OrchestratorHindsightConfig, data.get("hindsight", {}) or {}
         ),
