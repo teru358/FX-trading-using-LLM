@@ -232,7 +232,7 @@ def test_section6_renders_entry_analysis_and_postHoc():
         "sl_minus_0_5_atr_pnl": -1500,
         "tighter_sl_would_recover": False,
     }}
-    text = render_section6_detailed_review([s], review_map, accepted_lessons_map={})
+    text = render_section6_detailed_review([s], review_map)
     assert "## Section 6" in text
     assert "Test entry reasoning" in text
     assert "CONF_MISS" in text

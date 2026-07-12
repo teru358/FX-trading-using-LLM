@@ -230,7 +230,6 @@ def _cmd_audit(config: AppConfig, args: list[str]) -> None:
     from rich.table import Table
     tbl = Table(show_header=False, box=None)
     tbl.add_row("Sessions", str(result.session_count))
-    tbl.add_row("Lessons added", str(result.lessons_added))
     tbl.add_row("Report", str(result.report_path))
     if result.flag_counts:
         tbl.add_row("Flags", ", ".join(f"{k}:{v}" for k, v in result.flag_counts.items()))

@@ -37,7 +37,6 @@ class AuditResult:
     report_path: Path
     session_count: int
     flag_counts: dict[str, int] = field(default_factory=dict)
-    lessons_added: int = 0
 
 
 _price_store_singleton = None
@@ -168,9 +167,6 @@ def run_audit(
     # 選定
     selected = select_representative_trades(sessions, flags_map)
 
-    lessons_added = 0
-    accepted_lessons_map: dict[str, list] = {}
-
     # markdown 生成
     parts = [
         f"# Performance Audit — {now.strftime('%Y-%m-%d')}",
@@ -190,7 +186,7 @@ def run_audit(
         "",
         render_section5_trade_table(sessions, flags_map),
         "",
-        render_section6_detailed_review(selected, review_map, accepted_lessons_map),
+        render_section6_detailed_review(selected, review_map),
         "",
     ]
 
@@ -208,7 +204,6 @@ def run_audit(
         report_path=report_path,
         session_count=len(sessions),
         flag_counts=flag_counts,
-        lessons_added=lessons_added,
     )
 
 

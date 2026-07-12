@@ -268,12 +268,10 @@ def select_representative_trades(
 def render_section6_detailed_review(
     selected: list,
     review_map: dict[str, dict[str, Any]],
-    accepted_lessons_map: dict[str, list],
 ) -> str:
     """Section 6: 代表 10 件の詳細レビュー。
 
     review_map: session_id → {flag, mfe_*, mae_*, counterfactual, ...}
-    accepted_lessons_map: session_id → [LessonCandidate] (review mode 承認済み)
     """
     lines = ["## Section 6: 詳細レビュー (代表 10 件)", ""]
     if not selected:
@@ -313,13 +311,6 @@ def render_section6_detailed_review(
         if s.reflection_text:
             lines.append("**Reflection (決済時自動生成)**:")
             lines.append(f"> {s.reflection_text}")
-            lines.append("")
-
-        accepted = accepted_lessons_map.get(s.session_id, [])
-        if accepted:
-            lines.append("**承認された教訓**:")
-            for lesson in accepted:
-                lines.append(f"- [LLM-PROPOSED / USER-APPROVED] {lesson.rule_text}")
             lines.append("")
 
         lines.append("---")
