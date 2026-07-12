@@ -71,6 +71,8 @@ class AnalysisStore:
                 ).fetchall()
             }
             if existing:  # テーブルが既存
+                # __init__ は _get_engine を先に呼ぶため実運用ではここで常に存在する。
+                # 空 set 分岐は _migrate を直接呼んだ場合の防御 (テーブル未作成)。
                 needs_rebuild = bool(existing & self._LEGACY_COLS) or not (
                     self._REQUIRED_COLS <= existing
                 )

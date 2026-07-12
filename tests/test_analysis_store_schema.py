@@ -52,6 +52,29 @@ def test_migration_drops_and_recreates_old_shape_table(tmp_path):
     assert n == 0
 
 
+def test_migration_rebuilds_partial_table_missing_required_cols(tmp_path):
+    # legacy 列は無いが required 列 (tf_scores_json 等) が欠けている部分テーブル
+    # → shape guard の `not (_REQUIRED_COLS <= existing)` 分岐で rebuild される
+    from sqlalchemy import create_engine, text
+    db = tmp_path / "partial.db"
+    raw = create_engine(f"sqlite:///{db}")
+    with raw.connect() as conn:
+        conn.execute(text(
+            "CREATE TABLE technical_snapshots ("
+            "id INTEGER PRIMARY KEY, symbol TEXT, analyzed_at DATETIME, "
+            "collect_status TEXT)"
+        ))
+        conn.execute(text("INSERT INTO technical_snapshots (id, symbol) VALUES (1, 'Z')"))
+        conn.commit()
+    raw.dispose()
+    store = AnalysisStore(db)
+    cols = _columns(store._engine)
+    assert "tf_scores_json" in cols
+    with store._engine.connect() as conn:
+        n = conn.execute(text("SELECT COUNT(*) FROM technical_snapshots")).scalar()
+    assert n == 0  # rebuild でクリア
+
+
 def test_migration_is_idempotent_keeps_rows(tmp_path):
     db = tmp_path / "c.db"
     store = AnalysisStore(db)
