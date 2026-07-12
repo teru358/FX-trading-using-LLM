@@ -682,6 +682,13 @@ class OrchestratorFiringConfig:
     debounce_window_seconds: int = 180
     min_planning_interval_seconds: int = 1800
 
+    def __post_init__(self) -> None:
+        for name in ("material_news_impact_min", "material_bias_delta_min",
+                     "material_direction_flip_min"):
+            v = getattr(self, name)
+            if not (0.0 <= v <= 1.0):
+                raise ValueError(f"orchestrator.firing.{name} must be in [0,1], got {v!r}")
+
 
 @dataclass
 class OrchestratorHindsightConfig:

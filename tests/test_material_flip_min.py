@@ -52,11 +52,12 @@ def test_bias_delta_path_still_fires_without_flip():
     assert det.technical_material("USDJPY=X") is True
 
 
-def test_flip_fails_but_delta_fires():
-    # direction 反転だが両側弱く flip 不成立、しかし delta が大きいケース。
-    # weak flip で False に early-return せず delta 経路が評価されることを保証。
-    # prev long +0.09 → short -0.30: max(0.09,0.30)=0.30 ≥ flip_min なので実は flip で material。
-    # flip も delta も成立する境界確認 (どちらでも material=True)。
+def test_strong_flip_material_when_both_conditions_met():
+    # flip と delta の両方が成立する強い反転 (どちらでも material)。
+    # prev long +0.09 → short -0.30: max(0.09,0.30)=0.30 ≥ flip_min(0.10) で flip 成立、
+    # かつ |delta|=0.39 ≥ bias_delta_min(0.20) で delta も成立する。
+    # なお「両側 |bias| < flip_min かつ |delta| ≥ bias_delta_min」は flip_min(0.10) <
+    # bias_delta_min(0.20) より数学的に到達不能なので、そのケースはテストできない。
     det, h = _detector()
     det._seen["USDJPY=X"] = _seen_from(_Snap("long", 0.09))
     h["cur"] = _Snap("short", -0.30)
@@ -78,13 +79,12 @@ def test_status_recovery_material():
 
 
 def test_flip_min_range_validation():
-    from src.config.loader import _validate_firing_ranges
     from src.config.schema import OrchestratorFiringConfig
-    with pytest.raises(Exception):
-        _validate_firing_ranges(OrchestratorFiringConfig(material_direction_flip_min=1.5))
-    with pytest.raises(Exception):
-        _validate_firing_ranges(OrchestratorFiringConfig(material_direction_flip_min=-0.1))
-    _validate_firing_ranges(OrchestratorFiringConfig(material_direction_flip_min=0.1))  # OK
+    with pytest.raises(ValueError):
+        OrchestratorFiringConfig(material_direction_flip_min=1.5)
+    with pytest.raises(ValueError):
+        OrchestratorFiringConfig(material_direction_flip_min=-0.1)
+    OrchestratorFiringConfig(material_direction_flip_min=0.1)  # OK
 
 
 def test_config_default_flip_min():
