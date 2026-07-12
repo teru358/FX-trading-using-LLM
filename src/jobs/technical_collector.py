@@ -19,27 +19,12 @@ import logging
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 
-from src.analysis.price_analyzer import analyze_price_action
 from src.config import AppConfig, InstrumentConfig
 from src.data.analysis_store import AnalysisStore
-from src.data.correlation import (
-    PairCorrelation,
-    compute_correlations,
-    format_correlation_context,
-    _DEFAULT_ROLLING_WINDOW,
-)
 from src.data.indicators import compute_indicators
 from src.data.price_provider import PriceProvider
 from src.data.price_store import PriceStore
-from src.llm.client import LLMClient
 from src.llm.factory import create_llm_client
-from src.rag.prompt_formatter import (
-    format_insights_for_prompt,
-    format_macro_context_for_prompt,
-    format_news_for_prompt,
-    format_previous_analysis_for_prompt,
-    format_reflections_for_prompt,
-)
 from src.rag.vector_store import VectorStore
 from src.trading.market_hours import is_market_open
 from src.utils.clock import to_db_naive_datetime
@@ -120,45 +105,6 @@ def _econ_window_for(event_time: datetime, hours: int = 1) -> tuple[datetime, da
     """
     base = to_db_naive_datetime(event_time)
     return base - timedelta(hours=hours), base + timedelta(hours=hours)
-
-
-_CORR_LOOKBACK_DAYS = 30  # 相関に十分なバー数を確保する lookback
-
-
-def _reload_watch_prices(
-    config: AppConfig,
-    price_store: PriceStore,
-) -> dict[str, "PriceData"]:
-    """相関計算用に watch 価格を PriceStore から再ロードする。
-
-    空・バー不足・stale な watch symbol は除外する (相関入力から外れるだけで trade 収集は継続)。
-    分割後は watch 収集が停止しても prices.db に古いバーが残るため、stale 判定で古いバーを
-    相関から弾く。
-    """
-    from src.data.price_fetcher import PriceData
-    from src.utils.clock import db_now
-
-    min_bars = _DEFAULT_ROLLING_WINDOW + 5
-    end = db_now()
-    start = end - timedelta(days=_CORR_LOOKBACK_DAYS)
-    out: dict[str, PriceData] = {}
-    for w in config.watch_only_instruments:
-        try:
-            df = price_store.load_ohlcv(w.symbol, start, end)
-        except Exception as e:
-            logger.debug(f"[CORR] watch reload failed {w.symbol}: {e}")
-            continue
-        if df is None or df.empty or len(df) < min_bars:
-            continue
-        pd_w = PriceData(
-            symbol=w.symbol, df=df,
-            current_price=float(df["Close"].iloc[-1]), fetched_at=end,
-        )
-        if _is_price_data_stale(pd_w, max_staleness=_max_staleness_for(w, config)) is not None:
-            logger.debug(f"[CORR] watch {w.symbol} stale, excluded from correlation")
-            continue
-        out[w.symbol] = pd_w
-    return out
 
 
 def _compute_and_log_tech_score(inst: InstrumentConfig, summary, config: AppConfig):
@@ -250,44 +196,6 @@ def _compute_mtf_and_log(inst: InstrumentConfig, df_1h, config: AppConfig):
     return summaries, mtf_score, short_summary
 
 
-def _build_rag_contexts(
-    inst: InstrumentConfig,
-    store: VectorStore,
-    analysis_store: AnalysisStore,
-    config: AppConfig,
-) -> tuple[str, str, str]:
-    """LLM プロンプト向けの (news_ctx, refl_ctx (+insights), prev_ctx) を構築する。"""
-    news_entries = store.get_recent_category_news(
-        categories=inst.news_categories,
-        lookback_hours=config.rag.news_lookback_hours,
-    )
-    reflections = store.get_recent_reflections(
-        pair=inst.symbol,
-        limit=config.rag.reflection_lookback_count,
-    )
-    news_ctx = format_news_for_prompt(news_entries)
-    refl_ctx = format_reflections_for_prompt(reflections)
-
-    # 過去の ask 洞察を reflection 末尾に結合
-    insights = store.get_recent_insights(pair=inst.symbol, limit=3, lookback_hours=72)
-    insight_ctx = format_insights_for_prompt(insights)
-    if insight_ctx:
-        refl_ctx = f"{refl_ctx}\n\n{insight_ctx}" if refl_ctx else insight_ctx
-
-    prev_snapshots = analysis_store.get_recent_ok_snapshots(inst.symbol, hours=8)
-    prev_ctx = format_previous_analysis_for_prompt(prev_snapshots[0] if prev_snapshots else None)
-    return news_ctx, refl_ctx, prev_ctx
-
-
-def _combine_macro(macro_context: str, correlation_context: str) -> str:
-    """macro と correlation を単一テキストに結合する。空文字列の扱いに注意。"""
-    if not correlation_context:
-        return macro_context
-    if not macro_context:
-        return correlation_context
-    return f"{macro_context}\n\n{correlation_context}"
-
-
 def _compute_summary_and_score(inst: InstrumentConfig, price_data, config: AppConfig):
     """インジケータ計算 + テクニカルスコア算出を MTF/単一 TF 分岐込みで一括処理する。
 
@@ -323,28 +231,63 @@ def _compute_summary_and_score(inst: InstrumentConfig, price_data, config: AppCo
         pattern_cfg=config.analysis.chart_patterns,
     )
     tech_score = _compute_and_log_tech_score(inst, summary, config)
-    return summary, tech_score, mtf_score
+    return summary, tech_score, None
+
+
+def _build_snapshot_data(
+    *, pair, analyzed_at, tech_score, mtf_score, chart_patterns,
+) -> "TechnicalSnapshotData":
+    """決定的スコアから TechnicalSnapshotData を組む (spec §2.A)。"""
+    from src.analysis.technical_snapshot_data import TechnicalSnapshotData
+
+    components = {
+        "sma": round(tech_score.sma_score, 4),
+        "rsi": round(tech_score.rsi_score, 4),
+        "macd": round(tech_score.macd_score, 4),
+        "ichimoku": round(tech_score.ichimoku_score, 4),
+        "bb": round(tech_score.bb_score, 4),
+        "pattern": round(tech_score.pattern_score, 4),
+        "adx_factor": round(tech_score.adx_factor, 4),
+    }
+    if mtf_score is not None:
+        mtf_alignment = mtf_score.alignment
+        tf_scores = {
+            name: {"score": round(s.total_score, 4), "direction": s.direction}
+            for name, s in mtf_score.tf_scores.items()
+        }
+    else:
+        mtf_alignment = None
+        tf_scores = {}
+    return TechnicalSnapshotData(
+        pair=pair,
+        analyzed_at=analyzed_at,
+        bias_score=tech_score.total_score,
+        confidence=tech_score.confidence,
+        direction_bias=tech_score.direction,
+        mtf_alignment=mtf_alignment,
+        tf_scores=tf_scores,
+        components=components,
+        patterns=list(chart_patterns or []),
+    )
 
 
 async def _collect_one(
     inst: InstrumentConfig,
     config: AppConfig,
-    store: VectorStore,
     price_store: PriceStore,
     analysis_store: AnalysisStore,
-    llm: LLMClient,
-    macro_context: str = "",
-    correlation_context: str = "",
     price_provider: "PriceProvider | None" = None,
     price_data: "PriceData | None" = None,
 ) -> None:
-    """1銘柄のOHLCVを取得してテクニカル分析を実行し、スナップショットを保存する。
+    """1銘柄のOHLCVを取得して決定的テクニカル分析を行い snapshot を保存する。
 
     全経路で必ず 1 行 (ok / stale_price / failed) を analysis_store に書く。
     上位は本関数を try/except する必要は無い (内部で全例外を sentinel 化)。
 
     price_data が渡された場合は内部フェッチをスキップする (prefetch キャッシュ経由)。
     """
+    from src.utils.clock import db_now
+
     # Phase 1: OHLCV 取得 (prefetch されていなければここで取得)
     if price_data is None:
         price_data = _fetch_instrument_ohlcv(inst, config, price_store, price_provider)
@@ -376,54 +319,18 @@ async def _collect_one(
         )
         return
 
-    # Phase 4: RAG コンテキスト構築 (失敗 → failed sentinel)
-    try:
-        news_ctx, refl_ctx, prev_ctx = _build_rag_contexts(inst, store, analysis_store, config)
-        full_macro = _combine_macro(macro_context, correlation_context)
-    except Exception as e:
-        analysis_store.add_sentinel(
-            symbol=inst.symbol, status="failed",
-            reason=f"rag_context_error: {type(e).__name__}: {e}",
-        )
-        logger.error(
-            f"[COLLECT] {inst.display_name}: failed sentinel (rag context) — {e}",
-            exc_info=True,
-        )
-        return
-
-    # Phase 5: LLM 分析 (失敗 → failed sentinel)
-    try:
-        price_analysis = await analyze_price_action(
-            pair_cfg=inst,
-            price_data=price_data,
-            summary=summary,
-            llm=llm,
-            temperature=config.llm.price_analysis.temperature,
-            news_context=news_ctx,
-            reflection_context=refl_ctx,
-            previous_analysis=prev_ctx,
-            macro_context=full_macro,
-            user_notes_path=config.user_notes_path,
-            tech_score=tech_score,
-            mtf_score=mtf_score,
-        )
-    except Exception as e:
-        analysis_store.add_sentinel(
-            symbol=inst.symbol, status="failed",
-            reason=f"llm_error: {type(e).__name__}: {e}",
-        )
-        logger.error(
-            f"[COLLECT] {inst.display_name}: failed sentinel (llm) — {e}",
-            exc_info=True,
-        )
-        return
-
-    # Phase 6: 成功 → ok 行保存
-    analysis_store.add_snapshot(price_analysis)
+    # Phase 4: 決定的スナップショット組み立て + 保存
+    data = _build_snapshot_data(
+        pair=inst.symbol,
+        analyzed_at=db_now(),
+        tech_score=tech_score,
+        mtf_score=mtf_score,
+        chart_patterns=summary.chart_patterns,
+    )
+    analysis_store.add_snapshot(data)
     logger.info(
         f"[COLLECT] {inst.display_name}: technical snapshot stored | "
-        f"bias={price_analysis.bias_score:+.2f} conf={price_analysis.confidence:.2f} "
-        f"dir={price_analysis.direction_bias}"
+        f"bias={data.bias_score:+.2f} conf={data.confidence:.2f} dir={data.direction_bias}"
     )
 
 
@@ -443,7 +350,6 @@ async def collect_watch_technical(
     if not watch_only:
         return
 
-    llm_price = create_llm_client(config, "price_analysis")
     delay = config.news_collection.inter_pair_delay_seconds
     logger.info(f"[COLLECT] Watch technical: {len(watch_only)} watch-only instruments")
 
@@ -461,7 +367,7 @@ async def collect_watch_technical(
             continue
         try:
             await _collect_one(
-                inst, config, store, price_store, analysis_store, llm_price,
+                inst, config, price_store, analysis_store,
                 price_provider=price_provider, price_data=price_data,
             )
         except Exception as e:
@@ -632,16 +538,14 @@ async def collect_trade_technical(
     force: bool = False,
     price_provider: "PriceProvider | None" = None,
 ) -> None:
-    """tradeable 銘柄のテクニカル分析を収集する (macro + 相関 + econ 付き)。"""
+    """tradeable 銘柄のテクニカル分析を収集する (決定的スコア + econ 付き)。"""
     if not force and not is_market_open():
         return
 
     tradeable = config.tradeable_instruments
-    watch_only = config.watch_only_instruments
     if not tradeable:
         return
 
-    llm_price = create_llm_client(config, "price_analysis")
     delay = config.news_collection.inter_pair_delay_seconds
     logger.info(f"[COLLECT] Trade technical: {len(tradeable)} tradeable instruments")
 
@@ -656,26 +560,6 @@ async def collect_trade_technical(
             prefetch_errors[inst.symbol] = f"{type(e).__name__}: {e}"
             logger.warning(f"[PREFETCH] {inst.display_name}: OHLCV fetch failed: {e}")
 
-    macro_snapshots = []
-    for inst in watch_only:
-        snaps = analysis_store.get_recent_ok_snapshots(inst.symbol, hours=8)
-        if snaps:
-            macro_snapshots.append(snaps[0])
-    macro_ctx = format_macro_context_for_prompt(
-        macro_snapshots, watch_only, realtime_provider=config.paper_provider,
-    )
-
-    correlations: list[PairCorrelation] = []
-    if watch_only:
-        try:
-            watch_prices = _reload_watch_prices(config, price_store)
-            trade_prices = {i.symbol: prices[i.symbol] for i in tradeable if i.symbol in prices}
-            watch_names = {inst.symbol: inst.display_name for inst in watch_only}
-            correlations = compute_correlations(trade_prices, watch_prices, watch_names)
-            logger.info(f"[CORR] Computed {len(correlations)} correlation pairs")
-        except Exception as e:
-            logger.error(f"[CORR] Correlation computation failed: {e}", exc_info=True)
-
     for i, inst in enumerate(tradeable):
         pd_cached = prices.get(inst.symbol)
         if pd_cached is None:
@@ -688,10 +572,8 @@ async def collect_trade_technical(
                 await asyncio.sleep(delay)
             continue
         try:
-            corr_ctx = format_correlation_context(correlations, inst.symbol)
             await _collect_one(
-                inst, config, store, price_store, analysis_store, llm_price,
-                macro_context=macro_ctx, correlation_context=corr_ctx,
+                inst, config, price_store, analysis_store,
                 price_provider=price_provider, price_data=pd_cached,
             )
         except Exception as e:
