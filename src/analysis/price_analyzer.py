@@ -52,22 +52,26 @@ class PriceAnalysis:
 
 
 def load_user_notes(notes_path: Path, section: str = "price") -> str:
-    """user_notes.md の指定セクション (price/news/reflect) のテキストを返す。
+    """user_notes.md の指定セクション (price/news/reflect/plan) のテキストを返す。
 
-    ## price / ## news / ## reflect の見出しでセクションを分割する。
+    ## price / ## news / ## reflect / ## plan の見出しでセクションを分割する。
     見出しがない場合はファイル全体を "price" として扱う（後方互換）。
     空または有効テキストなしの場合は空文字を返す。
     """
     if not notes_path.exists():
         return ""
-    text = notes_path.read_text(encoding="utf-8")
+    try:
+        text = notes_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        logger.warning(f"user_notes read failed ({notes_path}): {type(e).__name__}: {e}")
+        return ""
     text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
 
     def _clean(raw: str) -> str:
         lines = [l for l in raw.splitlines() if l.strip() and not l.strip().startswith("#") and l.strip() != "---"]
         return "\n".join(lines).strip()
 
-    parts = re.split(r"^##\s+(price|news|reflect)\s*$", text, flags=re.MULTILINE | re.IGNORECASE)
+    parts = re.split(r"^##\s+(price|news|reflect|plan)\s*$", text, flags=re.MULTILINE | re.IGNORECASE)
     if len(parts) == 1:
         # セクション見出しなし → 全体を "price" 扱い（後方互換）
         return _clean(parts[0]) if section.lower() == "price" else ""
