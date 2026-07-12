@@ -52,6 +52,7 @@ _guards: dict[str, JobGuard] = {
     "price_monitor": JobGuard("price_monitor", skip_predicate=market_skip_check),
     "exit_check": JobGuard("exit_check", skip_predicate=market_skip_check),
     "forecast": JobGuard("forecast", skip_predicate=market_skip_check),
+    "technical": JobGuard("technical", skip_predicate=market_skip_check),
     "econ": JobGuard("econ_calendar"),
     "weekly_diagnosis": JobGuard("weekly_diagnosis"),
     "data_backup": JobGuard("data_backup"),
@@ -401,19 +402,19 @@ def main() -> None:
     # 4. テクニカル分析。cadence_enabled なら可変 interval driver、そうでなければ
     #    現行の union 時刻 dispatch (後方互換・ロールバック先)。
     if _cadence_driver is not None:
-        # driver tick を毎分 slot 経由で回す (§5.6 の薄い毎 tick ドライバ)。tick が slot busy
-        # で skip されても driver の last_run は進まないため次 tick で backfill される
-        # (§5.1.1)。tick 内の収集 callback は同一 slot 内で同期実行する (slot 再取得しない)。
+        # driver tick を毎分 technical guard 経由で回す。guard busy (前回収集が実行中) で
+        # skip されても driver の last_run は進まないため次 tick で backfill される
+        # (CadenceDriver._dispatch が False で last_run を進めない設計)。
         def _cadence_tick() -> None:
             _cadence_driver.tick()
         schedule.every(1).minutes.do(
-            _run_with_slot, _cadence_tick, _market_aware=True,
+            _run_with_guard, _guards["technical"], _cadence_tick,
         )
         _logger.info("[CADENCE] variable-interval driver enabled (union dispatch bypassed)")
     else:
         for t in _tech_union_times:
             schedule.every().day.at(t, news_tz).do(
-                _run_with_slot, _tech_dispatch, t, _market_aware=True,
+                _run_with_guard, _guards["technical"], _tech_dispatch, t,
             )
 
     # 5. 予測サイクル（LLMなし・取引判定の直前）
@@ -456,6 +457,17 @@ def main() -> None:
             config.economic_calendar.fetch_time,
             config.economic_calendar.fetch_timezone,
         ).do(_run_with_guard, _guards["econ"], _econ_daily)
+
+    # 経済指標影響分析 (LLM 使用 → slot 経由。collector から分離、spec §2.K)
+    # market_aware は付けない: 金曜イベントの actual 確定が休場後になり得るため週末も回す。
+    # 10 分間隔: 検索窓が最終成功時刻から動的拡大 (econ_impact_job) するため slot busy の
+    # 連続 skip でも取りこぼさない。
+    if config.economic_calendar.enabled:
+        from src.jobs.econ_impact_job import run_econ_impact_collection
+        schedule.every(10).minutes.do(
+            _run_with_slot, run_econ_impact_collection,
+            config, store, price_store, analysis_store,
+        )
 
     # 週次自己診断レポート (FX 休場の週末に実行、cron 不使用)
     if config.weekly_diagnosis.enabled:
@@ -534,6 +546,11 @@ def main() -> None:
             config, store, price_store, analysis_store,
             force=is_fresh_start, price_provider=price_provider, gate=bridge_gate,
         )
+
+    # econ impact 起動時 1 回 (spec §2.K — 旧 trade collect 内実行との空白を作らない)
+    if config.economic_calendar.enabled:
+        from src.jobs.econ_impact_job import run_econ_impact_collection
+        run_econ_impact_collection(config, store, price_store, analysis_store)
 
     # スケジューラをバックグラウンドスレッドで起動
     scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True, name="scheduler")
