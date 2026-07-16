@@ -37,13 +37,23 @@ def _default_pip_size_for(pair: str) -> float:
 
 
 def _executable_price(direction: str, quote: dict[str, Any] | None) -> float | None:
-    """約定想定価格: long は ask (買い)、short は bid (売り)。無ければ mid。"""
+    """約定想定価格: long は ask (買い)、short は bid (売り)。無ければ mid。
+
+    quote は schema 層を通らない untrusted 入力 — 非数値 (str 等) は None に落とし
+    導出不能側へ倒す (hard veto 関数を評価中に TypeError で殺さない)。
+    0.0 は有効値としてそのまま返す (退化候補として _rr 側で rr=0.0 になる)。
+    """
     if not quote:
         return None
     price = quote.get("ask") if direction == "long" else quote.get("bid")
     if price is None:
         price = quote.get("mid")
-    return price
+    if price is None:
+        return None
+    try:
+        return float(price)
+    except (TypeError, ValueError):
+        return None
 
 
 def derive_rr(

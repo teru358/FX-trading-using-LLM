@@ -131,6 +131,19 @@ class TestDeriveRr:
         rr = derive_rr(draft, {"mid": 150.0, "spread": None}, include_executable_price=True)
         assert rr == pytest.approx(2.0)
 
+    def test_non_numeric_quote_degrades_to_none_not_crash(self) -> None:
+        # quote は untrusted — str 値で TypeError にせず導出不能 (None) へ倒す。
+        draft = _draft_entries([EntryCondition(type="spread_below", value_pips=2.0)])
+        quote = {"bid": "149.99", "ask": "not a number", "mid": None, "spread": 0.02}
+        assert derive_rr(draft, quote, include_executable_price=True) is None
+
+    def test_numeric_string_quote_coerced(self) -> None:
+        # str 数値は float 化して使う (ローカル環境の JSON 復元経路対策)。
+        draft = _draft_entries([EntryCondition(type="spread_below", value_pips=2.0)])
+        quote = {"ask": "150.01", "mid": 150.0}
+        rr = derive_rr(draft, quote, include_executable_price=True)
+        assert rr == pytest.approx((152.0 - 150.01) / (150.01 - 149.0))
+
     def test_no_candidates_returns_none(self) -> None:
         draft = _draft_entries([EntryCondition(type="spread_below", value_pips=2.0)])
         assert derive_rr(draft, None, include_executable_price=True) is None
