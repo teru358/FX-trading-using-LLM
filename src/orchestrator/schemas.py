@@ -15,6 +15,7 @@ Pydantic を使っても json.loads は不可避で、validation の利点は pa
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -56,16 +57,23 @@ def _strip_fences(raw: str) -> str:
 
 
 def _opt_float(value: Any, field_name: str) -> float | None:
-    """None はそのまま、それ以外は float 化。失敗時 SchemaParseError。
+    """None はそのまま、それ以外は有限 float 化。失敗時 SchemaParseError。
 
-    LLM が数値を文字列 ("150.0") で返しても正規化する。
+    LLM が数値を文字列 ("150.0") で返しても正規化する。bool / NaN / Infinity は
+    拒否する — NaN の entry 値は derive_rr の min 比較 (NaN < x == False) で
+    hard gate を偽通過させるため (R2 High#3)。
     """
     if value is None:
         return None
+    if isinstance(value, bool):
+        raise SchemaParseError(f"{field_name} must be numeric, got {value!r}")
     try:
-        return float(value)
+        f = float(value)
     except (TypeError, ValueError) as exc:
         raise SchemaParseError(f"{field_name} must be numeric, got {value!r}") from exc
+    if not math.isfinite(f):
+        raise SchemaParseError(f"{field_name} must be finite, got {f!r}")
+    return f
 
 
 def _loads(raw: str) -> dict[str, Any]:
@@ -233,6 +241,30 @@ class PlannerOpportunity:
 _DRAFT_DIRECTION = frozenset({"long", "short"})
 
 
+def _normalize_action_numbers(action: dict[str, Any]) -> dict[str, Any]:
+    """action の sl/tp/rr を有限 float へ正規化した新 dict を返す。
+
+    - str 数値 → float 変換 (ローカル LLM の揺れ対策)
+    - bool / NaN / Infinity / 変換不能 → ValueError (呼び出し元で SchemaParseError 化)
+    - 欠落・None → そのまま (gate の missing sl/tp issue の責務)
+    """
+    out = dict(action)
+    for key in ("sl", "tp", "rr"):
+        if key not in out or out[key] is None:
+            continue
+        v = out[key]
+        if isinstance(v, bool):
+            raise ValueError(f"action {key} must be numeric, got bool {v!r}")
+        try:
+            f = float(v)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"action {key} must be numeric, got {v!r}") from exc
+        if not math.isfinite(f):
+            raise ValueError(f"action {key} must be finite, got {f!r}")
+        out[key] = f
+    return out
+
+
 @dataclass
 class ExecutionPlanDraft:
     direction: str  # "long" | "short"
@@ -253,6 +285,13 @@ class ExecutionPlanDraft:
             raise ValueError(f"direction must be long/short, got {self.direction!r}")
         if not self.entry_conditions:
             raise ValueError("entry_conditions must not be empty")
+        # action の sl/tp/rr を有限 float へ正規化 (spec 2026-07-16 §2.A′)。
+        # str 数値 ("149.0") はローカル LLM の揺れとして変換を許容。bool / NaN /
+        # Infinity / 非数値は拒否 → from_llm_json 経由では SchemaParseError となり
+        # redraft 救済 (§2.D) に乗る。欠落・None は gate の責務なので通す。
+        # __post_init__ に置くのは runtime の draft 復元 (コンストラクタ直呼び)
+        # もカバーするため。
+        self.action = _normalize_action_numbers(self.action)
 
     @classmethod
     def from_llm_json(cls, raw: str) -> "ExecutionPlanDraft":

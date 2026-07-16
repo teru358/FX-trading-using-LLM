@@ -75,6 +75,19 @@ class TestEntryCondition:
         with pytest.raises(SchemaParseError):
             EntryCondition.from_dict({"type": "price_at_or_below", "value": "abc"})
 
+    def test_from_dict_nan_value_rejected(self) -> None:
+        # NaN entry 値は derive_rr の min に混入すると gate を偽通過する (R2 High#3)。
+        with pytest.raises(SchemaParseError, match="finite"):
+            EntryCondition.from_dict({"type": "price_at_or_below", "value": float("nan")})
+
+    def test_from_dict_infinity_value_rejected(self) -> None:
+        with pytest.raises(SchemaParseError, match="finite"):
+            EntryCondition.from_dict({"type": "price_at_or_below", "value": float("inf")})
+
+    def test_from_dict_bool_value_rejected(self) -> None:
+        with pytest.raises(SchemaParseError, match="numeric"):
+            EntryCondition.from_dict({"type": "price_at_or_below", "value": True})
+
 
 # ---------------------------------------------------------------------------
 # InvalidationCondition
@@ -102,6 +115,10 @@ class TestInvalidationCondition:
         cond = InvalidationCondition.from_dict({"type": "price_below", "value": "149.5"})
         assert cond.value == 149.5
         assert isinstance(cond.value, float)
+
+    def test_from_dict_nan_value_rejected(self) -> None:
+        with pytest.raises(SchemaParseError, match="finite"):
+            InvalidationCondition.from_dict({"type": "price_below", "value": float("nan")})
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +375,82 @@ class TestExecutionPlanDraft:
         with pytest.raises(SchemaParseError):
             ExecutionPlanDraft.from_llm_json(
                 json.dumps({**base, "scale_in": True, "new_signal_evidence": 123}))
+
+    # ── action sl/tp/rr 正規化 (2026-07-16 spec 2.A′) ──────────
+
+    def test_action_string_numbers_normalized_to_float(self) -> None:
+        kw = self._valid_kwargs()
+        kw["action"] = {"sl": "149.0", "tp": "152.0", "rr": "2.0", "comment": "x"}
+        draft = ExecutionPlanDraft(**kw)
+        assert draft.action["sl"] == 149.0
+        assert isinstance(draft.action["sl"], float)
+        assert draft.action["tp"] == 152.0
+        assert draft.action["rr"] == 2.0
+
+    def test_action_nan_rejected(self) -> None:
+        kw = self._valid_kwargs()
+        kw["action"] = {"sl": float("nan"), "tp": 152.0, "rr": 2.0}
+        with pytest.raises(ValueError, match="sl"):
+            ExecutionPlanDraft(**kw)
+
+    def test_action_infinity_rejected(self) -> None:
+        kw = self._valid_kwargs()
+        kw["action"] = {"sl": 149.0, "tp": float("inf"), "rr": 2.0}
+        with pytest.raises(ValueError, match="tp"):
+            ExecutionPlanDraft(**kw)
+
+    def test_action_bool_rejected(self) -> None:
+        kw = self._valid_kwargs()
+        kw["action"] = {"sl": True, "tp": 152.0, "rr": 2.0}
+        with pytest.raises(ValueError, match="sl"):
+            ExecutionPlanDraft(**kw)
+
+    def test_action_non_numeric_string_rejected(self) -> None:
+        kw = self._valid_kwargs()
+        kw["action"] = {"sl": "around 149", "tp": 152.0, "rr": 2.0}
+        with pytest.raises(ValueError, match="sl"):
+            ExecutionPlanDraft(**kw)
+
+    def test_action_missing_keys_allowed(self) -> None:
+        # 欠落は正規化では拒否しない (gate の missing sl/tp issue の責務)。
+        kw = self._valid_kwargs()
+        kw["action"] = {"size_policy": "risk", "comment": "x"}
+        draft = ExecutionPlanDraft(**kw)
+        assert "sl" not in draft.action
+
+    def test_action_none_values_allowed(self) -> None:
+        # None は「欠落」と同義に扱い、そのまま通す。
+        kw = self._valid_kwargs()
+        kw["action"] = {"sl": None, "tp": 152.0, "rr": None}
+        draft = ExecutionPlanDraft(**kw)
+        assert draft.action["sl"] is None
+        assert draft.action["tp"] == 152.0
+
+    def test_from_llm_json_action_string_numbers_normalized(self) -> None:
+        # from_llm_json 経由でも __post_init__ の正規化が効く。
+        raw = json.dumps({
+            "direction": "long",
+            "entry_conditions": [{"type": "price_at_or_below", "value": 150.0}],
+            "action": {"sl": "149.0", "tp": "152.0", "rr": "2.0", "comment": "x"},
+            "invalidation": [{"type": "expired"}],
+            "expires_at": "2026-12-31T18:00:00+00:00",
+            "reasoning_summary": "r",
+        })
+        draft = ExecutionPlanDraft.from_llm_json(raw)
+        assert draft.action["sl"] == 149.0
+
+    def test_from_llm_json_action_nan_raises_schema_parse_error(self) -> None:
+        # JSON 標準に NaN は無いが json.loads は NaN/Infinity を受理する (Python 拡張)。
+        raw = (
+            '{"direction": "long",'
+            '"entry_conditions": [{"type": "price_at_or_below", "value": 150.0}],'
+            '"action": {"sl": NaN, "tp": 152.0, "rr": 2.0},'
+            '"invalidation": [{"type": "expired"}],'
+            '"expires_at": "2026-12-31T18:00:00+00:00",'
+            '"reasoning_summary": "r"}'
+        )
+        with pytest.raises(SchemaParseError):
+            ExecutionPlanDraft.from_llm_json(raw)
 
 
 # ---------------------------------------------------------------------------
