@@ -15,10 +15,11 @@ advice_memo は不可侵 — risk gate は読まない・変更しない。
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.orchestrator.schemas import ExecutionPlanDraft
+from src.orchestrator.schemas import ExecutionPlanDraft, _ENTRY_PRICE_TYPES
 
 STRUCTURAL = "structural"
 FIXABLE = "fixable"
@@ -33,6 +34,71 @@ def _default_pip_size_for(pair: str) -> float:
     既存 symbol 表記 (USDJPY=X / EURUSD=X) を想定。'JPY' 部分一致で判定。
     """
     return 0.01 if "JPY" in pair.upper() else 0.0001
+
+
+def _executable_price(direction: str, quote: dict[str, Any] | None) -> float | None:
+    """約定想定価格: long は ask (買い)、short は bid (売り)。無ければ mid。"""
+    if not quote:
+        return None
+    price = quote.get("ask") if direction == "long" else quote.get("bid")
+    if price is None:
+        price = quote.get("mid")
+    return price
+
+
+def derive_rr(
+    draft: ExecutionPlanDraft,
+    quote: dict[str, Any] | None,
+    *,
+    include_executable_price: bool,
+) -> float | None:
+    """sl/tp/entry 候補から reward/risk 比を決定的に導出する (spec 2026-07-16 §2.A)。
+
+    entry 候補 = price 系 entry_condition の value 全部。実行価格 (long=ask /
+    short=bid、無ければ mid) は include_executable_price=True のとき、または
+    price 系候補ゼロのとき (underivable 回避 fallback) に追加する。
+
+    phase 分離 (R2 High#1): planning/coerce は False — 押し目 plan の entry が
+    現在価格から離れているのは正常で、約定は条件成立後 (watch_evaluator が評価)。
+    live final gate / shadow precheck は True — breakout オーバーシュートの
+    実行 RR 劣化を trigger 時価格で検出する。
+
+    候補ごとに rr を計算し **最小値** を採用する (保守則 — SL に近い entry ほど
+    rr は大きく出るため、min でしか最悪ケースを取れない)。退化候補
+    (risk<=0 / reward<0) と非有限候補 (NaN/Inf — quote は schema 層を通らない,
+    R2 High#3) は rr 0.0 として min に参加させる (黙って除外すると悪い候補ほど
+    無視され、NaN は比較 False で偽 pass する)。
+
+    None (導出不能): sl or tp 欠落 / entry 候補ゼロ。
+    """
+    sl = draft.action.get("sl")
+    tp = draft.action.get("tp")
+    if sl is None or tp is None:
+        return None
+
+    candidates: list[float] = [
+        c.value for c in draft.entry_conditions
+        if c.type in _ENTRY_PRICE_TYPES and c.value is not None
+    ]
+    if include_executable_price or not candidates:
+        executable = _executable_price(draft.direction, quote)
+        if executable is not None:
+            candidates.append(executable)
+    if not candidates:
+        return None
+
+    def _rr(entry: float) -> float:
+        if not (math.isfinite(entry) and math.isfinite(sl) and math.isfinite(tp)):
+            return 0.0  # 非有限は reject 方向 (深層防御)
+        if draft.direction == "long":
+            reward, risk = tp - entry, entry - sl
+        else:
+            reward, risk = entry - tp, sl - entry
+        if risk <= 0 or reward < 0:
+            return 0.0
+        return reward / risk
+
+    return min(_rr(e) for e in candidates)
 
 
 @dataclass

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.orchestrator.risk_gate import RiskGateResult, RiskGateWorker
+from src.orchestrator.risk_gate import RiskGateResult, RiskGateWorker, derive_rr
 from src.orchestrator.schemas import EntryCondition, ExecutionPlanDraft, InvalidationCondition
 
 
@@ -24,6 +24,129 @@ def _draft(direction="long", sl=149.0, tp=152.0, rr=2.0) -> ExecutionPlanDraft:
         expires_at=datetime(2026, 6, 21, 18, 0, 0, tzinfo=timezone.utc),
         reasoning_summary="r",
     )
+
+
+def _draft_entries(entries, *, direction="long", sl=149.0, tp=152.0) -> ExecutionPlanDraft:
+    """entry_conditions を差し替えた draft を作る (derive_rr テスト用)。"""
+    return ExecutionPlanDraft(
+        direction=direction,
+        entry_conditions=entries,
+        action={"sl": sl, "tp": tp, "size_policy": "risk", "rr": 2.0, "comment": "x"},
+        invalidation=[InvalidationCondition(type="price_below", value=148.0)],
+        expires_at=datetime(2026, 6, 21, 18, 0, 0, tzinfo=timezone.utc),
+        reasoning_summary="r",
+    )
+
+
+class TestDeriveRr:
+    """derive_rr (spec 2026-07-16 §2.A): entry 候補 min の決定的 RR 導出 + phase 分離。"""
+
+    QUOTE = {"bid": 149.99, "ask": 150.01, "mid": 150.0, "spread": 0.02}
+
+    def test_planning_uses_condition_value_only(self) -> None:
+        # planning phase: 条件値 150 のみ評価 → rr=(152-150)/(150-149)=2.0。
+        # ask は含めない (押し目誤 reject 防止, R2 High#1)。
+        draft = _draft_entries([EntryCondition(type="price_at_or_below", value=150.0)])
+        rr = derive_rr(draft, self.QUOTE, include_executable_price=False)
+        assert rr == pytest.approx(2.0)
+
+    def test_live_includes_executable_price(self) -> None:
+        # live phase: 候補 = 条件値 150 (rr 2.0) + ask 150.01 (rr≈1.97) → min≈1.97
+        draft = _draft_entries([EntryCondition(type="price_at_or_below", value=150.0)])
+        rr = derive_rr(draft, self.QUOTE, include_executable_price=True)
+        assert rr == pytest.approx((152.0 - 150.01) / (150.01 - 149.0))
+
+    def test_pullback_plan_planning_pass_live_scenario(self) -> None:
+        # R2 High#1 の例: long, 現在 ask=151, 押し目 entry=149.5, SL=148.5, TP=151.5。
+        # planning (条件値のみ) → 計画 RR 2.0。実行価格を含めると 0.2 に落ちる —
+        # planning で False を渡す限り誤 reject しない。
+        draft = _draft_entries(
+            [EntryCondition(type="price_at_or_below", value=149.5)],
+            sl=148.5, tp=151.5,
+        )
+        quote = {"bid": 150.99, "ask": 151.0, "mid": 150.995, "spread": 0.01}
+        assert derive_rr(draft, quote, include_executable_price=False) == pytest.approx(2.0)
+        assert derive_rr(draft, quote, include_executable_price=True) == pytest.approx(
+            (151.5 - 151.0) / (151.0 - 148.5)
+        )
+
+    def test_short_uses_bid_as_executable(self) -> None:
+        # short: reward=entry-tp, risk=sl-entry。実行価格は bid。
+        draft = _draft_entries(
+            [EntryCondition(type="price_at_or_above", value=150.0)],
+            direction="short", sl=151.0, tp=148.0,
+        )
+        rr = derive_rr(draft, self.QUOTE, include_executable_price=True)
+        # 候補: 150 → (150-148)/(151-150)=2.0 / bid=149.99 → (1.99)/(1.01)≈1.970
+        assert rr == pytest.approx((149.99 - 148.0) / (151.0 - 149.99))
+
+    def test_multiple_price_conditions_takes_min(self) -> None:
+        # R1 High#1 の例: long SL=149/TP=152、候補 150 (rr 2.0) と 151 (rr 0.5)
+        # → 0.5 を採用 (SL に近い 150 は最良側)。
+        draft = _draft_entries([
+            EntryCondition(type="price_at_or_below", value=150.0),
+            EntryCondition(type="breakout_above", value=151.0),
+        ])
+        rr = derive_rr(draft, None, include_executable_price=False)
+        assert rr == pytest.approx(0.5)
+
+    def test_live_overshoot_executable_price_dominates(self) -> None:
+        # R1 High#2 の例: breakout=150, SL=149, TP=152, trigger 時 ask=151.8
+        # → 実行 RR=(152-151.8)/(151.8-149)≈0.071 が min。
+        draft = _draft_entries([EntryCondition(type="breakout_above", value=150.0)])
+        quote = {"bid": 151.78, "ask": 151.8, "mid": 151.79, "spread": 0.02}
+        rr = derive_rr(draft, quote, include_executable_price=True)
+        assert rr == pytest.approx((152.0 - 151.8) / (151.8 - 149.0))
+
+    def test_degenerate_candidate_counts_as_zero(self) -> None:
+        # entry が TP を超えている候補 (reward<0) は rr=0.0 として min に参加。
+        draft = _draft_entries([
+            EntryCondition(type="price_at_or_below", value=150.0),
+            EntryCondition(type="breakout_above", value=152.5),  # > TP
+        ])
+        assert derive_rr(draft, None, include_executable_price=False) == 0.0
+
+    def test_risk_nonpositive_candidate_counts_as_zero(self) -> None:
+        # entry が SL の防御側に無い候補 (long で entry <= sl) は rr=0.0。
+        draft = _draft_entries([
+            EntryCondition(type="price_at_or_below", value=148.5),  # < SL
+        ])
+        assert derive_rr(draft, None, include_executable_price=False) == 0.0
+
+    def test_nan_quote_counts_as_zero(self) -> None:
+        # quote の ask が NaN → その候補は rr=0.0 (reject 方向)。NaN が min 比較を
+        # すり抜けて偽 pass しない (R2 High#3)。
+        draft = _draft_entries([EntryCondition(type="price_at_or_below", value=150.0)])
+        quote = {"bid": 149.99, "ask": float("nan"), "mid": 150.0, "spread": 0.02}
+        assert derive_rr(draft, quote, include_executable_price=True) == 0.0
+
+    def test_no_price_condition_falls_back_to_executable_even_in_planning(self) -> None:
+        # price 条件ゼロの draft は planning でも実行価格 fallback (underivable 回避)。
+        draft = _draft_entries([EntryCondition(type="spread_below", value_pips=2.0)])
+        rr = derive_rr(draft, self.QUOTE, include_executable_price=False)
+        assert rr == pytest.approx((152.0 - 150.01) / (150.01 - 149.0))
+
+    def test_missing_bid_ask_falls_back_to_mid(self) -> None:
+        draft = _draft_entries([EntryCondition(type="spread_below", value_pips=2.0)])
+        rr = derive_rr(draft, {"mid": 150.0, "spread": None}, include_executable_price=True)
+        assert rr == pytest.approx(2.0)
+
+    def test_no_candidates_returns_none(self) -> None:
+        draft = _draft_entries([EntryCondition(type="spread_below", value_pips=2.0)])
+        assert derive_rr(draft, None, include_executable_price=True) is None
+        assert derive_rr(draft, {}, include_executable_price=True) is None
+
+    def test_missing_sl_returns_none(self) -> None:
+        draft = _draft_entries(
+            [EntryCondition(type="price_at_or_below", value=150.0)], sl=None,
+        )
+        assert derive_rr(draft, self.QUOTE, include_executable_price=False) is None
+
+    def test_missing_tp_returns_none(self) -> None:
+        draft = _draft_entries(
+            [EntryCondition(type="price_at_or_below", value=150.0)], tp=None,
+        )
+        assert derive_rr(draft, self.QUOTE, include_executable_price=False) is None
 
 
 def _ctx(
