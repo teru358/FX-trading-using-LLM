@@ -152,8 +152,12 @@
 
 - [ ] **Step 2: テストが落ちることを確認**
 
-Run: `uv run pytest tests/test_orchestrator_schemas.py -k "action" -v`
-Expected: 上記の reject 系テストが FAIL (現状は未検証で通ってしまうため `DID NOT RAISE`)。normalize 系も FAIL (str のまま)。
+Run:
+```bash
+uv run pytest tests/test_orchestrator_schemas.py \
+  -k "action or nan_value or infinity_value or bool_value" -v
+```
+Expected: 上記の reject 系テスト (action 正規化 + `_opt_float` の nan/infinity/bool、R3 Low#3) が FAIL (現状は未検証で通ってしまうため `DID NOT RAISE`)。normalize 系も FAIL (str のまま)。
 
 - [ ] **Step 3: 実装**
 
@@ -1164,11 +1168,49 @@ git commit -m "feat(orchestrator): rescue draft schema parse failures with one r
 ### Task 7: live final gate 統合テスト (R2 Medium#4)
 
 **Files:**
-- Test: `tests/test_taskf_execute_live_trigger.py` (追加のみ — production コードは Task 3/4 で変更済み)
+- Modify: `tests/test_taskf_live_execution_helpers.py` (`seed_active_plan_ready_to_trigger` L122 に任意引数追加)
+- Test: `tests/test_taskf_execute_live_trigger.py` (追加 — production コードは Task 3/4 で変更済み)
 
 **背景:** gate 単体テストでは「runtime に別 gate が生成される」問題 (R2 High#2) や実際の発注抑止・状態遷移を検出できない。`make_live_runtime` (test_taskf_live_execution_helpers) は `risk_gate` を引数で受けるので、fake gate の代わりに**実 RiskGateWorker** を注入して `_execute_live_trigger` 経路を end-to-end で検証する。
 
-- [ ] **Step 1: 統合テストを書く**
+**fixture 計算の注意 (R3 Medium#1):** helpers の既定 seed は entry=150.30 / SL=149.4 / TP=151.5 → **計画 RR = 1.2/0.9 ≈ 1.33 < 1.5** で、実 gate では live phase の候補 min = min(1.33, 実行 RR) が必ず 1.33 になり reject される。既定値は変えない (既存テストは fake gate 使用で RR 非依存 — seed の意図を保つ) — 押し目テスト側で entry=150.20 (計画 RR = 1.3/0.8 = 1.625 >= 1.5、mid=150.10 <= 150.20 で trigger 成立) を明示指定する。
+
+- [ ] **Step 1: seed helper に任意引数を追加**
+
+`tests/test_taskf_live_execution_helpers.py` L122 の `seed_active_plan_ready_to_trigger` を後方互換のまま拡張 (R3 Low#2 — 存在しない Store API を使わず helper で条件を注入する):
+
+```python
+def seed_active_plan_ready_to_trigger(
+    rt: OrchestratorRuntime,
+    *,
+    entry_conditions: list | None = None,
+    action: dict | None = None,
+) -> int:
+    """entry が即成立する active plan を 1 件作る (既定: price_at_or_below 150.30,
+    mid=150.10)。entry_conditions / action を指定すると差し替える (実 gate を使う
+    統合テスト用 — 既定 seed の計画 RR ≈ 1.33 は min_rr=1.5 の実 gate を通らない)。"""
+    orch = rt._orch
+    snap = orch.create_snapshot(pair="USDJPY=X", as_of_time=NOW)
+    run_id = orch.start_run("PlannerAgent", pair="USDJPY=X")
+    return orch.create_trade_plan(
+        pair="USDJPY=X", snapshot_id=snap, horizon="swing", direction="long",
+        entry_conditions_json=(
+            entry_conditions
+            if entry_conditions is not None
+            else [{"type": "price_at_or_below", "value": 150.30}]
+        ),
+        action_json=(
+            action if action is not None
+            else {"sl": 149.4, "tp": 151.5, "rr": 2.0, "confidence": 0.7}
+        ),
+        invalidation_json=[],
+        expires_at=FUTURE, created_by_run_id=run_id,
+    )
+```
+
+既存呼び出し (引数なし) は挙動不変であることを確認: `uv run pytest tests/test_taskf_execute_live_trigger.py tests/test_watch_counterfactual.py -q` → PASS (Task 3 完了後の状態で)。
+
+- [ ] **Step 2: 統合テストを書く**
 
 `tests/test_taskf_execute_live_trigger.py` に追加。import に実 gate を足す:
 
@@ -1180,17 +1222,16 @@ from src.orchestrator.risk_gate import RiskGateWorker
 def test_live_gate_rejects_overshoot_with_real_gate(tmp_path):
     """R2 Medium#4: breakout オーバーシュート時、実 RiskGateWorker の live final gate
     (include_executable_price=True) が発注を止め、intent=abandoned / plan=invalidated
-    に遷移する。seed plan は breakout_above 150.0 / SL 149.4 / TP 151.5、trigger 時
-    mid=151.3 (ask≈151.305) → 実行 RR ≈ (151.5-151.305)/(151.305-149.4) ≈ 0.10 < 1.5。
-    (breakout 条件は mid > 150.0 で trigger 成立する。)"""
+    に遷移する。plan: breakout_above 150.0 / SL 149.0 / TP 152.0 (計画 RR 2.0)、
+    trigger 時 mid=151.79 (ask=151.795) → 実行 RR = (152-151.795)/(151.795-149)
+    ≈ 0.073 < 1.5。breakout 条件は mid 151.79 > 150.0 で trigger 成立。"""
     broker = _FakeBroker(ExecutionResult.executed(_executed_order()))
     gate = RiskGateWorker(min_rr=1.5, spread_max_pips=2.0)
-    rt = make_live_runtime(tmp_path, broker, gate, mid=151.30)
-    plan_id = seed_active_plan_ready_to_trigger(rt)
-    # seed の entry を breakout に差し替え (helpers の seed は price_at_or_below 固定
-    # のため、plan 行を直接 update する)。
-    rt._orch.update_plan_conditions(  # このメソッドが無い場合は下の注記参照
-        plan_id, entry_conditions_json=[{"type": "breakout_above", "value": 150.0}],
+    rt = make_live_runtime(tmp_path, broker, gate, mid=151.79)
+    plan_id = seed_active_plan_ready_to_trigger(
+        rt,
+        entry_conditions=[{"type": "breakout_above", "value": 150.0}],
+        action={"sl": 149.0, "tp": 152.0, "rr": 2.0, "confidence": 0.7},
     )
     rt.run_watch_cycle(now=NOW)
     assert broker.calls == []                          # 発注されない
@@ -1201,12 +1242,18 @@ def test_live_gate_rejects_overshoot_with_real_gate(tmp_path):
 
 def test_live_gate_passes_pullback_with_real_gate(tmp_path):
     """押し目 plan は trigger 時実行価格が条件値の有利側 → live gate でも pass して
-    発注される (live で誤 reject しない回帰)。seed 既定: price_at_or_below 150.30 /
-    SL 149.4 / TP 151.5 / mid=150.10 (ask≈150.105) → 実行 RR ≈ 1.98 >= 1.5。"""
+    発注される (live で誤 reject しない回帰)。entry=150.20 / SL=149.4 / TP=151.5:
+    計画 RR = (151.5-150.2)/(150.2-149.4) = 1.625、実行 (ask=150.105) RR =
+    (151.5-150.105)/(150.105-149.4) ≈ 1.98 → min = 1.625 >= 1.5 で pass。
+    trigger は mid 150.10 <= 150.20 で成立 (R3 Medium#1: 既定 seed の entry=150.30
+    は計画 RR 1.33 で実 gate を通らないため明示指定)。"""
     broker = _FakeBroker(ExecutionResult.executed(_executed_order()))
     gate = RiskGateWorker(min_rr=1.5, spread_max_pips=2.0)
     rt = make_live_runtime(tmp_path, broker, gate)
-    plan_id = seed_active_plan_ready_to_trigger(rt)
+    plan_id = seed_active_plan_ready_to_trigger(
+        rt,
+        entry_conditions=[{"type": "price_at_or_below", "value": 150.20}],
+    )
     triggered = rt.run_watch_cycle(now=NOW)
     assert triggered == [plan_id]
     assert len(broker.calls) == 1                      # 発注される
@@ -1214,19 +1261,18 @@ def test_live_gate_passes_pullback_with_real_gate(tmp_path):
 ```
 
 **注記 (実装者向け):**
-- `update_plan_conditions` 相当のメソッドが `OrchestratorStore` に無い場合は、`seed_active_plan_ready_to_trigger` を使わず `orch.create_trade_plan(...)` を直接呼んで breakout entry の plan を seed する (helpers の `seed_active_plan_ready_to_trigger` の実装をコピーして entry_conditions_json だけ変える)。
-- `make_live_runtime` の quote は `bid=mid-0.005, ask=mid+0.005` (helpers L100 付近) — RR 期待値はこの ask で計算する。
-- seed plan の action (`sl=149.4, tp=151.5, rr=2.0`) は helpers の実装を確認して合わせる。
+- `make_live_runtime` の quote は `bid=mid-0.005, ask=mid+0.005` (helpers L100 付近) — RR 期待値はこの ask で計算済み。
+- overshoot テストの spread = 0.01 / pip 0.01 (JPY) = 1.0 pips < 2.0 なので spread reject は立たない。
 
-- [ ] **Step 2: テストを実行**
+- [ ] **Step 3: テストを実行**
 
 Run: `uv run pytest tests/test_taskf_execute_live_trigger.py -v`
 Expected: 新テスト 2 件を含め全 PASS (Task 3/4 実装済みが前提。FAIL するなら phase 配線か gate 共有の欠陥 — テストでなく production を疑う)
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
-git add tests/test_taskf_execute_live_trigger.py
+git add tests/test_taskf_execute_live_trigger.py tests/test_taskf_live_execution_helpers.py
 git commit -m "test(orchestrator): live final gate integration — overshoot reject, pullback pass"
 ```
 
