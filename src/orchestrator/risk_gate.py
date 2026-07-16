@@ -7,7 +7,8 @@ design §5.2 Step5 / §5.3。PlannerAgent が accept した ExecutionPlanDraft �
 reject は 2 種類に分類する:
 - structural (B): halt / bridge unhealthy / market closed / cooldown /
   stale required data。再起案しても直らない構造的問題 → pipeline は再起案しない。
-- fixable (A): SL/TP の side, RR < min, spread 過大, SL/TP 欠落。
+- fixable (A): SL/TP の side, 導出 RR < min (申告 rr でなく derive_rr), spread 過大,
+  SL/TP 欠落。
   ExecutionOpinionAgent が 1 回だけ再起案して直せる可能性がある。
 
 structural を fixable より優先する (両方該当時は structural)。
@@ -131,7 +132,8 @@ class RiskGateWorker:
 
     Parameters
     ----------
-    min_rr : 最低 reward/risk 比。draft.action["rr"] がこれ未満なら fixable reject。
+    min_rr : 最低 reward/risk 比。derive_rr の導出 RR (申告 action["rr"] は不使用)
+        がこれ未満なら fixable reject。導出不能 (entry 候補ゼロ) も fixable reject。
     spread_max_pips : 許容 spread (pips)。quote spread がこれ超で fixable reject。
     pip_size : 旧 API 互換の単一 pip size。pip_size_for が無い pair の fallback。
     pip_size_for : pair → pip_size の解決関数。JPY クロスは 0.01、それ以外 0.0001 が
@@ -156,9 +158,21 @@ class RiskGateWorker:
             return self._pip_size
         return self._pip_size_for(pair)
 
-    def pre_check(self, draft: ExecutionPlanDraft, context: dict[str, Any]) -> RiskGateResult:
+    def pre_check(
+        self,
+        draft: ExecutionPlanDraft,
+        context: dict[str, Any],
+        *,
+        include_executable_price: bool,
+    ) -> RiskGateResult:
         """draft を context に対して検証する。
 
+        include_executable_price (spec 2026-07-16 §2.A phase 分離):
+          - False = planning phase (pipeline)。計画 RR (price 条件値) で判定。
+          - True  = trigger phase (live final gate / shadow precheck)。trigger 時
+            実行価格を候補に含め、breakout オーバーシュートを検出する。
+        既定値は設けない — 呼び出し元に phase の選択を強制する (暗黙 default は
+        planning/live の基準取り違えの再発経路)。
         structural を最優先で判定し、該当すれば即座に structural reject を返す
         (fixable と混在しても structural を返す = §5.3 の「構造的は再起案しない」)。
         """
@@ -166,7 +180,9 @@ class RiskGateWorker:
         if structural:
             return RiskGateResult(passed=False, reject_class=STRUCTURAL, issues=structural)
 
-        fixable = self._fixable_issues(draft, context)
+        fixable = self._fixable_issues(
+            draft, context, include_executable_price=include_executable_price
+        )
         if fixable:
             return RiskGateResult(passed=False, reject_class=FIXABLE, issues=fixable)
 
@@ -195,7 +211,9 @@ class RiskGateWorker:
 
     # ── fixable (A): ExecutionOpinion 再起案で直せる可能性 ────────
 
-    def _fixable_issues(self, draft, context: dict[str, Any]) -> list[str]:
+    def _fixable_issues(
+        self, draft, context: dict[str, Any], *, include_executable_price: bool
+    ) -> list[str]:
         issues: list[str] = []
         action = draft.action
         mid = context.get("quote", {}).get("mid")
@@ -220,12 +238,23 @@ class RiskGateWorker:
                 if tp >= mid:
                     issues.append("short tp must be below entry")
 
-        # RR: 欠落も下限割れも fixable (再起案で直せる)。
-        rr = action.get("rr")
-        if rr is None:
-            issues.append("missing rr")
-        elif rr < self._min_rr:
-            issues.append(f"rr {rr} below min {self._min_rr}")
+        # RR: LLM 申告 (action["rr"]) は信用せず derive_rr の導出値で判定する
+        # (spec 2026-07-16 §2.B — 申告過大の偽 pass / 申告過小の誤 reject を両方塞ぐ)。
+        # 導出不能は楽観通過させず fixable reject (spread unknown と同じ思想)。
+        derived = derive_rr(
+            draft, context.get("quote"),
+            include_executable_price=include_executable_price,
+        )
+        if derived is None:
+            if sl is not None and tp is not None:
+                # sl/tp 欠落時は上の missing issue が既に立っている — entry 起因のみ追加。
+                issues.append("rr underivable (no entry candidate)")
+        elif derived < self._min_rr:
+            claimed = action.get("rr")
+            issues.append(
+                f"derived rr {derived:.2f} below min {self._min_rr}"
+                f" (claimed {claimed if claimed is not None else 'none'})"
+            )
 
         # spread 上限。pip_size は pair 依存 (JPY=0.01, それ以外=0.0001)。
         # spread 不明 (None) は楽観通過させず fixable reject (Codex Low-Medium): 実 spread

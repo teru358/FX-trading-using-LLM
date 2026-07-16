@@ -276,7 +276,7 @@ class PlanningPipeline:
                 )
 
             # accept のみ risk gate (hard veto) へ。
-            risk = self._risk.pre_check(draft, context)
+            risk = self._risk.pre_check(draft, context, include_executable_price=False)
             if risk.passed:
                 return self._commit_plan(
                     run_id, snapshot_id, pair, horizon, draft, final, risk, redraft_count

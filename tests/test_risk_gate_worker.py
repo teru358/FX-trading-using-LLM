@@ -190,6 +190,84 @@ def worker() -> RiskGateWorker:
     return RiskGateWorker(min_rr=1.5, spread_max_pips=2.0, pip_size=0.01)
 
 
+class TestDerivedRrGate:
+    """gate の RR 判定は申告値でなく derive_rr の導出値を使う (spec §2.B)。"""
+
+    def test_overclaimed_rr_rejected_by_derived(self, worker: RiskGateWorker) -> None:
+        # 申告 rr=3.0 だが計画 RR は (150.5-150.0)/(150.0-149.0)=0.5 (tp=150.5)。
+        # 旧実装 (申告比較) では pass していた偽 pass ケース。
+        d = _draft(tp=150.5, rr=3.0)
+        res = worker.pre_check(d, _ctx(), include_executable_price=False)
+        assert res.passed is False
+        assert res.reject_class == "fixable"
+        assert any("derived rr" in i for i in res.issues)
+
+    def test_underclaimed_rr_passes_by_derived(self, worker: RiskGateWorker) -> None:
+        # 申告 rr=0.5 だが計画 RR = 2.0 (>= 1.5)。旧実装では誤 reject していたケース。
+        d = _draft(rr=0.5)
+        res = worker.pre_check(d, _ctx(), include_executable_price=False)
+        assert res.passed is True, res.issues
+
+    def test_missing_rr_claim_passes_when_derivable(self, worker: RiskGateWorker) -> None:
+        # 申告 rr 欠落は reject 理由にしない (導出できるため)。missing rr issue は廃止。
+        d = _draft(rr=None)
+        res = worker.pre_check(d, _ctx(), include_executable_price=False)
+        assert res.passed is True, res.issues
+
+    def test_issue_message_includes_claimed(self, worker: RiskGateWorker) -> None:
+        d = _draft(tp=150.5, rr=3.0)
+        res = worker.pre_check(d, _ctx(), include_executable_price=False)
+        msg = next(i for i in res.issues if "derived rr" in i)
+        assert "claimed 3.0" in msg
+
+    def test_rr_underivable_is_fixable(self, worker: RiskGateWorker) -> None:
+        # price 条件なし + quote なし → 候補ゼロ → underivable reject。
+        # (sl/tp はあるので missing sl/tp issue は立たない)
+        d = ExecutionPlanDraft(
+            direction="long",
+            entry_conditions=[EntryCondition(type="spread_below", value_pips=2.0)],
+            action={"sl": 149.0, "tp": 152.0, "size_policy": "risk", "rr": 2.0, "comment": "x"},
+            invalidation=[InvalidationCondition(type="price_below", value=148.0)],
+            expires_at=datetime(2026, 6, 21, 18, 0, 0, tzinfo=timezone.utc),
+            reasoning_summary="r",
+        )
+        ctx = _ctx()
+        ctx["quote"] = {}  # bid/ask/mid なし (spread も無いが underivable を先に確認)
+        res = worker.pre_check(d, ctx, include_executable_price=True)
+        assert res.passed is False
+        assert res.reject_class == "fixable"
+        assert any("underivable" in i for i in res.issues)
+
+    def test_live_overshoot_rejected(self, worker: RiskGateWorker) -> None:
+        # R1 High#2: breakout=150/SL=149/TP=152、trigger 時 ask≈151.8
+        # → 実行 RR≈0.07 < 1.5 → live phase (include_executable_price=True) で reject。
+        d = ExecutionPlanDraft(
+            direction="long",
+            entry_conditions=[EntryCondition(type="breakout_above", value=150.0)],
+            action={"sl": 149.0, "tp": 152.0, "size_policy": "risk", "rr": 2.0, "comment": "x"},
+            invalidation=[InvalidationCondition(type="price_below", value=148.0)],
+            expires_at=datetime(2026, 6, 21, 18, 0, 0, tzinfo=timezone.utc),
+            reasoning_summary="r",
+        )
+        res = worker.pre_check(d, _ctx(mid=151.79), include_executable_price=True)
+        assert res.passed is False
+        assert any("derived rr" in i for i in res.issues)
+
+    def test_pullback_plan_passes_planning_phase(self, worker: RiskGateWorker) -> None:
+        # R2 High#1: 押し目 plan (entry=149.5 が現在 ask≈151 から遠い) は planning
+        # phase で誤 reject しない (計画 RR = (151.5-149.5)/(149.5-148.5) = 2.0)。
+        d = ExecutionPlanDraft(
+            direction="long",
+            entry_conditions=[EntryCondition(type="price_at_or_below", value=149.5)],
+            action={"sl": 148.5, "tp": 151.5, "size_policy": "risk", "rr": 2.0, "comment": "x"},
+            invalidation=[InvalidationCondition(type="price_below", value=148.0)],
+            expires_at=datetime(2026, 6, 21, 18, 0, 0, tzinfo=timezone.utc),
+            reasoning_summary="r",
+        )
+        res = worker.pre_check(d, _ctx(mid=151.0), include_executable_price=False)
+        assert res.passed is True, res.issues
+
+
 class TestRealContextIntegration:
     """DecisionContextBuilder 由来の risk_state enum と整合すること (Codex High#1)。
 
@@ -203,28 +281,31 @@ class TestRealContextIntegration:
         ctx = _ctx()
         ctx["risk_state"] = DecisionContextBuilder._empty_risk_state()
         ctx["technical"]["status"] = "ok"
-        res = worker.pre_check(_draft(), ctx)
+        res = worker.pre_check(_draft(), ctx, include_executable_price=False)
         assert res.passed is True, res.issues
 
     def test_bridge_ok_is_healthy(self, worker: RiskGateWorker) -> None:
-        res = worker.pre_check(_draft(), _ctx(bridge_health="ok"))
+        res = worker.pre_check(
+            _draft(), _ctx(bridge_health="ok"), include_executable_price=False
+        )
         assert res.passed is True
 
 
 class TestPass:
     def test_clean_long_passes(self, worker: RiskGateWorker) -> None:
-        res = worker.pre_check(_draft(), _ctx())
+        res = worker.pre_check(_draft(), _ctx(), include_executable_price=False)
         assert res.passed is True
         assert res.reject_class is None
         assert res.issues == []
 
     def test_clean_short_passes(self, worker: RiskGateWorker) -> None:
-        draft = _draft(direction="short", sl=152.0, tp=148.0, rr=2.0)
-        res = worker.pre_check(draft, _ctx())
-        assert res.passed is True
+        # 導出 RR = (150-148)/(151-150) = 2.0 (entry 候補 150.0、短方向)。
+        draft = _draft(direction="short", sl=151.0, tp=148.0, rr=2.0)
+        res = worker.pre_check(draft, _ctx(), include_executable_price=False)
+        assert res.passed is True, res.issues
 
     def test_result_is_json_safe(self, worker: RiskGateWorker) -> None:
-        res = worker.pre_check(_draft(), _ctx())
+        res = worker.pre_check(_draft(), _ctx(), include_executable_price=False)
         d = res.to_dict()
         assert d["passed"] is True
         assert d["reject_class"] is None
@@ -233,28 +314,36 @@ class TestPass:
 
 class TestStructuralReject:
     def test_halt_is_structural(self, worker: RiskGateWorker) -> None:
-        res = worker.pre_check(_draft(), _ctx(halt="hard"))
+        res = worker.pre_check(_draft(), _ctx(halt="hard"), include_executable_price=False)
         assert res.passed is False
         assert res.reject_class == "structural"
         assert any("halt" in i for i in res.issues)
 
     def test_bridge_unhealthy_is_structural(self, worker: RiskGateWorker) -> None:
-        res = worker.pre_check(_draft(), _ctx(bridge_health="unhealthy"))
+        res = worker.pre_check(
+            _draft(), _ctx(bridge_health="unhealthy"), include_executable_price=False
+        )
         assert res.passed is False
         assert res.reject_class == "structural"
 
     def test_market_closed_is_structural(self, worker: RiskGateWorker) -> None:
-        res = worker.pre_check(_draft(), _ctx(market_open=False))
+        res = worker.pre_check(
+            _draft(), _ctx(market_open=False), include_executable_price=False
+        )
         assert res.passed is False
         assert res.reject_class == "structural"
 
     def test_cooldown_is_structural(self, worker: RiskGateWorker) -> None:
-        res = worker.pre_check(_draft(), _ctx(cooldown=True))
+        res = worker.pre_check(
+            _draft(), _ctx(cooldown=True), include_executable_price=False
+        )
         assert res.passed is False
         assert res.reject_class == "structural"
 
     def test_stale_technical_is_structural(self, worker: RiskGateWorker) -> None:
-        res = worker.pre_check(_draft(), _ctx(technical_status="stale"))
+        res = worker.pre_check(
+            _draft(), _ctx(technical_status="stale"), include_executable_price=False
+        )
         assert res.passed is False
         assert res.reject_class == "structural"
 
@@ -263,26 +352,28 @@ class TestFixableReject:
     def test_long_sl_above_entry_is_fixable(self, worker: RiskGateWorker) -> None:
         # long で SL が entry(mid) より上 = 不正な side
         draft = _draft(direction="long", sl=151.0, tp=153.0, rr=2.0)
-        res = worker.pre_check(draft, _ctx(mid=150.0))
+        res = worker.pre_check(draft, _ctx(mid=150.0), include_executable_price=False)
         assert res.passed is False
         assert res.reject_class == "fixable"
 
     def test_long_tp_below_entry_is_fixable(self, worker: RiskGateWorker) -> None:
         draft = _draft(direction="long", sl=149.0, tp=149.5, rr=2.0)
-        res = worker.pre_check(draft, _ctx(mid=150.0))
+        res = worker.pre_check(draft, _ctx(mid=150.0), include_executable_price=False)
         assert res.passed is False
         assert res.reject_class == "fixable"
 
     def test_rr_below_min_is_fixable(self, worker: RiskGateWorker) -> None:
-        draft = _draft(rr=0.8)
-        res = worker.pre_check(draft, _ctx())
+        # 計画 RR = (150.5-150.0)/(150.0-149.0) = 0.5 < 1.5
+        res = worker.pre_check(_draft(tp=150.5), _ctx(), include_executable_price=False)
         assert res.passed is False
         assert res.reject_class == "fixable"
-        assert any("rr" in i.lower() for i in res.issues)
+        assert any("derived rr" in i for i in res.issues)
 
     def test_spread_too_wide_is_fixable(self, worker: RiskGateWorker) -> None:
         # spread 0.05 = 5 pips > 2.0 max
-        res = worker.pre_check(_draft(), _ctx(spread=0.05))
+        res = worker.pre_check(
+            _draft(), _ctx(spread=0.05), include_executable_price=False
+        )
         assert res.passed is False
         assert res.reject_class == "fixable"
 
@@ -291,7 +382,9 @@ class TestFixableReject:
 
         実 spread が取れない (bid/ask 無し) 場合に通過させると shadow 評価が楽観化する。
         """
-        res = worker.pre_check(_draft(), _ctx(spread=None))
+        res = worker.pre_check(
+            _draft(), _ctx(spread=None), include_executable_price=False
+        )
         assert res.passed is False
         assert res.reject_class == "fixable"
         assert any("spread" in i.lower() for i in res.issues)
@@ -301,7 +394,7 @@ class TestFixableReject:
         # 0.0003/0.01=0.03 pips と過小評価され見逃す。pair 依存なら 3 pips で reject。
         ctx = _ctx(spread=0.0003)
         ctx["pair"] = "EURUSD=X"
-        res = worker.pre_check(_draft(), ctx)
+        res = worker.pre_check(_draft(), ctx, include_executable_price=False)
         assert res.passed is False
         assert res.reject_class == "fixable"
         assert any("spread" in i.lower() for i in res.issues)
@@ -309,31 +402,23 @@ class TestFixableReject:
     def test_eurusd_tight_spread_passes(self, worker: RiskGateWorker) -> None:
         ctx = _ctx(spread=0.0001)  # 1 pip < 2.0
         ctx["pair"] = "EURUSD=X"
-        res = worker.pre_check(_draft(), ctx)
+        res = worker.pre_check(_draft(), ctx, include_executable_price=False)
         assert res.passed is True, res.issues
 
     def test_missing_sl_is_fixable(self, worker: RiskGateWorker) -> None:
         draft = _draft()
         draft.action.pop("sl")
-        res = worker.pre_check(draft, _ctx())
+        res = worker.pre_check(draft, _ctx(), include_executable_price=False)
         assert res.passed is False
         assert res.reject_class == "fixable"
-
-    def test_missing_rr_is_fixable(self, worker: RiskGateWorker) -> None:
-        # rr 未指定 draft が gate を通過してはならない (Codex Medium#1)
-        draft = _draft()
-        draft.action.pop("rr")
-        res = worker.pre_check(draft, _ctx())
-        assert res.passed is False
-        assert res.reject_class == "fixable"
-        assert any("rr" in i.lower() for i in res.issues)
 
 
 class TestPrecedence:
     def test_structural_beats_fixable(self, worker: RiskGateWorker) -> None:
-        # halt(structural) と rr<min(fixable) が同時 → structural を優先
-        draft = _draft(rr=0.5)
-        res = worker.pre_check(draft, _ctx(halt="hard"))
+        # halt(structural) と 導出 rr<min(fixable, tp=150.5 → 計画 RR 0.5) が同時
+        # → structural を優先
+        draft = _draft(tp=150.5)
+        res = worker.pre_check(draft, _ctx(halt="hard"), include_executable_price=False)
         assert res.reject_class == "structural"
 
     def test_advice_memo_not_touched(self, worker: RiskGateWorker) -> None:
@@ -341,5 +426,5 @@ class TestPrecedence:
         # ctx に advice_memo を入れても結果に影響しないことを確認。
         ctx = _ctx()
         ctx["policy"] = {"advice_memo": "ALWAYS GO LONG"}
-        res = worker.pre_check(_draft(), ctx)
+        res = worker.pre_check(_draft(), ctx, include_executable_price=False)
         assert res.passed is True

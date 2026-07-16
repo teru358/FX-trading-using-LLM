@@ -331,8 +331,10 @@ async def test_final_reject_creates_no_plan(store: OrchestratorStore) -> None:
 
 
 async def test_fixable_reject_redrafts_once_then_accepts(store: OrchestratorStore) -> None:
+    # tp=150.5 → 導出 RR (150.5-150)/(150-149)=0.5 < 1.5 で fixable reject
+    # (gate は申告 rr でなく derive_rr で判定するため tp で下限割れを作る)。
     llm = _ScriptedLLM(
-        [OPP_YES, _draft_json(rr=0.8), FINAL_ACCEPT, _draft_json(rr=2.0), FINAL_ACCEPT]
+        [OPP_YES, _draft_json(tp=150.5), FINAL_ACCEPT, _draft_json(tp=152.0), FINAL_ACCEPT]
     )
     pipe = _make_pipeline(store, llm)
     ctx = _ctx(store)
@@ -346,8 +348,9 @@ async def test_fixable_reject_redrafts_once_then_accepts(store: OrchestratorStor
 
 
 async def test_fixable_reject_twice_stops(store: OrchestratorStore) -> None:
+    # 2 回とも導出 RR 0.5 (< 1.5) の fixable reject → 再起案 1 回で打ち切り。
     llm = _ScriptedLLM(
-        [OPP_YES, _draft_json(rr=0.8), FINAL_ACCEPT, _draft_json(rr=0.8), FINAL_ACCEPT]
+        [OPP_YES, _draft_json(tp=150.5), FINAL_ACCEPT, _draft_json(tp=150.5), FINAL_ACCEPT]
     )
     pipe = _make_pipeline(store, llm)
     ctx = _ctx(store)

@@ -52,7 +52,7 @@ class _FakePositionMgr:
 
 
 class _GatePass:
-    def pre_check(self, draft, context):
+    def pre_check(self, draft, context, **kwargs):
         return RiskGateResult(passed=True)
 
 
@@ -60,7 +60,7 @@ class _GateReject:
     def __init__(self, reject_class):
         self._rc = reject_class
 
-    def pre_check(self, draft, context):
+    def pre_check(self, draft, context, **kwargs):
         return RiskGateResult(passed=False, reject_class=self._rc, issues=["x"])
 
 

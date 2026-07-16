@@ -42,7 +42,9 @@ DRAFT = (
     "{"
     '"direction": "long",'
     '"entry_conditions": [{"type": "price_at_or_below", "value": 150.30}],'
-    '"action": {"sl": 149.40, "tp": 151.50, "size_policy": "risk", "rr": 2.0, "comment": "pullback"},'
+    # sl=149.60: 導出 RR = (151.50-150.30)/(150.30-149.60) ≈ 1.71 >= 1.5 (gate は
+    # 申告 rr でなく derive_rr で判定するため、計画 RR が下限を満たす値にする)。
+    '"action": {"sl": 149.60, "tp": 151.50, "size_policy": "risk", "rr": 2.0, "comment": "pullback"},'
     '"invalidation": [{"type": "price_below", "value": 148.0}],'
     '"expires_at": "2026-12-31T18:00:00",'
     '"reasoning_summary": "pullback long"'

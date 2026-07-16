@@ -970,7 +970,9 @@ class OrchestratorRuntime:
             # trigger_ctx 未提供時 (直接呼出テスト等) のみ assemble に fallback する。
             gate_ctx = trigger_ctx if trigger_ctx is not None else \
                 self._ctx.assemble(pair=pair, now=db_now(), quote=quote)
-            gate = self._risk_gate.pre_check(draft, gate_ctx)
+            gate = self._risk_gate.pre_check(
+                draft, gate_ctx, include_executable_price=True
+            )
             if not gate.passed:
                 # 恒久 (structural)=rejected / 一時 (fixable)=abandoned で intent.status を区別。
                 # どちらも plan は invalidated (terminal)。再発注は新 plan_id で行う (replan)。
@@ -1106,7 +1108,9 @@ class OrchestratorRuntime:
         draft = self._build_execution_draft(plan, reasoning="shadow precheck")
         if draft is None:
             return None
-        return self._risk_gate.pre_check(draft, trigger_ctx).to_dict()
+        return self._risk_gate.pre_check(
+            draft, trigger_ctx, include_executable_price=True
+        ).to_dict()
 
     def _build_execution_draft(self, plan, *, reasoning: str):
         """plan の保存済み条件から ExecutionPlanDraft を復元する (shadow precheck と live
