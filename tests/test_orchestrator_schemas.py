@@ -387,28 +387,17 @@ class TestExecutionPlanDraft:
         assert draft.action["tp"] == 152.0
         assert draft.action["rr"] == 2.0
 
-    def test_action_nan_rejected(self) -> None:
+    @pytest.mark.parametrize("key", ["sl", "tp", "rr"])
+    @pytest.mark.parametrize(
+        "bad", [float("nan"), float("inf"), True, "NaN", "Infinity", "around 149"],
+        ids=["nan", "inf", "bool", "str-nan", "str-inf", "non-numeric-str"],
+    )
+    def test_action_invalid_numeric_rejected(self, key, bad) -> None:
         kw = self._valid_kwargs()
-        kw["action"] = {"sl": float("nan"), "tp": 152.0, "rr": 2.0}
-        with pytest.raises(ValueError, match="sl"):
-            ExecutionPlanDraft(**kw)
-
-    def test_action_infinity_rejected(self) -> None:
-        kw = self._valid_kwargs()
-        kw["action"] = {"sl": 149.0, "tp": float("inf"), "rr": 2.0}
-        with pytest.raises(ValueError, match="tp"):
-            ExecutionPlanDraft(**kw)
-
-    def test_action_bool_rejected(self) -> None:
-        kw = self._valid_kwargs()
-        kw["action"] = {"sl": True, "tp": 152.0, "rr": 2.0}
-        with pytest.raises(ValueError, match="sl"):
-            ExecutionPlanDraft(**kw)
-
-    def test_action_non_numeric_string_rejected(self) -> None:
-        kw = self._valid_kwargs()
-        kw["action"] = {"sl": "around 149", "tp": 152.0, "rr": 2.0}
-        with pytest.raises(ValueError, match="sl"):
+        action = {"sl": 149.0, "tp": 152.0, "rr": 2.0, "comment": "x"}
+        action[key] = bad
+        kw["action"] = action
+        with pytest.raises(ValueError, match=key):
             ExecutionPlanDraft(**kw)
 
     def test_action_missing_keys_allowed(self) -> None:
