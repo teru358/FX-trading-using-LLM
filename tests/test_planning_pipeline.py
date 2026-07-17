@@ -574,6 +574,51 @@ async def test_rr_claim_within_tolerance_still_replaced(store: OrchestratorStore
     assert active[0].action_json["rr"] == 2.0
 
 
+def _no_price_entry_draft_json(rr=2.0) -> str:
+    """price 系 entry 条件を持たない draft (spread_below のみ)。
+    quote に実行価格が無いと derive_rr は None (導出不能) を返す。"""
+    return (
+        "{"
+        '"direction": "long",'
+        '"entry_conditions": [{"type": "spread_below", "value_pips": 2.0}],'
+        f'"action": {{"sl": 149.0, "tp": 152.0, "size_policy": "risk", "rr": {rr}, "comment": "x"}},'
+        '"invalidation": [{"type": "price_below", "value": 148.0}],'
+        '"expires_at": "2026-12-31T18:00:00+00:00",'
+        '"reasoning_summary": "no price entry"'
+        "}"
+    )
+
+
+async def test_rr_not_coerced_when_underivable(store: OrchestratorStore) -> None:
+    # price 系 entry なし + quote に実行価格なし → derive_rr None → coerce せず、
+    # gate の underivable reject に委ねる (spec §2.C 点4)。申告 rr は焼き込まない。
+    # derive_rr None → 申告 rr を焼かず risk gate へ委ねる。gate は rr underivable
+    # (+ spread unknown) で fixable reject → 1 回再起案 (2 巡目 draft も同じ underivable
+    # draft) → 予算切れで reject 終了。よって 2 巡分の draft/final を与える。
+    llm = _ScriptedLLM(
+        [
+            OPP_YES,
+            _no_price_entry_draft_json(rr=2.0),
+            FINAL_ACCEPT,
+            _no_price_entry_draft_json(rr=2.0),
+            FINAL_ACCEPT,
+        ]
+    )
+    pipe = _make_pipeline(store, llm)
+    ctx = _ctx(store)
+    ctx["quote"] = {}  # bid/ask/mid なし → 実行価格候補ゼロ
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    result = await pipe.run(pair="USDJPY=X", context=ctx, run_id=run_id)
+    # (spread_below の spread も無いので spread unknown も併発するが、
+    #  reject に至れば「coerce で握り潰していない」ことは示せる)
+    assert result.outcome == "reject"
+    # reject 理由に derived-None 起因の「rr underivable」が含まれる = derive_rr None
+    # 分岐を通ったことを示す (coerce が申告 rr を焼いて pass させていない)。
+    assert "rr underivable" in result.reason
+    # plan は作られない (coerce で偽の rr を焼いて pass させていない)。
+    assert store.get_active_plans("USDJPY=X") == []
+
+
 async def test_rr_claim_preserved_in_agent_outputs(store: OrchestratorStore) -> None:
     # 申告値は agent_outputs (coerce 前に永続化) に残る — 不一致率の SQL 測定材料
     # (scale_in と同じ検証パターン: test_scale_in_coerced_false_without_position 参照)。
