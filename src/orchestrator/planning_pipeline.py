@@ -196,10 +196,29 @@ class PlanningPipeline:
         max_redraft = 1  # 修正可能 reject / revise は 1 回だけ再起案 (§5.3)
 
         while True:
-            draft = await self._exec.draft(
-                pair=pair, direction=direction, context=context,
-                revision_feedback=feedback,
-            )
+            try:
+                draft = await self._exec.draft(
+                    pair=pair, direction=direction, context=context,
+                    revision_feedback=feedback,
+                )
+            except SchemaParseError as exc:
+                # 監査痕跡 (レビュー Low#6): parse 失敗 draft は _persist_opinion に
+                # 到達しないため、構造化ログで pair / attempt / 例外要約を残す
+                # (モデル変更後の schema 逸脱率追跡用)。
+                logger.warning(
+                    "[ORCH] draft schema parse failed for %s (attempt %d): %s",
+                    pair, redraft_count + 1, exc,
+                )
+                if redraft_count < max_redraft:
+                    # vocabulary 逸脱等は LLM が直せるミス — fixable reject と同じ
+                    # redraft 予算 (max_redraft) で 1 回だけ救済する (spec §2.D)。
+                    redraft_count += 1
+                    feedback = [
+                        f"Previous draft failed schema validation: {exc}. "
+                        "Use ONLY the condition vocabularies listed in the schema."
+                    ]
+                    continue
+                raise  # 予算切れ → 従来通り _FAILSAFE_EXC で failed (挙動互換)
             draft = clamp_draft_ttl(draft, max_hours=self._config.plan_ttl_max_hours)
             # 【順序重要】opinion は決定的 gate の前に LLM の申告値のまま永続化する。
             # coercion 後だと申告値が消え、申告 vs 導出の不一致率 (spec §4:

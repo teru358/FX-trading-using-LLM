@@ -635,11 +635,86 @@ async def test_rr_claim_preserved_in_agent_outputs(store: OrchestratorStore) -> 
     assert draft_outputs[0].structured_payload_json["action"]["rr"] == 9.9
 
 
+def _bad_vocab_draft_json() -> str:
+    """未知 invalidation type を含む draft (SchemaParseError を誘発)。"""
+    return (
+        "{"
+        '"direction": "long",'
+        '"entry_conditions": [{"type": "price_at_or_below", "value": 150.0}],'
+        '"action": {"sl": 149.0, "tp": 152.0, "size_policy": "risk", "rr": 2.0, "comment": "x"},'
+        '"invalidation": [{"type": "boj_intervention_signal"}],'
+        '"expires_at": "2026-12-31T18:00:00+00:00",'
+        '"reasoning_summary": "pullback long"'
+        "}"
+    )
+
+
+# ── draft parse 救済 (spec 2026-07-16 §2.D) ──────────────────
+
+
+async def test_draft_parse_error_redrafts_once_then_succeeds(
+    store: OrchestratorStore, caplog,
+) -> None:
+    llm = _ScriptedLLM([OPP_YES, _bad_vocab_draft_json(), _draft_json(), FINAL_ACCEPT])
+    pipe = _make_pipeline(store, llm)
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    with caplog.at_level("WARNING"):
+        result = await pipe.run(pair="USDJPY=X", context=_ctx(store), run_id=run_id)
+    assert result.outcome == "plan_create"
+    assert result.redraft_count == 1
+    # 監査ログ (レビュー Low#6): pair / attempt / 例外要約。
+    assert any("draft schema parse failed" in r.message for r in caplog.records)
+    # 再起案プロンプトに feedback が入っている (3 呼び出し目 = 再 draft の user msg)。
+    redraft_user = llm.calls[2][-1]["content"]
+    assert "failed schema validation" in redraft_user
+
+
+async def test_draft_parse_error_twice_fails_safe(store: OrchestratorStore) -> None:
+    llm = _ScriptedLLM([OPP_YES, _bad_vocab_draft_json(), _bad_vocab_draft_json()])
+    pipe = _make_pipeline(store, llm)
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    result = await pipe.run(pair="USDJPY=X", context=_ctx(store), run_id=run_id)
+    assert result.outcome == "failed"
+    assert "SchemaParseError" in result.error
+
+
+async def test_parse_budget_shared_with_fixable_redraft(store: OrchestratorStore) -> None:
+    # parse 救済で redraft 予算 (max_redraft=1) を消費した後の fixable reject は
+    # 再起案せず reject 終端 (予算共有)。tp=150.5 → 導出 RR=0.5 < 1.5。
+    llm = _ScriptedLLM([
+        OPP_YES, _bad_vocab_draft_json(), _draft_json(tp=150.5), FINAL_ACCEPT,
+    ])
+    pipe = _make_pipeline(store, llm)
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    result = await pipe.run(pair="USDJPY=X", context=_ctx(store), run_id=run_id)
+    assert result.outcome == "reject"
+    assert result.redraft_count == 1
+
+
+async def test_scan_parse_error_still_fails_safe(store: OrchestratorStore) -> None:
+    # scan (PlannerOpportunity) の parse 失敗は救済されない (従来互換)。
+    llm = _ScriptedLLM(['{"broken": true}'])
+    pipe = _make_pipeline(store, llm)
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    result = await pipe.run(pair="USDJPY=X", context=_ctx(store), run_id=run_id)
+    assert result.outcome == "failed"
+
+
+async def test_final_parse_error_still_fails_safe(store: OrchestratorStore) -> None:
+    # final (PlannerFinalDecision) の parse 失敗も救済されない (従来互換)。
+    llm = _ScriptedLLM([OPP_YES, _draft_json(), '{"broken": true}'])
+    pipe = _make_pipeline(store, llm)
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    result = await pipe.run(pair="USDJPY=X", context=_ctx(store), run_id=run_id)
+    assert result.outcome == "failed"
+
+
 # ── fail-safe ─────────────────────────────────────────────────
 
 
 async def test_parse_error_yields_failed_no_plan(store: OrchestratorStore) -> None:
-    llm = _ScriptedLLM([OPP_YES, "not json at all"])  # draft parse error
+    # draft parse 失敗は 1 回 redraft 救済される (spec 2026-07-16 §2.D) — 2 回連続で failed。
+    llm = _ScriptedLLM([OPP_YES, "not json at all", "still not json"])
     pipe = _make_pipeline(store, llm)
     ctx = _ctx(store)
     run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
