@@ -547,6 +547,49 @@ async def test_opposite_direction_position_is_not_scale_in(
     assert active[0].scale_in is False
 
 
+# ── rr coerce (spec 2026-07-16 §2.C) ─────────────────────────
+
+
+async def test_rr_claim_always_replaced_with_derived(store: OrchestratorStore) -> None:
+    # 申告 rr=9.9 (乖離>10%) → plan の action.rr は計画 RR (条件値 150 基準、
+    # planning phase は実行価格を含めない) = (152-150)/(150-149) = 2.0 に置換。
+    llm = _ScriptedLLM([OPP_YES, _draft_json(rr=9.9), FINAL_ACCEPT])
+    pipe = _make_pipeline(store, llm)
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    result = await pipe.run(pair="USDJPY=X", context=_ctx(store), run_id=run_id)
+    assert result.outcome == "plan_create"
+    active = store.get_active_plans("USDJPY=X")
+    assert active[0].action_json["rr"] == 2.0
+
+
+async def test_rr_claim_within_tolerance_still_replaced(store: OrchestratorStore) -> None:
+    # 乖離 <=10% でも置換は無条件 (レビュー Medium#3)。ログ発火だけが閾値依存。
+    # 申告 2.05 (乖離 2.5%) → 導出 2.0 に置換される。
+    llm = _ScriptedLLM([OPP_YES, _draft_json(rr=2.05), FINAL_ACCEPT])
+    pipe = _make_pipeline(store, llm)
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    result = await pipe.run(pair="USDJPY=X", context=_ctx(store), run_id=run_id)
+    assert result.outcome == "plan_create"
+    active = store.get_active_plans("USDJPY=X")
+    assert active[0].action_json["rr"] == 2.0
+
+
+async def test_rr_claim_preserved_in_agent_outputs(store: OrchestratorStore) -> None:
+    # 申告値は agent_outputs (coerce 前に永続化) に残る — 不一致率の SQL 測定材料
+    # (scale_in と同じ検証パターン: test_scale_in_coerced_false_without_position 参照)。
+    llm = _ScriptedLLM([OPP_YES, _draft_json(rr=9.9), FINAL_ACCEPT])
+    pipe = _make_pipeline(store, llm)
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+    result = await pipe.run(pair="USDJPY=X", context=_ctx(store), run_id=run_id)
+    assert result.outcome == "plan_create"
+    draft_outputs = [
+        o for o in store.get_agent_outputs(run_id)
+        if o.output_type == "execution_draft"
+    ]
+    assert len(draft_outputs) == 1
+    assert draft_outputs[0].structured_payload_json["action"]["rr"] == 9.9
+
+
 # ── fail-safe ─────────────────────────────────────────────────
 
 

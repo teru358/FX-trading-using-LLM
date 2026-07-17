@@ -34,7 +34,7 @@ from src.llm.claude_cli_client import ClaudeCliUsageLimitError
 from src.llm.client import CircuitOpenError
 from src.orchestrator.execution_opinion_agent import ExecutionOpinionAgent
 from src.orchestrator.planner_agent import PlannerAgent, PromptBudgetExceeded
-from src.orchestrator.risk_gate import RiskGateWorker
+from src.orchestrator.risk_gate import RiskGateWorker, derive_rr
 from src.orchestrator.schemas import (
     ExecutionPlanDraft,
     PlannerFinalDecision,
@@ -245,6 +245,27 @@ class PlanningPipeline:
                     draft, scale_in=same_dir,
                     new_signal_evidence=draft.new_signal_evidence if same_dir else None,
                 )
+
+            # P-2c: rr の正本も決定的導出 (spec 2026-07-16 §2.C)。申告値は
+            # _persist_opinion で agent_outputs に保存済み — plan には導出値を
+            # 保存する (置換は無条件、レビュー Medium#3)。乖離 >10% のみログ
+            # (不一致メトリクスの発火閾値)。導出不能時は coerce せず gate の
+            # underivable reject に委ねる。planning phase なので計画 RR
+            # (include_executable_price=False) — plan に保存する rr は計画値で
+            # あるべきで、planning 時点の一時的な実勢を焼き込まない。
+            derived_rr = derive_rr(
+                draft, context.get("quote"), include_executable_price=False
+            )
+            if derived_rr is not None:
+                claimed_rr = draft.action.get("rr")
+                if claimed_rr is None or abs(claimed_rr - derived_rr) > 0.10 * derived_rr:
+                    logger.info(
+                        "[ORCH] rr claim overridden for %s: llm=%s derived=%.2f",
+                        pair, claimed_rr, derived_rr,
+                    )
+                new_action = dict(draft.action)
+                new_action["rr"] = round(derived_rr, 2)
+                draft = replace(draft, action=new_action)
 
             final = await self._planner.final_decision(
                 pair=pair, context=context, draft=draft
