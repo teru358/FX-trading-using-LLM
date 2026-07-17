@@ -9,7 +9,7 @@
 
 ## 0. 背景 — 稼働ログ調査で判明した 3 問題
 
-paper 稼働中 (Fiosracht, branch `feat/plan-quality-rr`) の `logs/finance.log` / `logs/activity.log` を実測して 3 つの観測性の穴を特定した。3 件とも執行安全性には影響しないが、運用時の可視性を大きく損なう。
+paper 稼働中 (Fiosracht, branch `feat/plan-quality-rr`) の `logs/finance.log` / `logs/activity.log` を実測して 3 つの観測性の穴を特定した。3 件とも既存挙動としては執行安全性に影響しないが、運用時の可視性を大きく損なう。**本 spec の修正 (特に §3 の news キャッシュ) は、実装を誤ると live trigger 判断を変えうる** — 失敗時セマンティクス (stale-if-error, §3.2/§3.7) を正しく守ることが挙動不変の条件になる。
 
 ### 問題 A: planning が「何を判断したか」がログに出ない
 
@@ -98,12 +98,26 @@ cycle 終端で決定種別に応じ INFO 1 行:
 
 **対応:**
 
-1. `PipelineResult` に **`reason: str`** (全 outcome で必ず設定・ログ用の正本) と **`derived_rr: float | None`** (plan_create/reject で設定) を持たせる。
+1. `PipelineResult` に **`reason: str`** (全 outcome で必ず設定・ログ用の正本) と **`derived_rr: float | None`** を持たせる。**`derived_rr` は RR を導出済みの経路でのみ値を持ち、導出前 reject では None** (Low 指摘): scale-in evidence 不足 reject (planning_pipeline.py:235) は `derive_rr` 呼び出し前に return するため None。risk reject / plan_create は導出済みなので値あり。ログは `rr=<値>` を出すのは derived_rr が None でないときだけ。
 2. **全 return 経路** (failed / direct_hold ×2 / reject ×N / plan_create) で `reason` を明示設定する。既存の `reasoning_summary` と揃える (direct_hold は「no opportunity」「position/current_plan unavailable」等、reject は planner/risk それぞれの理由)。
 3. `reason` は**改行除去 + 長さ制限** (例: 200 字で truncate)。ログ 1 行を壊さない。
 4. **phase1 observe** (pipeline 未注入) は `PipelineResult` を経由しないため、runtime.py:264 の分岐で直接 `[ORCH] planning result: ... decision=direct_hold reason=phase1 observe` を出す。
 5. plan_create は既存の可視ログ (`📋 plan created`) と二重に出さない。既存ログを result 契約に寄せるか、既存を残して result 行だけ追加するかは実装時に統一 (どちらか一方)。
 6. ログ出力は既存の `_notify_planning_result(pair, result)` (runtime.py:263) と同じ位置で行い、通知とログの正本を一元化する (再 query しない)。
+
+**A-3b. ライフサイクル契約 — start 1 件に terminal result 1 件 (Medium 指摘):** `PipelineResult.reason` を全 outcome で定義したが、それだけでは result ログが全経路で保証されない:
+
+- **pipeline 到達前の例外** (quote provider 失敗 / context build 失敗 / snapshot 保存失敗) は `PipelineResult` が存在しない (runtime.py:223 の try 内)。現状 except (runtime.py:276) は `finish_run(failed)` するだけでログを出さない。
+- **pipeline が `outcome="failed"` を返した経路** (runtime.py:248) は `_notify_planning_result` を呼ばない (else 側 runtime.py:259 でのみ呼ぶ)。
+
+→ **契約: `[ORCH] planning start` を 1 件出したら、必ず対応する `[ORCH] planning result` を 1 件出す** (成功 hold/reject/create・pipeline failed・pipeline 到達前 error のすべて)。実装:
+
+- `run_planning_cycle` の各 pair 処理を、result ログを必ず 1 回出す構造にする (finally か、正常/failed/except の 3 経路すべてで出す)。
+- pipeline 到達前 error は `[ORCH] planning result: pair=X decision=error reason=<例外要約>` を出す。
+- pipeline failed は `decision=failed reason=<PipelineResult.error>`。
+- reason は A-3 と同じ改行除去 + 長さ制限を通す。
+
+テスト対象: quote provider 失敗 / context builder 失敗 / pipeline failed / 正常 hold・reject・create の各ケースで、start 1 件に result がちょうど 1 件対応すること。
 
 **A-5. detector API 変更 — trigger 理由の受け渡し** (material_landing.py)
 
@@ -131,8 +145,9 @@ watch loop は 1sec tick で回るため、ここに cycle ログを足すと ac
 ### 2.4 テスト
 
 - caplog で `run_planning_cycle` が decision 種別ごと (direct_hold / reject / plan_create / failed / phase1 observe) に正しい文言・レベルで planning start / result を出すことを検証。
+- **ライフサイクル (A-3b)**: quote provider 失敗 / context builder 失敗 / pipeline failed / 正常 hold・reject・create の各ケースで、start 1 件に result がちょうど 1 件対応することを検証。
 - `PipelineResult.reason` が全 return 経路で non-None・改行なし・長さ制限内であることを検証。
-- `PipelineResult.derived_rr` が plan_create/reject で設定されることを検証。
+- `PipelineResult.derived_rr` が plan_create/risk reject で値を持ち、scale-in evidence 不足 reject では None であることを検証。
 - `pairs_to_plan` が `PlanningTarget(pair, triggers)` を返し、複数 material 該当時に全 trigger を含むことを検証 (短絡しない)。
 - trigger 理由生成で news 集計が余分に走らないことを検証 (aggregate 呼び出し回数)。
 - `[ORCH]` が `_ACTIVITY_PREFIXES` に含まれることを検証 (registry 登録の回帰防止)。
@@ -149,7 +164,13 @@ watch loop (1sec) が保持中 plan ごとに毎 tick news をフル集計する
 
 `make_news_provider` (context_builder.py:399) が返す `NewsProvider` を **TTL キャッシュでラップ**する。
 
-**並行実行と失敗時の設計 (Medium 指摘対応):** planning loop と watch loop は**別スレッド**で同時に動き、同じ context builder / news_provider を共有する (runtime.py:1297 でスレッド起動)。単純 dict キャッシュだと (a) TTL 境界で両スレッドが同時 miss して二重集計する、(b) inner が例外だとキャッシュされず `_build_news` (context_builder.py:269) が毎秒例外を記録して再試行する — `[ORCH]` を activity 対象にするため障害時に新たなログ洪水になる。→ **pair 単位 lock (single-flight) + negative cache** を仕様に含める。
+**並行実行と失敗時の設計 (Medium/High 指摘対応):** planning loop と watch loop は**別スレッド**で同時に動き、同じ context builder / news_provider を共有する (runtime.py:1297 でスレッド起動)。単純 dict キャッシュだと (a) TTL 境界で両スレッドが同時 miss して二重集計する、(b) inner が例外だとキャッシュされず `_build_news` (context_builder.py:269) が毎秒例外を記録して再試行する — `[ORCH]` を activity 対象にするため障害時に新たなログ洪水になる。→ **pair 単位 lock (single-flight) + stale-if-error** を仕様に含める。
+
+**失敗時セマンティクスの制約 (High 指摘):** 失敗時に `_empty_news()` (sentiment=None) を「成功」として返してはいけない。`_build_news` (context_builder.py:274) がそれを取得成功とみなし `_ref.as_of = now` を付け、`_news_conflicts` (runtime.py:776) は sentiment=None で conflict=False になる。**結果、直前まで反対方向の強い news があっても refresh 失敗後の TTL 間だけ news_conflict による失効が無効化され、entry 成立時に trigger へ進んでしまう** — live trigger 判断に影響する (「執行安全性に影響しない」前提の違反)。したがって:
+
+- **stale-if-error**: 過去の成功値があれば、失敗時はその**古い成功値をそのまま返す** (as_of は実際の成功取得時刻を維持)。→ 直前の逆行 news は保持され、news_conflict は生き続ける。
+- **成功値が一度も無い場合**: `status="unavailable"` を明示した news ブロックを返す (`_empty_news` と区別できる標識)。→ `_build_news` / watch 側が「取得できていない」と識別できる。
+- **例外ログは negative TTL ごとに 1 回**、例外内容付きで記録 (毎秒ログ洪水を断つ)。
 
 ```python
 def make_cached_news_provider(
@@ -157,12 +178,12 @@ def make_cached_news_provider(
     negative_ttl_seconds: float, clock: Callable[[], datetime],
 ) -> NewsProvider:
     """pair 単位で (value, fetched_at) を保持し、TTL 内は再集計せず返す。
-    pair 単位 lock で single-flight (同時 miss の二重集計を防ぐ)。
-    inner 例外は negative cache し、短時間は再集計/再ログしない。"""
-    cache: dict[str, tuple[dict, datetime]] = {}
-    neg: dict[str, datetime] = {}                 # pair -> 直近失敗時刻
-    locks: dict[str, Lock] = defaultdict(Lock)    # pair 単位
-    guard = Lock()                                # locks/neg 辞書自体の保護
+    pair 単位 lock で single-flight。inner 例外時は stale-if-error
+    (直近成功値を返す) / 成功値が無ければ status='unavailable'。"""
+    cache: dict[str, tuple[dict, datetime]] = {}   # pair -> (成功 news, 成功時刻)
+    neg: dict[str, datetime] = {}                  # pair -> 直近ログ時刻 (negative TTL 制御)
+    locks: dict[str, Lock] = defaultdict(Lock)
+    guard = Lock()
 
     def provider(pair: str) -> dict:
         now = clock()
@@ -171,19 +192,21 @@ def make_cached_news_provider(
             return hit[0]
         with guard:
             lock = locks[pair]
-        with lock:                                # single-flight: 同 pair は 1 本
-            hit = cache.get(pair)                 # lock 取得後に再チェック (先行者が埋めた)
+        with lock:                                 # single-flight
+            hit = cache.get(pair)
             if hit is not None and (now - hit[1]).total_seconds() < ttl_seconds:
                 return hit[0]
-            failed_at = neg.get(pair)
-            if failed_at is not None and (now - failed_at).total_seconds() < negative_ttl_seconds:
-                return DecisionContextBuilder._empty_news()   # 失敗を short-cache・再集計しない
             try:
-                value = inner(pair)               # ← ここでのみ aggregate_news_sentiment が走る
-            except Exception:
-                neg[pair] = now
-                logger.warning("[ORCH] news aggregate failed for %s — negative-cached", pair)
-                return DecisionContextBuilder._empty_news()
+                value = inner(pair)                # ← ここでのみ aggregate_news_sentiment が走る
+            except Exception as exc:
+                last_log = neg.get(pair)
+                if last_log is None or (now - last_log).total_seconds() >= negative_ttl_seconds:
+                    logger.warning("[ORCH] news aggregate failed for %s: %s", pair, exc)
+                    neg[pair] = now
+                if hit is not None:
+                    return hit[0]                  # stale-if-error: 直近成功値を維持
+                return {"sentiment_score": None, "confidence": None,
+                        "top_reasons": [], "status": "unavailable"}
             cache[pair] = (value, now)
             neg.pop(pair, None)
             return value
@@ -191,10 +214,24 @@ def make_cached_news_provider(
 ```
 
 - **キャッシュキー = pair**。値 = §7 news ブロック dict (`sentiment_score` / `confidence` / `top_reasons`)。
-- **成功 TTL 既定 = 60s** / **negative TTL 既定 = 30s** (config 化: `OrchestratorConfig.entry.news_cache_ttl_seconds: float = 60.0` / `news_cache_negative_ttl_seconds: float = 30.0`。`__post_init__` で有限 > 0 を検証)。
-- **例外は provider 内で握って negative cache 化**する。inner (`make_news_provider`) 側は従来通り集計するが、`_build_news` の毎秒例外ループは cache 層で断つ。`_build_news` 側の既存 try/except (context_builder.py:269) はそのまま (二重防御)。
+- **成功 TTL 既定 = 60s** / **negative(ログ) TTL 既定 = 30s** (config 化: `OrchestratorConfig.entry.news_cache_ttl_seconds: float = 60.0` / `news_cache_negative_ttl_seconds: float = 30.0`。`__post_init__` で有限 > 0 を検証)。
+- **stale 値には新しい as_of を付けない**: stale 返却時は cache に保存した成功値 dict をそのまま返す。`_build_news` はそれを raw として受け `_ref.as_of` を **今の now でなく成功時刻**にする必要がある → **§3.6 で `_build_news` を stale/unavailable 対応に変更**する。
 - **clock は注入** (db_now を渡す)。テストで時間を進められるよう関数引数にする。Date.now 直呼びしない。
 - ラップ位置は bootstrap で `make_news_provider` の戻りを `make_cached_news_provider` で包む 1 箇所。`DecisionContextBuilder` に渡る provider がキャッシュ済みになる。
+
+### 3.6 `_build_news` の stale/unavailable 対応 (High 指摘)
+
+現状 `_build_news` (context_builder.py:256) は「provider 成功 → `_ref.as_of = now`」「provider 例外 → 空 news + `_ref=None`」の 2 分岐。cached provider は例外を投げず値を返すため、news ブロックに **取得成否と鮮度**を持たせて分岐させる:
+
+- provider が返す dict に **`as_of` (成功取得時刻・ISO) と `status`** を含める設計に統一する。成功時は cached provider が `as_of=成功時刻` を付与し、stale 返却でも古い as_of を維持する (現在時刻で上書きしない)。
+- `_build_news` は provider 応答の `as_of` をそのまま `_ref.as_of` に使う (今の now で上書きしない)。→ trace 上「いつ取得した news か」が正しく残る。
+- `status="unavailable"` の news は sentiment=None のまま通すが、`_ref` に `status="unavailable"` を残す。
+
+### 3.7 watch の news_conflict と unavailable の扱い
+
+- **stale 値** (直近成功値) が返る場合: `_news_conflicts` は従来通り生の sentiment_score で判定する。→ 直前の逆行 news は保持され失効が効く (High 指摘の中核)。
+- **`status="unavailable"`** (成功値なし) の場合: sentiment=None なので `_news_conflicts` は False。これは「news で失効させる根拠が無い」= 従来の空 news と同じ挙動で、**block しない**方針を明示採用する (news 取得不能を理由に active plan を止めない — technical unavailable と同じ fail-open 思想)。この選択を spec 上で明示的に決定とする。
+- 逆に「news 取得不能中は保守的に conflict 扱いで trigger を止める」設計は採らない (news は判断材料の 1 つで、取得不能で執行を全停止するのは過剰・リスク哲学 [[finance_risk_management_philosophy]])。
 
 ### 3.3 build 経路との関係
 
@@ -217,7 +254,9 @@ def make_cached_news_provider(
 - TTL 超過後は再集計されることを clock を進めて検証。
 - material provider の impact + key (+commit_seen) 連続呼び出しで aggregate が 1 回に集約されることを検証。
 - **並行テスト**: 2 スレッドが同時に同 pair を miss しても inner が 1 回しか呼ばれない (single-flight)。
-- **失敗テスト**: inner が例外を投げても TTL(negative) 内で 1 回しか呼ばれない・provider は空 news を返す・例外ログが毎回出ない (negative cache)。
+- **stale-if-error テスト (High)**: 成功して sentiment を得た後、inner が例外を投げても直近成功値が返る・as_of が成功時刻を維持する。→ **「成功後の refresh 失敗でも news_conflict が消えない」**: 逆行 news で成功 → refresh 失敗 → `_news_conflicts` が引き続き True を返すことを検証。
+- **unavailable テスト**: 一度も成功していない状態で inner 例外 → `status="unavailable"` news が返る・sentiment=None。
+- **ログ抑制テスト**: inner が連続失敗しても例外ログは negative TTL ごとに 1 回だけ。
 
 ---
 
@@ -256,7 +295,7 @@ watch loop (1sec)
 
 ## 6. 影響範囲・非互換
 
-- **挙動不変性:** news キャッシュは値を最大 TTL 秒古くするだけ。watch の news_conflict 判定は 60s 粒度で更新 (現状の毎秒判定は過剰)。planning material 判定は 60s cadence と同期するので実質不変。
+- **挙動不変性:** news キャッシュは成功値を最大 TTL 秒古くするだけ。watch の news_conflict 判定は 60s 粒度で更新 (現状の毎秒判定は過剰)。planning material 判定は 60s cadence と同期するので実質不変。**失敗時は stale-if-error で直近成功値を維持する** (空 news に化かさない) ため、refresh 失敗でも news_conflict による失効は生き続ける — live trigger 判断を変えない (High 指摘の要件)。一度も成功していない場合のみ sentiment=None (unavailable) となり、これは従来の空 news と同じ fail-open 挙動 (§3.7 で明示決定)。
 - **ログ増減:** activity.log に planning start/result が増える (60s ごと数行) が、watch 由来 [AGGREGATE] が pair あたり毎秒 → 60s に 1 回へ激減。差引で activity.log は読みやすくなる。
 - **config 追加:** `news_cache_ttl_seconds` (既定 60s) / `news_cache_negative_ttl_seconds` (既定 30s)。未設定時は既定で挙動する (後方互換)。
 - **detector 戻り値変更:** `pairs_to_plan` の戻りが `list[str]` → `list[PlanningTarget]`。呼び出しは runtime 1 箇所のみ (内部 API・外部契約でない)。テストの直接呼び出しがあれば追従。
@@ -267,12 +306,14 @@ watch loop (1sec)
 ## 7. 実装順 (概略・詳細は plan で)
 
 1. logging_setup に `[ORCH]` 登録 + テスト (A-1)
-2. news TTL キャッシュ ラッパ (single-flight + negative cache) + config 2 値 + bootstrap 配線 + テスト (B, B-2)
-3. `PipelineResult` に reason/derived_rr 追加 + 全 return 経路で設定 + reason 正規化 (改行除去/truncate) + テスト (A-3 データ契約)
-4. detector `pairs_to_plan` → `PlanningTarget` 変更 + 呼び出し側追従 + テスト (A-5)
-5. planning start / result ログ (既存 `_notify_planning_result` 位置に相乗り) + phase1 直接ログ + テスト (A-2, A-3)
-6. フェーズ遷移 DEBUG 整理 (A-4)
+2. news TTL キャッシュ ラッパ (single-flight + stale-if-error + unavailable + ログ抑制) + config 2 値 + テスト (B §3.2)
+3. `_build_news` を as_of/status ベースに変更 (stale as_of 維持・unavailable 標識) + テスト (§3.6/§3.7) + bootstrap 配線
+4. material landing 経路のキャッシュ (B-2 §3.4) + テスト
+5. `PipelineResult` に reason/derived_rr 追加 + 全 return 経路で設定 + reason 正規化 + テスト (A-3 データ契約)
+6. detector `pairs_to_plan` → `PlanningTarget` 変更 + 呼び出し側追従 + テスト (A-5)
+7. planning start / result ログ + ライフサイクル契約 (start:result = 1:1) + phase1・failed・到達前error 全経路 + テスト (A-2, A-3, A-3b)
+8. フェーズ遷移 DEBUG 整理 (A-4)
 
-順序根拠: 3・4 (データ契約 + trigger 受け渡し) を 5 (ログ本体) より前に確定させる — ログの正本が揃ってから出力を書く。
+順序根拠: 2・3 (キャッシュ失敗セマンティクス) を最優先で正しくする — live trigger 判断に影響する唯一の箇所 (High)。5・6 (データ契約 + trigger 受け渡し) を 7 (ログ本体) より前に確定させ、ログの正本が揃ってから出力を書く。
 
 各ステップ TDD (RED → GREEN)。finance の uv/pytest は WSL 内実行厳守 ([[finance_uv_wsl_only]])。
