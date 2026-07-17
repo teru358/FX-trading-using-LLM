@@ -170,7 +170,8 @@ class OrchestratorRuntime:
         # shadow_triggers に残すだけ — Phase 2 は発注しないため pre_check の reject でも
         # trigger 記録は行う (判断品質データ収集が目的)。
         self._risk_gate = risk_gate or RiskGateWorker(
-            spread_max_pips=config.entry.spread_max_pips
+            min_rr=config.entry.min_rr,
+            spread_max_pips=config.entry.spread_max_pips,
         )
         self._stop = threading.Event()
         self._planning_paused = False  # planning loop の閉場ゲート状態 (遷移ログ用)
