@@ -168,70 +168,84 @@ watch loop (1sec) が保持中 plan ごとに毎 tick news をフル集計する
 
 **失敗時セマンティクスの制約 (High 指摘):** 失敗時に `_empty_news()` (sentiment=None) を「成功」として返してはいけない。`_build_news` (context_builder.py:274) がそれを取得成功とみなし `_ref.as_of = now` を付け、`_news_conflicts` (runtime.py:776) は sentiment=None で conflict=False になる。**結果、直前まで反対方向の強い news があっても refresh 失敗後の TTL 間だけ news_conflict による失効が無効化され、entry 成立時に trigger へ進んでしまう** — live trigger 判断に影響する (「執行安全性に影響しない」前提の違反)。したがって:
 
-- **stale-if-error**: 過去の成功値があれば、失敗時はその**古い成功値をそのまま返す** (as_of は実際の成功取得時刻を維持)。→ 直前の逆行 news は保持され、news_conflict は生き続ける。
-- **成功値が一度も無い場合**: `status="unavailable"` を明示した news ブロックを返す (`_empty_news` と区別できる標識)。→ `_build_news` / watch 側が「取得できていない」と識別できる。
-- **例外ログは negative TTL ごとに 1 回**、例外内容付きで記録 (毎秒ログ洪水を断つ)。
+- **failure TTL で再集計を止める (High 指摘)**: `inner(pair)` を**呼ぶ前**に直近失敗時刻を判定し、negative TTL 内なら inner を呼ばず stale/unavailable を返す。→ 計算 (RAG 集計) とログの**両方**を止める。失敗記録はログ頻度制御だけでなく再集計抑止に使う。
+- **stale-if-error**: 過去の成功値があれば、失敗中はその**古い成功値をそのまま返す** (as_of は実際の成功取得時刻を維持)。→ 直前の逆行 news は保持され、news_conflict は生き続ける。
+- **成功値が一度も無い場合**: `status="unavailable"` を明示した news ブロックを返す。→ `_build_news` / watch 側が「取得できていない」と識別できる。
+- **成功で failure 状態を解除**する。
+
+**provider 返却型 (3 状態):** cached provider は §7 news dict に `status` と `as_of` を必ず付けて返す:
+
+- `status="ok"`: 新規取得成功。`as_of` = 取得時刻。
+- `status="stale"`: refresh 失敗で前回成功値を返却。`as_of` = **前回成功時刻** (変更しない)。sentiment/confidence/top_reasons は前回成功値。
+- `status="unavailable"`: 成功履歴なし。sentiment=None / confidence=None / top_reasons=[] / `as_of=None`。
 
 ```python
 def make_cached_news_provider(
     inner: NewsProvider, *, ttl_seconds: float,
     negative_ttl_seconds: float, clock: Callable[[], datetime],
 ) -> NewsProvider:
-    """pair 単位で (value, fetched_at) を保持し、TTL 内は再集計せず返す。
-    pair 単位 lock で single-flight。inner 例外時は stale-if-error
-    (直近成功値を返す) / 成功値が無ければ status='unavailable'。"""
+    """pair 単位で成功値 (news dict, 成功時刻) を保持。TTL 内は再集計せず返す。
+    pair 単位 lock で single-flight。failure TTL 内は inner を呼ばず
+    stale (前回成功値) / 成功履歴なしは unavailable。返却は status+as_of 付き。"""
     cache: dict[str, tuple[dict, datetime]] = {}   # pair -> (成功 news, 成功時刻)
-    neg: dict[str, datetime] = {}                  # pair -> 直近ログ時刻 (negative TTL 制御)
+    failures: dict[str, datetime] = {}             # pair -> 直近失敗時刻 (再集計 + ログ抑止)
     locks: dict[str, Lock] = defaultdict(Lock)
     guard = Lock()
+
+    def _ok(value: dict, at: datetime) -> dict:
+        return {**value, "status": "ok", "as_of": at.isoformat()}
+
+    def _stale(value: dict, at: datetime) -> dict:
+        return {**value, "status": "stale", "as_of": at.isoformat()}
+
+    def _unavailable() -> dict:
+        return {"sentiment_score": None, "confidence": None,
+                "top_reasons": [], "status": "unavailable", "as_of": None}
 
     def provider(pair: str) -> dict:
         now = clock()
         hit = cache.get(pair)
         if hit is not None and (now - hit[1]).total_seconds() < ttl_seconds:
-            return hit[0]
+            return _ok(hit[0], hit[1])
         with guard:
             lock = locks[pair]
         with lock:                                 # single-flight
             hit = cache.get(pair)
             if hit is not None and (now - hit[1]).total_seconds() < ttl_seconds:
-                return hit[0]
+                return _ok(hit[0], hit[1])
+            # failure TTL 内: inner を呼ばない (計算もログも止める)。
+            failed_at = failures.get(pair)
+            if failed_at is not None and (now - failed_at).total_seconds() < negative_ttl_seconds:
+                return _stale(hit[0], hit[1]) if hit is not None else _unavailable()
             try:
                 value = inner(pair)                # ← ここでのみ aggregate_news_sentiment が走る
             except Exception as exc:
-                last_log = neg.get(pair)
-                if last_log is None or (now - last_log).total_seconds() >= negative_ttl_seconds:
-                    logger.warning("[ORCH] news aggregate failed for %s: %s", pair, exc)
-                    neg[pair] = now
-                if hit is not None:
-                    return hit[0]                  # stale-if-error: 直近成功値を維持
-                return {"sentiment_score": None, "confidence": None,
-                        "top_reasons": [], "status": "unavailable"}
+                failures[pair] = now               # 再集計抑止の起点 + 1 回だけログ
+                logger.warning("[ORCH] news aggregate failed for %s: %s", pair, exc)
+                return _stale(hit[0], hit[1]) if hit is not None else _unavailable()
             cache[pair] = (value, now)
-            neg.pop(pair, None)
-            return value
+            failures.pop(pair, None)               # 成功で failure 解除
+            return _ok(value, now)
     return provider
 ```
 
-- **キャッシュキー = pair**。値 = §7 news ブロック dict (`sentiment_score` / `confidence` / `top_reasons`)。
-- **成功 TTL 既定 = 60s** / **negative(ログ) TTL 既定 = 30s** (config 化: `OrchestratorConfig.entry.news_cache_ttl_seconds: float = 60.0` / `news_cache_negative_ttl_seconds: float = 30.0`。`__post_init__` で有限 > 0 を検証)。
-- **stale 値には新しい as_of を付けない**: stale 返却時は cache に保存した成功値 dict をそのまま返す。`_build_news` はそれを raw として受け `_ref.as_of` を **今の now でなく成功時刻**にする必要がある → **§3.6 で `_build_news` を stale/unavailable 対応に変更**する。
+- **キャッシュキー = pair**。cache 保存値 = §7 news ブロック dict (`sentiment_score` / `confidence` / `top_reasons`)。status/as_of は返却時に付与 (cache には生値のみ保存)。
+- **成功 TTL 既定 = 60s** / **negative(失敗) TTL 既定 = 30s** (config 化: `OrchestratorConfig.entry.news_cache_ttl_seconds: float = 60.0` / `news_cache_negative_ttl_seconds: float = 30.0`。`__post_init__` で有限 > 0 を検証)。
 - **clock は注入** (db_now を渡す)。テストで時間を進められるよう関数引数にする。Date.now 直呼びしない。
 - ラップ位置は bootstrap で `make_news_provider` の戻りを `make_cached_news_provider` で包む 1 箇所。`DecisionContextBuilder` に渡る provider がキャッシュ済みになる。
 
 ### 3.6 `_build_news` の stale/unavailable 対応 (High 指摘)
 
-現状 `_build_news` (context_builder.py:256) は「provider 成功 → `_ref.as_of = now`」「provider 例外 → 空 news + `_ref=None`」の 2 分岐。cached provider は例外を投げず値を返すため、news ブロックに **取得成否と鮮度**を持たせて分岐させる:
+現状 `_build_news` (context_builder.py:256) は「provider 成功 → `_ref.as_of = now`」「provider 例外 → 空 news + `_ref=None`」の 2 分岐。cached provider は例外を投げず status/as_of 付き dict を返すため、それを使って分岐させる:
 
-- provider が返す dict に **`as_of` (成功取得時刻・ISO) と `status`** を含める設計に統一する。成功時は cached provider が `as_of=成功時刻` を付与し、stale 返却でも古い as_of を維持する (現在時刻で上書きしない)。
-- `_build_news` は provider 応答の `as_of` をそのまま `_ref.as_of` に使う (今の now で上書きしない)。→ trace 上「いつ取得した news か」が正しく残る。
-- `status="unavailable"` の news は sentiment=None のまま通すが、`_ref` に `status="unavailable"` を残す。
+- `_build_news` は provider 応答の **`as_of` をそのまま `_ref.as_of` に使う** (今の now で上書きしない)。→ stale の場合 trace 上「前回いつ取得した news か」が正しく残る。
+- `_ref` に provider の **`status` (ok/stale/unavailable)** を残す。
+- `status="unavailable"` の news は sentiment=None のまま通す (fail-open, §3.7)。
 
 ### 3.7 watch の news_conflict と unavailable の扱い
 
-- **stale 値** (直近成功値) が返る場合: `_news_conflicts` は従来通り生の sentiment_score で判定する。→ 直前の逆行 news は保持され失効が効く (High 指摘の中核)。
-- **`status="unavailable"`** (成功値なし) の場合: sentiment=None なので `_news_conflicts` は False。これは「news で失効させる根拠が無い」= 従来の空 news と同じ挙動で、**block しない**方針を明示採用する (news 取得不能を理由に active plan を止めない — technical unavailable と同じ fail-open 思想)。この選択を spec 上で明示的に決定とする。
-- 逆に「news 取得不能中は保守的に conflict 扱いで trigger を止める」設計は採らない (news は判断材料の 1 つで、取得不能で執行を全停止するのは過剰・リスク哲学 [[finance_risk_management_philosophy]])。
+- **`status="stale"`** (直近成功値) が返る場合: `_news_conflicts` は従来通り生の sentiment_score で判定する。→ 直前の逆行 news は保持され失効が効く (High 指摘の中核)。
+- **`status="unavailable"`** (成功値なし) の場合: sentiment=None なので `_news_conflicts` は False。これは「news で失効させる根拠が無い」= 従来の空 news と同じ挙動で、**block しない** (fail-open)。**technical とは異なる**: watch evaluator は technical が `status != "ok"` なら trigger を **block** する (fail-close, watch_evaluator.py:138)。news は補助材料なので**意図的に fail-open** とし、news 取得不能を理由に active plan を止めない。この非対称を spec 上で明示的に決定とする ([[finance_risk_management_philosophy]] — 補助材料の取得不能で執行を全停止するのは過剰)。
 
 ### 3.3 build 経路との関係
 
@@ -243,8 +257,10 @@ def make_cached_news_provider(
 
 `make_news_material_provider` の `get_news_impact` + `get_news_key` が 1 回の material 判定で各々 `_aggregate` を呼び、同 pair を 2 回集計する (impact≥閾値時)。加えて `commit_seen` でも `get_news_key` を呼ぶため 1 判定で最大 3 回集計しうる。
 
-- **対応:** `make_news_material_provider` 内の `_aggregate(pair)` を同一 TTL キャッシュで包む。§3.2 のラッパは NewsProvider (dict 返し) 用なので、`_aggregate` (NewsSentiment 返し) 用に **同じ TTL ロジックを共有する内部ヘルパ**を切り出して両者から使う (キャッシュ実体は関数ごとに別。共有するのは「pair→(value, fetched_at) を TTL 判定するロジック」)。
-- TTL・clock は §3.2 と同じ `news_cache_ttl_seconds` / db_now を使う。
+- **既存の例外握り潰しを迂回しない (Medium 指摘):** `make_news_material_provider` の `_aggregate()` は現状 `except Exception: return None` で例外を握り潰す (landing_providers.py:112)。この関数をそのまま共通キャッシュで包むと **`None` を成功値としてキャッシュ**し、stale 値が維持されない (stale-if-error が迂回される)。→ **`_aggregate()` の内部 try/except を削除し、例外をキャッシュ層に伝搬させる**。キャッシュ層の共通ヘルパが例外を捕捉して stale/unavailable を判定する (§3.2 と同一セマンティクス)。
+- **対応:** `_aggregate` (NewsSentiment 返し) 用に §3.2 と**同じ失敗セマンティクス** (成功 TTL hit / failure TTL 内は再集計せず stale / 成功履歴なしは None) を持つ内部ヘルパを共有する。キャッシュ実体は関数ごとに別。共有するのは「pair→(value, 成功時刻) を TTL + failure TTL で判定するロジック」。
+- material 経路の失敗時返却: stale があれば直近成功 NewsSentiment、無ければ None (get_news_impact→0.0 / get_news_key→None、既存の None 契約を維持)。
+- TTL・clock は §3.2 と同じ `news_cache_ttl_seconds` / `news_cache_negative_ttl_seconds` / db_now を使う。
 - これで planning material 判定由来の [AGGREGATE] (60s 間隔・EUR/USD 2〜3 行) も 1 行に減る。
 - **キャッシュ実体を 2 つ持つことの整合:** watch 経路 (dict provider) と material 経路 (NewsSentiment) は別プロセス位置・別頻度で呼ばれるため、キャッシュを共有せず各々が独立に最大 TTL 秒だけ古い値を返す。値のズレは最大 TTL 秒で、判断品質に影響しない (news は 30 分粒度)。
 
@@ -254,9 +270,11 @@ def make_cached_news_provider(
 - TTL 超過後は再集計されることを clock を進めて検証。
 - material provider の impact + key (+commit_seen) 連続呼び出しで aggregate が 1 回に集約されることを検証。
 - **並行テスト**: 2 スレッドが同時に同 pair を miss しても inner が 1 回しか呼ばれない (single-flight)。
-- **stale-if-error テスト (High)**: 成功して sentiment を得た後、inner が例外を投げても直近成功値が返る・as_of が成功時刻を維持する。→ **「成功後の refresh 失敗でも news_conflict が消えない」**: 逆行 news で成功 → refresh 失敗 → `_news_conflicts` が引き続き True を返すことを検証。
+- **failure TTL 再集計抑止テスト (High)**: inner が失敗した後、negative TTL 内の再呼び出しで **inner が呼ばれない** (呼び出し回数 = negative TTL 内で 1 回)。ログ回数だけでなく **inner 呼び出し回数**を検証する。
+- **stale-if-error テスト (High)**: 成功して sentiment を得た後、inner が例外を投げても直近成功値 (`status="stale"`) が返る・as_of が成功時刻を維持する。→ **「成功後の refresh 失敗でも news_conflict が消えない」**: 逆行 news で成功 → refresh 失敗 → `_news_conflicts` が引き続き True を返すことを検証。
 - **unavailable テスト**: 一度も成功していない状態で inner 例外 → `status="unavailable"` news が返る・sentiment=None。
-- **ログ抑制テスト**: inner が連続失敗しても例外ログは negative TTL ごとに 1 回だけ。
+- **成功で failure 解除テスト**: 失敗 → 成功 → 失敗 で、2 回目失敗が再び inner を呼ぶ (failure 状態が成功でクリアされる)。
+- **material stale テスト (Medium)**: material provider も「成功後の refresh 失敗で前回 sentiment (impact/key) が維持される」ことを検証。`_aggregate` 例外がキャッシュ層に伝搬し stale が返ることを確認。
 
 ---
 
