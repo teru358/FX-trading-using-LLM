@@ -228,8 +228,10 @@ class RiskGateWorker:
         issues: list[str] = []
         action = draft.action
         # mid は untrusted quote 由来 — 非数値 (str 等) だと下の side 比較 (sl >= mid)
-        # が TypeError で gate を殺す。数値化できなければ None に倒し side チェックを
-        # skip する (実行価格不能は derive_rr 側で underivable reject が立つ)。
+        # が TypeError で gate を殺す。mid が「存在するのに非数値/非有限」なら side 違反を
+        # 黙って見逃さず fixable reject に倒す (R4 follow-up: skip すると sl>=entry 等の
+        # 幾何違反が escape する)。mid 欠落 (None) は判定不能なので従来通り side チェック
+        # skip (issue なし)。
         # NOTE: derive_rr の _executable_price も別途 quote を float 化するが、あちらは
         # direction で ask/bid を選ぶ「実行価格」、こちらは side 幾何の「entry proxy=mid」
         # と選ぶフィールドも用途も異なる。共有ヘルパにせず各所で独立に coerce する
@@ -237,9 +239,14 @@ class RiskGateWorker:
         mid = context.get("quote", {}).get("mid")
         if mid is not None:
             try:
-                mid = float(mid)
+                mid_val = float(mid)
             except (TypeError, ValueError):
-                mid = None
+                mid_val = None
+            if mid_val is None or not math.isfinite(mid_val):
+                issues.append("entry price invalid")
+                mid = None  # side チェックを skip (下の mid is not None ガードで)
+            else:
+                mid = mid_val
 
         sl = action.get("sl")
         tp = action.get("tp")

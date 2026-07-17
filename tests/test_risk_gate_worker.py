@@ -479,6 +479,46 @@ class TestFixableReject:
         res = worker.pre_check(_draft(), ctx, include_executable_price=False)
         assert res.passed is True, res.issues
 
+    def test_mid_non_numeric_is_entry_price_invalid(self, worker: RiskGateWorker) -> None:
+        # R4 follow-up: mid だけ非数値 (ask/bid 有効) → side チェックを黙って skip せず
+        # "entry price invalid" fixable reject。真の side 違反 escape を防ぐ。
+        d = _draft()  # long, sl=149/tp=152
+        ctx = _ctx()
+        ctx["quote"] = dict(ctx["quote"])
+        ctx["quote"]["mid"] = "garbage"  # ask/bid は有効なまま
+        res = worker.pre_check(d, ctx, include_executable_price=False)
+        assert res.passed is False
+        assert res.reject_class == "fixable"
+        assert any("entry price invalid" in i for i in res.issues)
+
+    def test_mid_non_numeric_does_not_crash(self, worker: RiskGateWorker) -> None:
+        # 非数値 mid で TypeError クラッシュしない (float 化防御が効く)。
+        d = _draft()
+        ctx = _ctx()
+        ctx["quote"] = dict(ctx["quote"])
+        ctx["quote"]["mid"] = "garbage"
+        res = worker.pre_check(d, ctx, include_executable_price=False)  # 例外が出ないこと
+        assert res is not None
+
+    def test_mid_inf_is_entry_price_invalid(self, worker: RiskGateWorker) -> None:
+        # 非有限 (Inf) mid も side 比較を汚染するので invalid reject。
+        d = _draft()
+        ctx = _ctx()
+        ctx["quote"] = dict(ctx["quote"])
+        ctx["quote"]["mid"] = float("inf")
+        res = worker.pre_check(d, ctx, include_executable_price=False)
+        assert res.passed is False
+        assert any("entry price invalid" in i for i in res.issues)
+
+    def test_mid_missing_still_skips_side_check(self, worker: RiskGateWorker) -> None:
+        # mid 欠落 (None) は従来通り — side チェック skip、entry price invalid は立たない。
+        d = _draft()
+        ctx = _ctx()
+        ctx["quote"] = dict(ctx["quote"])
+        ctx["quote"]["mid"] = None
+        res = worker.pre_check(d, ctx, include_executable_price=False)
+        assert not any("entry price invalid" in i for i in res.issues)
+
     def test_missing_sl_is_fixable(self, worker: RiskGateWorker) -> None:
         draft = _draft()
         draft.action.pop("sl")
