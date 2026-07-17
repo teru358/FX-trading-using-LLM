@@ -676,7 +676,6 @@ class OrchestratorLocksConfig:
 @dataclass
 class OrchestratorEntryConfig:
     """entry 感度・gate 閾値 (spec §12)。"""
-    price_move_pct: float = 0.15
     spread_max_pips: float = 2.0
     # 最低 reward/risk 比 (決定的導出 RR で判定, spec 2026-07-16)。プロンプトは
     # RR >= 2 を狙わせ、gate は 1.5 で切る (マージン構造は意図的)。
@@ -693,6 +692,18 @@ class OrchestratorEntryConfig:
         if not isinstance(v, (int, float)) or isinstance(v, bool) or \
                 not math.isfinite(v) or v <= 0:
             raise ValueError(f"orchestrator.entry.min_rr must be finite and > 0, got {v!r}")
+        # spread_max_pips / news_impact_min は float 閾値。NaN が入ると gate 比較
+        # (spread_pips > threshold / score <= -threshold) が常に False になり、
+        # ガードが黙って無効化される (fail-silent, min_rr と同じ穴)。有限性のみ検証する
+        # — 負値/0 は全 reject/全 invalidate で fail-visible なので許容 (単一基準・
+        # 過剰な安全装置を足さない方針)。
+        for name in ("spread_max_pips", "news_impact_min"):
+            val = getattr(self, name)
+            if not isinstance(val, (int, float)) or isinstance(val, bool) or \
+                    not math.isfinite(val):
+                raise ValueError(
+                    f"orchestrator.entry.{name} must be a finite number, got {val!r}"
+                )
 
 
 @dataclass

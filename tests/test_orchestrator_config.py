@@ -22,6 +22,33 @@ def test_entry_min_rr_invalid_rejected(bad) -> None:
         OrchestratorEntryConfig(min_rr=bad)
 
 
+@pytest.mark.parametrize("field", ["spread_max_pips", "news_impact_min"])
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+def test_entry_float_thresholds_reject_non_finite(field, bad) -> None:
+    from src.config.schema import OrchestratorEntryConfig
+
+    with pytest.raises(ValueError, match=field):
+        OrchestratorEntryConfig(**{field: bad})
+
+
+@pytest.mark.parametrize("field", ["spread_max_pips", "news_impact_min"])
+def test_entry_float_thresholds_allow_zero_and_negative(field) -> None:
+    # 負値/0 は fail-visible なので許容 (方針: 有限性のみ検証)。
+    from src.config.schema import OrchestratorEntryConfig
+
+    assert getattr(OrchestratorEntryConfig(**{field: 0.0}), field) == 0.0
+    assert getattr(OrchestratorEntryConfig(**{field: -1.0}), field) == -1.0
+
+
+def test_entry_price_move_pct_removed() -> None:
+    # デッドフィールド削除の回帰防止 (再追加を検知)。
+    import dataclasses
+    from src.config.schema import OrchestratorEntryConfig
+
+    field_names = {f.name for f in dataclasses.fields(OrchestratorEntryConfig)}
+    assert "price_move_pct" not in field_names
+
+
 def test_orchestrator_config_defaults() -> None:
     cfg = OrchestratorConfig()
     assert cfg.enabled is False

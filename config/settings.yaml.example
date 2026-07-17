@@ -420,7 +420,6 @@ orchestrator:
     decision_lock_ttl_seconds: 600
     order_lock_ttl_seconds: 120
   entry:
-    price_move_pct: 0.15
     spread_max_pips: 2.0
     # 最低 reward/risk 比 (決定的導出 RR で判定)。プロンプトは RR >= 2 を狙わせ、
     # gate は 1.5 で切る (マージン構造は意図的)。
