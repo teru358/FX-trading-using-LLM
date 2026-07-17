@@ -5,6 +5,7 @@ load_config (loader.py) がここで定義された dataclass を YAML から組
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -677,10 +678,21 @@ class OrchestratorEntryConfig:
     """entry 感度・gate 閾値 (spec §12)。"""
     price_move_pct: float = 0.15
     spread_max_pips: float = 2.0
+    # 最低 reward/risk 比 (決定的導出 RR で判定, spec 2026-07-16)。プロンプトは
+    # RR >= 2 を狙わせ、gate は 1.5 で切る (マージン構造は意図的)。
+    min_rr: float = 1.5
     news_impact_min: float = 0.5
     require_fresh_technical: bool = True
     max_quote_age_seconds: int = 10
     max_technical_age_seconds: int = 1800
+
+    def __post_init__(self) -> None:
+        # min_rr <= 0 / NaN は hard gate を実質無効化するため起動時に拒否する
+        # (レビュー Medium#5)。上限は設けない — 過大値は全 reject で fail-visible。
+        v = self.min_rr
+        if not isinstance(v, (int, float)) or isinstance(v, bool) or \
+                not math.isfinite(v) or v <= 0:
+            raise ValueError(f"orchestrator.entry.min_rr must be finite and > 0, got {v!r}")
 
 
 @dataclass

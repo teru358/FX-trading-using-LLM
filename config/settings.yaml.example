@@ -422,6 +422,9 @@ orchestrator:
   entry:
     price_move_pct: 0.15
     spread_max_pips: 2.0
+    # 最低 reward/risk 比 (決定的導出 RR で判定)。プロンプトは RR >= 2 を狙わせ、
+    # gate は 1.5 で切る (マージン構造は意図的)。
+    min_rr: 1.5
     news_impact_min: 0.5
     require_fresh_technical: true
     max_quote_age_seconds: 10

@@ -1,8 +1,25 @@
 """orchestrator config block (spec §12) のパース・デフォルトテスト。"""
 from __future__ import annotations
 
+import pytest
+
 from src.config.schema import OrchestratorConfig, OrchestratorFiringConfig
 from src.config.loader import _build_orchestrator_config
+
+
+def test_entry_min_rr_default_and_override() -> None:
+    from src.config.schema import OrchestratorEntryConfig
+
+    assert OrchestratorEntryConfig().min_rr == 1.5
+    assert OrchestratorEntryConfig(min_rr=2.0).min_rr == 2.0
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan"), float("inf")])
+def test_entry_min_rr_invalid_rejected(bad) -> None:
+    from src.config.schema import OrchestratorEntryConfig
+
+    with pytest.raises(ValueError, match="min_rr"):
+        OrchestratorEntryConfig(min_rr=bad)
 
 
 def test_orchestrator_config_defaults() -> None:

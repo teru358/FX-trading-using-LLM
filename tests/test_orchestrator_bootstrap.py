@@ -382,3 +382,25 @@ def test_no_agents_yaml_falls_back_to_price_analysis(tmp_path: Path, monkeypatch
     # 両方 price_analysis の temperature (役割 temperature)
     assert pipeline._planner._temperature == 0.1
     assert pipeline._exec._temperature == 0.1
+
+
+def test_risk_gate_shared_and_configured(tmp_path: Path, monkeypatch) -> None:
+    """gate は 1 個だけ構築され pipeline と runtime で共有、min_rr は config 値
+    (spec 2.E / R2 High#2 — 二重構築だと live final gate に config が届かない)。"""
+    monkeypatch.setattr(
+        "src.llm.factory._build_client",
+        lambda provider, pc, model: ("client", provider, model),
+    )
+    _patch_orch_store(monkeypatch, tmp_path)
+
+    cfg = _config(enabled=True, tmp_path=tmp_path)
+    cfg.llm.provider = "claude-cli"
+    cfg.orchestrator.entry.min_rr = 2.5
+
+    rt = bs.build_orchestrator_runtime(
+        cfg, store=object(), price_store=object(),
+        analysis_store=_FakeAnalysisStore(), price_provider=_FakePriceProvider(),
+    )
+    assert rt._pipeline._risk._min_rr == 2.5
+    # 同一インスタンス共有 — runtime fallback (既定 1.5) が生成されていないこと。
+    assert rt._risk_gate is rt._pipeline._risk

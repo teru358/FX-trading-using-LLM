@@ -290,7 +290,15 @@ def build_orchestrator_runtime(
         )
 
     detector = _build_detector(config, orch_cfg, analysis_store, pairs, store=store)
-    pipeline = _build_pipeline(config, orch_store)
+    # risk gate は単一構築で pipeline (planning) と runtime (live final gate /
+    # shadow precheck) に共有する — 二重構築だと config (min_rr 等) が runtime 側
+    # fallback に届かず、planning と live で閾値がズレる (spec 2026-07-16 §2.E)。
+    from src.orchestrator.risk_gate import RiskGateWorker
+    risk_gate = RiskGateWorker(
+        min_rr=config.orchestrator.entry.min_rr,
+        spread_max_pips=config.orchestrator.entry.spread_max_pips,
+    )
+    pipeline = _build_pipeline(config, orch_store, risk_gate)
     hindsight = make_hindsight_evaluator(price_store, interval=config.trading.ohlcv_interval)
     notifier = create_shadow_notifier(orch_cfg.notifications)
 
@@ -317,6 +325,7 @@ def build_orchestrator_runtime(
         protection_worker=protection_worker,
         detector=detector,
         pipeline=pipeline,
+        risk_gate=risk_gate,
         hindsight_evaluator=hindsight,
         shadow_notifier=notifier,
         market_state_detector=mstate,
@@ -432,19 +441,22 @@ def _build_market_state(
     return detector, bridge
 
 
-def _build_pipeline(config: "AppConfig", orch_store: "OrchestratorStore"):
+def _build_pipeline(config: "AppConfig", orch_store: "OrchestratorStore", risk_gate):
     """planning loop の LLM パイプラインを組む。
 
     PlannerAgent / ExecutionOpinionAgent はそれぞれ独立した AgentLlm
     (client + temperature) を受け取る (per-agent llm config)。agents.yaml に
     設定が無ければ両者とも price_analysis 役割 client + 役割 temperature に
-    fallback し従来動作 (逐次・worker=1, §4.2)。RiskGateWorker は spread 閾値のみ。
+    fallback し従来動作 (逐次・worker=1, §4.2)。
+
+    RiskGateWorker は build_orchestrator_runtime が単一構築したものを受け取る —
+    pipeline (planning) と runtime (live final gate / shadow precheck) で閾値が
+    ズレないよう同一インスタンスを共有する (spec 2026-07-16 §2.E)。
     """
     from src.llm.factory import create_agent_llm
     from src.orchestrator.execution_opinion_agent import ExecutionOpinionAgent
     from src.orchestrator.planner_agent import PlannerAgent
     from src.orchestrator.planning_pipeline import PlanningPipeline
-    from src.orchestrator.risk_gate import RiskGateWorker
 
     planner_llm = create_agent_llm(config, "planner")
     exec_llm = create_agent_llm(config, "execution_opinion")
@@ -452,9 +464,7 @@ def _build_pipeline(config: "AppConfig", orch_store: "OrchestratorStore"):
         orch_store=orch_store,
         planner=PlannerAgent(planner_llm, user_notes_path=config.user_notes_path),
         execution_agent=ExecutionOpinionAgent(exec_llm),
-        risk_gate=RiskGateWorker(
-            spread_max_pips=config.orchestrator.entry.spread_max_pips
-        ),
+        risk_gate=risk_gate,
         config=config.orchestrator,
     )
 
