@@ -180,6 +180,14 @@ class TestDeriveRr:
         quote = {"ask": "invalid", "bid": "invalid", "mid": "invalid"}
         assert derive_rr(draft, quote, include_executable_price=False) == pytest.approx(2.0)
 
+    def test_planning_phase_no_price_condition_and_invalid_executable_is_none(self) -> None:
+        # R4 review Low#2: planning phase で price 条件ゼロ + 実行価格非数値 →
+        # elif fallback が None で潰れ candidates ゼロ → None (導出不能)。
+        # (有効 quote なら fallback 成功する境界 = test_no_price_condition_..._planning)
+        draft = _draft_entries([EntryCondition(type="spread_below", value_pips=2.0)])
+        quote = {"ask": "invalid", "bid": "invalid", "mid": "invalid"}
+        assert derive_rr(draft, quote, include_executable_price=False) is None
+
 
 def _ctx(
     *,

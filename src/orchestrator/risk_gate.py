@@ -230,6 +230,10 @@ class RiskGateWorker:
         # mid は untrusted quote 由来 — 非数値 (str 等) だと下の side 比較 (sl >= mid)
         # が TypeError で gate を殺す。数値化できなければ None に倒し side チェックを
         # skip する (実行価格不能は derive_rr 側で underivable reject が立つ)。
+        # NOTE: derive_rr の _executable_price も別途 quote を float 化するが、あちらは
+        # direction で ask/bid を選ぶ「実行価格」、こちらは side 幾何の「entry proxy=mid」
+        # と選ぶフィールドも用途も異なる。共有ヘルパにせず各所で独立に coerce する
+        # (float() try/except の 3 行を共通化する DRY 益 < フィールド選択を絡める結合コスト)。
         mid = context.get("quote", {}).get("mid")
         if mid is not None:
             try:
