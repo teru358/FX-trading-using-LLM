@@ -75,9 +75,12 @@ def derive_rr(
     min に参加させる** (黙って除外すると悪い候補ほど無視される)。
     非有限候補 (NaN/Inf、entry/sl/tp のいずれか) も **0.0 扱い** (reject 方向 =
     安全側。NaN 比較の False 化による偽 pass を防ぐ、R2 High#3)。
-    None 条件: 候補ゼロ (price 条件なし & 実行価格なし) / sl or tp 欠落。
+    None 条件: 候補ゼロ (price 条件なし & 実行価格なし) / sl or tp 欠落 /
+      **include_executable_price=True かつ実行価格が取得不能** (R4 High#1)。
     """
 ```
+
+- **実行価格必須化 (R4 High#1)**: `include_executable_price=True` (live final gate / shadow precheck) は「trigger 時実行価格で検証する」のが目的。実行価格が欠落・非数値で取れないとき、price 条件候補 (計画 RR) だけで pass すると breakout オーバーシュートを見逃す。よって **`include_executable_price=True` で `_executable_price` が None なら derive_rr 全体を None (underivable → gate で fixable reject)** に倒す。「trigger 時に実勢価格を確認できないなら発注しない」= spread unknown を reject にしたのと同じ思想。quote 回復後の次 tick で再評価される。planning phase (False) は実行価格を使わないので影響なし (price 条件ゼロの fallback 時のみ実行価格を見るが、その場合も取れなければ従来通り候補ゼロ → None)。
 
 - **最小値採用の理由 (R1 High#1)**: long で entry が SL に近いほど risk 分母が小さく RR は**大きく**なる。「SL に最も近い entry = 最悪」は逆。最悪ケースは候補ごとに RR を出した上での min でしか正しく取れない。
 - **phase 分離の理由 (R2 High#1)**: 押し目 plan (long, 現在 ask=151, entry 条件=149.5, SL=148.5, TP=151.5) では現在価格 RR=0.2 だが、entry 条件はまだ成立しておらず約定は条件成立後 — planning 時に実行価格を候補に含めると正常な押し目 plan (計画 RR 2.0) を誤 reject し、プロンプトの「pullback/retest 優先」指針とも衝突する。trigger セマンティクス (watch_evaluator: `price_at_or_below` は mid<=value で成立) から、押し目系の trigger 時実行価格は条件値の**有利側**にあり計画 RR を下回らない。実行 RR が計画を下回り得るのは breakout オーバーシュート = **trigger 時** のみ。よって:
@@ -112,6 +115,7 @@ def derive_rr(
 - 申告 `action["rr"]` は gate では比較に使わない。`missing rr` issue は廃止 (申告は任意の参考値になる)。
 - **呼び出し元の変更 (R2 High#1)**: pipeline (planning) は `include_executable_price=False`、runtime の live final gate (`_execute_live_trigger`) と shadow precheck (`_shadow_risk_precheck`) は `True` を渡す。runtime の 2 呼び出し行に keyword を足すだけで、reject 後の遷移 (fixable → intent=`abandoned`・plan=`invalidated`・replan) は既存のまま不変。
 - **fake gate 互換**: テストの `_GatePass`/`_GateReject` (test_taskf_live_execution_helpers) は `pre_check(draft, context)` シグネチャ — keyword 追加に合わせ `**kwargs` を受けるよう更新する。
+- **spread の有限性検証 (R4 Medium#2)**: `_fixable_issues` の spread 節は `spread` を float 化した後に `math.isfinite` を検証する。現状 `spread is None` は reject するが、NaN/Inf/非数値 str は `spread / pip_size` → `NaN > max` 常に False で **spread ガードを黙って通過** (fail-silent、min_rr で塞いだのと同型)。非数値 str は除算で TypeError → gate クラッシュ。対処: `spread is None` → `"spread unknown"` は維持しつつ、`float()` 変換失敗 or `not math.isfinite` → `"spread invalid"` の fixable reject に倒す。upstream (`mt5_ohlcv_fetcher.py` の `float()` のみ) では `"nan"` 文字列を弾けないため gate 側の防御が最終壁。
 
 ### 2.C 申告 rr の coerce (planning_pipeline.py)
 
