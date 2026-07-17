@@ -119,15 +119,29 @@ def make_live_runtime(tmp_path: Path, broker, risk_gate, *, mode: str = "live",
     return rt
 
 
-def seed_active_plan_ready_to_trigger(rt: OrchestratorRuntime) -> int:
-    """entry が即成立する active plan を 1 件作る (price_at_or_below 150.30, mid=150.10)。"""
+def seed_active_plan_ready_to_trigger(
+    rt: OrchestratorRuntime,
+    *,
+    entry_conditions: list | None = None,
+    action: dict | None = None,
+) -> int:
+    """entry が即成立する active plan を 1 件作る (既定: price_at_or_below 150.30,
+    mid=150.10)。entry_conditions / action を指定すると差し替える (実 gate を使う
+    統合テスト用 — 既定 seed の計画 RR ≈ 1.33 は min_rr=1.5 の実 gate を通らない)。"""
     orch = rt._orch
     snap = orch.create_snapshot(pair="USDJPY=X", as_of_time=NOW)
     run_id = orch.start_run("PlannerAgent", pair="USDJPY=X")
     return orch.create_trade_plan(
         pair="USDJPY=X", snapshot_id=snap, horizon="swing", direction="long",
-        entry_conditions_json=[{"type": "price_at_or_below", "value": 150.30}],
-        action_json={"sl": 149.4, "tp": 151.5, "rr": 2.0, "confidence": 0.7},
+        entry_conditions_json=(
+            entry_conditions
+            if entry_conditions is not None
+            else [{"type": "price_at_or_below", "value": 150.30}]
+        ),
+        action_json=(
+            action if action is not None
+            else {"sl": 149.4, "tp": 151.5, "rr": 2.0, "confidence": 0.7}
+        ),
         invalidation_json=[],
         expires_at=FUTURE, created_by_run_id=run_id,
     )

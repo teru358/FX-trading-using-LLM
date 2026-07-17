@@ -1,6 +1,7 @@
 """Task F F-1/F-3: _execute_live_trigger 執行段テスト (claim→gate→submit→execute→反映)。"""
 from __future__ import annotations
 
+from src.orchestrator.risk_gate import RiskGateWorker
 from src.trading.broker_adapter import ExecutionResult
 from src.utils.clock import db_now
 
@@ -108,6 +109,47 @@ def test_trigger_id_recorded_on_order_intent(tmp_path):
     intent = rt._orch.get_order_intent(plan_id)
     trig = rt._orch.get_shadow_trigger(plan_id)
     assert intent.trigger_id == str(trig.id)
+
+
+def test_live_gate_rejects_overshoot_with_real_gate(tmp_path):
+    """R2 Medium#4: breakout オーバーシュート時、実 RiskGateWorker の live final gate
+    (include_executable_price=True) が発注を止め、intent=abandoned / plan=invalidated
+    に遷移する。plan: breakout_above 150.0 / SL 149.0 / TP 152.0 (計画 RR 2.0)、
+    trigger 時 mid=151.79 (ask=151.795) → 実行 RR = (152-151.795)/(151.795-149)
+    ≈ 0.073 < 1.5。breakout 条件は mid 151.79 > 150.0 で trigger 成立。"""
+    broker = _FakeBroker(ExecutionResult.executed(_executed_order()))
+    gate = RiskGateWorker(min_rr=1.5, spread_max_pips=2.0)
+    rt = make_live_runtime(tmp_path, broker, gate, mid=151.79)
+    plan_id = seed_active_plan_ready_to_trigger(
+        rt,
+        entry_conditions=[{"type": "breakout_above", "value": 150.0}],
+        action={"sl": 149.0, "tp": 152.0, "rr": 2.0, "confidence": 0.7},
+    )
+    rt.run_watch_cycle(now=NOW)
+    assert broker.calls == []                          # 発注されない
+    intent = rt._orch.get_order_intent(plan_id)
+    assert intent.status == "abandoned"                # fixable reject → abandoned
+    assert rt._orch.get_trade_plan(plan_id).status == "invalidated"
+
+
+def test_live_gate_passes_pullback_with_real_gate(tmp_path):
+    """押し目 plan は trigger 時実行価格が条件値の有利側 → live gate でも pass して
+    発注される (live で誤 reject しない回帰)。entry=150.20 / SL=149.4 / TP=151.5:
+    計画 RR = (151.5-150.2)/(150.2-149.4) = 1.625、実行 (ask=150.105) RR =
+    (151.5-150.105)/(150.105-149.4) ≈ 1.98 → min = 1.625 >= 1.5 で pass。
+    trigger は mid 150.10 <= 150.20 で成立 (R3 Medium#1: 既定 seed の entry=150.30
+    は計画 RR 1.33 で実 gate を通らないため明示指定)。"""
+    broker = _FakeBroker(ExecutionResult.executed(_executed_order()))
+    gate = RiskGateWorker(min_rr=1.5, spread_max_pips=2.0)
+    rt = make_live_runtime(tmp_path, broker, gate)
+    plan_id = seed_active_plan_ready_to_trigger(
+        rt,
+        entry_conditions=[{"type": "price_at_or_below", "value": 150.20}],
+    )
+    triggered = rt.run_watch_cycle(now=NOW)
+    assert triggered == [plan_id]
+    assert len(broker.calls) == 1                      # 発注される
+    assert rt._orch.get_order_intent(plan_id).status == "filled"
 
 
 def test_shadow_mode_never_executes(tmp_path):
