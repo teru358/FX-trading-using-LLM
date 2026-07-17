@@ -80,7 +80,8 @@ def derive_rr(
     R2 High#3) は rr 0.0 として min に参加させる (黙って除外すると悪い候補ほど
     無視され、NaN は比較 False で偽 pass する)。
 
-    None (導出不能): sl or tp 欠落 / entry 候補ゼロ。
+    None (導出不能): sl or tp 欠落 / entry 候補ゼロ / include_executable_price=True
+    かつ実行価格取得不能 (欠落・非数値で trigger 時実勢を確認できない, R4 High#1)。
     """
     sl = draft.action.get("sl")
     tp = draft.action.get("tp")
@@ -91,7 +92,17 @@ def derive_rr(
         c.value for c in draft.entry_conditions
         if c.type in _ENTRY_PRICE_TYPES and c.value is not None
     ]
-    if include_executable_price or not candidates:
+    if include_executable_price:
+        # live/shadow phase: 実勢価格で trigger 時 RR を検証するのが目的。
+        # 実行価格が取れない (欠落/非数値) なら検証不能 → 導出不能に倒す (R4 High#1)。
+        # price 条件候補 (計画 RR) だけで pass させない — breakout オーバーシュートを
+        # 見逃す。「trigger 時に実勢を確認できないなら発注しない」(spread unknown と同思想)。
+        executable = _executable_price(draft.direction, quote)
+        if executable is None:
+            return None
+        candidates.append(executable)
+    elif not candidates:
+        # planning phase で price 条件ゼロのときのみ実行価格に fallback (underivable 回避)。
         executable = _executable_price(draft.direction, quote)
         if executable is not None:
             candidates.append(executable)
@@ -216,7 +227,15 @@ class RiskGateWorker:
     ) -> list[str]:
         issues: list[str] = []
         action = draft.action
+        # mid は untrusted quote 由来 — 非数値 (str 等) だと下の side 比較 (sl >= mid)
+        # が TypeError で gate を殺す。数値化できなければ None に倒し side チェックを
+        # skip する (実行価格不能は derive_rr 側で underivable reject が立つ)。
         mid = context.get("quote", {}).get("mid")
+        if mid is not None:
+            try:
+                mid = float(mid)
+            except (TypeError, ValueError):
+                mid = None
 
         sl = action.get("sl")
         tp = action.get("tp")
@@ -259,15 +278,24 @@ class RiskGateWorker:
         # spread 上限。pip_size は pair 依存 (JPY=0.01, それ以外=0.0001)。
         # spread 不明 (None) は楽観通過させず fixable reject (Codex Low-Medium): 実 spread
         # が取れないまま発注判断品質を検証すると shadow 評価が楽観化する。
+        # NaN/Inf/非数値も同様に楽観通過させない (R4 Medium#2): NaN>max が常に False で
+        # ガードが黙って無効化される / 非数値は除算で TypeError → gate クラッシュ。
         spread = context.get("quote", {}).get("spread")
         pip_size = self._pip_size_of(context.get("pair"))
         if spread is None:
             issues.append("spread unknown")
-        elif pip_size > 0:
-            spread_pips = spread / pip_size
-            if spread_pips > self._spread_max_pips:
-                issues.append(
-                    f"spread {spread_pips:.1f}pips above max {self._spread_max_pips}"
-                )
+        else:
+            try:
+                spread_val = float(spread)
+            except (TypeError, ValueError):
+                spread_val = None
+            if spread_val is None or not math.isfinite(spread_val):
+                issues.append("spread invalid")
+            elif pip_size > 0:
+                spread_pips = spread_val / pip_size
+                if spread_pips > self._spread_max_pips:
+                    issues.append(
+                        f"spread {spread_pips:.1f}pips above max {self._spread_max_pips}"
+                    )
 
         return issues

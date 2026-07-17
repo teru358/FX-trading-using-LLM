@@ -161,6 +161,25 @@ class TestDeriveRr:
         )
         assert derive_rr(draft, self.QUOTE, include_executable_price=False) is None
 
+    def test_live_phase_underivable_when_no_executable_price_at_all(self) -> None:
+        # R4 High#1: include_executable_price=True で ask/bid/mid すべて取得不能 →
+        # None (導出不能)。price 条件 (計画 RR 2.0) だけで pass させない。
+        draft = _draft_entries([EntryCondition(type="breakout_above", value=150.0)])
+        quote = {"ask": "invalid", "bid": "invalid", "mid": "invalid", "spread": 0.02}
+        assert derive_rr(draft, quote, include_executable_price=True) is None
+
+    def test_live_phase_underivable_when_quote_none(self) -> None:
+        # include_executable_price=True で quote が None → 実行価格取れない → None。
+        draft = _draft_entries([EntryCondition(type="breakout_above", value=150.0)])
+        assert derive_rr(draft, None, include_executable_price=True) is None
+
+    def test_planning_phase_unaffected_by_missing_executable(self) -> None:
+        # planning phase (False) は実行価格を使わないので、quote が非数値でも
+        # price 条件から計画 RR を導出する (回帰: 押し目 plan を壊さない)。
+        draft = _draft_entries([EntryCondition(type="price_at_or_below", value=150.0)])
+        quote = {"ask": "invalid", "bid": "invalid", "mid": "invalid"}
+        assert derive_rr(draft, quote, include_executable_price=False) == pytest.approx(2.0)
+
 
 def _ctx(
     *,
@@ -252,6 +271,23 @@ class TestDerivedRrGate:
         res = worker.pre_check(d, _ctx(mid=151.79), include_executable_price=True)
         assert res.passed is False
         assert any("derived rr" in i for i in res.issues)
+
+    def test_live_executable_price_invalid_is_underivable_reject(self, worker: RiskGateWorker) -> None:
+        # R4 High#1: live gate で実行価格が全て非数値 → underivable fixable reject。
+        d = ExecutionPlanDraft(
+            direction="long",
+            entry_conditions=[EntryCondition(type="breakout_above", value=150.0)],
+            action={"sl": 149.0, "tp": 152.0, "size_policy": "risk", "rr": 2.0, "comment": "x"},
+            invalidation=[InvalidationCondition(type="price_below", value=148.0)],
+            expires_at=datetime(2026, 6, 21, 18, 0, 0, tzinfo=timezone.utc),
+            reasoning_summary="r",
+        )
+        ctx = _ctx()
+        ctx["quote"] = {"ask": "invalid", "bid": "invalid", "mid": "invalid", "spread": 0.02}
+        res = worker.pre_check(d, ctx, include_executable_price=True)
+        assert res.passed is False
+        assert res.reject_class == "fixable"
+        assert any("underivable" in i for i in res.issues)
 
     def test_pullback_plan_passes_planning_phase(self, worker: RiskGateWorker) -> None:
         # R2 High#1: 押し目 plan (entry=149.5 が現在 ask≈151 から遠い) は planning
@@ -388,6 +424,36 @@ class TestFixableReject:
         assert res.passed is False
         assert res.reject_class == "fixable"
         assert any("spread" in i.lower() for i in res.issues)
+
+    def test_spread_nan_is_invalid(self, worker: RiskGateWorker) -> None:
+        # R4 Medium#2: spread=NaN は NaN>max が常に False で黙って通過する穴 → invalid reject。
+        d = _draft()
+        ctx = _ctx()
+        ctx["quote"] = dict(ctx["quote"])
+        ctx["quote"]["spread"] = float("nan")
+        res = worker.pre_check(d, ctx, include_executable_price=False)
+        assert res.passed is False
+        assert res.reject_class == "fixable"
+        assert any("spread invalid" in i for i in res.issues)
+
+    def test_spread_non_numeric_is_invalid(self, worker: RiskGateWorker) -> None:
+        # spread=非数値 str は除算で TypeError → gate クラッシュしていた → invalid reject。
+        d = _draft()
+        ctx = _ctx()
+        ctx["quote"] = dict(ctx["quote"])
+        ctx["quote"]["spread"] = "wide"
+        res = worker.pre_check(d, ctx, include_executable_price=False)
+        assert res.passed is False
+        assert any("spread invalid" in i for i in res.issues)
+
+    def test_spread_inf_is_invalid(self, worker: RiskGateWorker) -> None:
+        d = _draft()
+        ctx = _ctx()
+        ctx["quote"] = dict(ctx["quote"])
+        ctx["quote"]["spread"] = float("inf")
+        res = worker.pre_check(d, ctx, include_executable_price=False)
+        assert res.passed is False
+        assert any("spread invalid" in i for i in res.issues)
 
     def test_eurusd_spread_uses_pip_0001(self, worker: RiskGateWorker) -> None:
         # Codex High#3: EURUSD の 3 pips = 0.0003。pip_size=0.01 固定だと
