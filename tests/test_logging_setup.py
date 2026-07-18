@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.logging_setup import setup_logging
+from src.logging_setup import _ACTIVITY_PREFIXES, _PREFIX_STYLES, setup_logging
 
 
 @pytest.fixture
@@ -56,3 +56,13 @@ def test_httpx_and_httpcore_demoted_to_warning(restore_logging, tmp_path):
     setup_logging(_logging_cfg(), tmp_path)
     assert logging.getLogger("httpx").level == logging.WARNING
     assert logging.getLogger("httpcore").level == logging.WARNING
+
+
+def test_orch_prefix_registered_for_activity():
+    """[ORCH] は activity.log 対象 (goes_to_activity_log=True) に登録されている。"""
+    assert "[ORCH]" in _ACTIVITY_PREFIXES
+
+
+def test_orch_prefix_has_style():
+    """[ORCH] は着色スタイルを持つ。"""
+    assert "[ORCH]" in _PREFIX_STYLES
