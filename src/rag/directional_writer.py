@@ -89,28 +89,27 @@ async def record_trade_complete(
         f"reason={closed_order.close_reason} | "
         f"{reflection_text}"
     )
-    try:
-        embedding = await embed_fn(text)
-        # horizon キー無し = legacy swing カード規約 (spec V-1)。None は渡さない。
-        extra = {"horizon": horizon} if horizon else {}
-        store.directional.upsert(
-            entry_id=f"{closed_order.order_id}_complete",
-            text=text,
-            embedding=embedding,
-            direction=direction,
-            pair=closed_order.pair,
-            session_id=closed_order.order_id,
-            session_type="trade",
-            phase="complete",
-            signal_score=0.0,
-            confidence=0.0,
-            outcome="win" if realized > 0 else "loss",
-            realized_pnl=realized,
-            close_reason=closed_order.close_reason,
-            **extra,
-        )
-    except Exception as e:
-        logger.warning(f"[SESSION] RAG complete failed for {closed_order.order_id}: {e}")
+    # strict: 失敗は例外を伝搬させ、呼び出し側 (reflection job) の retry 管理に
+    # 委ねる (spec §3.5)。「未記録なのに成功扱い」を作らない。
+    embedding = await embed_fn(text)
+    # horizon キー無し = legacy swing カード規約 (spec V-1)。None は渡さない。
+    extra = {"horizon": horizon} if horizon else {}
+    store.directional.upsert(
+        entry_id=f"{closed_order.order_id}_complete",
+        text=text,
+        embedding=embedding,
+        direction=direction,
+        pair=closed_order.pair,
+        session_id=closed_order.order_id,
+        session_type="trade",
+        phase="complete",
+        signal_score=0.0,
+        confidence=0.0,
+        outcome="win" if realized > 0 else "loss",
+        realized_pnl=realized,
+        close_reason=closed_order.close_reason,
+        **extra,
+    )
 
 
 # ── forecast ──────────────────────────────────────────────────────

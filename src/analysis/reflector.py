@@ -18,6 +18,10 @@ EmbedFn = Callable[[str], Coroutine[Any, Any, list[float]]]
 logger = logging.getLogger(__name__)
 
 
+class ReflectionValidationError(Exception):
+    """LLM 応答が必須スキーマを満たさない (spec §3.5b)。retry 管理へ乗せる。"""
+
+
 @dataclass
 class Reflection:
     entry_id: str
@@ -29,14 +33,12 @@ class Reflection:
     lesson: str
     confidence_assessment: str
     full_text: str
-    atr_params_suggestion: dict | None = None
 
 
 _CLOSE_REFLECTION_SYSTEM = (
     "You are an FX trading journal analyst reviewing a completed trade. "
     "Compare planned vs actual R:R, evaluate entry timing and SL/TP placement, and distill "
-    "one actionable lesson. If SL/TP comparison data is provided, assess whether the ATR "
-    "multipliers need adjustment. Output ONLY valid JSON, no markdown fences, no commentary "
+    "one actionable lesson. Output ONLY valid JSON, no markdown fences, no commentary "
     "outside the JSON object."
 )
 
@@ -58,32 +60,23 @@ Achieved R:R: {achieved_rr:+.2f}
 === Why We Entered ===
 {signal_reason}
 
-{macro_context_section}
 {entry_analysis_section}
-{sltp_analysis_section}
-{param_history_section}
 === Task ===
 Evaluate this completed trade. Assess:
-1. Was the directional call correct? (take_profit = yes, stop_loss = no)
+1. Was the directional call correct? (did price move in the traded direction?)
 2. Was the SL/TP placement appropriate given what actually happened?
-3. If macro context is available: did the macro instruments correctly indicate the direction?
-4. Was the news sentiment assessment correct? Did the key themes play out as expected?
-5. Was the technical analysis direction correct? Were the key support/resistance levels respected?
-6. Based on the SL/TP comparison: should the ATR multipliers be adjusted for this pair?
-7. What is the ONE most actionable lesson for future {pair} trades?
+3. What is the ONE most actionable lesson for future {pair} trades?
 {user_context}
 Return ONLY valid JSON:
 {{
   "outcome_summary": "<one sentence: what happened and the key reason>",
   "was_directionally_correct": true|false,
   "lesson": "<one specific, actionable lesson>",
-  "confidence_assessment": "<was the entry timing and risk setup appropriate?>",
-  "atr_params_suggestion": {{
-    "sl_atr_mult": <new_value or null if no change>,
-    "tp_atr_mult": <new_value or null if no change>,
-    "reason": "<why this change, or 'no change needed'>"
-  }}
+  "confidence_assessment": "<was the entry timing and risk setup appropriate?>"
 }}"""
+
+# LLM 応答の必須キー (spec §3.5b)。欠落・型不正は失敗扱いにする。
+_REQUIRED_KEYS = ("outcome_summary", "lesson", "was_directionally_correct")
 
 _CLOSE_REASON_LABELS = {
     "take_profit":   "TAKE PROFIT HIT ✓",
@@ -102,10 +95,7 @@ async def generate_close_reflection(
     llm: LLMClient,
     temperature: float = 0.1,
     user_notes: str = "",
-    macro_context_at_entry: str = "",
     entry_analysis: str = "",
-    sltp_comparison: str = "",
-    param_history: str = "",
 ) -> Reflection:
     """決済済み Order から確定結果ベースの振り返りを生成する。"""
     close_price = order.close_price or order.entry_price
@@ -129,22 +119,9 @@ async def generate_close_reflection(
     signal_reason = order.signal_reason or "Not recorded."
     close_reason_label = _CLOSE_REASON_LABELS.get(close_reason, close_reason.upper())
     user_context = f"=== User's Perspective ===\n{user_notes}" if user_notes else ""
-    macro_ctx = getattr(order, "macro_context_at_entry", "") or macro_context_at_entry or ""
-    macro_context_section = (
-        f"=== Macro Instruments at Entry ===\n{macro_ctx}\n"
-        if macro_ctx else ""
-    )
     entry_analysis_section = (
         f"=== Entry Analysis (Full Context) ===\n{entry_analysis}\n"
         if entry_analysis else ""
-    )
-    sltp_analysis_section = (
-        f"=== SL/TP Analysis ===\n{sltp_comparison}\n"
-        if sltp_comparison else ""
-    )
-    param_history_section = (
-        f"=== Parameter History (last 3) ===\n{param_history}\n"
-        if param_history else ""
     )
 
     prompt = _CLOSE_REFLECTION_PROMPT.format(
@@ -162,10 +139,7 @@ async def generate_close_reflection(
         duration_hours=duration_hours,
         achieved_rr=achieved_rr,
         signal_reason=signal_reason,
-        macro_context_section=macro_context_section,
         entry_analysis_section=entry_analysis_section,
-        sltp_analysis_section=sltp_analysis_section,
-        param_history_section=param_history_section,
         user_context=user_context,
     )
 
@@ -173,30 +147,43 @@ async def generate_close_reflection(
         {"role": "system", "content": _CLOSE_REFLECTION_SYSTEM},
         {"role": "user", "content": prompt},
     ]
-    try:
-        text = await llm.chat(messages, temperature=temperature)
-        data = extract_json(text)
-    except Exception as e:
-        logger.warning(f"[REFLECT/CLOSE] {pair_cfg.display_name}: LLM failed ({e}), using factual fallback")
-        data = {}
+    # fallback は持たない: LLM 失敗も schema 不正も例外を伝搬させ、呼び出し側
+    # (reflection job) の retry 管理に委ねる (spec §3.5)。
+    text = await llm.chat(messages, temperature=temperature)
+    data = extract_json(text)
 
-    won = close_reason == "take_profit"
-    outcome = data.get(
-        "outcome_summary",
-        f"{close_reason_label} @ {close_price:.5f} | PnL: {realized_pnl:+.2f}",
-    )
-    lesson = data.get(
-        "lesson",
-        "Review entry conditions and SL/TP placement for this setup.",
-    )
-    correct = bool(data.get("was_directionally_correct", won))
+    missing = [k for k in _REQUIRED_KEYS if k not in data]
+    if missing:
+        raise ReflectionValidationError(f"missing keys: {missing}")
+    if not isinstance(data["was_directionally_correct"], bool):
+        raise ReflectionValidationError("was_directionally_correct must be bool")
+    if not isinstance(data["outcome_summary"], str) or not isinstance(data["lesson"], str):
+        raise ReflectionValidationError("outcome_summary/lesson must be str")
+
+    outcome = data["outcome_summary"]
+    lesson = data["lesson"]
     conf_assess = data.get("confidence_assessment", "")
-    atr_suggestion = data.get("atr_params_suggestion")
+
+    # 方向正誤は価格方向の機械判定を正とする (spec §3.5b)。
+    # close_reason == "take_profit" 基準は trailing SL / manual の利益決済を誤判定する。
+    if order.direction == "buy":
+        correct = close_price > order.entry_price
+    else:
+        correct = close_price < order.entry_price
+    # LLM 申告は叙述の整合確認に使う (spec §3.5b)。不一致は lesson が逆方向の
+    # 解釈を含む可能性があるため warning を残す。
+    if data["was_directionally_correct"] != correct:
+        logger.warning(
+            f"[REFLECT/CLOSE] {order.order_id}: LLM directional claim "
+            f"({data['was_directionally_correct']}) != machine verdict "
+            f"({correct}) — using machine verdict"
+        )
 
     full_text = (
         f"Closed: {order.opened_at.strftime('%Y-%m-%d %H:%M')} → {closed_at.strftime('%Y-%m-%d %H:%M')} | "
         f"{order.direction.upper()} {pair_cfg.display_name} @ {order.entry_price:.5f} | "
         f"{close_reason_label}: {close_price:.5f} | PnL: {realized_pnl:+.2f} | "
+        f"directionally_correct={correct} | "
         f"Lesson: {lesson}"
     )
 
@@ -218,5 +205,4 @@ async def generate_close_reflection(
         lesson=lesson,
         confidence_assessment=conf_assess,
         full_text=full_text,
-        atr_params_suggestion=atr_suggestion,
     )

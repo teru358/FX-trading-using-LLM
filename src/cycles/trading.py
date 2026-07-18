@@ -288,11 +288,11 @@ async def _finalize_closed_orders(
     store: VectorStore,
     embed_fn,
     llm_reflect: LLMClient,
-    adaptive_store: AdaptiveParamsStore,
+    adaptive_store: AdaptiveParamsStore,  # 未使用 (adaptive 退役)。Task 8 で本関数ごと削除
     session_store,
     log_source: str,
 ) -> None:
-    """決済済みオーダー群に対し、振り返り生成 → 適応パラメータ更新 → セッション終了 →
+    """決済済みオーダー群に対し、振り返り生成 → セッション終了 →
     directional RAG への complete upsert までを実行する。
 
     log_source は失敗時のログプレフィックス (例: '[REFLECT/CLOSE]', '[REFLECT/REVIEW]')。
@@ -307,29 +307,15 @@ async def _finalize_closed_orders(
         )
         if pair_cfg is None:
             continue
+        # NOTE: reflector / record_trade_complete の strict 化 (spec §3.5) で例外が
+        # 伝搬するようになったため、旧挙動 (1 件失敗しても他を続行) をここで維持する。
+        # この関数自体 Task 8 で削除予定の暫定コード。
         try:
             entry_analysis = ""
-            sltp_comparison = ""
-            param_history_text = ""
-            macro_ctx_at_entry = ""
             if session_store:
                 sess = session_store.get_session(closed_order.order_id)
                 if sess:
                     entry_analysis = sess.analysis_summary or ""
-                    macro_ctx_at_entry = sess.macro_context or ""
-                    if sess.atr_value and sess.computed_sl:
-                        sltp_comparison = (
-                            f"ATR(14)={sess.atr_value:.5f} sl_mult={sess.sl_atr_mult} tp_mult={sess.tp_atr_mult}\n"
-                            f"computed: SL={sess.computed_sl:.5f} TP={sess.computed_tp:.5f}\n"
-                            f"llm: SL={sess.llm_sl:.5f} TP={sess.llm_tp:.5f}\n"
-                            f"Actual close: {(closed_order.close_price or closed_order.entry_price):.5f} ({closed_order.close_reason})"
-                        )
-                    history = adaptive_store.get_history(closed_order.pair, limit=3)
-                    if history:
-                        param_history_text = "\n".join(
-                            f"[{h.get('updated_at', '?')}] sl={h.get('sl_atr_mult')} tp={h.get('tp_atr_mult')} reason={h.get('reason', '')}"
-                            for h in history
-                        )
 
             reflection = await generate_close_reflection(
                 pair_cfg=pair_cfg,
@@ -337,29 +323,8 @@ async def _finalize_closed_orders(
                 llm=llm_reflect,
                 temperature=config.llm.reflection.temperature,
                 user_notes=load_user_notes(config.user_notes_path, "reflect"),
-                macro_context_at_entry=macro_ctx_at_entry,
                 entry_analysis=entry_analysis,
-                sltp_comparison=sltp_comparison,
-                param_history=param_history_text,
             )
-
-            if reflection.atr_params_suggestion:
-                suggestion = reflection.atr_params_suggestion
-                new_params = {}
-                if suggestion.get("sl_atr_mult") is not None:
-                    new_params["sl_atr_mult"] = suggestion["sl_atr_mult"]
-                if suggestion.get("tp_atr_mult") is not None:
-                    new_params["tp_atr_mult"] = suggestion["tp_atr_mult"]
-                if new_params:
-                    try:
-                        adaptive_store.update_params(
-                            pair=closed_order.pair,
-                            new_params=new_params,
-                            reason=suggestion.get("reason", "LLM suggestion"),
-                            trade_id=closed_order.order_id,
-                        )
-                    except Exception as e:
-                        logger.warning(f"[ADAPTIVE] {closed_order.pair}: param update failed — {e}")
 
             if session_store:
                 session_store.close_session(
