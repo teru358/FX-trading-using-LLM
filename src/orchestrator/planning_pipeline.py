@@ -141,14 +141,20 @@ class PlanningPipeline:
             logger.warning(
                 "[ORCH] planning fail-safe for %s: %s: %s", pair, type(exc).__name__, exc
             )
-            return PipelineResult(outcome="failed", error=f"{type(exc).__name__}: {exc}")
+            return PipelineResult(
+                outcome="failed", error=f"{type(exc).__name__}: {exc}",
+                reason=_normalize_reason(f"fail-safe: {type(exc).__name__}: {exc}"),
+            )
         except Exception as exc:
             # 想定外 (store DB エラー等)。§5.4「planning thread は死なせない」。
             # plan を作っても decision を残せなかった等の不整合は orphan を残しうるが、
             # _commit_plan が record 順序 (create→decision→vote→supersede) でこれを
             # 最小化する。ここはあくまで最後の安全網。
             logger.exception("[ORCH] planning unexpected error for %s — failing safe", pair)
-            return PipelineResult(outcome="failed", error=f"{type(exc).__name__}: {exc}")
+            return PipelineResult(
+                outcome="failed", error=f"{type(exc).__name__}: {exc}",
+                reason=_normalize_reason(f"unexpected: {type(exc).__name__}: {exc}"),
+            )
 
     async def _pipeline(
         self, pair: str, context: dict[str, Any], run_id: int, snapshot_id: int, horizon: str
@@ -172,7 +178,10 @@ class PlanningPipeline:
                 ),
                 trade_horizon=horizon,
             )
-            return PipelineResult(outcome="direct_hold", decision_ids=[did])
+            return PipelineResult(
+                outcome="direct_hold", decision_ids=[did],
+                reason=_normalize_reason(f"{'/'.join(unavailable)} unavailable"),
+            )
 
         # ── Step 2: opportunity scan ──────────────────────────
         opp = await self._planner.scan_opportunity(pair=pair, context=context)
@@ -193,7 +202,10 @@ class PlanningPipeline:
                 final_score=opp.score, confidence=opp.confidence,
                 reasoning_summary=opp.reasoning_summary, trade_horizon=horizon,
             )
-            return PipelineResult(outcome="direct_hold", decision_ids=[did])
+            return PipelineResult(
+                outcome="direct_hold", decision_ids=[did],
+                reason=_normalize_reason(opp.reasoning_summary or "no opportunity"),
+            )
 
         # ── Step 3-5: draft → final → risk (再起案ループ) ──────
         # opportunity=yes なのに direction が long/short でない = 矛盾出力。
@@ -265,7 +277,8 @@ class PlanningPipeline:
                 )
                 return PipelineResult(
                     outcome="reject", decision_ids=[did], redraft_count=redraft_count,
-                    reason="scale-in without new_signal_evidence",
+                    reason=_normalize_reason("scale-in without new_signal_evidence"),
+                    derived_rr=None,
                 )
             if draft.scale_in != same_dir:
                 logger.info(
@@ -309,7 +322,8 @@ class PlanningPipeline:
                 )
                 return PipelineResult(
                     outcome="reject", decision_ids=[did], redraft_count=redraft_count,
-                    reason=f"planner reject: {final.reasoning_summary}",
+                    reason=_normalize_reason(f"planner reject: {final.reasoning_summary}"),
+                    derived_rr=None,
                 )
 
             # PlannerAgent が revise → draft を採用せず 1 回だけ再起案 (§13#6: 最終権限は
@@ -324,7 +338,10 @@ class PlanningPipeline:
                 )
                 return PipelineResult(
                     outcome="reject", decision_ids=[did], redraft_count=redraft_count,
-                    reason=f"planner revise exhausted: {final.reasoning_summary}",
+                    reason=_normalize_reason(
+                        f"planner revise exhausted: {final.reasoning_summary}"
+                    ),
+                    derived_rr=None,
                 )
 
             # accept のみ risk gate (hard veto) へ。
@@ -346,7 +363,10 @@ class PlanningPipeline:
             risk_reason = "; ".join(risk.issues) if risk.issues else "structural"
             return PipelineResult(
                 outcome="reject", decision_ids=[did], redraft_count=redraft_count,
-                reason=f"risk reject ({risk.reject_class}): {risk_reason}",
+                reason=_normalize_reason(
+                    f"risk reject ({risk.reject_class}): {risk_reason}"
+                ),
+                derived_rr=risk.derived_rr,
             )
 
     # ── persistence helpers ──────────────────────────────────
@@ -427,7 +447,9 @@ class PlanningPipeline:
             outcome="plan_create", plan_id=plan_id, decision_ids=[did],
             redraft_count=redraft_count,
             direction=draft.direction, score=final.final_score,
-            confidence=final.confidence, reason=final.reasoning_summary,
+            confidence=final.confidence,
+            reason=_normalize_reason(final.reasoning_summary),
+            derived_rr=risk.derived_rr,
             superseded_plan_ids=superseded,
         )
 

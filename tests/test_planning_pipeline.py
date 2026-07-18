@@ -267,6 +267,7 @@ async def test_revise_twice_stops_without_plan(store: OrchestratorStore) -> None
     assert result.outcome == "reject"
     assert result.plan_id is None
     assert store.get_active_plans("USDJPY=X") == []
+    assert result.reason and "revise" in result.reason
 
 
 # ── bad opportunity direction → fail-safe (MEDIUM-1 fix) ───────
@@ -306,6 +307,7 @@ async def test_unexpected_store_error_yields_failed(store: OrchestratorStore, mo
     result = await pipe.run(pair="USDJPY=X", context=ctx, run_id=run_id)
 
     assert result.outcome == "failed"  # クラッシュせず failed を返す
+    assert result.reason
     # orphan 防止 (Codex High#2): decision 記録に失敗したら active plan は残らない
     assert store.get_active_plans("USDJPY=X") == []
 
