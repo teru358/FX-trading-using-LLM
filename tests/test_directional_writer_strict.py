@@ -28,6 +28,27 @@ class _Order:
     signal_reason = "r"
 
 
+class _OkStore:
+    class directional:
+        @staticmethod
+        def upsert(**kwargs):
+            return None
+
+
+async def _failing_embed(text):
+    raise RuntimeError("embed model down")
+
+
 async def test_rag_failure_propagates():
     with pytest.raises(RuntimeError):
         await record_trade_complete(_FailingStore(), _embed, _Order(), "text")
+
+
+async def test_embed_failure_propagates():
+    """embedding 生成失敗も握り潰さない (upsert と同じく un-swallow 対象)。"""
+    with pytest.raises(RuntimeError):
+        await record_trade_complete(_OkStore(), _failing_embed, _Order(), "text")
+
+
+async def test_success_does_not_raise():
+    await record_trade_complete(_OkStore(), _embed, _Order(), "text")

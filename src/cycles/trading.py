@@ -307,9 +307,11 @@ async def _finalize_closed_orders(
         )
         if pair_cfg is None:
             continue
-        # NOTE: reflector / record_trade_complete の strict 化 (spec §3.5) で例外が
-        # 伝搬するようになったため、旧挙動 (1 件失敗しても他を続行) をここで維持する。
-        # この関数自体 Task 8 で削除予定の暫定コード。
+        # NOTE: この except は 1 件の失敗が他の決済処理を止めないようにするだけでなく、
+        # strict 化した generate_close_reflection / record_trade_complete (spec §3.5) の
+        # 例外もここで飲み込む。つまり本経路では LLM 失敗も RAG upsert 失敗も
+        # warning ログのみで消え、retry されない。retry 管理は reflection job (Task 4)
+        # が引き継ぎ、本関数は Task 8 で削除されるまでの暫定コード。
         try:
             entry_analysis = ""
             if session_store:

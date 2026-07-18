@@ -1,19 +1,16 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 from src.llm.client import LLMClient
 from src.llm.response_parser import extract_json
+from src.utils.clock import db_now
 
 if TYPE_CHECKING:
     from src.trading.position_manager import Order
-
-# embed_fn の型: async (text: str) -> list[float]
-EmbedFn = Callable[[str], Coroutine[Any, Any, list[float]]]
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +72,12 @@ Return ONLY valid JSON:
   "confidence_assessment": "<was the entry timing and risk setup appropriate?>"
 }}"""
 
-# LLM 応答の必須キー (spec §3.5b)。欠落・型不正は失敗扱いにする。
-_REQUIRED_KEYS = ("outcome_summary", "lesson", "was_directionally_correct")
+# LLM 応答の必須キーと期待型 (spec §3.5b)。欠落・型不正・明示的 null は失敗扱い。
+_REQUIRED_KEY_TYPES: dict[str, type] = {
+    "outcome_summary": str,
+    "lesson": str,
+    "was_directionally_correct": bool,
+}
 
 _CLOSE_REASON_LABELS = {
     "take_profit":   "TAKE PROFIT HIT ✓",
@@ -97,11 +98,32 @@ async def generate_close_reflection(
     user_notes: str = "",
     entry_analysis: str = "",
 ) -> Reflection:
-    """決済済み Order から確定結果ベースの振り返りを生成する。"""
-    close_price = order.close_price or order.entry_price
+    """決済済み Order から確定結果ベースの振り返りを生成する。
+
+    方向正誤 (`was_directionally_correct`) は価格方向による機械判定を正とし、
+    LLM の申告値は採用しない (spec §3.5b)。LLM は叙述 (outcome_summary / lesson /
+    confidence_assessment) のみを担う。
+
+    fallback は持たない。失敗は呼び出し側 (reflection job) の retry 管理へ委ねる。
+
+    Raises:
+        ReflectionValidationError: `order.close_price` が None で方向判定不能な場合、
+            または LLM 応答の必須キーが欠落・型不正な場合。
+        ValueError: LLM 応答から JSON を抽出できなかった場合 (`extract_json` 由来。
+            `json.JSONDecodeError` を含む)。
+        Exception: LLM 呼び出し自体が失敗した場合 (クライアント実装依存)。
+    """
+    # 方向判定は close_price に全面依存するため、entry_price での補填はしない。
+    # 補填すると entry > entry = False となり、捏造された「方向的に誤り」が
+    # full_text 経由で directional RAG に永続化される (spec §3.5b)。
+    if order.close_price is None:
+        raise ReflectionValidationError(
+            f"close_price is None for {order.order_id}; cannot determine direction"
+        )
+    close_price = order.close_price
     close_reason = order.close_reason or "manual"
     realized_pnl = order.realized_pnl or 0.0
-    closed_at = order.closed_at or datetime.now()
+    closed_at = order.closed_at or db_now()
 
     duration_hours = (closed_at - order.opened_at).total_seconds() / 3600
     pip_multiplier = 100 if "JPY" in order.pair else 10000
@@ -150,22 +172,36 @@ async def generate_close_reflection(
     # fallback は持たない: LLM 失敗も schema 不正も例外を伝搬させ、呼び出し側
     # (reflection job) の retry 管理に委ねる (spec §3.5)。
     text = await llm.chat(messages, temperature=temperature)
+    # extract_json は全 return パスで dict を保証する (src/llm/response_parser.py)。
+    # 抽出不能なら ValueError を投げるため、ここでの非 dict チェックは不要。
     data = extract_json(text)
 
-    missing = [k for k in _REQUIRED_KEYS if k not in data]
-    if missing:
-        raise ReflectionValidationError(f"missing keys: {missing}")
-    if not isinstance(data["was_directionally_correct"], bool):
-        raise ReflectionValidationError("was_directionally_correct must be bool")
-    if not isinstance(data["outcome_summary"], str) or not isinstance(data["lesson"], str):
-        raise ReflectionValidationError("outcome_summary/lesson must be str")
+    # 存在チェックと型チェックを分けず、必須キーは「期待型であること」で一括判定する。
+    # `k not in data` だけでは明示的 null を通してしまうが (_sanitize_json が壊れた値を
+    # 能動的に null へ変換するため現実的な LLM 出力)、型が一致しないので確実に弾ける。
+    for key, expected in _REQUIRED_KEY_TYPES.items():
+        if key not in data:
+            raise ReflectionValidationError(f"missing key: {key}")
+        if not isinstance(data[key], expected):
+            raise ReflectionValidationError(
+                f"{key} must be {expected.__name__}, got {type(data[key]).__name__}"
+            )
+    # 任意キーだが、存在するなら型は守らせる (Reflection の型注釈を嘘にしない)。
+    conf_assess = data.get("confidence_assessment", "")
+    if not isinstance(conf_assess, str):
+        raise ReflectionValidationError(
+            f"confidence_assessment must be str, got {type(conf_assess).__name__}"
+        )
 
     outcome = data["outcome_summary"]
     lesson = data["lesson"]
-    conf_assess = data.get("confidence_assessment", "")
 
     # 方向正誤は価格方向の機械判定を正とする (spec §3.5b)。
     # close_reason == "take_profit" 基準は trailing SL / manual の利益決済を誤判定する。
+    # 境界: close == entry (建値決済) は厳密不等号により False に倒れる。これは意図的で、
+    # 建値で利益が出ていない以上「方向の優位性は確認できなかった」という扱いにする。
+    # 三値化しないのは spec §3.4 が done 時の was_directionally_correct を必須と
+    # 規定しており、NULL を flat に流用すると衝突するため。
     if order.direction == "buy":
         correct = close_price > order.entry_price
     else:
