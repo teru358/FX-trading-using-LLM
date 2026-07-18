@@ -149,6 +149,25 @@ class _OrderIntent(_Base):
     )
 
 
+class _Reflection(_Base):
+    """決済済みトレードの LLM 振り返り + retry 管理 (spec §3.2b/§3.4)。"""
+    __tablename__ = "reflections"
+
+    order_id                  = Column(String, primary_key=True)
+    plan_id                   = Column(Integer)          # NULL = orchestrator 経由でない決済
+    pair                      = Column(String, nullable=False)
+    close_reason              = Column(String)
+    realized_pnl              = Column(Float)
+    reflection_text           = Column(String)           # done 以外は NULL 可
+    was_directionally_correct = Column(Boolean)          # done 時は必須 (§3.5b 機械判定)
+    status                    = Column(String, nullable=False)   # done | retry | dead
+    attempt_count             = Column(Integer, nullable=False, default=0)
+    last_error                = Column(String)
+    next_retry_at             = Column(DateTime)
+    created_at                = Column(DateTime, nullable=False)
+    updated_at                = Column(DateTime, nullable=False)
+
+
 # spec §8.3 の decision_type 集合
 DECISION_TYPES = (
     "plan_create", "plan_update", "plan_invalidate",
@@ -327,6 +346,14 @@ class _ProtectionDecision(_Base):
     giveback_r = Column(Float)
 
 
+# reflection retry の指数 backoff (時間)。5 回目の失敗で dead になるため
+# backoff は 4 段で全段使われる (spec §3.2b)。
+_REFLECTION_BACKOFF_HOURS = (1, 2, 4, 8)
+_REFLECTION_MAX_ATTEMPTS = 5
+# planning 実行中判定の stale 閾値 (秒)。これより古い未完了 run は無視 (spec §3.6)。
+_PLANNING_STALE_SECONDS = 600
+
+
 class OrchestratorStore:
     """spec §8 のテーブル群を 1 つの DB で管理するストア。"""
 
@@ -361,6 +388,17 @@ class OrchestratorStore:
                     logger.info(f"[MIGRATE] Added {table}.{col}")
                 except Exception:
                     pass  # カラムが既に存在
+
+        # order_id 逆引き index (spec §3.3)。既存 DB にも冪等に張る。
+        with self._engine.connect() as conn:
+            try:
+                conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS ix_order_intents_order_id "
+                    "ON order_intents(order_id)"
+                ))
+                conn.commit()
+            except Exception:
+                logger.debug("[MIGRATE] ix_order_intents_order_id skipped", exc_info=True)
 
     # ── decision_snapshots (§8.7) ──────────────────────────────
 
@@ -969,6 +1007,126 @@ class OrchestratorStore:
             if intent is not None:
                 session.expunge(intent)
             return intent
+
+    def get_order_intent_by_order_id(self, order_id: str) -> _OrderIntent | None:
+        """broker の order_id から intent を逆引きする (spec §3.3)。"""
+        with Session(self._engine) as session:
+            stmt = select(_OrderIntent).where(_OrderIntent.order_id == order_id)
+            intent = session.execute(stmt).scalars().first()
+            if intent is not None:
+                session.expunge(intent)
+            return intent
+
+    # ── reflections (spec §3.2b/§3.4) ──────────────────────────
+
+    def get_reflection(self, order_id: str) -> _Reflection | None:
+        with Session(self._engine) as session:
+            r = session.get(_Reflection, order_id)
+            if r is not None:
+                session.expunge(r)
+            return r
+
+    def get_reflections(self) -> list[_Reflection]:
+        with Session(self._engine) as session:
+            rows = list(session.execute(select(_Reflection)).scalars().all())
+            for r in rows:
+                session.expunge(r)
+            return rows
+
+    def mark_reflection_done(
+        self, order_id: str, *, plan_id: int | None, pair: str,
+        close_reason: str | None, realized_pnl: float | None,
+        reflection_text: str, was_directionally_correct: bool,
+        now: datetime,
+    ) -> None:
+        """LLM + RAG 成功後にのみ呼ぶ (spec §3.5 不変条件)。"""
+        with Session(self._engine) as session:
+            r = session.get(_Reflection, order_id)
+            if r is None:
+                r = _Reflection(order_id=order_id, created_at=now,
+                                attempt_count=0)
+                session.add(r)
+            r.plan_id = plan_id
+            r.pair = pair
+            r.close_reason = close_reason
+            r.realized_pnl = realized_pnl
+            r.reflection_text = reflection_text
+            r.was_directionally_correct = was_directionally_correct
+            r.status = "done"
+            r.last_error = None       # retry からの遷移で error 状態を消去
+            r.next_retry_at = None
+            r.updated_at = now
+            session.commit()
+
+    def mark_reflection_retry(
+        self, order_id: str, *, pair: str, error: str, now: datetime,
+    ) -> None:
+        """失敗を記録し backoff を進める。5 回目で dead に落ちる。"""
+        with Session(self._engine) as session:
+            r = session.get(_Reflection, order_id)
+            if r is None:
+                r = _Reflection(order_id=order_id, pair=pair,
+                                created_at=now, attempt_count=0)
+                session.add(r)
+            r.attempt_count += 1
+            r.last_error = error
+            r.updated_at = now
+            if r.attempt_count >= _REFLECTION_MAX_ATTEMPTS:
+                r.status = "dead"
+                r.next_retry_at = None
+                logger.warning(
+                    f"[REFLECT] {order_id} dead-lettered after "
+                    f"{r.attempt_count} attempts: {error}")
+            else:
+                r.status = "retry"
+                hours = _REFLECTION_BACKOFF_HOURS[
+                    min(r.attempt_count - 1, len(_REFLECTION_BACKOFF_HOURS) - 1)]
+                r.next_retry_at = now + timedelta(hours=hours)
+            session.commit()
+
+    def mark_reflection_dead(
+        self, order_id: str, *, pair: str, error: str, now: datetime,
+    ) -> None:
+        """恒久不能 (instrument 不在等) を即 dead 記録する。"""
+        with Session(self._engine) as session:
+            r = session.get(_Reflection, order_id)
+            if r is None:
+                r = _Reflection(order_id=order_id, pair=pair,
+                                created_at=now, attempt_count=0)
+                session.add(r)
+            r.status = "dead"
+            r.last_error = error
+            r.next_retry_at = None
+            r.updated_at = now
+            session.commit()
+
+    # ── planning 実行中照会 (spec §3.6, best effort) ────────────
+
+    def has_running_planning_run(self, *, now: datetime) -> bool:
+        """実行中 planning run の有無。stale (>10 分) は実行中と見なさない。"""
+        threshold = now - timedelta(seconds=_PLANNING_STALE_SECONDS)
+        with Session(self._engine) as session:
+            stmt = (
+                select(_AgentRun.run_id)
+                .where(_AgentRun.trigger_type == "planning_cycle")
+                .where(_AgentRun.finished_at.is_(None))
+                .where(_AgentRun.started_at > threshold)
+                .limit(1)
+            )
+            return session.execute(stmt).first() is not None
+
+    def finish_dangling_runs(self, *, now: datetime) -> int:
+        """起動時に前プロセスの未完了 run を failed で回収する (spec §3.6)。"""
+        with Session(self._engine) as session:
+            stmt = (
+                update(_AgentRun)
+                .where(_AgentRun.finished_at.is_(None))
+                .values(status="failed", error_type="dangling",
+                        finished_at=now)
+            )
+            result = session.execute(stmt)
+            session.commit()
+            return result.rowcount
 
     def get_stale_pending_intents(self, *, now: datetime) -> list[_OrderIntent]:
         """lease_until を過ぎた pending 行を返す (recovery job 用、§8.8)。
