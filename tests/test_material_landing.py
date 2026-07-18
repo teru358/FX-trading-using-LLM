@@ -1,6 +1,10 @@
 from datetime import datetime, timezone, timedelta
 
-from src.orchestrator.material_landing import MaterialLandingDetector
+from src.orchestrator.material_landing import MaterialLandingDetector, PlanningTarget
+
+
+def _pairs(targets):
+    return [t.pair for t in targets]
 
 
 class _FakeTechSnap:
@@ -145,11 +149,11 @@ def test_debounce_coalesces_rapid_landings():
         pairs=["USDJPY=X"],
     )
     # t=0: material（初観測）→ debounce 窓開始、まだ起動しない
-    assert det.pairs_to_plan(_t(0)) == []
+    assert _pairs(det.pairs_to_plan(_t(0))) == []
     # t=60: 窓内 → まだ
-    assert det.pairs_to_plan(_t(60)) == []
+    assert _pairs(det.pairs_to_plan(_t(60))) == []
     # t=200: 窓（180s）を抜けた → 起動
-    assert det.pairs_to_plan(_t(200)) == ["USDJPY=X"]
+    assert _pairs(det.pairs_to_plan(_t(200))) == ["USDJPY=X"]
 
 
 def test_periodic_floor_fires_without_material():
@@ -164,9 +168,9 @@ def test_periodic_floor_fires_without_material():
     det.pairs_to_plan(_t(0)); det.mark_committed("EURUSD=X", _t(0))
     # material 無し・floor 未超過 → 起動しない
     snaps["EURUSD=X"] = _FakeTechSnap("long", 0.3)  # 変化なし
-    assert det.pairs_to_plan(_t(900)) == []
+    assert _pairs(det.pairs_to_plan(_t(900))) == []
     # floor（1800s）超過 → 起動
-    assert det.pairs_to_plan(_t(1801)) == ["EURUSD=X"]
+    assert _pairs(det.pairs_to_plan(_t(1801))) == ["EURUSD=X"]
 
 
 def test_floor_bootstraps_first_planning_for_idle_pair():
@@ -179,12 +183,12 @@ def test_floor_bootstraps_first_planning_for_idle_pair():
         pairs=["GBPUSD=X"],
     )
     # last_planned が無い (None) pair も初回は due 扱いで起動する
-    assert det.pairs_to_plan(_t(0)) == ["GBPUSD=X"]
+    assert _pairs(det.pairs_to_plan(_t(0))) == ["GBPUSD=X"]
     det.mark_committed("GBPUSD=X", _t(0))
     # 直後は floor 未超過 → 起動しない
-    assert det.pairs_to_plan(_t(900)) == []
+    assert _pairs(det.pairs_to_plan(_t(900))) == []
     # floor 超過 → 再起動
-    assert det.pairs_to_plan(_t(1801)) == ["GBPUSD=X"]
+    assert _pairs(det.pairs_to_plan(_t(1801))) == ["GBPUSD=X"]
 
 
 # ── attempted vs committed (Codex Medium#4) ─────────────────────────
@@ -201,14 +205,14 @@ def test_mark_attempted_does_not_consume_technical_baseline():
     )
     # material が debounce を抜けて起動対象になる
     det.pairs_to_plan(_t(0))
-    assert det.pairs_to_plan(_t(200)) == ["USDJPY=X"]
+    assert _pairs(det.pairs_to_plan(_t(200))) == ["USDJPY=X"]
     # planning が失敗 → attempted (debounce 窓は閉じるが baseline は未消費)
     det.mark_attempted("USDJPY=X", _t(200))
     # 失敗直後は debounce 窓リセットで即再発火しない (新たな窓を開く)
-    assert det.pairs_to_plan(_t(201)) == []   # t=201 に窓を開き直す
+    assert _pairs(det.pairs_to_plan(_t(201))) == []   # t=201 に窓を開き直す
     # baseline 未消費なので、新たな debounce 窓を抜ければ再び material として起動できる
-    assert det.pairs_to_plan(_t(300)) == []   # 窓内 (300-201=99 < 180)
-    assert det.pairs_to_plan(_t(390)) == ["USDJPY=X"]  # 窓を抜けて再起動 (390-201=189 ≥ 180)
+    assert _pairs(det.pairs_to_plan(_t(300))) == []   # 窓内 (300-201=99 < 180)
+    assert _pairs(det.pairs_to_plan(_t(390))) == ["USDJPY=X"]  # 窓を抜けて再起動 (390-201=189 ≥ 180)
 
 
 def test_mark_committed_consumes_technical_baseline():
@@ -222,10 +226,10 @@ def test_mark_committed_consumes_technical_baseline():
         pairs=["USDJPY=X"],
     )
     det.pairs_to_plan(_t(0))
-    assert det.pairs_to_plan(_t(200)) == ["USDJPY=X"]
+    assert _pairs(det.pairs_to_plan(_t(200))) == ["USDJPY=X"]
     det.mark_committed("USDJPY=X", _t(200))   # 成功 → baseline 消費
     # 同じ technical のまま → material でない (floor まで起動しない)
-    assert det.pairs_to_plan(_t(400)) == []
+    assert _pairs(det.pairs_to_plan(_t(400))) == []
 
 
 # ── regime push 経路 (§5.4① / Task C-3) ──────────────────────
@@ -296,6 +300,6 @@ def test_regime_drives_pairs_to_plan_after_debounce():
     det = _regime_detector(debounce_window_seconds=180)
     t0 = datetime(2026, 6, 22, 12, 0, 0, tzinfo=timezone.utc)
     det.mark_regime("USDJPY=X", "active")
-    assert det.pairs_to_plan(t0) == []  # debounce 窓開始
+    assert _pairs(det.pairs_to_plan(t0)) == []  # debounce 窓開始
     # 窓を抜けたら planning 対象に入る。
-    assert det.pairs_to_plan(t0 + timedelta(seconds=181)) == ["USDJPY=X"]
+    assert _pairs(det.pairs_to_plan(t0 + timedelta(seconds=181))) == ["USDJPY=X"]

@@ -27,6 +27,12 @@ from typing import Any, Callable
 _REGIME_RANK = {"calm": 0, "normal": 1, "active": 2, "critical": 3}
 
 
+@dataclass(frozen=True)
+class PlanningTarget:
+    pair: str
+    triggers: tuple[str, ...]   # ("news", "regime", ...) 空なら cadence floor 起因
+
+
 @dataclass
 class _Seen:
     direction_bias: str | None
@@ -211,11 +217,25 @@ class MaterialLandingDetector:
 
     # ── 起動 pair 決定 ──────────────────────────────────────────────
 
-    def pairs_to_plan(self, now: datetime) -> list[str]:
-        out: list[str] = []
+    def _material_triggers(self, pair: str) -> tuple[str, ...]:
+        """該当する全 material 経路を集める (短絡しない)。空なら non-material。"""
+        triggers: list[str] = []
+        if self.technical_material(pair):
+            triggers.append("technical")
+        if self.news_material(pair):
+            triggers.append("news")
+        if self.event_window_material(pair):
+            triggers.append("event")
+        if self.regime_material(pair):
+            triggers.append("regime")
+        return tuple(triggers)
+
+    def pairs_to_plan(self, now: datetime) -> list["PlanningTarget"]:
+        out: list[PlanningTarget] = []
         for pair in self._pairs:
+            triggers = self._material_triggers(pair)
             fire = False
-            if self.is_material(pair):
+            if triggers:
                 # material 経路: debounce 窓を抜けたら起動。
                 started = self._material_since.get(pair)
                 if started is None:
@@ -230,5 +250,5 @@ class MaterialLandingDetector:
                 if last is None or (now - last).total_seconds() >= self._floor:
                     fire = True
             if fire:
-                out.append(pair)
+                out.append(PlanningTarget(pair=pair, triggers=triggers))
         return out

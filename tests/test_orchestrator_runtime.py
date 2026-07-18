@@ -334,7 +334,8 @@ def test_pipeline_failed_marks_attempted_not_committed(tmp_path: Path) -> None:
             self.committed = []
             self.attempted = []
         def pairs_to_plan(self, now):
-            return list(self.fire)
+            from src.orchestrator.material_landing import PlanningTarget
+            return [PlanningTarget(pair=p, triggers=()) for p in self.fire]
         def mark_committed(self, pair, now):
             self.committed.append(pair)
         def mark_attempted(self, pair, now):
@@ -381,7 +382,8 @@ def test_pipeline_success_marks_committed(tmp_path: Path) -> None:
             self.committed = []
             self.attempted = []
         def pairs_to_plan(self, now):
-            return list(self.fire)
+            from src.orchestrator.material_landing import PlanningTarget
+            return [PlanningTarget(pair=p, triggers=()) for p in self.fire]
         def mark_committed(self, pair, now):
             self.committed.append(pair)
         def mark_attempted(self, pair, now):
@@ -421,7 +423,8 @@ def test_planning_cycle_only_processes_detector_pairs(tmp_path: Path) -> None:
             self.committed = []
             self.attempted = []
         def pairs_to_plan(self, now):
-            return list(self.fire)
+            from src.orchestrator.material_landing import PlanningTarget
+            return [PlanningTarget(pair=p, triggers=()) for p in self.fire]
         def mark_committed(self, pair, now):
             self.committed.append(pair)
         def mark_attempted(self, pair, now):

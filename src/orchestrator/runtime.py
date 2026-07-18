@@ -216,10 +216,15 @@ class OrchestratorRuntime:
         """
         now = now or db_now()
         if self._detector is not None:
-            target_pairs = self._detector.pairs_to_plan(now)
+            targets = self._detector.pairs_to_plan(now)
         else:
-            target_pairs = self._pairs  # 後方互換: detector 未注入時は全 pair
-        for pair in target_pairs:
+            # 後方互換: detector 未注入時は全 pair・trigger=cadence 扱い。
+            from src.orchestrator.material_landing import PlanningTarget
+            targets = [PlanningTarget(pair=p, triggers=()) for p in self._pairs]
+        for target in targets:
+            pair = target.pair
+            # trigger_label は planning start ログ用 (後続 Task で消費)。
+            trigger_label = "+".join(target.triggers) if target.triggers else "cadence"
             # start_run は quote 取得・build より前に呼ぶ: 価格取得は落ちやすい入力なので、
             # 失敗時も failed run を必ず残し (dangling 防止)、かつ 1 ペアの失敗で残りペアを
             # 止めないため、quote 取得も含めて try 内に入れる。

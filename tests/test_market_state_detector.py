@@ -214,7 +214,8 @@ def test_build_market_state_regime_pushes_into_detector(tmp_path):
     assert landing.regime_material("USDJPY=X") is True
     # 1 回目で debounce 窓開始、2 回目 (debounce=0 経過) で planning 対象。
     landing.pairs_to_plan(NOW)
-    assert landing.pairs_to_plan(NOW + timedelta(seconds=1)) == ["USDJPY=X"]
+    targets = landing.pairs_to_plan(NOW + timedelta(seconds=1))
+    assert [t.pair for t in targets] == ["USDJPY=X"]
 
 
 def test_build_market_state_disabled_returns_none(tmp_path):
