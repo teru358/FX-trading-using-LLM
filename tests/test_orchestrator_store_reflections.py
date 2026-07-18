@@ -1,11 +1,16 @@
 """reflections テーブルと planning 照会 API のテスト (spec §3.2b/§3.4/§3.6)。"""
 from __future__ import annotations
 
+import threading
 from datetime import timedelta
 
 import pytest
 
-from src.data.orchestrator_store import OrchestratorStore
+from src.data.orchestrator_store import (
+    _PLANNING_STALE_SECONDS,
+    _REFLECTION_MAX_ATTEMPTS,
+    OrchestratorStore,
+)
 from src.utils.clock import db_now
 
 
@@ -85,11 +90,149 @@ class TestReflectionCrud:
         assert r.last_error is None        # done 遷移で error 状態を消去
         assert r.next_retry_at is None
 
+    def test_done_preserves_attempt_count(self, store):
+        """done は attempt_count をリセットしない。
+
+        「何回失敗した末に成功したか」は reflection job の健全性指標として
+        残す (リセットすると retry 経由の成功が観測できなくなる)。
+        """
+        store.mark_reflection_retry("ord-7", pair="USDJPY=X", error="e", now=NOW)
+        store.mark_reflection_done(
+            "ord-7", plan_id=None, pair="USDJPY=X", close_reason="take_profit",
+            realized_pnl=10.0, reflection_text="t",
+            was_directionally_correct=True, now=NOW,
+        )
+        r = store.get_reflection("ord-7")
+        assert r.status == "done"
+        assert r.attempt_count == 1
+
+    def test_dead_is_terminal_retry_is_noop(self, store):
+        """dead は terminal。後続 retry で復活してはならない (HIGH-3)。"""
+        store.mark_reflection_dead("ord-8", pair="USDJPY=X",
+                                   error="pair not in instruments", now=NOW)
+        store.mark_reflection_retry("ord-8", pair="USDJPY=X", error="later", now=NOW)
+        r = store.get_reflection("ord-8")
+        assert r.status == "dead"
+        assert r.attempt_count == 0          # no-op なので増えない
+        assert "not in instruments" in r.last_error   # 元の error を保持
+
+    def test_dead_by_max_attempts_is_terminal(self, store):
+        """attempt 上限で dead になった行も同様に terminal。"""
+        for _ in range(5):
+            store.mark_reflection_retry("ord-9", pair="USDJPY=X", error="e", now=NOW)
+        store.mark_reflection_retry("ord-9", pair="USDJPY=X", error="again", now=NOW)
+        r = store.get_reflection("ord-9")
+        assert r.status == "dead"
+        assert r.attempt_count == 5
+
+    def test_mark_done_twice_is_idempotent(self, store):
+        for _ in range(2):
+            store.mark_reflection_done(
+                "ord-10", plan_id=3, pair="USDJPY=X", close_reason="take_profit",
+                realized_pnl=50.0, reflection_text="t",
+                was_directionally_correct=True, now=NOW,
+            )
+        assert len(store.get_reflections()) == 1
+        r = store.get_reflection("ord-10")
+        assert r.status == "done"
+        assert r.attempt_count == 0
+
     def test_get_reflections_lists_all(self, store):
         store.mark_reflection_retry("a", pair="P", error="e", now=NOW)
         store.mark_reflection_dead("b", pair="P", error="e", now=NOW)
         ids = {r.order_id for r in store.get_reflections()}
         assert ids == {"a", "b"}
+
+
+class TestReflectionConcurrency:
+    """_get_engine は path で engine をキャッシュし全スレッドで共有するため
+    (price_store.py:52-61)、orchestrator runtime / scheduler / API スレッドが
+    同一 DB を並行に触る。read-modify-write では lost update が起きる。
+    """
+
+    def _run_parallel(self, fn, n):
+        errors: list[BaseException] = []
+        barrier = threading.Barrier(n)
+
+        def worker():
+            try:
+                barrier.wait()      # 全スレッドを同時に突入させ競合を最大化
+                fn()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=worker) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        return errors
+
+    def test_concurrent_retry_counts_every_attempt(self, store):
+        """8 スレッド並行 retry で attempt_count が過小計上されないこと。
+
+        過小計上は dead-letter 到達失敗 = 永久 retry を招き、
+        spec §3.2b の 5 回上限という中核不変条件が破綻する。
+        """
+        # 上限 5 で dead に落ちないよう、上限を超えた回数でも増分が失われないことを見る
+        errors = self._run_parallel(
+            lambda: store.mark_reflection_retry(
+                "ord-race", pair="USDJPY=X", error="e", now=NOW),
+            8,
+        )
+        assert errors == [], f"並行 retry で例外: {errors!r}"
+        r = store.get_reflection("ord-race")
+        # 最終値は 5〜8 の範囲で interleaving 依存になる。どこかのスレッドが
+        # dead を commit した後の呼び出しは HIGH-3 の terminal ガードで no-op に
+        # なるため、8 に張り付くとは限らない (増分ロストではない: dead 判定を
+        # 挟まない純粋な増分パスは 8 並行で必ず 8 になることを実測で確認済み)。
+        # 守るべき不変条件は「過小計上で dead-letter に到達し損ねないこと」。
+        # read-modify-write 版はここで 2 まで落ち、永久 retry を招いていた。
+        assert r.attempt_count >= _REFLECTION_MAX_ATTEMPTS
+        assert r.status == "dead"
+
+    def test_concurrent_increment_loses_nothing(self, store):
+        """増分パス単体では 1 件も失われないこと (HIGH-1 の本丸)。
+
+        mark_reflection_retry 経由だと dead terminal ガードの no-op が混ざり
+        最終値が interleaving 依存になるため、増分だけを 8 並行で叩いて
+        lost update が無いことを厳密に (== 8) 押さえる。
+        """
+        from sqlalchemy.orm import Session
+
+        def bump():
+            with Session(store._engine) as session:
+                store._upsert_reflection(
+                    session, "ord-inc", pair="USDJPY=X", now=NOW,
+                    values={"status": "retry", "last_error": "e"},
+                    attempt_increment=True,
+                )
+
+        errors = self._run_parallel(bump, 8)
+        assert errors == [], f"並行増分で例外: {errors!r}"
+        assert store.get_reflection("ord-inc").attempt_count == 8
+
+    def test_concurrent_first_insert_does_not_raise(self, store):
+        """同一 order_id への初回 INSERT 競合で IntegrityError が漏れないこと。"""
+        errors = self._run_parallel(
+            lambda: store.mark_reflection_dead(
+                "ord-insert-race", pair="USDJPY=X", error="e", now=NOW),
+            6,
+        )
+        assert errors == [], f"初回 INSERT 競合で例外: {errors!r}"
+        assert len(store.get_reflections()) == 1
+
+    def test_concurrent_done_does_not_raise(self, store):
+        errors = self._run_parallel(
+            lambda: store.mark_reflection_done(
+                "ord-done-race", plan_id=1, pair="USDJPY=X",
+                close_reason="take_profit", realized_pnl=1.0,
+                reflection_text="t", was_directionally_correct=True, now=NOW),
+            6,
+        )
+        assert errors == [], f"並行 done で例外: {errors!r}"
+        assert len(store.get_reflections()) == 1
+        assert store.get_reflection("ord-done-race").status == "done"
 
 
 class TestOrderIntentLookup:
@@ -148,9 +291,25 @@ class TestPlanningRunQuery:
     def test_finish_dangling_runs(self, store):
         rid = store.start_run("OrchestratorRuntime", pair="USDJPY=X",
                               trigger_type="planning_cycle")
-        n = store.finish_dangling_runs(now=NOW)
+        # stale 閾値を越えた「明らかに古い」run のみが回収対象 (MEDIUM-1)。
+        later = db_now() + timedelta(seconds=_PLANNING_STALE_SECONDS + 1)
+        n = store.finish_dangling_runs(now=later)
         assert n == 1
         run = store.get_run(rid)
         assert run.status == "failed"
         assert run.error_type == "dangling"
         assert run.finished_at is not None
+
+    def test_finish_dangling_runs_spares_fresh_runs(self, store):
+        """多重起動時に、他プロセスの実行中 run を横から failed にしないこと。
+
+        これを踏むと has_running_planning_run が false を返し、
+        reflection job の LLM 譲り判定まで壊れる (MEDIUM-1)。
+        """
+        rid = store.start_run("OrchestratorRuntime", pair="USDJPY=X",
+                              trigger_type="planning_cycle")
+        n = store.finish_dangling_runs(now=db_now())
+        assert n == 0
+        run = store.get_run(rid)
+        assert run.status == "ok"
+        assert run.finished_at is None

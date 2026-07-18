@@ -15,6 +15,7 @@ from sqlalchemy import (
     JSON, Boolean, Column, DateTime, Float, Integer, String, UniqueConstraint,
     and_, case, func, or_, select, text, update,
 )
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -398,7 +399,13 @@ class OrchestratorStore:
                 ))
                 conn.commit()
             except Exception:
-                logger.debug("[MIGRATE] ix_order_intents_order_id skipped", exc_info=True)
+                # IF NOT EXISTS 付きなので index 既存でも成功する。ここに到達する
+                # のは本物の異常 (DB ロック / 権限 / テーブル未作成) のみ。index が
+                # 無いと get_order_intent_by_order_id が full scan に落ちるため、
+                # 気付けるよう warning で残す (起動自体は止めない)。
+                logger.warning(
+                    "[MIGRATE] ix_order_intents_order_id の作成に失敗 "
+                    "(order_id 逆引きが full scan に劣化)", exc_info=True)
 
     # ── decision_snapshots (§8.7) ──────────────────────────────
 
@@ -1033,55 +1040,110 @@ class OrchestratorStore:
                 session.expunge(r)
             return rows
 
+    def _upsert_reflection(
+        self, session: Session, order_id: str, *, pair: str, now: datetime,
+        values: dict[str, Any], attempt_increment: bool = False,
+    ) -> None:
+        """reflections 行を原子的に INSERT-or-UPDATE する。
+
+        `session.get()` → 無ければ `add` という read-modify-write は、engine が
+        全スレッドで共有される (price_store.py の _engines キャッシュ) 環境で
+        lost update と INSERT 競合 (UNIQUE violation) を起こす。SQLite の
+        `INSERT ... ON CONFLICT DO UPDATE` で単一 statement に畳み込む。
+
+        attempt_increment=True のとき attempt_count の +1 は DB 側の式で行い、
+        並行呼び出しでも増分が失われないようにする (spec §3.2b の 5 回上限)。
+        """
+        insert_values = {
+            "order_id": order_id,
+            "pair": pair,
+            "attempt_count": 1 if attempt_increment else 0,
+            "created_at": now,
+            "updated_at": now,
+            **values,
+        }
+        update_values = {**values, "pair": pair, "updated_at": now}
+        if attempt_increment:
+            # DB 側で読み取り + 加算を 1 statement 内に閉じ込める (原子的)。
+            update_values["attempt_count"] = _Reflection.attempt_count + 1
+        stmt = sqlite_insert(_Reflection).values(**insert_values)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["order_id"], set_=update_values,
+        )
+        session.execute(stmt)
+        session.commit()
+
     def mark_reflection_done(
         self, order_id: str, *, plan_id: int | None, pair: str,
         close_reason: str | None, realized_pnl: float | None,
         reflection_text: str, was_directionally_correct: bool,
         now: datetime,
     ) -> None:
-        """LLM + RAG 成功後にのみ呼ぶ (spec §3.5 不変条件)。"""
+        """LLM + RAG 成功後にのみ呼ぶ (spec §3.5 不変条件)。
+
+        attempt_count は保持する ("何回失敗した末に成功したか" は
+        reflection job の健全性指標として残す)。
+        """
         with Session(self._engine) as session:
-            r = session.get(_Reflection, order_id)
-            if r is None:
-                r = _Reflection(order_id=order_id, created_at=now,
-                                attempt_count=0)
-                session.add(r)
-            r.plan_id = plan_id
-            r.pair = pair
-            r.close_reason = close_reason
-            r.realized_pnl = realized_pnl
-            r.reflection_text = reflection_text
-            r.was_directionally_correct = was_directionally_correct
-            r.status = "done"
-            r.last_error = None       # retry からの遷移で error 状態を消去
-            r.next_retry_at = None
-            r.updated_at = now
-            session.commit()
+            self._upsert_reflection(
+                session, order_id, pair=pair, now=now,
+                values={
+                    "plan_id": plan_id,
+                    "close_reason": close_reason,
+                    "realized_pnl": realized_pnl,
+                    "reflection_text": reflection_text,
+                    "was_directionally_correct": was_directionally_correct,
+                    "status": "done",
+                    "last_error": None,   # retry からの遷移で error 状態を消去
+                    "next_retry_at": None,
+                },
+            )
 
     def mark_reflection_retry(
         self, order_id: str, *, pair: str, error: str, now: datetime,
     ) -> None:
-        """失敗を記録し backoff を進める。5 回目で dead に落ちる。"""
+        """失敗を記録し backoff を進める。5 回目で dead に落ちる。
+
+        dead は terminal。既に dead の行に対しては no-op で返す
+        (呼び出し側の規律に依存せず、DB 状態として復活を禁じる)。
+        """
         with Session(self._engine) as session:
-            r = session.get(_Reflection, order_id)
-            if r is None:
-                r = _Reflection(order_id=order_id, pair=pair,
-                                created_at=now, attempt_count=0)
-                session.add(r)
-            r.attempt_count += 1
-            r.last_error = error
-            r.updated_at = now
-            if r.attempt_count >= _REFLECTION_MAX_ATTEMPTS:
-                r.status = "dead"
-                r.next_retry_at = None
+            existing = session.get(_Reflection, order_id)
+            if existing is not None and existing.status == "dead":
+                logger.warning(
+                    f"[REFLECT] {order_id} は dead (terminal) のため retry を無視: {error}")
+                return
+
+            # 増分は DB 側で原子的に行い、確定値を読み直して終端判定する。
+            self._upsert_reflection(
+                session, order_id, pair=pair, now=now,
+                values={"status": "retry", "last_error": error},
+                attempt_increment=True,
+            )
+            attempt = session.execute(
+                select(_Reflection.attempt_count)
+                .where(_Reflection.order_id == order_id)
+            ).scalar_one_or_none()
+            if attempt is None:   # 直前に別スレッドが削除した場合のみ (通常起きない)
+                return
+
+            # 終端判定は attempt_count を含めない UPDATE で書く。ORM の属性代入
+            # (session.get → 代入 → commit) だと、読み取った時点の古い
+            # attempt_count まで書き戻して並行スレッドの増分を消してしまう。
+            if attempt >= _REFLECTION_MAX_ATTEMPTS:
+                terminal = {"status": "dead", "next_retry_at": None}
                 logger.warning(
                     f"[REFLECT] {order_id} dead-lettered after "
-                    f"{r.attempt_count} attempts: {error}")
+                    f"{attempt} attempts: {error}")
             else:
-                r.status = "retry"
                 hours = _REFLECTION_BACKOFF_HOURS[
-                    min(r.attempt_count - 1, len(_REFLECTION_BACKOFF_HOURS) - 1)]
-                r.next_retry_at = now + timedelta(hours=hours)
+                    min(attempt - 1, len(_REFLECTION_BACKOFF_HOURS) - 1)]
+                terminal = {"next_retry_at": now + timedelta(hours=hours)}
+            session.execute(
+                update(_Reflection)
+                .where(_Reflection.order_id == order_id)
+                .values(**terminal)
+            )
             session.commit()
 
     def mark_reflection_dead(
@@ -1089,16 +1151,14 @@ class OrchestratorStore:
     ) -> None:
         """恒久不能 (instrument 不在等) を即 dead 記録する。"""
         with Session(self._engine) as session:
-            r = session.get(_Reflection, order_id)
-            if r is None:
-                r = _Reflection(order_id=order_id, pair=pair,
-                                created_at=now, attempt_count=0)
-                session.add(r)
-            r.status = "dead"
-            r.last_error = error
-            r.next_retry_at = None
-            r.updated_at = now
-            session.commit()
+            self._upsert_reflection(
+                session, order_id, pair=pair, now=now,
+                values={
+                    "status": "dead",
+                    "last_error": error,
+                    "next_retry_at": None,
+                },
+            )
 
     # ── planning 実行中照会 (spec §3.6, best effort) ────────────
 
@@ -1116,11 +1176,20 @@ class OrchestratorStore:
             return session.execute(stmt).first() is not None
 
     def finish_dangling_runs(self, *, now: datetime) -> int:
-        """起動時に前プロセスの未完了 run を failed で回収する (spec §3.6)。"""
+        """起動時に前プロセスの未完了 run を failed で回収する (spec §3.6)。
+
+        has_running_planning_run と同じ stale 閾値を started_at に掛け、
+        「明らかに古い run」のみを対象にする。無条件の全件更新にすると、
+        多重起動や recovery job からの呼び出しで他プロセスの実行中 run を
+        横から failed に落とし、has_running_planning_run が false を返して
+        reflection job の LLM 譲り判定まで壊れる。
+        """
+        threshold = now - timedelta(seconds=_PLANNING_STALE_SECONDS)
         with Session(self._engine) as session:
             stmt = (
                 update(_AgentRun)
                 .where(_AgentRun.finished_at.is_(None))
+                .where(_AgentRun.started_at <= threshold)
                 .values(status="failed", error_type="dangling",
                         finished_at=now)
             )
