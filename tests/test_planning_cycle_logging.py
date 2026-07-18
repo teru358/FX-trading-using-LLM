@@ -177,15 +177,30 @@ def test_start_result_one_to_one(caplog, planning_runtime_factory, scenario, exp
     assert f"decision={expect_decision}" in msg
     if expect_decision != "error":
         assert "reason=" in msg or expect_decision == "plan_create"
+    # reject は必ず reason= を伴う (却下理由を残す契約)。stub の reject result は
+    # reason="rr too low" を持つので、緩い or 条件ではなく reason= を必須で固定する。
+    if scenario == "reject":
+        assert "reason=" in msg
 
 
 def test_start_run_failure_emits_neither(caplog, planning_runtime_factory):
-    """start_run 自体が落ちたら start も result も出ない (start=0/result=0)。"""
+    """start_run 自体が落ちたら start も result も出ない (start=0/result=0)。
+
+    さらに ef0ad88 の load-bearing な挙動を lock する:
+    start_run が try 内で落ちても (a) cycle 全体は abort せず finally まで到達し、
+    (b) detector.mark_attempted が呼ばれて debounce 窓が閉じる。snapshot 未到達なので
+    committed は空 (baseline は未消費)。
+    """
     rt = planning_runtime_factory("start_run_failure")
+    detector = rt._detector
     with caplog.at_level(logging.INFO):
         rt.run_planning_cycle()
     assert _count(caplog.records, "[ORCH] planning start") == 0
     assert _count(caplog.records, "[ORCH] planning result") == 0
+    # start_run 失敗でも finally で mark_attempted が走り (debounce 窓が閉じる)、
+    # committed は空 (snapshot 未到達で baseline 未消費)。cycle 全体は abort しない。
+    assert detector.attempted == ["USDJPY=X"]
+    assert detector.committed == []
 
 
 def test_notify_failure_keeps_plan_create_result(caplog, planning_runtime_factory):
