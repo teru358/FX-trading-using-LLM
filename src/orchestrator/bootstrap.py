@@ -379,7 +379,12 @@ def _build_detector(
             make_news_material_provider,
         )
 
-        get_news_impact, get_news_key = make_news_material_provider(config, store)
+        get_news_impact, get_news_key = make_news_material_provider(
+            config, store,
+            ttl_seconds=orch_cfg.entry.news_cache_ttl_seconds,
+            negative_ttl_seconds=orch_cfg.entry.news_cache_negative_ttl_seconds,
+            clock=db_now,
+        )
         from src.data.econ_event_store import EconEventStore
 
         econ_store = EconEventStore(config.econ_db_path)

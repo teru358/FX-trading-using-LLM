@@ -20,6 +20,10 @@ from src.orchestrator.material_landing import MaterialLandingDetector
 NOW = datetime(2026, 6, 21, 12, 0, 0, tzinfo=timezone.utc)
 
 
+def _fixed_clock():
+    return datetime(2026, 7, 17, 0, 0, 0)
+
+
 def _config_with_usdjpy() -> AppConfig:
     cfg = AppConfig()
     cfg.instruments = [
@@ -120,7 +124,10 @@ def test_news_provider_impact_and_key(tmp_path, monkeypatch):
         "src.analysis.news_aggregator.aggregate_news_sentiment",
         lambda inst, store, config: _Sent(),
     )
-    get_impact, get_key = make_news_material_provider(cfg, store=object())
+    get_impact, get_key = make_news_material_provider(
+        cfg, store=object(),
+        ttl_seconds=60.0, negative_ttl_seconds=30.0, clock=_fixed_clock,
+    )
     assert get_impact("USDJPY=X") == 0.7  # |−0.7|
     assert get_key("USDJPY=X") is not None
     # 未知 pair は impact 0。

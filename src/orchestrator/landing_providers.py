@@ -17,6 +17,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Callable
 
+from src.orchestrator._ttl_cache import TtlSingleFlightCache
 from src.utils.clock import db_utc_now
 
 if TYPE_CHECKING:
@@ -100,32 +101,52 @@ def make_event_window_provider(
 def make_news_material_provider(
     config: "AppConfig",
     store: "VectorStore",
+    *,
+    ttl_seconds: float,
+    negative_ttl_seconds: float,
+    clock: Callable[[], datetime],
 ) -> tuple[Callable[[str], float], Callable[[str], str | None]]:
     """(get_news_impact, get_news_key) を返す。
 
     get_news_impact(pair): 該当 pair の直近 news sentiment の絶対値 (= impact 強度)。
     get_news_key(pair): その news 集計の identity (summary hash)。同一 news の二度発火を
-      防ぐため detector が消費 key として使う。集計不能時は impact=0.0 / key=None。
+      防ぐため detector が消費 key として使う。
+
+    集計は TtlSingleFlightCache で共有キャッシュする (watch 経路と同一失敗セマンティクス)。
+    impact + key の連続呼び出しでも aggregate は 1 回に集約される。_produce は例外を
+    握り潰さずキャッシュ層へ伝搬させる (stale-if-error を迂回しないため — None を成功値と
+    してキャッシュすると stale が維持されない)。unavailable 時は impact=0.0 / key=None、
+    stale 時は直近成功 NewsSentiment を返す。
     """
     from src.analysis.news_aggregator import aggregate_news_sentiment
 
-    def _aggregate(pair: str):
-        for inst in config.instruments:
-            if inst.symbol == pair:
-                try:
-                    return aggregate_news_sentiment(inst, store, config)
-                except Exception:
-                    return None
-        return None
+    by_symbol = {inst.symbol: inst for inst in config.instruments}
+    cache = TtlSingleFlightCache(
+        ttl_seconds=ttl_seconds,
+        negative_ttl_seconds=negative_ttl_seconds,
+        clock=clock,
+    )
+
+    def _produce(pair: str):
+        inst = by_symbol.get(pair)
+        if inst is None:
+            return None
+        return aggregate_news_sentiment(inst, store, config)   # 例外はそのまま送出
+
+    def _sentiment(pair: str):
+        res = cache.get(pair, lambda: _produce(pair))
+        if res.status == "unavailable":
+            return None
+        return res.value                          # ok / stale とも成功 NewsSentiment (or None)
 
     def get_news_impact(pair: str) -> float:
-        sent = _aggregate(pair)
+        sent = _sentiment(pair)
         if sent is None or sent.sentiment_score is None:
             return 0.0
         return abs(sent.sentiment_score)
 
     def get_news_key(pair: str) -> str | None:
-        sent = _aggregate(pair)
+        sent = _sentiment(pair)
         if sent is None:
             return None
         # summary を identity に使う (同一集計 = 同一 summary)。空なら score 由来。
