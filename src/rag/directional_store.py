@@ -142,23 +142,51 @@ class DirectionalStore:
 
         forecast サイクル・取引サイクル退役に伴い、これらの生産者は全て廃止される。
         既存の蓄積カードが教訓として検索され続けないよう掃除する。
-        戻り値は方向ごとの削除件数。
+
+        削除対象は以下を満たすカード:
+          - session_type が "forecast" または "hold"
+          - session_type == "trade" かつ phase == "entry"
+
+        Returns:
+            方向 ("bullish"/"bearish") ごとの削除件数。件数は削除対象 ID を
+            事前に確定して数えるため、並行 upsert が走っていても正確。
+
+        Note:
+            session_type メタデータ導入前の legacy カード (キー自体が無い) は
+            $in にも $eq にもマッチしないため削除されない。これは spec §3.4b が
+            削除対象を session_type で定義しているための意図的な許容である。
+            同カードは news_collector の複合 filter からも除外されるため、
+            「残存するが検索されない」死蔵データとなる。結果として本メソッドの
+            報告件数と実 DB 残存件数は一致しないことがある。
+
+        Raises:
+            Exception: ChromaDB の get/delete が失敗した場合、例外はそのまま
+                伝搬する (migration スクリプトが失敗を検知できるようにするため)。
+                bullish の削除成功後に bearish で例外が出ると片側だけ掃除された
+                状態で落ちるが、本メソッドは冪等なので再実行で回復できる。
         """
         counts: dict[str, int] = {}
         for direction in ("bullish", "bearish"):
             col = self._collection(direction)
-            before = col.count()
-            col.delete(where={"session_type": {"$in": ["forecast", "hold"]}})
-            col.delete(where={"$and": [
-                {"session_type": {"$eq": "trade"}},
-                {"phase": {"$eq": "entry"}},
-            ]})
-            deleted = before - col.count()
-            counts[direction] = deleted
-            if deleted:
+            # 削除は 1 回の $or にまとめる (中間状態を作らない)。件数は
+            # count 差分ではなく対象 ID 数で確定する (並行 upsert に非依存)。
+            retired = col.get(
+                where={"$or": [
+                    {"session_type": {"$in": ["forecast", "hold"]}},
+                    {"$and": [
+                        {"session_type": {"$eq": "trade"}},
+                        {"phase": {"$eq": "entry"}},
+                    ]},
+                ]},
+                include=[],
+            )
+            ids = retired["ids"]
+            if ids:
+                col.delete(ids=ids)
                 logger.info(
-                    f"Deleted {deleted} retired cards from {direction} collection"
+                    f"Deleted {len(ids)} retired cards from {direction} collection"
                 )
+            counts[direction] = len(ids)
         return counts
 
     def count(self, direction: str) -> int:
