@@ -295,6 +295,44 @@ def test_success_clears_failure_state():
     assert calls["n"] == 3
 
 
+def test_failure_time_taken_after_producer_completes():
+    """producer が時間を消費して失敗した場合、failure 起点は producer 完了後の時刻。
+
+    producer 内で clock を 40s 進めて失敗 → negative TTL 30s。
+    完了後 (=起点) から 10s 進めても再実行されない (起点が producer 前だと再実行されてしまう)。
+    """
+    clock = _Clock(datetime(2026, 7, 17, 0, 0, 0))
+    calls = {"n": 0}
+    def produce():
+        calls["n"] += 1
+        clock.advance(40)          # producer が 40s 消費
+        raise RuntimeError("boom")
+    c = _cache(clock, ttl=60, neg=30)
+    c.get("k", produce)            # 失敗・起点は完了後 (t=40)
+    clock.advance(10)              # t=50 (完了後 10s < neg 30) → 再実行しない
+    c.get("k", produce)
+    assert calls["n"] == 1
+
+
+def test_success_time_taken_after_producer_completes():
+    """producer が時間を消費して成功した場合、success 起点は producer 完了後の時刻。
+
+    producer 内で 50s 進めて成功 → 成功 TTL 60s。完了後 (=起点) から 30s 進めても
+    hit 継続 (起点が producer 前だと 60s 経過扱いで miss してしまう)。
+    """
+    clock = _Clock(datetime(2026, 7, 17, 0, 0, 0))
+    calls = {"n": 0}
+    def produce():
+        calls["n"] += 1
+        clock.advance(50)          # producer が 50s 消費
+        return "v"
+    c = _cache(clock, ttl=60, neg=30)
+    c.get("k", produce)            # 成功・起点は完了後 (t=50)
+    clock.advance(30)              # t=80 (完了後 30s < ttl 60) → hit 継続
+    c.get("k", produce)
+    assert calls["n"] == 1
+
+
 def test_single_flight_concurrent_miss():
     """2 スレッド同時 miss でも producer は 1 回だけ。デッドロックしない設計。
 
@@ -374,13 +412,15 @@ class TtlSingleFlightCache:
         self._guard = Lock()
 
     def get(self, key: str, producer: Callable[[], Any]) -> CacheResult:
-        now = self._clock()
+        # lock 前の速い hit チェック (clock はここで 1 回)。
         hit = self._cache.get(key)
-        if hit is not None and (now - hit[1]).total_seconds() < self._ttl:
+        if hit is not None and (self._clock() - hit[1]).total_seconds() < self._ttl:
             return CacheResult(hit[0], "ok", hit[1])
         with self._guard:
             lock = self._locks[key]
         with lock:                                 # single-flight (producer は lock 外で待たない)
+            # lock 取得後に clock を再取得して再判定 (指摘: TTL 起点は判定時刻)。
+            now = self._clock()
             hit = self._cache.get(key)
             if hit is not None and (now - hit[1]).total_seconds() < self._ttl:
                 return CacheResult(hit[0], "ok", hit[1])
@@ -392,13 +432,16 @@ class TtlSingleFlightCache:
             try:
                 value = producer()
             except Exception as exc:
-                self._failures[key] = now
+                # 失敗時刻は producer *完了後* に取得 (producer 実行時間分の起点ズレを避ける)。
+                self._failures[key] = self._clock()
                 logger.warning("[ORCH] cache producer failed for %s: %s", key, exc)
                 return (CacheResult(hit[0], "stale", hit[1]) if hit is not None
                         else CacheResult(None, "unavailable", None))
-            self._cache[key] = (value, now)
+            # 成功時刻も producer 完了後に取得 (成功 TTL が処理時間分短くならないように)。
+            success_at = self._clock()
+            self._cache[key] = (value, success_at)
             self._failures.pop(key, None)          # 成功で failure 解除
-            return CacheResult(value, "ok", now)
+            return CacheResult(value, "ok", success_at)
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -573,12 +616,12 @@ def _quote(now):
 
 
 def _direct_build_news(builder, pair, now):
-    """_build_news を直接呼んで _ref/status/as_of を検証する (private だが契約検証のため)。"""
+    """_build_news を直接呼んで news 本体 + _ref を検証する。"""
     return builder._build_news(pair, now)
 
 
-def test_build_news_stale_keeps_provider_as_of(tmp_path):
-    """provider の stale as_of を _ref にそのまま使う (now で上書きしない)。"""
+def test_build_news_stale_keeps_status_and_as_of(tmp_path):
+    """news 本体に status を残し、_ref の as_of は provider 成功時刻を維持する。"""
     now = datetime(2026, 7, 17, 0, 5, 0)
     past = "2026-07-17T00:00:00"
     def provider(pair):
@@ -587,12 +630,13 @@ def test_build_news_stale_keeps_provider_as_of(tmp_path):
     b = _builder(tmp_path, provider)
     news = _direct_build_news(b, "EURUSD=X", now)
     assert news["sentiment_score"] == -0.6           # stale 値が通る (news_conflict 生存)
+    assert news["status"] == "stale"                 # 本体に status (assemble が _ref 除外しても残る)
     assert news["_ref"]["status"] == "stale"
     assert news["_ref"]["as_of"] == past             # 成功時刻を維持 (now でない)
 
 
-def test_build_news_unavailable_keeps_ref_marker(tmp_path):
-    """unavailable でも _ref に status を残す (取得失敗の監査痕跡)。"""
+def test_build_news_unavailable_marks_status(tmp_path):
+    """unavailable を news 本体 status で識別できる (指摘5)。"""
     now = datetime(2026, 7, 17, 0, 5, 0)
     def provider(pair):
         return {"sentiment_score": None, "confidence": None,
@@ -600,31 +644,30 @@ def test_build_news_unavailable_keeps_ref_marker(tmp_path):
     b = _builder(tmp_path, provider)
     news = _direct_build_news(b, "EURUSD=X", now)
     assert news["sentiment_score"] is None           # fail-open (§3.7)
-    assert news["_ref"] is not None
+    assert news["status"] == "unavailable"           # 本体で識別可能
     assert news["_ref"]["status"] == "unavailable"
-    assert news["_ref"]["as_of"] is None
 
 
-def test_build_news_ok_uses_success_as_of(tmp_path):
+def test_assemble_news_keeps_status(tmp_path):
+    """assemble() 経由でも news 本体に status が残る (_ref は除外されるが status は本体)。"""
     now = datetime(2026, 7, 17, 0, 5, 0)
-    at = "2026-07-17T00:05:00"
     def provider(pair):
-        return {"sentiment_score": 0.3, "confidence": 0.7,
-                "top_reasons": [], "status": "ok", "as_of": at}
+        return {"sentiment_score": None, "confidence": None,
+                "top_reasons": [], "status": "unavailable", "as_of": None}
     b = _builder(tmp_path, provider)
-    news = _direct_build_news(b, "EURUSD=X", now)
-    assert news["_ref"]["status"] == "ok"
-    assert news["_ref"]["as_of"] == at
+    ctx = b.assemble(pair="EURUSD=X", now=now, quote=_quote(now))
+    assert "_ref" not in ctx["news"]                 # assemble は _ref を除外 (既存挙動)
+    assert ctx["news"]["status"] == "unavailable"    # status は本体に残る (指摘5)
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_context_builder_news.py -v"`
-Expected: FAIL (現状 `_build_news` は `_ref` に status を持たず、unavailable で `_ref=None` にする)
+Expected: FAIL (現状 `_build_news` は news 本体・`_ref` に status を持たない)
 
 - [ ] **Step 3: Modify `_build_news`**
 
-`src/orchestrator/context_builder.py` の `_build_news` (現在 context_builder.py:256-279) を次に置き換える。provider の status/as_of を `_ref` に残し、unavailable も監査痕跡として `_ref` を保存する (指摘2対応):
+`src/orchestrator/context_builder.py` の `_build_news` (現在 context_builder.py:256-279) を次に置き換える。**news 本体に `status` を残し** (assemble が `_ref` を除外しても watch が unavailable を識別できる・指摘5)、`_ref` にも status/as_of を残す:
 
 ```python
     def _build_news(self, pair: str, now: datetime) -> dict[str, Any]:
@@ -632,26 +675,29 @@ Expected: FAIL (現状 `_build_news` は `_ref` に status を持たず、unavai
 
         provider 未注入なら従来の空 news に倒す (後方互換)。cached provider は
         例外を投げず status (ok|stale|unavailable) + as_of 付き dict を返すため、
-        as_of をそのまま _ref に使い (now で上書きしない)、status を _ref に残す。
-        unavailable も _ref に status を残す (取得失敗の監査痕跡・spec §3.6)。
-        provider が直接例外を投げるケース (非 cached provider) は従来通り空 news に倒す。
+        status を news 本体に残し (assemble が _ref を除外しても watch が識別できる),
+        as_of は _ref に残す (now で上書きしない・成功時刻を維持・spec §3.6/§3.7)。
+        provider が直接例外を投げるケース (非 cached provider) は空 news + status=None に倒す。
         """
         if self._news_provider is None:
-            return {**self._empty_news(), "_ref": None}
+            return {**self._empty_news(), "status": None, "_ref": None}
         try:
             raw = self._news_provider(pair)
         except Exception:
             logger.exception("[ORCH] news_provider failed for %s — empty news", pair)
-            return {**self._empty_news(), "_ref": None}
+            return {**self._empty_news(), "status": None, "_ref": None}
         status = raw.get("status")
         as_of = raw.get("as_of")
         return {
             "sentiment_score": raw.get("sentiment_score"),
             "confidence": raw.get("confidence"),
             "top_reasons": raw.get("top_reasons") or [],
+            "status": status,                        # news 本体に残す (assemble 後も生存)
             "_ref": {"source": "rag_aggregate", "as_of": as_of, "status": status},
         }
 ```
+
+(注: `_empty_news()` は `sentiment_score/confidence/top_reasons` を返す。`status` キー追加は §7 news 契約の拡張。`_news_conflicts` は sentiment_score のみ参照するため status 追加は無害。prompt へ news dict が serialize される場合も status キー 1 つの追加で挙動不変。)
 
 - [ ] **Step 4: Wire cached provider in bootstrap**
 
@@ -884,15 +930,36 @@ def make_news_material_provider(
         )
 ```
 
-- [ ] **Step 5: Run tests**
+- [ ] **Step 5: Migrate existing caller in `tests/test_landing_providers.py` (指摘2)**
 
-Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_news_material_provider_cache.py -v"`
-Expected: PASS
+新 signature は TTL 引数を必須にするため、`tests/test_landing_providers.py:123` の旧呼び出しを移行する。ファイル冒頭にヘルパを足す:
 
-- [ ] **Step 6: Commit**
+```python
+from datetime import datetime
+
+def _fixed_clock():
+    return datetime(2026, 7, 17, 0, 0, 0)
+```
+
+`make_news_material_provider(cfg, store=object())` を次に置換:
+
+```python
+    get_impact, get_key = make_news_material_provider(
+        cfg, store=object(),
+        ttl_seconds=60.0, negative_ttl_seconds=30.0, clock=_fixed_clock,
+    )
+```
+
+- [ ] **Step 6: Run tests**
+
+Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_news_material_provider_cache.py tests/test_landing_providers.py -v"`
+Expected: PASS (新 cache テスト + 移行した既存テスト)
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/orchestrator/landing_providers.py src/orchestrator/bootstrap.py tests/test_news_material_provider_cache.py
+git add src/orchestrator/landing_providers.py src/orchestrator/bootstrap.py \
+  tests/test_news_material_provider_cache.py tests/test_landing_providers.py
 git commit -m "feat(orchestrator): cache material news provider, propagate aggregate exceptions"
 ```
 
@@ -1109,23 +1176,46 @@ git commit -m "feat(orchestrator): RiskGateResult.derived_rr computed once, expo
 - reject 経路 (298/313/335) は既に reason 設定済み → `_normalize_reason` で包むだけ。
 - plan_create (418) は `reason=final.reasoning_summary` 設定済み → `_normalize_reason` で包み + `derived_rr=risk.derived_rr` を追加。
 - direct_hold (163/184) / failed (132/139) は reason 未設定 → 追加。
-- risk reject (335) の derived_rr は None のまま (reason 文字列に既に RR あり)。scale-in reject も None。
+- risk reject (335) の derived_rr は `risk.derived_rr` を流す (RR 起因なら値・spec §150)。scale-in / planner / revise reject は導出前なので None。
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing test (production 経路の reason 非空を固定・指摘3)**
 
-`tests/test_planning_pipeline_result_contract.py` に追加:
+`reason: str | None = None` は stub 互換のため型では必須化しない。代わりに **production の全 return 経路が reason を非空で返す**ことを parameterized test で固定する。実 pipeline を各 outcome に誘導する統合テストを `tests/test_planning_pipeline.py` (既存) の fixture を使って書く:
 
 ```python
-def test_normalize_reason_is_idempotent_on_clean_input():
-    assert _normalize_reason("plan created") == "plan created"
+import pytest
+
+
+@pytest.mark.parametrize("scenario", [
+    "direct_hold_no_opportunity",
+    "direct_hold_unavailable",
+    "reject_scale_in",
+    "reject_planner",
+    "reject_risk",
+    "plan_create",
+    "failed_schema_parse",
+])
+def test_production_return_paths_set_reason(scenario, pipeline_scenario_factory):
+    """全 production outcome で PipelineResult.reason が非空・改行なし・長さ制限内。
+
+    pipeline_scenario_factory は各 scenario に対応する planner/exec/risk stub を注入した
+    PlanningPipeline を組む fixture (conftest か本ファイルに定義)。既存 tests/test_planning_pipeline.py
+    の stub 構築パターンを流用する。
+    """
+    pipeline, run_ctx = pipeline_scenario_factory(scenario)
+    import asyncio
+    result = asyncio.run(pipeline.run(**run_ctx))
+    assert result.reason, f"{scenario}: reason must be non-empty"
+    assert "\n" not in result.reason and "\r" not in result.reason
+    assert len(result.reason) <= 200
 ```
 
-(全経路の reason 設定は既存 pipeline 統合テスト `tests/test_planning_pipeline.py` で PipelineResult を検証する。契約単体はここで固定。)
+(注: `pipeline_scenario_factory` は既存 `tests/test_planning_pipeline.py` の planner/exec/risk stub 構築を流用して各 scenario を組む fixture。stub の詳細は既存テストに合わせる。plan_create/reject_risk では derived_rr が非 None であることも合わせて assert してよい。)
 
-- [ ] **Step 2: Run test (baseline)**
+- [ ] **Step 2: Run test to verify it fails**
 
-Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_planning_pipeline_result_contract.py -v"`
-Expected: PASS
+Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_planning_pipeline.py -k production_return_paths -v"`
+Expected: FAIL (direct_hold / failed 経路が reason 未設定)
 
 - [ ] **Step 3: Wrap/add reason + derived_rr in every return path**
 
@@ -1353,50 +1443,62 @@ git commit -m "feat(orchestrator): pairs_to_plan returns PlanningTarget with tri
 
 ```python
 import logging
-
-# 既存の runtime 構築ヘルパを流用する (test_watch_loop_shadow.py 等の seed パターンを参照)。
-# ここでは擬似的に、各 outcome で start と result が 1:1 で出ることを検証する骨子を示す。
+import pytest
 
 
 def _count(records, needle):
     return sum(1 for r in records if needle in r.getMessage())
 
 
-def test_planning_start_and_result_are_one_to_one(caplog, planning_runtime_factory):
-    """planning start 1 件につき result が 1 件対応する (正常 hold)。
+def _decisions(records):
+    return [r.getMessage() for r in records if "[ORCH] planning result" in r.getMessage()]
 
-    planning_runtime_factory は conftest / 既存ヘルパで用意する fixture。
-    direct_hold を返す最小 pipeline stub を注入した runtime を返す。
-    """
-    rt = planning_runtime_factory(outcome="direct_hold")
+
+# outcome / 失敗位置を parameterize (spec 要求の全ケース・指摘4)。
+# planning_runtime_factory: 各シナリオに対応する pipeline/quote/ctx stub を注入した
+# runtime を返す fixture。既存 tests/test_taskf_live_execution_helpers.py の make_live_runtime
+# と test_watch_loop_shadow.py の seed パターンを流用する (conftest か本ファイルに定義)。
+@pytest.mark.parametrize("scenario,expect_decision", [
+    ("direct_hold", "direct_hold"),
+    ("reject", "reject"),
+    ("plan_create", "plan_create"),
+    ("pipeline_failed", "failed"),
+    ("phase1_observe", "direct_hold"),   # pipeline 未注入
+    ("quote_failure", "error"),          # pipeline 到達前
+    ("context_build_failure", "error"),  # pipeline 到達前
+])
+def test_start_result_one_to_one(caplog, planning_runtime_factory, scenario, expect_decision):
+    """各 scenario で pair ごとに start==1・result==1、decision が期待通り・reason 非空。"""
+    rt = planning_runtime_factory(scenario)   # pairs=["USDJPY=X"] 単一 pair
     with caplog.at_level(logging.INFO):
         rt.run_planning_cycle()
     starts = _count(caplog.records, "[ORCH] planning start")
     results = _count(caplog.records, "[ORCH] planning result")
-    assert starts >= 1
-    assert starts == results
+    assert starts == 1
+    assert results == 1                       # 1 pair につき start:result = 1:1
+    msg = _decisions(caplog.records)[0]
+    assert f"decision={expect_decision}" in msg
+    # error 以外は reason が付く (direct_hold/reject/plan_create/failed)。
+    if expect_decision != "error":
+        assert "reason=" in msg or expect_decision == "plan_create"
 
 
-def test_planning_result_on_pipeline_failed(caplog, planning_runtime_factory):
-    rt = planning_runtime_factory(outcome="failed")
+def test_start_result_one_to_one_multi_pair(caplog, planning_runtime_factory):
+    """複数 pair でも各 pair の start==result (合計一致)。"""
+    rt = planning_runtime_factory("direct_hold", pairs=["USDJPY=X", "EURUSD=X"])
     with caplog.at_level(logging.INFO):
         rt.run_planning_cycle()
-    assert _count(caplog.records, "[ORCH] planning result") >= 1
-    assert any("decision=failed" in r.getMessage() for r in caplog.records)
-
-
-def test_planning_result_on_quote_failure(caplog, planning_runtime_factory):
-    """pipeline 到達前 (quote provider 失敗) でも result が 1 件出る。"""
-    rt = planning_runtime_factory(quote_raises=True)
-    with caplog.at_level(logging.INFO):
-        rt.run_planning_cycle()
-    starts = _count(caplog.records, "[ORCH] planning start")
-    results = _count(caplog.records, "[ORCH] planning result")
-    assert starts == results
-    assert any("decision=error" in r.getMessage() for r in caplog.records)
+    assert _count(caplog.records, "[ORCH] planning start") == 2
+    assert _count(caplog.records, "[ORCH] planning result") == 2
 ```
 
-(注: `planning_runtime_factory` fixture は実装時に用意する。既存 `tests/test_taskf_live_execution_helpers.py` の `make_live_runtime` パターンを流用し、outcome を制御できる pipeline stub を注入する。fixture を conftest.py か本テストファイル内に定義する。)
+(注: `planning_runtime_factory(scenario, pairs=...)` fixture を実装時に用意する。各 scenario の stub:
+- `direct_hold`/`reject`/`plan_create`: 対応 outcome を返す pipeline stub
+- `pipeline_failed`: `outcome="failed"` を返す stub
+- `phase1_observe`: pipeline=None (未注入) の runtime
+- `quote_failure`: quote_provider が例外を投げる
+- `context_build_failure`: `_ctx.build` が例外を投げる (ctx builder stub)
+既存 `make_live_runtime` / `seed_active_plan_ready_to_trigger` パターンを流用する。)
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1558,6 +1660,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest \
   tests/test_cached_news_provider.py \
   tests/test_context_builder_news.py \
   tests/test_news_material_provider_cache.py \
+  tests/test_landing_providers.py \
   tests/test_risk_gate_worker.py \
   tests/test_planning_pipeline.py \
   tests/test_planning_pipeline_result_contract.py \
