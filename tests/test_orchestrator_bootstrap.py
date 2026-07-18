@@ -404,3 +404,55 @@ def test_risk_gate_shared_and_configured(tmp_path: Path, monkeypatch) -> None:
     assert rt._pipeline._risk._min_rr == 2.5
     # 同一インスタンス共有 — runtime fallback (既定 1.5) が生成されていないこと。
     assert rt._risk_gate is rt._pipeline._risk
+
+
+def test_bootstrap_recovers_dangling_runs(tmp_path: Path, monkeypatch) -> None:
+    """起動時に前プロセスの dangling run (finished_at IS NULL) を回収する (spec §3.6)。
+
+    stale 閾値 (_PLANNING_STALE_SECONDS) より古い run のみが対象なので、seed した run の
+    started_at を db_now() 相対で十分過去にずらす (固定日付は date-flake になる)。
+    """
+    from datetime import timedelta
+
+    from sqlalchemy import text
+
+    from src.data.orchestrator_store import _PLANNING_STALE_SECONDS, OrchestratorStore
+    from src.utils.clock import db_now
+
+    # bootstrap が向くのと同じ temp DB に直接 run を仕込む。
+    db_path = tmp_path / "orch.db"
+    seed_store = OrchestratorStore(db_path)
+    stale_id = seed_store.start_run(
+        "OrchestratorRuntime", pair="USDJPY=X", trigger_type="planning_cycle")
+    fresh_id = seed_store.start_run(
+        "OrchestratorRuntime", pair="USDJPY=X", trigger_type="planning_cycle")
+    # start_run は内部で db_now() を打つので、生 UPDATE で stale 側だけ過去にずらす。
+    old = db_now() - timedelta(seconds=_PLANNING_STALE_SECONDS + 60)
+    with seed_store._engine.begin() as conn:
+        conn.execute(
+            text("UPDATE agent_runs SET started_at = :ts WHERE run_id = :rid"),
+            {"ts": old, "rid": stale_id},
+        )
+
+    _patch_orch_store(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        "src.llm.factory._build_client",
+        lambda provider, pc, model: ("client", provider, model),
+    )
+    cfg = _config(enabled=True, tmp_path=tmp_path)
+    cfg.llm.provider = "claude-cli"
+
+    rt = bs.build_orchestrator_runtime(
+        cfg, store=object(), price_store=object(),
+        analysis_store=_FakeAnalysisStore(), price_provider=_FakePriceProvider(),
+    )
+    assert rt is not None
+
+    stale = seed_store.get_run(stale_id)
+    assert stale.status == "failed"
+    assert stale.error_type == "dangling"
+    assert stale.finished_at is not None
+    # 閾値内の run は横から failed にしない (多重起動時の防御)。
+    fresh = seed_store.get_run(fresh_id)
+    assert fresh.status == "ok"
+    assert fresh.finished_at is None

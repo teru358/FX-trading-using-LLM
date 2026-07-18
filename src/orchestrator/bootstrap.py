@@ -177,6 +177,14 @@ def build_orchestrator_runtime(
 
     orch_store = OrchestratorStore(config.prices_db_path)
 
+    # 前プロセスの dangling run を回収する (spec §3.6)。異常終了で finished_at IS NULL の
+    # まま残った run は has_running_planning_run の stale 閾値で除外されるが、起動時に
+    # 明示的に failed/dangling として畳んでおく。finish_dangling_runs 自身も同じ stale
+    # 閾値を持つので、多重起動時に他プロセスの実行中 run を巻き込まない。
+    recovered = orch_store.finish_dangling_runs(now=db_now())
+    if recovered:
+        logger.warning("[ORCH] recovered %d dangling agent runs", recovered)
+
     # pairs は tradeable のみ (watch は planning/trigger 対象外、§4.8)。orch.pairs が
     # 指定されていれば tradeable との intersection に絞る (orchestrator だけ USDJPY に
     # 限定する等の運用、Codex Medium)。watch/未知 symbol は warning で除外する。
