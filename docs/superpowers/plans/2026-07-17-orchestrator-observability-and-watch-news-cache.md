@@ -23,7 +23,9 @@
 |---|---|---|
 | `src/logging_setup.py` | ログプレフィックス registry | `[ORCH]` 追加 (Task 1) |
 | `src/config/schema.py` | config dataclass | `news_cache_ttl_seconds` / `news_cache_negative_ttl_seconds` 追加 (Task 2) |
-| `src/orchestrator/context_builder.py` | §7 context 組立 + news provider | `make_cached_news_provider` 新設 / `_build_news` を status/as_of 対応 (Task 3) |
+| `config/settings.yaml.example` | config 正本例 | TTL 2 値 sync (Task 2) |
+| `src/orchestrator/_ttl_cache.py` | generic TTL + single-flight + stale-if-error | 新設・Task 3/4 で共有 (Task 3-pre) |
+| `src/orchestrator/context_builder.py` | §7 context 組立 + news provider | `make_cached_news_provider` (TtlSingleFlightCache 利用) / `_build_news` を status/as_of 対応 (Task 3) |
 | `src/orchestrator/landing_providers.py` | material 用 news 集計 | `_aggregate` 例外伝搬 + TTL キャッシュ (Task 4) |
 | `src/orchestrator/planning_pipeline.py` | planning pipeline | `PipelineResult` に reason/derived_rr 追加 + 全経路設定 (Task 5) |
 | `src/orchestrator/material_landing.py` | material 判定 + 発火 pair 決定 | `pairs_to_plan` → `PlanningTarget` (Task 6) |
@@ -151,23 +153,276 @@ Expected: FAIL (`news_cache_ttl_seconds` 属性が無い)
 Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_config_schema.py -k news_cache -v"`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Sync settings.yaml.example**
+
+`config/settings.yaml.example` の `orchestrator.entry` ブロックに 2 値を追記 (キー名・階層は既存 entry 項目に合わせる):
+
+```yaml
+    news_cache_ttl_seconds: 60.0
+    news_cache_negative_ttl_seconds: 30.0
+```
+
+- [ ] **Step 6: Run config sync + orchestrator config tests**
+
+Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_config_schema.py tests/test_config_example_sync.py tests/test_orchestrator_config.py -k 'news_cache or example or entry' -v"`
+Expected: PASS (example とスキーマの同期・orchestrator config ロード)
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/config/schema.py tests/test_config_schema.py
+git add src/config/schema.py config/settings.yaml.example tests/test_config_schema.py
 git commit -m "feat(config): add news_cache_ttl_seconds / news_cache_negative_ttl_seconds"
 ```
 
 ---
 
-## Task 3: cached news provider (single-flight + stale-if-error) + `_build_news` 対応
+## Task 3-pre: generic TTL キャッシュヘルパ (Task 3/4 で共有)
+
+**Files:**
+- Create: `src/orchestrator/_ttl_cache.py`
+- Test: `tests/test_ttl_cache.py` (新規)
+
+**背景 (指摘6対応):** watch 用 (dict) と material 用 (NewsSentiment) で TTL/single-flight/stale-if-error を別実装すると重複しズレる。共通の `TtlSingleFlightCache` に切り出し、両者から使う。
+
+- [ ] **Step 1: Write the failing test**
+
+`tests/test_ttl_cache.py` (新規):
+
+```python
+import threading
+import time
+from datetime import datetime, timedelta
+
+from src.orchestrator._ttl_cache import TtlSingleFlightCache
+
+
+class _Clock:
+    def __init__(self, start): self.now = start
+    def __call__(self): return self.now
+    def advance(self, s): self.now += timedelta(seconds=s)
+
+
+def _cache(clock, ttl=60, neg=30):
+    return TtlSingleFlightCache(ttl_seconds=ttl, negative_ttl_seconds=neg, clock=clock)
+
+
+def test_ttl_hit_calls_producer_once():
+    clock = _Clock(datetime(2026, 7, 17, 0, 0, 0))
+    calls = {"n": 0}
+    def produce():
+        calls["n"] += 1
+        return "v"
+    c = _cache(clock)
+    assert c.get("k", produce).value == "v"
+    clock.advance(30)
+    c.get("k", produce)
+    assert calls["n"] == 1
+
+
+def test_ttl_expiry_recomputes():
+    clock = _Clock(datetime(2026, 7, 17, 0, 0, 0))
+    calls = {"n": 0}
+    def produce():
+        calls["n"] += 1
+        return "v"
+    c = _cache(clock)
+    c.get("k", produce)
+    clock.advance(61)
+    c.get("k", produce)
+    assert calls["n"] == 2
+
+
+def test_failure_ttl_suppresses_recompute():
+    """失敗後 negative TTL 内は producer を呼ばない (計算とログ両方を止める)。"""
+    clock = _Clock(datetime(2026, 7, 17, 0, 0, 0))
+    calls = {"n": 0}
+    def produce():
+        calls["n"] += 1
+        raise RuntimeError("boom")
+    c = _cache(clock)
+    c.get("k", produce)
+    clock.advance(10)
+    c.get("k", produce)
+    assert calls["n"] == 1
+
+
+def test_stale_if_error_keeps_last_success():
+    clock = _Clock(datetime(2026, 7, 17, 0, 0, 0))
+    state = {"fail": False}
+    def produce():
+        if state["fail"]:
+            raise RuntimeError("boom")
+        return "good"
+    c = _cache(clock)
+    ok = c.get("k", produce)
+    assert ok.status == "ok"
+    clock.advance(61)
+    state["fail"] = True
+    stale = c.get("k", produce)
+    assert stale.status == "stale"
+    assert stale.value == "good"
+    assert stale.success_at == ok.success_at   # 成功時刻を維持
+
+
+def test_unavailable_when_never_succeeded():
+    clock = _Clock(datetime(2026, 7, 17, 0, 0, 0))
+    def produce():
+        raise RuntimeError("boom")
+    c = _cache(clock)
+    r = c.get("k", produce)
+    assert r.status == "unavailable"
+    assert r.value is None
+    assert r.success_at is None
+
+
+def test_success_clears_failure_state():
+    clock = _Clock(datetime(2026, 7, 17, 0, 0, 0))
+    calls = {"n": 0}
+    state = {"fail": True}
+    def produce():
+        calls["n"] += 1
+        if state["fail"]:
+            raise RuntimeError("boom")
+        return "v"
+    c = _cache(clock)
+    c.get("k", produce)           # 失敗 (n=1)
+    clock.advance(31)
+    state["fail"] = False
+    c.get("k", produce)           # 成功 (n=2, failure クリア)
+    clock.advance(61)
+    state["fail"] = True
+    c.get("k", produce)           # 再失敗 → producer 呼ぶ (n=3)
+    assert calls["n"] == 3
+
+
+def test_single_flight_concurrent_miss():
+    """2 スレッド同時 miss でも producer は 1 回だけ。デッドロックしない設計。
+
+    Barrier は producer の *外* (get 呼び出し直前) で同期する。producer 内では
+    Event で 1 本目を停止し、2 本目が lock 待ちに入る猶予を与えてから release する。
+    """
+    clock = _Clock(datetime(2026, 7, 17, 0, 0, 0))
+    calls = {"n": 0}
+    release = threading.Event()
+    entered = threading.Event()
+    def produce():
+        calls["n"] += 1
+        entered.set()             # 1 本目が producer に入った
+        release.wait(timeout=2.0) # release されるまで lock を保持
+        return "v"
+    c = _cache(clock)
+    results = {}
+    def worker(name):
+        results[name] = c.get("k", produce).value
+    t1 = threading.Thread(target=worker, args=("a",))
+    t1.start()
+    entered.wait(timeout=2.0)     # 1 本目が lock+producer に入るまで待つ
+    t2 = threading.Thread(target=worker, args=("b",))
+    t2.start()                    # 2 本目は lock 待ちで停止 (producer に入らない)
+    time.sleep(0.1)               # 2 本目が lock 待ちに入る猶予
+    release.set()                 # 1 本目を進ませる
+    t1.join(timeout=2.0); t2.join(timeout=2.0)
+    assert not t1.is_alive() and not t2.is_alive()   # デッドロックしていない
+    assert calls["n"] == 1                            # producer は 1 回だけ
+    assert results == {"a": "v", "b": "v"}
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_ttl_cache.py -v"`
+Expected: FAIL (`TtlSingleFlightCache` が無い)
+
+- [ ] **Step 3: Implement `TtlSingleFlightCache`**
+
+`src/orchestrator/_ttl_cache.py` (新規):
+
+```python
+"""pair (key) 単位の TTL + single-flight + stale-if-error キャッシュ。
+
+watch 用 news provider (dict) と material 用 news provider (NewsSentiment) が
+同一の失敗セマンティクスを共有するための汎用ヘルパ (spec §3.2/§3.4)。
+"""
+from __future__ import annotations
+
+import logging
+from collections import defaultdict
+from dataclasses import dataclass
+from datetime import datetime
+from threading import Lock
+from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class CacheResult:
+    """get() の返却。status = ok|stale|unavailable。"""
+    value: Any                    # 成功値 (unavailable は None)
+    status: str                   # "ok" | "stale" | "unavailable"
+    success_at: datetime | None   # 最後に成功した時刻 (unavailable は None)
+
+
+class TtlSingleFlightCache:
+    def __init__(self, *, ttl_seconds: float, negative_ttl_seconds: float,
+                 clock: Callable[[], datetime]) -> None:
+        self._ttl = ttl_seconds
+        self._neg_ttl = negative_ttl_seconds
+        self._clock = clock
+        self._cache: dict[str, tuple[Any, datetime]] = {}   # key -> (value, success_at)
+        self._failures: dict[str, datetime] = {}            # key -> 直近失敗時刻
+        self._locks: dict[str, Lock] = defaultdict(Lock)
+        self._guard = Lock()
+
+    def get(self, key: str, producer: Callable[[], Any]) -> CacheResult:
+        now = self._clock()
+        hit = self._cache.get(key)
+        if hit is not None and (now - hit[1]).total_seconds() < self._ttl:
+            return CacheResult(hit[0], "ok", hit[1])
+        with self._guard:
+            lock = self._locks[key]
+        with lock:                                 # single-flight (producer は lock 外で待たない)
+            hit = self._cache.get(key)
+            if hit is not None and (now - hit[1]).total_seconds() < self._ttl:
+                return CacheResult(hit[0], "ok", hit[1])
+            failed_at = self._failures.get(key)
+            if failed_at is not None and (now - failed_at).total_seconds() < self._neg_ttl:
+                # failure TTL 内: producer を呼ばない (計算もログも止める)。
+                return (CacheResult(hit[0], "stale", hit[1]) if hit is not None
+                        else CacheResult(None, "unavailable", None))
+            try:
+                value = producer()
+            except Exception as exc:
+                self._failures[key] = now
+                logger.warning("[ORCH] cache producer failed for %s: %s", key, exc)
+                return (CacheResult(hit[0], "stale", hit[1]) if hit is not None
+                        else CacheResult(None, "unavailable", None))
+            self._cache[key] = (value, now)
+            self._failures.pop(key, None)          # 成功で failure 解除
+            return CacheResult(value, "ok", now)
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_ttl_cache.py -v"`
+Expected: PASS (7 tests・single-flight デッドロックなし)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/orchestrator/_ttl_cache.py tests/test_ttl_cache.py
+git commit -m "feat(orchestrator): add TtlSingleFlightCache (shared TTL + single-flight + stale-if-error)"
+```
+
+---
+
+## Task 3: cached news provider (TtlSingleFlightCache 利用) + `_build_news` 対応
 
 **Files:**
 - Modify: `src/orchestrator/context_builder.py` (`make_cached_news_provider` 新設 / `_build_news` 変更)
 - Modify: `src/orchestrator/bootstrap.py:213` (配線)
 - Test: `tests/test_cached_news_provider.py` (新規)
 
-### Task 3a: `make_cached_news_provider` 本体
+### Task 3a: `make_cached_news_provider` (TtlSingleFlightCache 利用)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -180,15 +435,12 @@ from src.orchestrator.context_builder import make_cached_news_provider
 
 
 class _Clock:
-    def __init__(self, start: datetime):
-        self.now = start
-    def __call__(self) -> datetime:
-        return self.now
-    def advance(self, seconds: float) -> None:
-        self.now += timedelta(seconds=seconds)
+    def __init__(self, start): self.now = start
+    def __call__(self): return self.now
+    def advance(self, s): self.now += timedelta(seconds=s)
 
 
-def _sentiment(score: float) -> dict:
+def _sentiment(score):
     return {"sentiment_score": score, "confidence": 0.8, "top_reasons": ["x"]}
 
 
@@ -202,40 +454,14 @@ def test_ttl_hit_calls_inner_once():
     r1 = p("EURUSD=X")
     clock.advance(30)
     r2 = p("EURUSD=X")
-    assert calls["n"] == 1                 # TTL 内は inner 1 回
+    assert calls["n"] == 1
     assert r1["status"] == "ok"
+    assert r1["as_of"] is not None
     assert r2["sentiment_score"] == 0.5
 
 
-def test_ttl_expiry_recomputes():
-    clock = _Clock(datetime(2026, 7, 17, 0, 0, 0))
-    calls = {"n": 0}
-    def inner(pair):
-        calls["n"] += 1
-        return _sentiment(0.5)
-    p = make_cached_news_provider(inner, ttl_seconds=60, negative_ttl_seconds=30, clock=clock)
-    p("EURUSD=X")
-    clock.advance(61)
-    p("EURUSD=X")
-    assert calls["n"] == 2                 # TTL 超過で再集計
-
-
-def test_failure_ttl_suppresses_recompute():
-    """失敗後 negative TTL 内は inner を呼ばない (計算とログ両方を止める)。"""
-    clock = _Clock(datetime(2026, 7, 17, 0, 0, 0))
-    calls = {"n": 0}
-    def inner(pair):
-        calls["n"] += 1
-        raise RuntimeError("boom")
-    p = make_cached_news_provider(inner, ttl_seconds=60, negative_ttl_seconds=30, clock=clock)
-    p("EURUSD=X")                          # 1 回目失敗
-    clock.advance(10)
-    p("EURUSD=X")                          # negative TTL 内 → inner 呼ばない
-    assert calls["n"] == 1
-
-
 def test_stale_if_error_keeps_last_success():
-    """成功後の refresh 失敗で直近成功値 (status=stale) が返り as_of は成功時刻。"""
+    """成功後 refresh 失敗で status=stale・as_of は成功時刻を維持。"""
     clock = _Clock(datetime(2026, 7, 17, 0, 0, 0))
     state = {"fail": False}
     def inner(pair):
@@ -245,12 +471,12 @@ def test_stale_if_error_keeps_last_success():
     p = make_cached_news_provider(inner, ttl_seconds=60, negative_ttl_seconds=30, clock=clock)
     ok = p("EURUSD=X")
     success_as_of = ok["as_of"]
-    clock.advance(61)                      # TTL 超過で refresh を試みる
+    clock.advance(61)
     state["fail"] = True
     stale = p("EURUSD=X")
     assert stale["status"] == "stale"
-    assert stale["sentiment_score"] == -0.6      # 直近成功値を維持
-    assert stale["as_of"] == success_as_of       # as_of は成功時刻のまま
+    assert stale["sentiment_score"] == -0.6
+    assert stale["as_of"] == success_as_of
 
 
 def test_unavailable_when_never_succeeded():
@@ -262,46 +488,9 @@ def test_unavailable_when_never_succeeded():
     assert r["status"] == "unavailable"
     assert r["sentiment_score"] is None
     assert r["as_of"] is None
-
-
-def test_success_clears_failure_state():
-    """失敗 → 成功 → 失敗 で 2 回目失敗が再び inner を呼ぶ。"""
-    clock = _Clock(datetime(2026, 7, 17, 0, 0, 0))
-    calls = {"n": 0}
-    state = {"fail": True}
-    def inner(pair):
-        calls["n"] += 1
-        if state["fail"]:
-            raise RuntimeError("boom")
-        return _sentiment(0.5)
-    p = make_cached_news_provider(inner, ttl_seconds=60, negative_ttl_seconds=30, clock=clock)
-    p("EURUSD=X")                          # 失敗 (calls=1)
-    clock.advance(31)                      # negative TTL 超過
-    state["fail"] = False
-    p("EURUSD=X")                          # 成功 (calls=2, failure クリア)
-    clock.advance(61)                      # 成功 TTL 超過
-    state["fail"] = True
-    p("EURUSD=X")                          # 再度失敗 → inner 呼ぶ (calls=3)
-    assert calls["n"] == 3
-
-
-def test_single_flight_concurrent_miss():
-    """2 スレッド同時 miss でも inner は 1 回だけ。"""
-    import threading, time
-    clock = _Clock(datetime(2026, 7, 17, 0, 0, 0))
-    calls = {"n": 0}
-    barrier = threading.Barrier(2)
-    def inner(pair):
-        barrier.wait()                     # 両スレッドを同時に miss させる
-        time.sleep(0.05)
-        calls["n"] += 1
-        return _sentiment(0.5)
-    p = make_cached_news_provider(inner, ttl_seconds=60, negative_ttl_seconds=30, clock=clock)
-    threads = [threading.Thread(target=lambda: p("EURUSD=X")) for _ in range(2)]
-    for t in threads: t.start()
-    for t in threads: t.join()
-    assert calls["n"] == 1
 ```
+
+(single-flight / failure TTL / 成功解除の網羅は Task 3-pre `tests/test_ttl_cache.py` でカバー済み。ここは news dict への status/as_of 写しだけ検証する。)
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -310,7 +499,7 @@ Expected: FAIL (`make_cached_news_provider` が存在しない)
 
 - [ ] **Step 3: Implement `make_cached_news_provider`**
 
-`src/orchestrator/context_builder.py` の module 末尾 (`make_news_provider` の後) に追加。ファイル冒頭の import に不足があれば足す (`from collections import defaultdict` / `from threading import Lock` / `from datetime import datetime` / `from typing import Callable`):
+`src/orchestrator/context_builder.py` の module 末尾 (`make_news_provider` の後) に追加。import に `from src.orchestrator._ttl_cache import TtlSingleFlightCache` / `from datetime import datetime` / `from typing import Callable` を (不足あれば) 足す:
 
 ```python
 def make_cached_news_provider(
@@ -320,56 +509,23 @@ def make_cached_news_provider(
     negative_ttl_seconds: float,
     clock: Callable[[], datetime],
 ) -> NewsProvider:
-    """news_provider を pair 単位 TTL キャッシュでラップする。
+    """news_provider を TtlSingleFlightCache でラップし、返却 dict に status/as_of を付ける。
 
-    - 成功 TTL 内: 再集計せず前回成功値を status="ok" で返す。
-    - pair 単位 lock で single-flight (同時 miss の二重集計を防ぐ)。
-    - failure TTL 内: inner を呼ばず stale (直近成功値・status="stale") /
-      成功履歴なしは status="unavailable" を返す (計算とログ両方を止める)。
-    - 成功で failure 状態を解除する。
-    返却 dict には status (ok|stale|unavailable) と as_of (成功時刻 ISO / None) を必ず付ける。
+    status: ok (新規成功) | stale (refresh 失敗で前回値) | unavailable (成功履歴なし)。
+    as_of は成功時刻の ISO (unavailable は None)。stale でも as_of は成功時刻を維持する
+    (現在時刻で上書きしない — news_conflict の失効を live trigger で消さないため, spec §3.2)。
     """
-    cache: dict[str, tuple[dict, datetime]] = {}   # pair -> (成功 news, 成功時刻)
-    failures: dict[str, datetime] = {}             # pair -> 直近失敗時刻
-    locks: dict[str, Lock] = defaultdict(Lock)
-    guard = Lock()
-
-    def _ok(value: dict, at: datetime) -> dict:
-        return {**value, "status": "ok", "as_of": at.isoformat()}
-
-    def _stale(value: dict, at: datetime) -> dict:
-        return {**value, "status": "stale", "as_of": at.isoformat()}
-
-    def _unavailable() -> dict:
-        return {
-            "sentiment_score": None, "confidence": None,
-            "top_reasons": [], "status": "unavailable", "as_of": None,
-        }
+    cache = TtlSingleFlightCache(
+        ttl_seconds=ttl_seconds, negative_ttl_seconds=negative_ttl_seconds, clock=clock,
+    )
 
     def provider(pair: str) -> dict:
-        now = clock()
-        hit = cache.get(pair)
-        if hit is not None and (now - hit[1]).total_seconds() < ttl_seconds:
-            return _ok(hit[0], hit[1])
-        with guard:
-            lock = locks[pair]
-        with lock:                                 # single-flight
-            hit = cache.get(pair)
-            if hit is not None and (now - hit[1]).total_seconds() < ttl_seconds:
-                return _ok(hit[0], hit[1])
-            failed_at = failures.get(pair)
-            if failed_at is not None and (now - failed_at).total_seconds() < negative_ttl_seconds:
-                # failure TTL 内: inner を呼ばない (計算もログも止める)。
-                return _stale(hit[0], hit[1]) if hit is not None else _unavailable()
-            try:
-                value = inner(pair)                # ← ここでのみ aggregate_news_sentiment が走る
-            except Exception as exc:
-                failures[pair] = now
-                logger.warning("[ORCH] news aggregate failed for %s: %s", pair, exc)
-                return _stale(hit[0], hit[1]) if hit is not None else _unavailable()
-            cache[pair] = (value, now)
-            failures.pop(pair, None)               # 成功で failure 解除
-            return _ok(value, now)
+        res = cache.get(pair, lambda: inner(pair))
+        if res.status == "unavailable":
+            return {"sentiment_score": None, "confidence": None,
+                    "top_reasons": [], "status": "unavailable", "as_of": None}
+        as_of = res.success_at.isoformat() if res.success_at is not None else None
+        return {**res.value, "status": res.status, "as_of": as_of}
 
     return provider
 ```
@@ -377,13 +533,13 @@ def make_cached_news_provider(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_cached_news_provider.py -v"`
-Expected: PASS (8 tests)
+Expected: PASS (3 tests)
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/orchestrator/context_builder.py tests/test_cached_news_provider.py
-git commit -m "feat(orchestrator): add cached news provider (single-flight + stale-if-error)"
+git commit -m "feat(orchestrator): cached news provider via TtlSingleFlightCache"
 ```
 
 ### Task 3b: `_build_news` を status/as_of 対応 + bootstrap 配線
@@ -410,41 +566,65 @@ def _builder(tmp_path, news_provider):
 
 
 def _quote(now):
+    # observed_at は datetime を渡す (QuoteSnapshot 側で扱う型に合わせる — .isoformat 呼び出しは
+    # _enrich_ages 側が行うため、build/_build_news 経路では datetime を渡す)。
     return QuoteSnapshot(bid=150.0, ask=150.02, mid=150.01, spread=0.02,
-                         source="test", observed_at=now.isoformat())
+                         source="test", observed_at=now)
 
 
-def test_build_news_uses_provider_as_of(tmp_path):
-    """provider の as_of を _ref に使う (now で上書きしない)。"""
+def _direct_build_news(builder, pair, now):
+    """_build_news を直接呼んで _ref/status/as_of を検証する (private だが契約検証のため)。"""
+    return builder._build_news(pair, now)
+
+
+def test_build_news_stale_keeps_provider_as_of(tmp_path):
+    """provider の stale as_of を _ref にそのまま使う (now で上書きしない)。"""
     now = datetime(2026, 7, 17, 0, 5, 0)
     past = "2026-07-17T00:00:00"
     def provider(pair):
         return {"sentiment_score": -0.6, "confidence": 0.8,
                 "top_reasons": ["x"], "status": "stale", "as_of": past}
     b = _builder(tmp_path, provider)
-    ctx = b.assemble(pair="EURUSD=X", now=now, quote=_quote(now))
-    assert ctx["news"]["sentiment_score"] == -0.6      # stale 値が通る
-    # news_conflict 判定に使う sentiment が None にならないこと (High 指摘の核心)
+    news = _direct_build_news(b, "EURUSD=X", now)
+    assert news["sentiment_score"] == -0.6           # stale 値が通る (news_conflict 生存)
+    assert news["_ref"]["status"] == "stale"
+    assert news["_ref"]["as_of"] == past             # 成功時刻を維持 (now でない)
 
 
-def test_build_news_unavailable_passes_none(tmp_path):
+def test_build_news_unavailable_keeps_ref_marker(tmp_path):
+    """unavailable でも _ref に status を残す (取得失敗の監査痕跡)。"""
     now = datetime(2026, 7, 17, 0, 5, 0)
     def provider(pair):
         return {"sentiment_score": None, "confidence": None,
                 "top_reasons": [], "status": "unavailable", "as_of": None}
     b = _builder(tmp_path, provider)
-    ctx = b.assemble(pair="EURUSD=X", now=now, quote=_quote(now))
-    assert ctx["news"]["sentiment_score"] is None
+    news = _direct_build_news(b, "EURUSD=X", now)
+    assert news["sentiment_score"] is None           # fail-open (§3.7)
+    assert news["_ref"] is not None
+    assert news["_ref"]["status"] == "unavailable"
+    assert news["_ref"]["as_of"] is None
+
+
+def test_build_news_ok_uses_success_as_of(tmp_path):
+    now = datetime(2026, 7, 17, 0, 5, 0)
+    at = "2026-07-17T00:05:00"
+    def provider(pair):
+        return {"sentiment_score": 0.3, "confidence": 0.7,
+                "top_reasons": [], "status": "ok", "as_of": at}
+    b = _builder(tmp_path, provider)
+    news = _direct_build_news(b, "EURUSD=X", now)
+    assert news["_ref"]["status"] == "ok"
+    assert news["_ref"]["as_of"] == at
 ```
 
-- [ ] **Step 2: Run test to verify it fails or passes as baseline**
+- [ ] **Step 2: Run test to verify it fails**
 
 Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_context_builder_news.py -v"`
-Expected: `test_build_news_uses_provider_as_of` は現状 as_of=now で上書きするため PASS するが `_ref` の as_of は誤り。まず現状の `_build_news` を読み、as_of/status を反映するよう変更する (下記 Step 3)。両テストが provider dict をそのまま尊重することを保証する。
+Expected: FAIL (現状 `_build_news` は `_ref` に status を持たず、unavailable で `_ref=None` にする)
 
 - [ ] **Step 3: Modify `_build_news`**
 
-`src/orchestrator/context_builder.py` の `_build_news` (現在 context_builder.py:256-279) を次に置き換える。provider が status/as_of を返す前提で、`_ref.as_of` を provider の as_of にする:
+`src/orchestrator/context_builder.py` の `_build_news` (現在 context_builder.py:256-279) を次に置き換える。provider の status/as_of を `_ref` に残し、unavailable も監査痕跡として `_ref` を保存する (指摘2対応):
 
 ```python
     def _build_news(self, pair: str, now: datetime) -> dict[str, Any]:
@@ -453,7 +633,8 @@ Expected: `test_build_news_uses_provider_as_of` は現状 as_of=now で上書き
         provider 未注入なら従来の空 news に倒す (後方互換)。cached provider は
         例外を投げず status (ok|stale|unavailable) + as_of 付き dict を返すため、
         as_of をそのまま _ref に使い (now で上書きしない)、status を _ref に残す。
-        provider が直接例外を投げるケース (非 cached provider) も従来通り空 news に倒す。
+        unavailable も _ref に status を残す (取得失敗の監査痕跡・spec §3.6)。
+        provider が直接例外を投げるケース (非 cached provider) は従来通り空 news に倒す。
         """
         if self._news_provider is None:
             return {**self._empty_news(), "_ref": None}
@@ -468,10 +649,7 @@ Expected: `test_build_news_uses_provider_as_of` は現状 as_of=now で上書き
             "sentiment_score": raw.get("sentiment_score"),
             "confidence": raw.get("confidence"),
             "top_reasons": raw.get("top_reasons") or [],
-            "_ref": (
-                None if status == "unavailable"
-                else {"source": "rag_aggregate", "as_of": as_of, "status": status}
-            ),
+            "_ref": {"source": "rag_aggregate", "as_of": as_of, "status": status},
         }
 ```
 
@@ -606,6 +784,26 @@ def test_material_unavailable_returns_zero(monkeypatch):
     )
     assert impact("EURUSD=X") == 0.0
     assert key("EURUSD=X") is None
+
+
+def test_material_failure_ttl_suppresses_recompute(monkeypatch):
+    """失敗後 negative TTL 内は aggregate を再度呼ばない (計算・ログ抑止)。"""
+    clock = _Clock(datetime(2026, 7, 17, 0, 0, 0))
+    calls = {"n": 0}
+    def fake_aggregate(inst, store, config):
+        calls["n"] += 1
+        raise RuntimeError("boom")
+    monkeypatch.setattr(
+        "src.analysis.news_aggregator.aggregate_news_sentiment", fake_aggregate
+    )
+    impact, key = make_news_material_provider(
+        _config(), store=object(), ttl_seconds=60,
+        negative_ttl_seconds=30, clock=clock,
+    )
+    impact("EURUSD=X")                    # 1 回目失敗 (calls=1)
+    clock.advance(10)
+    key("EURUSD=X")                       # negative TTL 内 → aggregate 呼ばない
+    assert calls["n"] == 1
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -613,9 +811,9 @@ def test_material_unavailable_returns_zero(monkeypatch):
 Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_news_material_provider_cache.py -v"`
 Expected: FAIL (`make_news_material_provider` が ttl_seconds 引数を受けない)
 
-- [ ] **Step 3: Rewrite `make_news_material_provider`**
+- [ ] **Step 3: Rewrite `make_news_material_provider` (TtlSingleFlightCache 共有)**
 
-`src/orchestrator/landing_providers.py` の `make_news_material_provider` (現在 landing_providers.py:100-135) を次に置き換える。`_aggregate` の try/except を削除し、TTL キャッシュ (§3.2 と同一失敗セマンティクス) を内部に持つ。import に `from collections import defaultdict` / `from threading import Lock` / `from datetime import datetime` / `from typing import Callable` を足す:
+`src/orchestrator/landing_providers.py` の `make_news_material_provider` (現在 landing_providers.py:100-135) を次に置き換える。`_aggregate` の try/except を削除して例外をキャッシュ層に伝搬させ、TTL/single-flight/stale-if-error は Task 3-pre の `TtlSingleFlightCache` を共有する (指摘6)。import に `from src.orchestrator._ttl_cache import TtlSingleFlightCache` / `from datetime import datetime` / `from typing import Callable` を足す:
 
 ```python
 def make_news_material_provider(
@@ -628,59 +826,41 @@ def make_news_material_provider(
 ) -> tuple[Callable[[str], float], Callable[[str], str | None]]:
     """(get_news_impact, get_news_key) を返す。
 
+    集計は TtlSingleFlightCache で共有キャッシュする (watch 経路と同一失敗セマンティクス)。
     _aggregate は例外を握り潰さずキャッシュ層へ伝搬させる (stale-if-error を迂回しない)。
-    TTL 内は再集計せず前回成功値を返し、failure TTL 内は inner を呼ばず stale /
-    成功履歴なしは None。material 経路は失敗時 impact=0.0 / key=None を維持する。
+    material 経路は失敗時 (unavailable) に impact=0.0 / key=None を維持する。stale は
+    直近成功 NewsSentiment を返す。
     """
     from src.analysis.news_aggregator import aggregate_news_sentiment
 
     by_symbol = {inst.symbol: inst for inst in config.instruments}
-    cache: dict[str, tuple[object, datetime]] = {}   # pair -> (NewsSentiment, 成功時刻)
-    failures: dict[str, datetime] = {}
-    locks: dict[str, Lock] = defaultdict(Lock)
-    guard = Lock()
+    cache = TtlSingleFlightCache(
+        ttl_seconds=ttl_seconds, negative_ttl_seconds=negative_ttl_seconds, clock=clock,
+    )
 
-    def _aggregate(pair: str):
-        """該当 pair の NewsSentiment を返す。集計不能/失敗時は None (例外は伝搬させず
-        stale/None に変換するのはキャッシュ層 _cached_aggregate の責務)。"""
+    def _produce(pair: str):
+        """NewsSentiment を返す。pair 未登録は None を成功値として扱う (集計対象外)。
+        aggregate_news_sentiment の例外はそのまま送出しキャッシュ層が stale/unavailable に変換。"""
         inst = by_symbol.get(pair)
         if inst is None:
             return None
-        return aggregate_news_sentiment(inst, store, config)   # 例外はそのまま送出
+        return aggregate_news_sentiment(inst, store, config)
 
-    def _cached_aggregate(pair: str):
-        now = clock()
-        hit = cache.get(pair)
-        if hit is not None and (now - hit[1]).total_seconds() < ttl_seconds:
-            return hit[0]
-        with guard:
-            lock = locks[pair]
-        with lock:
-            hit = cache.get(pair)
-            if hit is not None and (now - hit[1]).total_seconds() < ttl_seconds:
-                return hit[0]
-            failed_at = failures.get(pair)
-            if failed_at is not None and (now - failed_at).total_seconds() < negative_ttl_seconds:
-                return hit[0] if hit is not None else None
-            try:
-                value = _aggregate(pair)
-            except Exception as exc:
-                failures[pair] = now
-                logger.warning("[ORCH] news material aggregate failed for %s: %s", pair, exc)
-                return hit[0] if hit is not None else None
-            if value is not None:
-                cache[pair] = (value, now)
-                failures.pop(pair, None)
-            return value
+    def _sentiment(pair: str):
+        """cache 経由で NewsSentiment (or None) を得る。unavailable は None。"""
+        res = cache.get(pair, lambda: _produce(pair))
+        if res.status == "unavailable":
+            return None
+        return res.value                          # ok / stale とも成功 NewsSentiment (or None)
 
     def get_news_impact(pair: str) -> float:
-        sent = _cached_aggregate(pair)
+        sent = _sentiment(pair)
         if sent is None or sent.sentiment_score is None:
             return 0.0
         return abs(sent.sentiment_score)
 
     def get_news_key(pair: str) -> str | None:
-        sent = _cached_aggregate(pair)
+        sent = _sentiment(pair)
         if sent is None:
             return None
         basis = sent.summary or f"score={sent.sentiment_score}"
@@ -689,7 +869,7 @@ def make_news_material_provider(
     return get_news_impact, get_news_key
 ```
 
-ファイル冒頭に `logger = logging.getLogger(__name__)` が無ければ追加 (`import logging` も)。
+(注: `_produce` が `None` を返す (pair 未登録) 場合、TtlSingleFlightCache はそれを成功値としてキャッシュする — 例外ではないため。集計対象外の pair は毎回 None で問題ない。実 pair の集計例外のみが failure TTL の対象になる。)
 
 - [ ] **Step 4: Update bootstrap caller**
 
@@ -796,7 +976,9 @@ git add src/orchestrator/planning_pipeline.py tests/test_planning_pipeline_resul
 git commit -m "feat(orchestrator): add PipelineResult.derived_rr + _normalize_reason helper"
 ```
 
-### Task 5a-2: `RiskGateResult.derived_rr` + pre_check pass 経路で導出
+### Task 5a-2: `RiskGateResult.derived_rr` + pre_check で 1 回導出し pass/reject に載せる
+
+**spec 契約 (§150):** `derived_rr` は plan_create (pass) **と risk reject の両方**で「RR を導出できたら」値を持つ。structural reject と導出前 reject (scale-in) だけ None。→ `pre_check` で `derive_rr` を 1 回だけ計算し、判定と `RiskGateResult` の両方に使う (指摘5)。
 
 - [ ] **Step 1: Write the failing test**
 
@@ -804,33 +986,43 @@ git commit -m "feat(orchestrator): add PipelineResult.derived_rr + _normalize_re
 
 ```python
 def test_pre_check_pass_exposes_derived_rr(...):
-    """pass 時、RiskGateResult.derived_rr に derive_rr の導出値が載る。
-
-    (既存テストの pass fixture を流用。RR が min_rr 以上で通る draft/quote を使う。)
-    """
+    """pass 時、RiskGateResult.derived_rr に derive_rr の導出値が載る。"""
     result = worker.pre_check(draft, ctx, include_executable_price=False)
     assert result.passed is True
     assert result.derived_rr is not None
     assert result.derived_rr >= worker._min_rr
 
 
-def test_pre_check_reject_derived_rr_is_none_or_value(...):
-    """reject 時 derived_rr は None (issues 文字列に既に RR が入るため冗長化しない)。"""
-    result = worker.pre_check(draft_bad_rr, ctx, include_executable_price=False)
+def test_pre_check_rr_reject_exposes_derived_rr(...):
+    """RR 起因の fixable reject でも derived_rr に導出値が載る (spec §150)。
+
+    (RR が min_rr 未満で通らない draft/quote を使う。)
+    """
+    result = worker.pre_check(draft_low_rr, ctx, include_executable_price=False)
     assert result.passed is False
+    assert result.reject_class == "fixable"
+    assert result.derived_rr is not None            # 導出できたので値あり
+    assert result.derived_rr < worker._min_rr
+
+
+def test_pre_check_structural_reject_derived_rr_none(...):
+    """structural reject は RR を導出しない (halt 等) → derived_rr=None。"""
+    result = worker.pre_check(draft, ctx_halted, include_executable_price=False)
+    assert result.passed is False
+    assert result.reject_class == "structural"
     assert result.derived_rr is None
 ```
 
-(実引数は既存 `tests/test_risk_gate_worker.py` の pass/reject fixture に合わせる。)
+(実引数は既存 `tests/test_risk_gate_worker.py` の pass / low-rr reject / structural(halt) fixture に合わせる。)
 
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_risk_gate_worker.py -k derived_rr -v"`
 Expected: FAIL (`RiskGateResult` に `derived_rr` 属性が無い)
 
-- [ ] **Step 3: Add field + populate on pass**
+- [ ] **Step 3: Add field + compute derive_rr once in pre_check**
 
-`src/orchestrator/risk_gate.py` の `RiskGateResult` (risk_gate.py:127-138) に追加:
+`src/orchestrator/risk_gate.py` の `RiskGateResult` (risk_gate.py:127-138) に `derived_rr` を追加:
 
 ```python
 @dataclass
@@ -838,7 +1030,7 @@ class RiskGateResult:
     passed: bool
     reject_class: str | None = None
     issues: list[str] = field(default_factory=list)
-    derived_rr: float | None = None   # pass 時のみ導出 RR を載せる (reject は issues に文字列)
+    derived_rr: float | None = None   # RR を導出できた経路 (pass / RR起因 fixable reject) で値・structural/導出前は None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -849,26 +1041,66 @@ class RiskGateResult:
         }
 ```
 
-`pre_check` の pass 経路 (risk_gate.py:200) を次に変更 — pass 時に derive_rr を 1 回呼ぶ:
+`pre_check` (risk_gate.py:189-200) を、structural 判定後に `derive_rr` を 1 回計算し、fixable 判定にその値を渡しつつ結果にも載せる形に変更する。現状 `_fixable_issues` 内部で derive_rr を呼んでいる (risk_gate.py:274) が、これを pre_check 側で 1 回計算して `_fixable_issues` に渡す (二重呼び出しを避ける):
 
 ```python
+        structural = self._structural_issues(context)
+        if structural:
+            # structural は RR 判定前に確定 → derived_rr は載せない。
+            return RiskGateResult(passed=False, reject_class=STRUCTURAL, issues=structural)
+
+        # RR を 1 回だけ導出し、fixable 判定と結果表示で共有する (spec §150)。
         derived = derive_rr(
             draft, context.get("quote"),
             include_executable_price=include_executable_price,
         )
+        fixable = self._fixable_issues(
+            draft, context, include_executable_price=include_executable_price,
+            derived_rr=derived,
+        )
+        if fixable:
+            # derived が計算できていれば載せる (RR起因/その他 fixable いずれも導出は試みた)。
+            return RiskGateResult(
+                passed=False, reject_class=FIXABLE, issues=fixable, derived_rr=derived,
+            )
+
         return RiskGateResult(passed=True, reject_class=None, issues=[], derived_rr=derived)
 ```
+
+`_fixable_issues` (risk_gate.py:225) の signature に `derived_rr: float | None` を追加し、内部の `derived = derive_rr(...)` 呼び出し (risk_gate.py:274-277) を引数 `derived_rr` の使用に置き換える (再計算しない):
+
+```python
+    def _fixable_issues(
+        self, draft, context: dict[str, Any], *,
+        include_executable_price: bool, derived_rr: float | None,
+    ) -> list[str]:
+        ...
+        # RR: 引数で受けた derived_rr を使う (pre_check が 1 回計算済み)。
+        derived = derived_rr
+        if derived is None:
+            if sl is not None and tp is not None:
+                issues.append("rr underivable (no entry candidate)")
+        elif derived < self._min_rr:
+            claimed = action.get("rr")
+            issues.append(
+                f"derived rr {derived:.2f} below min {self._min_rr}"
+                f" (claimed {claimed if claimed is not None else 'none'})"
+            )
+        ...
+```
+
+(注: `_fixable_issues` の他の issue 判定 (SL/TP side・spread 等) は現行のまま。derive_rr の内部呼び出し 1 箇所だけを引数使用に置換する。derived が None のときは reject でも derived_rr=None になる = 導出不能 reject。RR 起因で min 未満なら値が載る。)
 
 - [ ] **Step 4: Run tests**
 
 Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_risk_gate_worker.py -v"`
-Expected: PASS (新 derived_rr テスト + 既存全 pass)
+Expected: PASS (新 derived_rr テスト 3 本 + 既存全 pass)
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add src/orchestrator/risk_gate.py tests/test_risk_gate_worker.py
-git commit -m "feat(orchestrator): RiskGateResult exposes derived_rr on pass"
+git commit -m "feat(orchestrator): RiskGateResult.derived_rr computed once, exposed on pass and RR reject"
 ```
 
 ### Task 5b: 全 return 経路で reason 正規化 + derived_rr を流す
@@ -903,10 +1135,10 @@ Expected: PASS
 2. **failed (139)**: `reason=_normalize_reason(f"unexpected: {type(exc).__name__}: {exc}")` を追加。
 3. **direct_hold unavailable (163)**: `reason=_normalize_reason(f"{'/'.join(unavailable)} unavailable")` を追加。
 4. **direct_hold no opportunity (184)**: `reason=_normalize_reason(opp.reasoning_summary or "no opportunity")` を追加。
-5. **reject scale-in (254)**: 既存 reason を `_normalize_reason("scale-in without new_signal_evidence")` に、`derived_rr=None` 明示。
-6. **reject planner (300)**: `reason=` を `_normalize_reason(f"planner reject: {final.reasoning_summary}")` に置換 (`_normalize_reason` で包む)。
-7. **reject revise exhausted (315)**: `reason=` を `_normalize_reason(f"planner revise exhausted: {final.reasoning_summary}")` に置換。
-8. **reject risk (335)**: `reason=` を `_normalize_reason(f"risk reject ({risk.reject_class}): {risk_reason}")` に置換。
+5. **reject scale-in (254)**: 既存 reason を `_normalize_reason("scale-in without new_signal_evidence")` に、`derived_rr=None` 明示 (RR 導出前の reject)。
+6. **reject planner (300)**: `reason=` を `_normalize_reason(f"planner reject: {final.reasoning_summary}")` に置換。derived_rr は None (risk gate 前の reject)。
+7. **reject revise exhausted (315)**: `reason=` を `_normalize_reason(f"planner revise exhausted: {final.reasoning_summary}")` に置換。derived_rr は None (risk gate 前)。
+8. **reject risk (335)**: `reason=` を `_normalize_reason(f"risk reject ({risk.reject_class}): {risk_reason}")` に置換し、`derived_rr=risk.derived_rr` を追加 (risk は fixable reject の RiskGateResult なので RR 起因なら値を持つ・spec §150)。
 9. **plan_create (414-420, `_commit_plan`)**: `reason=final.reasoning_summary` を `reason=_normalize_reason(final.reasoning_summary)` に置換し、`derived_rr=risk.derived_rr` を追加 (risk は pass した RiskGateResult なので derived_rr を持つ)。
 
 - [ ] **Step 4: Run per-file tests**
@@ -965,14 +1197,19 @@ def test_planning_target_cadence_when_no_material():
 
 
 def test_planning_target_collects_multiple_triggers():
-    """news + regime が同時に material なら triggers に両方入る (短絡しない)。"""
+    """news + regime が同時に material なら triggers に両方入る (短絡しない)。
+
+    debounce_window_seconds=0 でも初回呼び出しは窓を開始するだけで fire しない。
+    一度呼んで窓を開き、次の評価 (>= 窓) で fire させる。
+    """
     now = _now()
     det = _detector(
         get_news_impact=lambda p: 0.9, material_news_impact_min=0.5,
         get_news_key=lambda p: "k1",
     )
     det.mark_regime("EURUSD=X", "active")        # normal→active で rank 上昇 push
-    targets = det.pairs_to_plan(now)
+    det.pairs_to_plan(now)                        # 窓開始 (fire しない)
+    targets = det.pairs_to_plan(now + timedelta(seconds=1))   # 窓を抜けて fire
     assert len(targets) == 1
     t = targets[0]
     assert t.pair == "EURUSD=X"
@@ -1060,15 +1297,45 @@ class PlanningTarget:
 
 `trigger_label` は Task 7 の planning start ログで使う。ここでは変数を用意するだけ。
 
-- [ ] **Step 5: Run tests**
+- [ ] **Step 5: Update existing tests that assume `list[str]` (指摘3)**
 
-Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_material_landing_targets.py tests/test_watch_loop_shadow.py -v"`
-Expected: PASS (targets テスト + runtime の既存 planning テスト)
+API 変更で `pairs_to_plan` が `list[PlanningTarget]` を返すため、既存テストを追従させる:
 
-- [ ] **Step 6: Commit**
+1. `tests/test_material_landing.py` — `assert det.pairs_to_plan(...) == ["USDJPY=X"]` 形式の全 assert (148/150/152/167/169/182/185/187/204/208/210/211 等) を `PlanningTarget` 比較に直す。ヘルパを足す:
+```python
+from src.orchestrator.material_landing import PlanningTarget
+
+def _pairs(targets):
+    """PlanningTarget list → pair 文字列 list (既存 assert の互換用)。"""
+    return [t.pair for t in targets]
+```
+各 assert を `assert _pairs(det.pairs_to_plan(_t(200))) == ["USDJPY=X"]` の形に置換する。
+
+2. `tests/test_market_state_detector.py:216-217` — `landing.pairs_to_plan(...)` の戻りを同様に `_pairs(...)` で包んで比較:
+```python
+assert _pairs(landing.pairs_to_plan(NOW + timedelta(seconds=1))) == ["USDJPY=X"]
+```
+(同ファイルに `_pairs` ヘルパと `PlanningTarget` import を足す。)
+
+3. `tests/test_orchestrator_runtime.py:331-337` — `_FakeDetector.pairs_to_plan` を `PlanningTarget` を返すよう変更:
+```python
+        def pairs_to_plan(self, now):
+            from src.orchestrator.material_landing import PlanningTarget
+            return [PlanningTarget(pair=p, triggers=()) for p in self.fire]
+```
+同ファイル内に他の stub detector (383/423 行の `pairs_to_plan`) があれば同様に PlanningTarget を返すよう直す。
+
+- [ ] **Step 6: Run tests**
+
+Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_material_landing_targets.py tests/test_material_landing.py tests/test_market_state_detector.py tests/test_orchestrator_runtime.py tests/test_watch_loop_shadow.py -v"`
+Expected: PASS (新 targets テスト + 追従した既存テスト全て)
+
+- [ ] **Step 7: Commit**
 
 ```bash
-git add src/orchestrator/material_landing.py src/orchestrator/runtime.py tests/test_material_landing_targets.py
+git add src/orchestrator/material_landing.py src/orchestrator/runtime.py \
+  tests/test_material_landing_targets.py tests/test_material_landing.py \
+  tests/test_market_state_detector.py tests/test_orchestrator_runtime.py
 git commit -m "feat(orchestrator): pairs_to_plan returns PlanningTarget with trigger reasons"
 ```
 
@@ -1136,32 +1403,55 @@ def test_planning_result_on_quote_failure(caplog, planning_runtime_factory):
 Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_planning_cycle_logging.py -v"`
 Expected: FAIL (planning start/result ログが出ない)
 
-- [ ] **Step 3: Add start/result logging with 1:1 lifecycle**
+- [ ] **Step 3: Remove duplicate `📋 plan created` log**
 
-`src/orchestrator/runtime.py` の `run_planning_cycle` (runtime.py:211-281) を、start 1 件に result 1 件が必ず対応する構造に変更する。Task 6 で用意した `trigger_label` を start ログに使う。各 pair ループ本体を次の骨子にする:
+`src/orchestrator/runtime.py` の `_notify_planning_result` (runtime.py:1210-1216) の `📋 plan created` INFO ログブロックを削除する (通知本体 L1218 以降は残す)。plan_create の可視化は Task 7 の統一 result ログに一本化する (二重回避・指摘4):
+
+```python
+    def _notify_planning_result(self, pair: str, result: "PipelineResult") -> None:
+        """plan_create / reject を shadow 通知する。direct_hold/failed は通知しない。
+
+        plan 作成の可視ログは run_planning_cycle の統一 result ログに一本化した
+        (旧 📋 plan created INFO はここから削除)。本メソッドは通知のみ担う。
+        """
+        if self._notifier is None:
+            return
+        # ... 以降 (PlanCreatedInfo / notify_plan_created / notify_plan_rejected) は既存のまま
+```
+
+- [ ] **Step 4: Add start/result logging with 1:1 lifecycle**
+
+`src/orchestrator/runtime.py` の `run_planning_cycle` (runtime.py:211-281) を、start 1 件に result 1 件が必ず対応する構造に変更する。**start ログは `start_run()` 成功後に出す** (start_run が DB エラーで落ちたら start ログも出ない = 1:1 維持・指摘4)。`run_id=None` で外側 try に包み、finally で result 保険を打つ。Task 6 の `trigger_label` を使う:
 
 ```python
         for target in targets:
             pair = target.pair
             trigger_label = "+".join(target.triggers) if target.triggers else "cadence"
-            logger.info("[ORCH] planning start: pair=%s trigger=%s", pair, trigger_label)
+            run_id = None
+            committed = False              # 既存初期化を維持
             result_logged = False
 
             def _log_result(decision: str, reason: str = "", *, extra: str = "") -> None:
                 nonlocal result_logged
+                # reason は PipelineResult 経由なら正規化済み。例外経路の生 reason も
+                # ここで改行除去する (1 行を壊さない・指摘4)。
+                flat = " ".join(str(reason).split())[:200] if reason else ""
                 logger.info(
                     "[ORCH] planning result: pair=%s decision=%s%s%s",
                     pair, decision,
                     f" {extra}" if extra else "",
-                    f" reason={reason}" if reason else "",
+                    f" reason={flat}" if flat else "",
                 )
                 result_logged = True
 
-            run_id = self._orch.start_run(...)   # 既存
             try:
+                run_id = self._orch.start_run(...)   # 既存引数を保持
+                # start_run 成功後に start ログ (失敗時は start も出ない → 1:1 維持)。
+                logger.info("[ORCH] planning start: pair=%s trigger=%s", pair, trigger_label)
                 quote = self._quote_provider(pair)
                 ctx = self._ctx.build(pair=pair, now=now, quote=quote)
                 self._orch.attach_snapshot(run_id, ctx["snapshot_id"])
+                committed = True           # snapshot 到達 (既存セマンティクス)
                 if self._pipeline is not None:
                     result = asyncio.run(self._pipeline.run(pair=pair, context=ctx, run_id=run_id))
                     if result.outcome == "failed":
@@ -1173,7 +1463,9 @@ Expected: FAIL (planning start/result ログが出ない)
                         self._orch.finish_run(run_id, status="ok")
                         self._notify_planning_result(pair, result)
                         rr = f"rr={result.derived_rr:.2f}" if result.derived_rr is not None else ""
-                        extra = f"plan_id={result.plan_id}" if result.outcome == "plan_create" else ""
+                        extra = ""
+                        if result.outcome == "plan_create":
+                            extra = f"plan_id={result.plan_id} dir={result.direction or '?'}"
                         _log_result(result.outcome, result.reason or "",
                                     extra=" ".join(x for x in (extra, rr) if x))
                 else:
@@ -1182,12 +1474,13 @@ Expected: FAIL (planning start/result ログが出ない)
                     _log_result("direct_hold", "phase1 observe")
             except Exception as exc:
                 logger.exception("[ORCH] planning cycle failed for %s", pair)
-                self._orch.finish_run(run_id, status="failed",
-                    error_type=type(exc).__name__, error_message=str(exc))
+                if run_id is not None:
+                    self._orch.finish_run(run_id, status="failed",
+                        error_type=type(exc).__name__, error_message=str(exc))
                 if not result_logged:
                     _log_result("error", f"{type(exc).__name__}: {exc}")
             finally:
-                if not result_logged:
+                if not result_logged and run_id is not None:
                     # start は出したが result を出せていない経路の最終保険 (契約: start:result = 1:1)。
                     _log_result("error", "no result recorded")
                 if self._detector is not None:
@@ -1197,14 +1490,16 @@ Expected: FAIL (planning start/result ログが出ない)
                         self._detector.mark_attempted(pair, now)
 ```
 
-(注: 既存の変数 `committed` の初期化・`start_run` 引数・`record_decision` 引数は現行コードを保持する。上記は差分の骨子で、既存の trace 記録 (attach_snapshot 等) を消さないこと。reason はログ内で改行を含まない前提 — PipelineResult.reason は Task 5 で正規化済み。)
+**契約の要点:** start ログは start_run 成功直後にのみ出る。start_run が落ちれば start も result も出ず (1:1 は「start が出たら result も出る」の意味で保たれる)。start 後に落ちた全経路 (quote/build/pipeline failed/例外) は except または finally で result を出す。
 
-- [ ] **Step 4: Run tests**
+(注: 既存の `start_run` 引数・`record_decision` 引数・trace 記録 (attach_snapshot 等) は現行コードを保持し消さない。`committed` の遷移は既存セマンティクスに合わせる — 上記は差分骨子。)
+
+- [ ] **Step 5: Run tests**
 
 Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_planning_cycle_logging.py tests/test_watch_loop_shadow.py -v"`
 Expected: PASS
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/orchestrator/runtime.py tests/test_planning_cycle_logging.py
@@ -1257,17 +1552,24 @@ Run:
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest \
   tests/test_logging_setup.py \
   tests/test_config_schema.py \
+  tests/test_config_example_sync.py \
+  tests/test_orchestrator_config.py \
+  tests/test_ttl_cache.py \
   tests/test_cached_news_provider.py \
   tests/test_context_builder_news.py \
   tests/test_news_material_provider_cache.py \
+  tests/test_risk_gate_worker.py \
   tests/test_planning_pipeline.py \
   tests/test_planning_pipeline_result_contract.py \
   tests/test_material_landing_targets.py \
+  tests/test_material_landing.py \
+  tests/test_market_state_detector.py \
+  tests/test_orchestrator_runtime.py \
   tests/test_planning_cycle_logging.py \
   tests/test_watch_loop_shadow.py \
   -v"
 ```
-Expected: 全 PASS。
+Expected: 全 PASS。フル suite は順序フレークを持つため per-file で判定する。
 
 - [ ] **spec との突き合わせ**: §2 (A-1〜A-5)・§3 (B / B-2 / 3.6 / 3.7)・§4 (C 注記) が各 Task でカバーされているか確認。
 

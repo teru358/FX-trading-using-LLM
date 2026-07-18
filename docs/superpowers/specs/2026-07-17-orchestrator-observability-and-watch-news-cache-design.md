@@ -323,8 +323,9 @@ watch loop (1sec)
 
 ## 7. 実装順 (概略・詳細は plan で)
 
+0. generic `TtlSingleFlightCache` を切り出す (watch/material 共有・single-flight + failure-TTL + stale-if-error) + テスト
 1. logging_setup に `[ORCH]` 登録 + テスト (A-1)
-2. news TTL キャッシュ ラッパ (single-flight + stale-if-error + unavailable + ログ抑制) + config 2 値 + テスト (B §3.2)
+2. news TTL キャッシュ ラッパ (TtlSingleFlightCache 利用・unavailable/stale の status+as_of 付与) + config 2 値 + テスト (B §3.2)
 3. `_build_news` を as_of/status ベースに変更 (stale as_of 維持・unavailable 標識) + テスト (§3.6/§3.7) + bootstrap 配線
 4. material landing 経路のキャッシュ (B-2 §3.4) + テスト
 5. `PipelineResult` に reason/derived_rr 追加 + 全 return 経路で設定 + reason 正規化 + テスト (A-3 データ契約)
