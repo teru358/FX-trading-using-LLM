@@ -1142,6 +1142,13 @@ class OrchestratorStore:
             session.execute(
                 update(_Reflection)
                 .where(_Reflection.order_id == order_id)
+                # dead を追い越さない。状態条件が無いと、attempt=4 を読んでいた
+                # 遅れスレッドが dead 確定後に next_retry_at を書き戻し、
+                # status='dead' なのに next_retry_at 非 NULL という不整合を作る。
+                # reflection job が due な retry を next_retry_at だけで拾うと
+                # dead 行を拾い続けるため、DB 状態として一貫させる。
+                # 冒頭の dead ガード (読み取り) との TOCTOU もここで閉じる。
+                .where(_Reflection.status != "dead")
                 .values(**terminal)
             )
             session.commit()

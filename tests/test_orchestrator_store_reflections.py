@@ -182,14 +182,45 @@ class TestReflectionConcurrency:
         )
         assert errors == [], f"並行 retry で例外: {errors!r}"
         r = store.get_reflection("ord-race")
-        # 最終値は 5〜8 の範囲で interleaving 依存になる。どこかのスレッドが
-        # dead を commit した後の呼び出しは HIGH-3 の terminal ガードで no-op に
-        # なるため、8 に張り付くとは限らない (増分ロストではない: dead 判定を
-        # 挟まない純粋な増分パスは 8 並行で必ず 8 になることを実測で確認済み)。
+        # 最終値はほとんどの試行で 8 になり、dead ガードが発火した試行でのみ
+        # 僅かに下回る (実測 40 試行中 38 が 8、残りが 7)。5〜6 が最終値として
+        # 出ることはまず無い — dead-letter ログに出る attempt 番号の揺れとは
+        # 別物なので混同しないこと。
+        # 増分ロストではない: dead 判定を挟まない純粋な増分パスは 8 並行で
+        # 必ず 8 になることを test_concurrent_increment_loses_nothing で担保。
         # 守るべき不変条件は「過小計上で dead-letter に到達し損ねないこと」。
         # read-modify-write 版はここで 2 まで落ち、永久 retry を招いていた。
         assert r.attempt_count >= _REFLECTION_MAX_ATTEMPTS
         assert r.status == "dead"
+
+    def test_concurrent_dead_keeps_next_retry_at_null(self, tmp_path):
+        """dead 行に next_retry_at が残らないこと (MEDIUM-5)。
+
+        終端 UPDATE に状態条件が無いと、attempt=4 を読んでいた遅れスレッドが
+        dead 確定後に next_retry_at を書き戻し、status='dead' かつ
+        next_retry_at 非 NULL の不整合が生じる。dead-letter 不変条件自体は
+        壊れないが、reflection job が due な retry を
+        `WHERE next_retry_at <= now` で拾うと dead 行を拾い続ける。
+
+        低頻度 (実測 ~12%) の競合なので試行を重ねて検出する。
+        """
+        offenders = []
+        for trial in range(40):
+            store = OrchestratorStore(tmp_path / f"race-{trial}.db")
+            oid = "ord-dead-race"
+            errors = self._run_parallel(
+                lambda s=store, o=oid: s.mark_reflection_retry(
+                    o, pair="USDJPY=X", error="e", now=NOW),
+                10,
+            )
+            assert errors == [], f"並行 retry で例外: {errors!r}"
+            r = store.get_reflection(oid)
+            assert r.status == "dead"
+            if r.next_retry_at is not None:
+                offenders.append((trial, r.attempt_count, r.next_retry_at))
+        assert offenders == [], (
+            f"dead 行に next_retry_at が残存: {len(offenders)}/40 件 {offenders[:3]}"
+        )
 
     def test_concurrent_increment_loses_nothing(self, store):
         """増分パス単体では 1 件も失われないこと (HIGH-1 の本丸)。
