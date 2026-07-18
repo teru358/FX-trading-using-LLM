@@ -10,7 +10,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from threading import Lock
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 class CacheResult:
     """get() の返却。status = ok|stale|unavailable。"""
     value: Any                    # 成功値 (unavailable は None)
-    status: str                   # "ok" | "stale" | "unavailable"
+    status: Literal["ok", "stale", "unavailable"]
     success_at: datetime | None   # 最後に成功した時刻 (unavailable は None)
 
 
@@ -31,11 +31,13 @@ class TtlSingleFlightCache:
         self._clock = clock
         self._cache: dict[str, tuple[Any, datetime]] = {}   # key -> (value, success_at)
         self._failures: dict[str, datetime] = {}            # key -> 直近失敗時刻
-        self._locks: dict[str, Lock] = defaultdict(Lock)
+        self._locks: dict[str, Lock] = defaultdict(Lock)  # key (pair) は有限 (数通貨ペア) 前提で eviction しない。
         self._guard = Lock()
 
     def get(self, key: str, producer: Callable[[], Any]) -> CacheResult:
         # lock 前の速い hit チェック (clock はここで 1 回)。
+        # fast path: GIL-atomic な dict 読み取り。lock 内で必ず再検証するので lock 不要
+        # (ここに lock を足すと全読み取りが直列化しキャッシュの意味が消える)。
         hit = self._cache.get(key)
         if hit is not None and (self._clock() - hit[1]).total_seconds() < self._ttl:
             return CacheResult(hit[0], "ok", hit[1])
