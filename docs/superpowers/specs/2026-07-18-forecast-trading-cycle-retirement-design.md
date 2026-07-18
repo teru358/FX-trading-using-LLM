@@ -78,6 +78,14 @@ directional RAG complete カードだけは生きた consumer が残る
 - `orchestrator.mode=shadow` は**許容** (Fiosracht の段階検証運用があるため
   live 必須にはしない)。ただし起動時に「発注は行われない (shadow)」を
   warning ログ + Schedule 表示に明示する。
+- **起動順序**: 現行 main は API 起動 → scheduler 起動 → orchestrator 構築の順
+  (main.py:504 / 543 / 554)。このままでは orchestrator 構築失敗までの短時間に
+  API が ready を返し定期 job が動き得るため、**orchestrator の構築 + 起動可能性
+  検証を API・scheduler 起動より前に移す**。
+- **pair 集合の整合**: bootstrap 解決後の orchestrator 対象 pair 集合が
+  tradeable 全体と一致しない場合、`mode=live` では対象外 pair の発注経路が
+  消えるため**起動中止**とする (subset 運用は tradeable 側の設定で表現する。
+  許可フラグは設けない)。`mode=shadow` では warning のみ。
 
 ## 2. 削除スコープ
 
@@ -125,7 +133,8 @@ directional RAG complete カードだけは生きた consumer が残る
   `price_provider.estimate_daily_requests()` の run_times 加算項も除去
 - config (caller sweep で確認の上): `rag_adjustment_enabled` /
   `rag_adjustment_max` / `rag_adjustment_min_hits` / `rag_adjustment_search_top_n` /
-  `rag_adjustment_same_weight` / `rag_adjustment_opposite_weight`、
+  `rag_adjustment_same_weight` / `rag_adjustment_opposite_weight` /
+  `rag_adjustment_trade_multiplier` / `rag_adjustment_hold_multiplier`、
   `atr_timeframe`・`sl_atr_mult_default/min/max`・`tp_atr_mult_default/min/max`
   (adaptive/取引サイクル専用なら削除。`_helpers.py` の ATR 計算を exit_check /
   orchestrator が使う場合は該当キーのみ残す)
@@ -177,8 +186,27 @@ news_collector への教訓供給を維持する。
   手動決済のいずれ経由でも trades.json に落ちる限り拾える。
   現行の「exit_check 決済は振り返り漏れ」も解消される。
 - 二重処理防止は `reflections.order_id` の存在チェック (PK/UNIQUE) で行う。
-- 起動直後の大量バックログを避けるため、1 回の実行での処理件数に上限を設ける
-  (10 件固定、古い順)。残りは次回実行で処理する。
+
+### 3.2b retry 管理と飢餓防止 (再レビュー High-2 対応)
+
+「古い順 N 件 + 成功するまで未記録」だけでは、恒久失敗レコード (例: 現在の
+instrument 設定に存在しない旧銘柄 — 現行実装は skip している) が先頭を占有し、
+新規決済の振り返りが飢餓する。対応:
+
+- `reflections` に retry 管理カラムを持たせる:
+  `status` (`done` | `retry` | `dead`) / `attempt_count` / `last_error` /
+  `next_retry_at`。
+- 検知集合 = closed trades − (`done` ∪ `dead` ∪ `next_retry_at` 未到来の `retry`)。
+- 失敗時: `retry` として upsert し `attempt_count` を増分、
+  `next_retry_at` = 指数 backoff (1h → 2h → 4h → 8h → 16h)。
+  **5 回失敗で `dead` (dead-letter) に落とし warning ログ**。以後検知対象外。
+- pair が現在の instrument 設定に存在しない order は**即 `dead`**
+  (last_error に理由記録)。
+- 成功時のみ `status="done"` (INSERT/upsert は LLM + RAG 成功後 — §3.5 の
+  不変条件は status="done" に対して適用)。
+- **1 回の実行枠は 10 件**: 新規 (未試行、新しい順) 優先 2 件 +
+  backfill (retry 到来分含む、古い順) 8 件。片方が枠未満なら他方に融通。
+  初回移行時の大量バックログでも新規決済の振り返りが遅延しない。
 
 ### 3.3 文脈組み立て
 
@@ -206,8 +234,12 @@ news_collector への教訓供給を維持する。
    - `pair` TEXT NOT NULL
    - `close_reason` TEXT
    - `realized_pnl` REAL
-   - `reflection_text` TEXT NOT NULL
-   - `created_at` TEXT NOT NULL (db_now)
+   - `reflection_text` TEXT NULL (`done` 以外は NULL 可)
+   - `status` TEXT NOT NULL (`done` | `retry` | `dead` — §3.2b)
+   - `attempt_count` INTEGER NOT NULL DEFAULT 0
+   - `last_error` TEXT NULL
+   - `next_retry_at` DATETIME NULL
+   - `created_at` / `updated_at` DATETIME NOT NULL (db_now)
 2. **directional RAG**: 既存 `record_trade_complete` を流用して
    `phase="complete"` カードを upsert (`session_type="trade"`)。
 
@@ -238,22 +270,44 @@ news_collector の教訓検索は現状 filter なしで全カードを対象に
 - `generate_close_reflection()` の **fallback 機構自体を削除**し、LLM 失敗は
   例外を伝搬する (呼び出し側 = reflection job が唯一の caller になる)。
 - `record_trade_complete()` も同様に RAG 失敗を例外伝搬に変更する。
-- reflection job 側: 1 件の処理で例外が出たらその order は `reflections` に
-  記録せず warning ログ → 次回実行で自然リトライ。
-- **`reflections` への INSERT は LLM 成功 + RAG upsert 成功の後** (途中失敗を
-  「処理済み」にしない)。RAG upsert が成功し INSERT が失敗した場合は次回
+- reflection job 側: 1 件の処理で例外が出たらその order を `retry` として記録し
+  (attempt_count 増分 + backoff、§3.2b) warning ログ → next_retry_at 到来後に再試行。
+- **`status="done"` の記録は LLM 成功 + RAG upsert 成功の後** (途中失敗を
+  「処理済み」にしない)。RAG upsert が成功し `done` 記録が失敗した場合は次回
   RAG 側が upsert (冪等) で上書きされるだけで害はない。
 - trades.json 読み込み失敗: job 全体を warning で skip (次回リトライ)。
 
+### 3.5b LLM 出力の検証と方向正誤の判定基準 (再レビュー Medium-4 対応)
+
+- **schema validation**: LLM 応答 JSON の必須キー (`outcome_summary` / `lesson` /
+  `was_directionally_correct`) が欠落・型不正なら**失敗扱い** (default へ落とさない)
+  → §3.2b の retry 管理に乗せる。
+- **方向正誤は機械判定を正とする**: 現行 fallback の
+  `close_reason == "take_profit"` 基準は trailing SL や manual close の利益決済を
+  誤判定する。判定は**価格方向** — buy: `close_price > entry_price`、
+  sell: `close_price < entry_price`。LLM の `was_directionally_correct` 申告は
+  叙述の整合確認のみに使い、カード/DB に記録する正誤は機械判定を採用する。
+- RAG カードの win/loss 表記は既存 directional_writer 準拠
+  (`realized_pnl > 0`) を維持する (方向正誤とは別軸)。
+
 ### 3.6 スケジュールと LLM 干渉制御 (レビュー High-3 対応)
 
-- 毎時実行 (exit_check と同じ毎時系だが独立 job)。JobGuard 付き。
-- main の `_run_with_slot` (`_llm_slot`) 経由 — これは **main-loop 系 LLM job
-  (news 収集等) との排他**であり、orchestrator の PlannerAgent
-  (runtime スレッドから直接 LLM を呼ぶ) とは排他にならない。
+- 毎時実行 (exit_check と同じ毎時系だが独立 job)。
+- **実行形 (再レビュー High-1 対応)** — `_run_with_slot()` は**使わない**
+  (別スレッド起動して即 return するため、JobGuard 配下で呼ぶと実処理中に
+  guard が解除される)。次の構成とする:
+  1. **JobGuard 配下の controller** を `schedule` に登録する
+     (`_run_with_guard, _guards["reflection"], controller`)。
+     controller は guard スレッド内で同期実行され、完了まで guard を保持する。
+  2. controller が §3.2b の検知・優先度付けで処理対象を列挙する。
+  3. 各 1 件を **`_llm_slot.try_run_scheduled(process_one, order)` で同期実行**
+     (`try_run_scheduled` は呼び出しスレッドで fn を実行し、slot busy なら
+     False で skip する — `priority_job_slot.py:70`)。
+  4. **slot busy (False 返り) または planning 実行中なら、その時点で controller
+     を終了**し残りを次回に回す。
 - planner との干渉は以下で最小化する (planner 側コードは変更しない):
-  1. **1 件単位の逐次処理** — LLM 呼び出しを 1 件ずつ行い、まとめて slot を
-     長時間占有しない。
+  1. **1 件単位の逐次処理** — 上記の通り slot の取得/解放を 1 件ごとに行い、
+     まとめて長時間占有しない。
   2. **planning 実行中は譲る** — 各件の処理前に OrchestratorStore の
      `agent_runs` に実行中 (running) の planning run が存在するか照会し、
      存在すれば残りを次回実行に回す (OrchestratorStore に照会 API
@@ -277,8 +331,10 @@ technical-llm-omit のデプロイと同梱可能な手順として:
 - CREATE: `reflections` (ORM model 追加により起動時 `metadata.create_all()` で
   自動作成。手動手順は不要)
 
-migration スクリプトは冪等 (`DROP TABLE IF EXISTS`) とし、実行前に DB バックアップを
-取る手順を明記する (rsync 事故の教訓に従い、バックアップ→実行の順を厳守)。
+migration スクリプトは冪等 (`DROP TABLE IF EXISTS`、ChromaDB 削除も再実行安全) とし、
+実行前に **DB と ChromaDB データディレクトリ (directional collections を含む
+`data/` 配下の RAG 永続化先) の両方をシステム停止中にバックアップ**する手順を
+明記する (rsync 事故の教訓に従い、バックアップ→実行の順を厳守)。
 
 ## 5. config 変更
 
@@ -298,7 +354,16 @@ migration スクリプトは冪等 (`DROP TABLE IF EXISTS`) とし、実行前�
   - LLM 失敗 → 記録なし → 次回再試行
   - RAG 成功 + INSERT 失敗 → 次回再処理で冪等
   - 二重処理防止 (記録済み order_id は再処理しない)
+- **retry 管理** (§3.2b): 失敗→retry→backoff→dead の遷移、instrument 不在→即 dead、
+  新規優先 2 + backfill 8 の枠配分、dead の検知除外。
+- **実行制御** (§3.6): slot busy で controller 即終了、planning 実行中で譲る、
+  guard が controller 完了まで保持される。
 - **reflections テーブル**: OrchestratorStore migration テスト既存パターンに追加。
+- **directional RAG cleanup** (§3.4b / 再レビュー Medium-5):
+  - 複合 filter が `session_type=trade AND phase=complete` のみ返す
+  - cleanup が forecast / HOLD / entry カードだけを削除する
+  - cleanup の再実行が冪等
+  - trade complete カードは維持される
 - **fail-fast 起動** (§1.5): enabled=false / bootstrap 失敗 → 起動中止、
   mode=shadow → warning のテストを追加。
 - **削除系**: 削除ごとに (a) 参照残りゼロ (grep + import 確認)、
