@@ -184,6 +184,7 @@ class PlanningPipeline:
             )
 
         # ── Step 2: opportunity scan ──────────────────────────
+        logger.debug("[ORCH] phase scan: pair=%s", pair)
         opp = await self._planner.scan_opportunity(pair=pair, context=context)
         self._orch.record_agent_output(
             run_id=run_id, agent_name="PlannerAgent", pair=pair,
@@ -221,6 +222,9 @@ class PlanningPipeline:
 
         while True:
             try:
+                logger.debug(
+                    "[ORCH] phase draft: pair=%s attempt=%d", pair, redraft_count + 1
+                )
                 draft = await self._exec.draft(
                     pair=pair, direction=direction, context=context,
                     revision_feedback=feedback,
@@ -345,6 +349,7 @@ class PlanningPipeline:
                 )
 
             # accept のみ risk gate (hard veto) へ。
+            logger.debug("[ORCH] phase gate: pair=%s", pair)
             risk = self._risk.pre_check(draft, context, include_executable_price=False)
             if risk.passed:
                 return self._commit_plan(
