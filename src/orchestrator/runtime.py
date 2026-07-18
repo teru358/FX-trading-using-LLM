@@ -223,19 +223,40 @@ class OrchestratorRuntime:
             targets = [PlanningTarget(pair=p, triggers=()) for p in self._pairs]
         for target in targets:
             pair = target.pair
-            # trigger_label は planning start ログ用 (後続 Task で消費)。
+            # trigger_label は planning start ログ用 (どの経路で起動したかの観測性)。
             trigger_label = "+".join(target.triggers) if target.triggers else "cadence"
+            run_id = None
+            committed = False
+            result_logged = False
+
+            def _log_result(decision, reason="", *, extra="", pair=pair):
+                # start:result 1:1 契約の result 側。1 run につき必ず 1 回だけ出す。
+                # reason は改行除去 + 長さ制限してログ 1 行を壊さない。
+                nonlocal result_logged
+                flat = " ".join(str(reason).split())[:200] if reason else ""
+                logger.info(
+                    "[ORCH] planning result: pair=%s decision=%s%s%s",
+                    pair, decision,
+                    f" {extra}" if extra else "",
+                    f" reason={flat}" if flat else "",
+                )
+                result_logged = True
+
             # start_run は quote 取得・build より前に呼ぶ: 価格取得は落ちやすい入力なので、
             # 失敗時も failed run を必ず残し (dangling 防止)、かつ 1 ペアの失敗で残りペアを
             # 止めないため、quote 取得も含めて try 内に入れる。
-            run_id = self._orch.start_run(
-                "OrchestratorRuntime",
-                pair=pair,
-                trigger_type="planning_cycle",
-                trade_horizon=self._config.policy.trade_horizon,
-            )
-            committed = False
+            # start ログは start_run 成功後にのみ出す: start_run が落ちたら run_id=None のまま
+            # で start も result も出ない (start=0/result=0 の 1:1 契約を維持)。
             try:
+                run_id = self._orch.start_run(
+                    "OrchestratorRuntime",
+                    pair=pair,
+                    trigger_type="planning_cycle",
+                    trade_horizon=self._config.policy.trade_horizon,
+                )
+                logger.info(
+                    "[ORCH] planning start: pair=%s trigger=%s", pair, trigger_label
+                )
                 quote = self._quote_provider(pair)
                 ctx = self._ctx.build(pair=pair, now=now, quote=quote)
                 # snapshot を run に後付けで紐付け、agent_run → decision_snapshot の
@@ -261,11 +282,33 @@ class OrchestratorRuntime:
                             run_id, status="failed",
                             error_type="PipelineFailed", error_message=result.error,
                         )
+                        _log_result("failed", result.reason or (result.error or ""))
                     else:
+                        # 順序: finish_run → result ログ → 通知。通知は最後で握り、通知
+                        # 失敗しても run=ok・result (plan_create 等) を維持する。
                         self._orch.finish_run(run_id, status="ok")
+                        rr = (
+                            f"rr={result.derived_rr:.2f}"
+                            if result.derived_rr is not None else ""
+                        )
+                        extra = ""
+                        if result.outcome == "plan_create":
+                            extra = f"plan_id={result.plan_id} dir={result.direction or '?'}"
+                        _log_result(
+                            result.outcome, result.reason or "",
+                            extra=" ".join(x for x in (extra, rr) if x),
+                        )
                         # plan_create / reject を shadow 通知 (direct_hold は通知しない)。
-                        # 記録完了後・deterministic path の外で fire する。
-                        self._notify_planning_result(pair, result)
+                        # 記録・result ログ完了後・deterministic path の外で fire する。
+                        # 通知失敗は result を error 化しない (result は既に記録済み)。
+                        try:
+                            self._notify_planning_result(pair, result)
+                        except Exception:
+                            logger.warning(
+                                "[ORCH] planning notify failed for %s "
+                                "(result already recorded)",
+                                pair, exc_info=True,
+                            )
                 else:
                     # 後方互換 (pipeline 未注入): 機会判断を行わず direct_hold を記録する。
                     self._orch.record_decision(
@@ -278,13 +321,23 @@ class OrchestratorRuntime:
                         trade_horizon=self._config.policy.trade_horizon,
                     )
                     self._orch.finish_run(run_id, status="ok")
+                    _log_result("direct_hold", "phase1 observe")
             except Exception as exc:
                 logger.exception(f"[ORCH] planning cycle failed for {pair}")
-                self._orch.finish_run(
-                    run_id, status="failed",
-                    error_type=type(exc).__name__, error_message=str(exc),
-                )
+                # start_run より後で落ちたときだけ failed run を残し result を出す。
+                # start_run 自体で落ちると run_id=None → start も出ていない → 1:1 維持。
+                if run_id is not None:
+                    self._orch.finish_run(
+                        run_id, status="failed",
+                        error_type=type(exc).__name__, error_message=str(exc),
+                    )
+                    if not result_logged:
+                        _log_result("error", f"{type(exc).__name__}: {exc}")
             finally:
+                # 保険: run が立った (start を出した) のに result 未記録なら error として
+                # 1:1 を必ず満たす (どの経路でも start 1 : result 1)。
+                if run_id is not None and not result_logged:
+                    _log_result("error", "no result recorded")
                 # detector 注入時のみ mark (Codex Medium#4)。
                 # - snapshot 作成まで到達 (committed) → mark_committed: baseline を消費し
                 #   floor 起点を進める (同じ材料で再発火しない)。
@@ -1208,18 +1261,11 @@ class OrchestratorRuntime:
             logger.warning("[ORCH] shadow notification failed", exc_info=True)
 
     def _notify_planning_result(self, pair: str, result: "PipelineResult") -> None:
-        """plan_create / reject を shadow 通知する。direct_hold/failed は通知しない。"""
-        # F-5 (spec §F-5): plan 作成成功をターミナルログにも出す (shadow trigger 🧪 と対)。
-        # plan_create のときのみ。direct_hold / failed は出さない (既存通知方針と同じ)。
-        # notifier 未注入でも出す (mode 非依存の観測性改善) ため guard の前に置く。
-        if result.outcome == "plan_create" and result.plan_id is not None:
-            logger.info(
-                "[ORCH] 📋 plan created %s %s %s score=%+.2f conf=%.2f",
-                result.plan_id, pair, result.direction or "?",
-                result.score if result.score is not None else 0.0,
-                result.confidence if result.confidence is not None else 0.0,
-            )
+        """plan_create / reject を shadow 通知する。direct_hold/failed は通知しない。
 
+        plan 作成成功の可視化は run_planning_cycle の統一 result ログ ([ORCH] planning
+        result) に一本化した (二重ログ排除)。ここは通知本体のみを担う。
+        """
         if self._notifier is None:
             return
         from src.orchestrator.shadow_notifier import PlanCreatedInfo

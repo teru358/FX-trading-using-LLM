@@ -1,7 +1,9 @@
 """Task F-5 (spec §F-5): plan 作成成功 / 約定成功のターミナルログ。
 
 plan→trigger→execute の一連をログで追えるようにする (mode 非依存)。
-- plan_create 成功 → [ORCH] 📋 plan created ... (direct_hold/failed には出さない)
+- plan_create の可視化は run_planning_cycle の統一 result ログ ([ORCH] planning
+  result) に一本化された。_notify_planning_result からは 📋 plan created を出さない
+  (二重ログ排除。start:result 1:1 契約は test_planning_cycle_logging を参照)。
 - executed 成功   → [ORCH] ✅ live execute ... (executed は alert 対象外のため別途 INFO)
 """
 from __future__ import annotations
@@ -45,23 +47,16 @@ def _bare_runtime(tmp_path: Path) -> OrchestratorRuntime:
     )
 
 
-def test_plan_create_emits_info_log(tmp_path, caplog):
-    """plan_create 成功時に [ORCH] 📋 plan created ... INFO が 1 本出る (notifier 無しでも)。"""
+def test_notify_planning_result_no_longer_emits_plan_created_log(tmp_path, caplog):
+    """📋 plan created は _notify_planning_result からは出さない (統一 result ログへ移設)。
+
+    plan_create 可視化は run_planning_cycle の [ORCH] planning result に一本化され、
+    通知本体からは二重ログが消えた (start:result 1:1 契約と二重排除)。
+    """
     rt = _bare_runtime(tmp_path)
     result = PipelineResult(
         outcome="plan_create", plan_id=7, direction="long", score=0.42, confidence=0.66,
     )
-    with caplog.at_level(logging.INFO, logger="src.orchestrator.runtime"):
-        rt._notify_planning_result("USDJPY=X", result)
-    created = [r for r in caplog.records if "📋 plan created" in r.getMessage()]
-    assert len(created) == 1
-    assert "7" in created[0].getMessage()
-
-
-def test_direct_hold_emits_no_plan_created_log(tmp_path, caplog):
-    """direct_hold では 📋 plan created を出さない (既存通知方針と同じ)。"""
-    rt = _bare_runtime(tmp_path)
-    result = PipelineResult(outcome="direct_hold")
     with caplog.at_level(logging.INFO, logger="src.orchestrator.runtime"):
         rt._notify_planning_result("USDJPY=X", result)
     assert not [r for r in caplog.records if "📋 plan created" in r.getMessage()]
