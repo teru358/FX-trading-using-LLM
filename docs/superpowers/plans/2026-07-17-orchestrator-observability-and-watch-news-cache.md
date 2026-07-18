@@ -354,7 +354,7 @@ def test_single_flight_concurrent_miss():
         results[name] = c.get("k", produce).value
     t1 = threading.Thread(target=worker, args=("a",))
     t1.start()
-    entered.wait(timeout=2.0)     # 1 本目が lock+producer に入るまで待つ
+    assert entered.wait(timeout=2.0)   # 1 本目が producer 到達を保証 (未到達なら失敗)
     t2 = threading.Thread(target=worker, args=("b",))
     t2.start()                    # 2 本目は lock 待ちで停止 (producer に入らない)
     time.sleep(0.1)               # 2 本目が lock 待ちに入る猶予
@@ -447,7 +447,7 @@ class TtlSingleFlightCache:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_ttl_cache.py -v"`
-Expected: PASS (7 tests・single-flight デッドロックなし)
+Expected: PASS (9 tests・single-flight デッドロックなし)
 
 - [ ] **Step 5: Commit**
 
@@ -673,31 +673,44 @@ Expected: FAIL (現状 `_build_news` は news 本体・`_ref` に status を持�
     def _build_news(self, pair: str, now: datetime) -> dict[str, Any]:
         """注入された news_provider から §7 news ブロックを組む。
 
-        provider 未注入なら従来の空 news に倒す (後方互換)。cached provider は
-        例外を投げず status (ok|stale|unavailable) + as_of 付き dict を返すため、
-        status を news 本体に残し (assemble が _ref を除外しても watch が識別できる),
-        as_of は _ref に残す (now で上書きしない・成功時刻を維持・spec §3.6/§3.7)。
-        provider が直接例外を投げるケース (非 cached provider) は空 news + status=None に倒す。
+        status は 3 状態 (ok|stale|unavailable) に統一する (指摘3)。provider 未注入・
+        provider 直例外はいずれも `status="unavailable"` に倒す (None にしない)。cached
+        provider は例外を投げず status + as_of 付き dict を返す。status を news 本体に残し
+        (assemble が _ref を除外しても watch が識別できる)、as_of は _ref に残す
+        (now で上書きしない・成功時刻を維持・spec §3.6/§3.7)。
         """
         if self._news_provider is None:
-            return {**self._empty_news(), "status": None, "_ref": None}
+            return {**self._empty_news(), "status": "unavailable", "_ref": None}
         try:
             raw = self._news_provider(pair)
         except Exception:
-            logger.exception("[ORCH] news_provider failed for %s — empty news", pair)
-            return {**self._empty_news(), "status": None, "_ref": None}
-        status = raw.get("status")
+            logger.exception("[ORCH] news_provider failed for %s — unavailable", pair)
+            return {**self._empty_news(), "status": "unavailable", "_ref": None}
+        status = raw.get("status") or "unavailable"
         as_of = raw.get("as_of")
         return {
             "sentiment_score": raw.get("sentiment_score"),
             "confidence": raw.get("confidence"),
             "top_reasons": raw.get("top_reasons") or [],
-            "status": status,                        # news 本体に残す (assemble 後も生存)
+            "status": status,                        # news 本体に残す (assemble 後も生存・3 状態)
             "_ref": {"source": "rag_aggregate", "as_of": as_of, "status": status},
         }
 ```
 
-(注: `_empty_news()` は `sentiment_score/confidence/top_reasons` を返す。`status` キー追加は §7 news 契約の拡張。`_news_conflicts` は sentiment_score のみ参照するため status 追加は無害。prompt へ news dict が serialize される場合も status キー 1 つの追加で挙動不変。)
+(注: `_empty_news()` は `sentiment_score/confidence/top_reasons` を返す。`status` キー追加は §7 news 契約の拡張で 3 状態に統一 (None を作らない)。`_news_conflicts` は sentiment_score のみ参照するため status 追加は無害。)
+
+- [ ] **Step 3b: Update existing exact-match tests in `tests/test_context_builder.py` (指摘3)**
+
+`tests/test_context_builder.py:182` 等の news dict 完全一致 assert (`ctx["news"] == {"sentiment_score": None, "confidence": None, "top_reasons": []}` の 2 件) は status キー追加で失敗するため期待値を更新する:
+
+```python
+    assert ctx["news"] == {
+        "sentiment_score": None, "confidence": None,
+        "top_reasons": [], "status": "unavailable",
+    }
+```
+
+(未注入経路のテストなので status="unavailable"。他に build()/assemble() の news 完全一致 assert があれば同様に status を足す。)
 
 - [ ] **Step 4: Wire cached provider in bootstrap**
 
@@ -727,13 +740,14 @@ from src.orchestrator.context_builder import (
 
 - [ ] **Step 5: Run tests**
 
-Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_context_builder_news.py tests/test_cached_news_provider.py -v"`
-Expected: PASS
+Run: `wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_context_builder_news.py tests/test_cached_news_provider.py tests/test_context_builder.py -v"`
+Expected: PASS (新 news テスト + status 追加した既存 exact-match テスト)
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/orchestrator/context_builder.py src/orchestrator/bootstrap.py tests/test_context_builder_news.py
+git add src/orchestrator/context_builder.py src/orchestrator/bootstrap.py \
+  tests/test_context_builder_news.py tests/test_context_builder.py
 git commit -m "feat(orchestrator): _build_news honors provider status/as_of; wire cached news provider"
 ```
 
@@ -1191,9 +1205,11 @@ import pytest
     "direct_hold_unavailable",
     "reject_scale_in",
     "reject_planner",
+    "reject_revise_exhausted",   # 指摘4: revise 予算切れ経路
     "reject_risk",
     "plan_create",
     "failed_schema_parse",
+    "failed_unexpected",         # 指摘4: unexpected exception 経路
 ])
 def test_production_return_paths_set_reason(scenario, pipeline_scenario_factory):
     """全 production outcome で PipelineResult.reason が非空・改行なし・長さ制限内。
@@ -1210,7 +1226,12 @@ def test_production_return_paths_set_reason(scenario, pipeline_scenario_factory)
     assert len(result.reason) <= 200
 ```
 
-(注: `pipeline_scenario_factory` は既存 `tests/test_planning_pipeline.py` の planner/exec/risk stub 構築を流用して各 scenario を組む fixture。stub の詳細は既存テストに合わせる。plan_create/reject_risk では derived_rr が非 None であることも合わせて assert してよい。)
+**代替 (指摘4推奨・より簡潔):** 新 fixture を作らず、既存テストに reason assert を足してもよい:
+- `test_revise_twice_stops_without_plan` (test_planning_pipeline.py:258) の末尾に `assert result.reason and "revise" in result.reason` を追加。
+- `test_unexpected_store_error_yields_failed` (test_planning_pipeline.py:294) の末尾に `assert result.reason` を追加。
+上記 parameterize と既存テスト追記のどちらか一方で全 9 経路を網羅すれば足りる (revise/unexpected を確実に含めること)。
+
+(注: `pipeline_scenario_factory` は既存 stub 構築を流用。plan_create/reject_risk では derived_rr が非 None であることも合わせて assert してよい。)
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1239,7 +1260,8 @@ Expected: PASS
 - [ ] **Step 5: Commit**
 
 ```bash
-git add src/orchestrator/planning_pipeline.py tests/test_planning_pipeline_result_contract.py
+git add src/orchestrator/planning_pipeline.py \
+  tests/test_planning_pipeline_result_contract.py tests/test_planning_pipeline.py
 git commit -m "feat(orchestrator): normalize reason + flow derived_rr on all PipelineResult paths"
 ```
 
@@ -1483,22 +1505,52 @@ def test_start_result_one_to_one(caplog, planning_runtime_factory, scenario, exp
         assert "reason=" in msg or expect_decision == "plan_create"
 
 
+def test_start_run_failure_emits_neither(caplog, planning_runtime_factory):
+    """start_run 自体が落ちたら start も result も出ない (start=0/result=0・指摘1)。"""
+    rt = planning_runtime_factory("start_run_failure")   # start_run が例外を投げる stub
+    with caplog.at_level(logging.INFO):
+        rt.run_planning_cycle()
+    assert _count(caplog.records, "[ORCH] planning start") == 0
+    assert _count(caplog.records, "[ORCH] planning result") == 0
+
+
+def test_notify_failure_keeps_plan_create_result(caplog, planning_runtime_factory):
+    """通知が例外を投げても run=ok・result=plan_create を維持する (指摘2)。"""
+    rt = planning_runtime_factory("plan_create", notify_raises=True)
+    with caplog.at_level(logging.INFO):
+        rt.run_planning_cycle()
+    results = _decisions(caplog.records)
+    assert len(results) == 1
+    assert "decision=plan_create" in results[0]      # error 化しない
+    assert "decision=error" not in results[0]
+    # run が ok で終わっている (failed に落ちていない) ことを DB 側で確認する:
+    # planning_runtime_factory が orch_store を露出する場合、最新 run の status=="ok" を assert。
+
+
 def test_start_result_one_to_one_multi_pair(caplog, planning_runtime_factory):
-    """複数 pair でも各 pair の start==result (合計一致)。"""
+    """複数 pair でも各 pair で start/result が各 1 件 (合計 2 件ずつ・軽微指摘)。"""
     rt = planning_runtime_factory("direct_hold", pairs=["USDJPY=X", "EURUSD=X"])
     with caplog.at_level(logging.INFO):
         rt.run_planning_cycle()
-    assert _count(caplog.records, "[ORCH] planning start") == 2
-    assert _count(caplog.records, "[ORCH] planning result") == 2
+    starts = [r.getMessage() for r in caplog.records if "[ORCH] planning start" in r.getMessage()]
+    results = [r.getMessage() for r in caplog.records if "[ORCH] planning result" in r.getMessage()]
+    assert len(starts) == 2 and len(results) == 2
+    # pair ごとに start/result 各 1 件 (合計だけでなく pair 単位で確認)。
+    for pair in ("USDJPY=X", "EURUSD=X"):
+        assert sum(pair in m for m in starts) == 1
+        assert sum(pair in m for m in results) == 1
 ```
 
-(注: `planning_runtime_factory(scenario, pairs=...)` fixture を実装時に用意する。各 scenario の stub:
+(注: `planning_runtime_factory(scenario, pairs=..., notify_raises=False)` fixture を実装時に用意する。各 scenario の stub:
 - `direct_hold`/`reject`/`plan_create`: 対応 outcome を返す pipeline stub
 - `pipeline_failed`: `outcome="failed"` を返す stub
 - `phase1_observe`: pipeline=None (未注入) の runtime
 - `quote_failure`: quote_provider が例外を投げる
 - `context_build_failure`: `_ctx.build` が例外を投げる (ctx builder stub)
-既存 `make_live_runtime` / `seed_active_plan_ready_to_trigger` パターンを流用する。)
+- `start_run_failure`: orch_store.start_run が例外を投げる (start=0/result=0 検証用)
+- `notify_raises=True`: `_notify_planning_result` が例外を投げる (通知失敗検証用)
+fixture は orch_store を露出し、run status を assert できるようにする。既存 `make_live_runtime` /
+`seed_active_plan_ready_to_trigger` パターンを流用する。)
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1562,14 +1614,22 @@ Expected: FAIL (planning start/result ログが出ない)
                             error_type="PipelineFailed", error_message=result.error)
                         _log_result("failed", result.reason or (result.error or ""))
                     else:
+                        # 順序 (指摘2): finish_run → result ログ → 通知。通知は最後で、
+                        # 例外を外に出さない (通知失敗が正常な plan_create を error 化しない)。
                         self._orch.finish_run(run_id, status="ok")
-                        self._notify_planning_result(pair, result)
                         rr = f"rr={result.derived_rr:.2f}" if result.derived_rr is not None else ""
                         extra = ""
                         if result.outcome == "plan_create":
                             extra = f"plan_id={result.plan_id} dir={result.direction or '?'}"
                         _log_result(result.outcome, result.reason or "",
                                     extra=" ".join(x for x in (extra, rr) if x))
+                        try:
+                            self._notify_planning_result(pair, result)
+                        except Exception:
+                            logger.warning(
+                                "[ORCH] planning notify failed for %s (result already recorded)",
+                                pair, exc_info=True,
+                            )
                 else:
                     self._orch.record_decision(..., reasoning_summary="phase1 observe: no planning agent wired yet", ...)
                     self._orch.finish_run(run_id, status="ok")
@@ -1579,10 +1639,12 @@ Expected: FAIL (planning start/result ログが出ない)
                 if run_id is not None:
                     self._orch.finish_run(run_id, status="failed",
                         error_type=type(exc).__name__, error_message=str(exc))
-                if not result_logged:
-                    _log_result("error", f"{type(exc).__name__}: {exc}")
+                    # start_run 成功後 (=start ログ済) の例外だけ result を出す。
+                    # start_run 自体が落ちた場合 run_id is None → start も出ていない (1:1 維持・指摘1)。
+                    if not result_logged:
+                        _log_result("error", f"{type(exc).__name__}: {exc}")
             finally:
-                if not result_logged and run_id is not None:
+                if run_id is not None and not result_logged:
                     # start は出したが result を出せていない経路の最終保険 (契約: start:result = 1:1)。
                     _log_result("error", "no result recorded")
                 if self._detector is not None:
@@ -1592,7 +1654,9 @@ Expected: FAIL (planning start/result ログが出ない)
                         self._detector.mark_attempted(pair, now)
 ```
 
-**契約の要点:** start ログは start_run 成功直後にのみ出る。start_run が落ちれば start も result も出ず (1:1 は「start が出たら result も出る」の意味で保たれる)。start 後に落ちた全経路 (quote/build/pipeline failed/例外) は except または finally で result を出す。
+**契約の要点:**
+- **start ログは start_run 成功直後にのみ出る。start_run が落ちれば run_id is None → start も result も出ない** (start=0/result=0・指摘1)。except / finally の result 出力は必ず `run_id is not None` でガードする。
+- **正常経路の順序は finish_run → result ログ → 通知** (指摘2)。通知は最後で try/except で握り、通知失敗しても run=ok・result=plan_create を維持する。`_notify_planning_result` 内の `PlanCreatedInfo` import・構築を含む全体がこの try で保護される。
 
 (注: 既存の `start_run` 引数・`record_decision` 引数・trace 記録 (attach_snapshot 等) は現行コードを保持し消さない。`committed` の遷移は既存セマンティクスに合わせる — 上記は差分骨子。)
 
@@ -1659,6 +1723,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest \
   tests/test_ttl_cache.py \
   tests/test_cached_news_provider.py \
   tests/test_context_builder_news.py \
+  tests/test_context_builder.py \
   tests/test_news_material_provider_cache.py \
   tests/test_landing_providers.py \
   tests/test_risk_gate_worker.py \

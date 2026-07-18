@@ -240,7 +240,7 @@ def make_cached_news_provider(
 
 - `_build_news` は provider 応答の **`as_of` をそのまま `_ref.as_of` に使う** (今の now で上書きしない)。→ stale の場合 trace 上「前回いつ取得した news か」が正しく残る。
 - **`status` (ok/stale/unavailable) を news 本体に残す** — `assemble()` は news から `_ref` を除外する (既存挙動) ため、watch が unavailable を識別するには本体に status が必要。`_ref` にも status/as_of を残す (snapshot trace 用)。
-- `status="unavailable"` の news は sentiment=None のまま通す (fail-open, §3.7)。
+- `status="unavailable"` の news は sentiment=None のまま通す (fail-open, §3.7)。**status は 3 状態 (ok/stale/unavailable) に統一する** — provider 未注入・provider 直例外もいずれも `status="unavailable"` に倒す (None を作らない)。既存の news 完全一致テストは status キー追加に追従させる。
 
 ### 3.7 watch の news_conflict と unavailable の扱い
 
