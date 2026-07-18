@@ -17,10 +17,13 @@ planning を起こしたら状態を確定する:
 """
 from __future__ import annotations
 
+import logging
 import threading
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 
 # market state の序列 (regime 上昇判定用)。detector は state 文字列の順位だけ知ればよい。
@@ -217,38 +220,57 @@ class MaterialLandingDetector:
 
     # ── 起動 pair 決定 ──────────────────────────────────────────────
 
+    def _safe_material(self, name: str, pair: str, check) -> bool:
+        """1 material 判定を実行する。例外は握って False に倒す (可用性優先)。
+
+        1 材料 (news/event provider 等) の失敗で planning サイクル全体を止めない。
+        短絡評価をやめ全 trigger を収集するため、旧実装なら到達しなかった provider
+        にも必ず到達する — その分の例外リスクをここで吸収する。
+        """
+        try:
+            return bool(check(pair))
+        except Exception:
+            logger.warning(
+                "[ORCH] material check %s failed for %s — treated as non-material",
+                name, pair, exc_info=True,
+            )
+            return False
+
     def _material_triggers(self, pair: str) -> tuple[str, ...]:
-        """該当する全 material 経路を集める (短絡しない)。空なら non-material。"""
-        triggers: list[str] = []
-        if self.technical_material(pair):
-            triggers.append("technical")
-        if self.news_material(pair):
-            triggers.append("news")
-        if self.event_window_material(pair):
-            triggers.append("event")
-        if self.regime_material(pair):
-            triggers.append("regime")
-        return tuple(triggers)
+        """該当する全 material 経路を集める (短絡しない・1 経路の失敗は握る)。"""
+        checks = (
+            ("technical", self.technical_material),
+            ("news", self.news_material),
+            ("event", self.event_window_material),
+            ("regime", self.regime_material),
+        )
+        return tuple(
+            name for name, check in checks if self._safe_material(name, pair, check)
+        )
 
     def pairs_to_plan(self, now: datetime) -> list["PlanningTarget"]:
         out: list[PlanningTarget] = []
         for pair in self._pairs:
-            triggers = self._material_triggers(pair)
-            fire = False
-            if triggers:
-                # material 経路: debounce 窓を抜けたら起動。
-                started = self._material_since.get(pair)
-                if started is None:
-                    self._material_since[pair] = now  # 窓開始
-                elif (now - started).total_seconds() >= self._debounce_window:
-                    fire = True
-            else:
-                self._material_since.pop(pair, None)  # material 解消で窓リセット
-                # periodic floor: material が無い pair も最低頻度で起動する。
-                # 初回 (last_planned 未設定) は bootstrap として due 扱いにする。
-                last = self._last_planned.get(pair)
-                if last is None or (now - last).total_seconds() >= self._floor:
-                    fire = True
-            if fire:
-                out.append(PlanningTarget(pair=pair, triggers=triggers))
+            # pair 単位の隔離: 1 pair の判定が落ちても他 pair の planning は継続する。
+            try:
+                triggers = self._material_triggers(pair)
+                fire = False
+                if triggers:
+                    # material 経路: debounce 窓を抜けたら起動。
+                    started = self._material_since.get(pair)
+                    if started is None:
+                        self._material_since[pair] = now  # 窓開始
+                    elif (now - started).total_seconds() >= self._debounce_window:
+                        fire = True
+                else:
+                    self._material_since.pop(pair, None)  # material 解消で窓リセット
+                    # periodic floor: material が無い pair も最低頻度で起動する。
+                    # 初回 (last_planned 未設定) は bootstrap として due 扱いにする。
+                    last = self._last_planned.get(pair)
+                    if last is None or (now - last).total_seconds() >= self._floor:
+                        fire = True
+                if fire:
+                    out.append(PlanningTarget(pair=pair, triggers=triggers))
+            except Exception:
+                logger.exception("[ORCH] pairs_to_plan failed for %s — skipped", pair)
         return out
