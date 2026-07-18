@@ -91,7 +91,21 @@ def _select_targets(
     def _ts(o: Order) -> datetime:
         return o.closed_at or o.opened_at
 
-    eligible = [o for o in closed if _eligible(o)]
+    # trades.json は append-only で order_id 一意性を保証しない (append_trade)。
+    # 重複行をそのまま通すと同一 order に LLM/RAG が 2 回走るため、最初の出現だけ
+    # 残して eligibility 判定前に排除する (レビュー MEDIUM-3)。
+    seen_ids: set[str] = set()
+    unique: list[Order] = []
+    for o in closed:
+        if o.order_id in seen_ids:
+            logger.warning(
+                f"[REFLECT] duplicate order_id in trades.json: {o.order_id} "
+                f"— later row ignored")
+            continue
+        seen_ids.add(o.order_id)
+        unique.append(o)
+
+    eligible = [o for o in unique if _eligible(o)]
     untried = sorted(
         (o for o in eligible if o.order_id not in states),
         key=_ts, reverse=True,
@@ -106,7 +120,7 @@ def _select_targets(
 
 async def _reflect_and_record(
     config, store, orch_store, llm, embed_fn, order: Order,
-    plan_id: int | None, entry_analysis: str,
+    entry_analysis: str,
 ) -> tuple[str, bool]:
     """LLM 振り返り → RAG upsert。失敗は例外伝搬 (strict、spec §3.5)。"""
     pair_cfg = next(
@@ -138,9 +152,16 @@ def _process_one(config, store, orch_store, llm, embed_fn, order: Order) -> None
     )
     if pair_cfg is None:
         # 恒久不能: 現 instrument 設定に無い旧銘柄 → 即 dead (spec §3.2b)
-        orch_store.mark_reflection_dead(
-            order.order_id, pair=order.pair,
-            error="pair not in tradeable instruments", now=now)
+        # DB 失敗を controller へ漏らさない (レビュー HIGH-1): try_run_scheduled は
+        # fn の例外を再送出するため、ここで漏らすと batch の残りが巻き添えで落ちる。
+        # 未記録なら次回 未試行として再度 dead 判定されるだけで実害はない。
+        try:
+            orch_store.mark_reflection_dead(
+                order.order_id, pair=order.pair,
+                error="pair not in tradeable instruments", now=now)
+        except Exception:
+            logger.exception(
+                f"[REFLECT] {order.order_id}: failed to record dead state")
         logger.warning(
             f"[REFLECT] {order.order_id} ({order.pair}): pair not in "
             f"instruments — dead-lettered")
@@ -153,8 +174,7 @@ def _process_one(config, store, orch_store, llm, embed_fn, order: Order) -> None
             entry_analysis = (
                 orch_store.get_latest_plan_create_reasoning(plan_id) or "")
         text, correct = asyncio.run(_reflect_and_record(
-            config, store, orch_store, llm, embed_fn, order,
-            plan_id, entry_analysis))
+            config, store, orch_store, llm, embed_fn, order, entry_analysis))
         # done 保存の失敗も retry に落とす (RAG upsert は冪等なので次回無害)
         orch_store.mark_reflection_done(
             order.order_id, plan_id=plan_id, pair=order.pair,
@@ -194,8 +214,8 @@ def run_reflection_cycle(config, store, orch_store, *, slot) -> None:
     targets = _select_targets(closed, orch_store, now)
     if not targets:
         return
-    llm = create_llm_client(config, "reflection")
-    embed_fn = make_embed_fn(config)
+    llm = None
+    embed_fn = None
     for order in targets:
         if slot.waiting_user_job:
             logger.info("[REFLECT] user job waiting — yielding")
@@ -203,6 +223,11 @@ def run_reflection_cycle(config, store, orch_store, *, slot) -> None:
         if orch_store.has_running_planning_run(now=db_now()):
             logger.info("[REFLECT] planning in progress — yielding")
             break
+        if llm is None:
+            # 譲渡チェック通過後に構築する (「使う前に確認する」順序、レビュー LOW)。
+            # 両者とも同期コンストラクタで接続は張らないため実コストは無い。
+            llm = create_llm_client(config, "reflection")
+            embed_fn = make_embed_fn(config)
         ran = slot.try_run_scheduled(
             _process_one, config, store, orch_store, llm, embed_fn, order)
         if not ran:
