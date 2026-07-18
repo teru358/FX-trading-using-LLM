@@ -62,6 +62,23 @@ directional RAG complete カードだけは生きた consumer が残る
 - `src/trading_cycle.py` は後方互換 shim (cycles/ からの re-export)。
   main.py / cli.py / tui.py / api / views が経由。
 
+## 1.5 起動要件の変更 (fail-fast) — レビュー High-1 対応
+
+現行 main.py は「orchestrator が立ち上がらなくても本体は継続する」設計
+(段階導入期の guard)。旧サイクル削除後にこの guard が残ると、
+`orchestrator.enabled=false`・bootstrap 失敗・runtime 起動失敗のいずれでも
+**発注経路ゼロのまま無音で運転を続ける**。
+
+要件:
+
+- `orchestrator.enabled=false` → **起動中止** (明示エラーで exit)。
+  データ収集専用運転が必要になったら明示フラグを別途設計する (今回スコープ外)。
+- `build_orchestrator_runtime()` が None を返す / 例外 / runtime 起動失敗 →
+  **起動中止**。現行の try/except 継続 guard は撤去する。
+- `orchestrator.mode=shadow` は**許容** (Fiosracht の段階検証運用があるため
+  live 必須にはしない)。ただし起動時に「発注は行われない (shadow)」を
+  warning ログ + Schedule 表示に明示する。
+
 ## 2. 削除スコープ
 
 ### 2.1 forecast 系 (全削除)
@@ -76,6 +93,7 @@ directional RAG complete カードだけは生きた consumer が残る
   `forecast_review_interval_hours`、`forecast_start_hour`、
   `forecast_min_combined_score`、`forecast_significance_atr_ratio`、
   `rag_adjustment_forecast_multiplier`
+- `src/analysis/forecaster.py` (forecast サイクルの LLM なし予測生成本体)
 - 表示・導線: weekly_diagnosis の accuracy セクション、
   `ask_context_builder` の forecast_accuracy (プロンプト変数 `prompts/ask_user.j2` 含む)、
   API `/forecast` (`src/api/routes/data.py`)、views/CLI/TUI の forecast ビュー、
@@ -95,13 +113,35 @@ directional RAG complete カードだけは生きた consumer が残る
 - `HoldDecisionStore` / `_HoldDecisionRecord` (`src/data/analysis_store.py:448-`)
 - `src/persistence/adaptive_params_store.py` (全体)
 - `src/data/session_store.py` (全体)
-- `src/analysis/performance_audit.py` + CLI `audit` コマンド
+- `src/analysis/performance_audit.py` + CLI `audit` コマンド、
+  `src/analysis/audit_post_hoc.py`・`src/analysis/audit_report.py` (caller sweep で確認の上)
 - `src/signals/rag_adjustment.py` (consumer は取引サイクルのみ)
+- `directional_writer.py` の `record_trade_entry` (`phase="entry"` カード。
+  唯一の caller が退役する Phase 4b)
 - CLI / API (`src/api/routes/trading.py` の手動実行) / TUI の取引サイクル実行導線
 - main.py: ジョブ登録・JobGuard・Schedule 表示・`run_times` を参照する分岐
   (forecast 時刻フィルタ含む)
+- config: `schedule.run_times` (schema + loader + example)。
+  `price_provider.estimate_daily_requests()` の run_times 加算項も除去
+- config (caller sweep で確認の上): `rag_adjustment_enabled` /
+  `rag_adjustment_max` / `rag_adjustment_min_hits` / `rag_adjustment_search_top_n` /
+  `rag_adjustment_same_weight` / `rag_adjustment_opposite_weight`、
+  `atr_timeframe`・`sl_atr_mult_default/min/max`・`tp_atr_mult_default/min/max`
+  (adaptive/取引サイクル専用なら削除。`_helpers.py` の ATR 計算を exit_check /
+  orchestrator が使う場合は該当キーのみ残す)
+- notifier: `notify_on_cycle_summary` / `notify_on_order_open` /
+  `notify_on_signal_skipped` と対応イベント (`CycleSummaryEvent` 等)・通知処理
+  (発火元が取引サイクルのみであることを caller sweep で確認の上)
 - `src/trading_cycle.py` shim の該当 re-export 整理
   (exit_check 系 re-export は残す or 呼び出し元を `src/cycles/` 直接 import に更新)
+
+### 2.2b discord_bot 側 (別リポジトリ、同時展開必須)
+
+- `cogs/finance/client.py` の `forecast()` / `run_trade()` メソッド
+- `cogs/finance/finance_cog.py` の `finance_forecast` / `finance_run_trade`
+  tool schema・コマンド対応表・`_forecast_embeds` 等の表示処理
+- finance API から `/forecast` / `/run/trade` が消えるため、
+  **finance と discord_bot は同時デプロイ** (§8)
 
 ### 2.3 残すもの (明示)
 
@@ -145,6 +185,10 @@ news_collector への教訓供給を維持する。
 - `order_id` → OrchestratorStore `order_intent` → `plan_id` → plan の
   planner reasoning (`get_latest_plan_create_reasoning`) を entry 分析文脈として
   LLM プロンプトに渡す。
+- `order_intents.order_id` (broker order id) からの逆引き API
+  `get_order_intent_by_order_id(order_id)` と index
+  `ix_order_intents_order_id` を OrchestratorStore に追加する
+  (現行 API は plan_id キーのみ)。
 - orchestrator 経由でない決済 (旧取引サイクル発注の残ポジ・手動) は plan なし →
   文脈なしで振り返りを実行する (skip しない)。
 - 旧 `_finalize_closed_orders` が渡していた session 由来の文脈
@@ -154,7 +198,9 @@ news_collector への教訓供給を維持する。
 
 ### 3.4 出力
 
-1. **`reflections` テーブル** (OrchestratorStore `_migrate()` に CREATE 追加):
+1. **`reflections` テーブル** (ORM model `_Reflection` を追加し、既存パターン通り
+   `_get_engine()` の `metadata.create_all()` で自動作成する。`_migrate()` の
+   生 SQL は既存テーブルへの ALTER 専用であり使わない):
    - `order_id` TEXT PRIMARY KEY
    - `plan_id` INTEGER NULL (orchestrator 経由でない決済は NULL)
    - `pair` TEXT NOT NULL
@@ -163,22 +209,60 @@ news_collector への教訓供給を維持する。
    - `reflection_text` TEXT NOT NULL
    - `created_at` TEXT NOT NULL (db_now)
 2. **directional RAG**: 既存 `record_trade_complete` を流用して
-   `phase="complete"` カードを upsert。
+   `phase="complete"` カードを upsert (`session_type="trade"`)。
 
 保持方針: reflections は軽量テキストのため prune しない (plan 系と同じ長期保持)。
 
-### 3.5 失敗時挙動
+### 3.4b directional RAG の検索 filter と既存カード掃除 (レビュー Medium-4 対応)
 
-- LLM 失敗・RAG 失敗: その order は記録せず warning ログ → 次回実行で自然リトライ。
+news_collector の教訓検索は現状 filter なしで全カードを対象にするため、
+退役後も既存 forecast / HOLD / trade-entry カードが「過去の取引教訓」として
+注入され続ける。対応:
+
+- `DirectionalStore.query()` を複合 filter 対応に拡張し
+  (`where={"$and": [{"session_type": "trade"}, {"phase": "complete"}]}`)、
+  news_collector の検索を **`session_type="trade" AND phase="complete"`** に限定する。
+- migration (§4) で既存の `session_type in ("forecast", "hold")` カードと
+  `phase="entry"` カードを directional collections から削除する
+  (今後の生産者も消えるため残す意味がない)。
+
+### 3.5 失敗時挙動 (strict 化 — レビュー High-2 対応)
+
+現行 API は失敗を握って正常形を返すため「未記録なら次回リトライ」が成立しない:
+`generate_close_reflection()` は LLM 例外を捕捉して factual fallback を返し
+(`src/analysis/reflector.py:176` 付近)、`record_trade_complete()` も RAG 例外を
+捕捉して正常終了する (`src/rag/directional_writer.py:92` 付近)。
+
+対応 — 旧 caller (`_finalize_closed_orders`) は全削除されるため、互換維持は不要:
+
+- `generate_close_reflection()` の **fallback 機構自体を削除**し、LLM 失敗は
+  例外を伝搬する (呼び出し側 = reflection job が唯一の caller になる)。
+- `record_trade_complete()` も同様に RAG 失敗を例外伝搬に変更する。
+- reflection job 側: 1 件の処理で例外が出たらその order は `reflections` に
+  記録せず warning ログ → 次回実行で自然リトライ。
 - **`reflections` への INSERT は LLM 成功 + RAG upsert 成功の後** (途中失敗を
   「処理済み」にしない)。RAG upsert が成功し INSERT が失敗した場合は次回
   RAG 側が upsert (冪等) で上書きされるだけで害はない。
 - trades.json 読み込み失敗: job 全体を warning で skip (次回リトライ)。
 
-### 3.6 スケジュール
+### 3.6 スケジュールと LLM 干渉制御 (レビュー High-3 対応)
 
-- 毎時実行 (exit_check と同じ毎時系だが独立 job)。
-- LLM slot 経由 (`_run_with_slot`) で他 LLM job と排他。JobGuard 付き。
+- 毎時実行 (exit_check と同じ毎時系だが独立 job)。JobGuard 付き。
+- main の `_run_with_slot` (`_llm_slot`) 経由 — これは **main-loop 系 LLM job
+  (news 収集等) との排他**であり、orchestrator の PlannerAgent
+  (runtime スレッドから直接 LLM を呼ぶ) とは排他にならない。
+- planner との干渉は以下で最小化する (planner 側コードは変更しない):
+  1. **1 件単位の逐次処理** — LLM 呼び出しを 1 件ずつ行い、まとめて slot を
+     長時間占有しない。
+  2. **planning 実行中は譲る** — 各件の処理前に OrchestratorStore の
+     `agent_runs` に実行中 (running) の planning run が存在するか照会し、
+     存在すれば残りを次回実行に回す (OrchestratorStore に照会 API
+     `has_running_planning_run()` を追加。DB 照会による低優先度化。
+     planner pipeline への semaphore 差し込みはスコープ拡大と planning
+     レイテンシリスクがあるため不採用。プロセス横断の LLM 調停層が必要に
+     なったら別 spec)。
+  3. LLM server (llama.cpp) は同時リクエストをキュー処理するため、
+     万一同時になっても正確性への影響はなく待ち時間のみ。
 - LLM は既存 `config.llm.reflection` 設定 (モデル / temperature) を再利用。
   新規 config キーは追加しない (interval は固定毎時)。
 
@@ -188,8 +272,10 @@ technical-llm-omit のデプロイと同梱可能な手順として:
 
 - DROP TABLE: `forecasts`、`hold_decisions`、`trading_sessions`
 - ファイル削除: state_dir の adaptive params JSON
-- CREATE: `reflections` (OrchestratorStore `_migrate()` が起動時に自動作成するため
-  手動手順は不要)
+- directional RAG (ChromaDB): `session_type in ("forecast", "hold")` カードと
+  `phase="entry"` カードを削除 (§3.4b)
+- CREATE: `reflections` (ORM model 追加により起動時 `metadata.create_all()` で
+  自動作成。手動手順は不要)
 
 migration スクリプトは冪等 (`DROP TABLE IF EXISTS`) とし、実行前に DB バックアップを
 取る手順を明記する (rsync 事故の教訓に従い、バックアップ→実行の順を厳守)。
@@ -213,13 +299,19 @@ migration スクリプトは冪等 (`DROP TABLE IF EXISTS`) とし、実行前�
   - RAG 成功 + INSERT 失敗 → 次回再処理で冪等
   - 二重処理防止 (記録済み order_id は再処理しない)
 - **reflections テーブル**: OrchestratorStore migration テスト既存パターンに追加。
+- **fail-fast 起動** (§1.5): enabled=false / bootstrap 失敗 → 起動中止、
+  mode=shadow → warning のテストを追加。
 - **削除系**: 削除ごとに (a) 参照残りゼロ (grep + import 確認)、
   (b) 影響ファイルの per-file pytest green。
 - **既存テストの整理**: 削除対象 (trading cycle / forecast / accuracy / rag_adjustment /
   session / hold / adaptive / audit) のテストは削除。共有部 (TradeSignal /
   _calculate_position_size / exit_check / _helpers) のテストは残し green を確認。
-- 回帰基準は per-file green (full suite は既知の順序依存フレークあり —
-  `finance_fullsuite_order_flake` 参照)。
+- **回帰基準** (レビュー Medium-7 対応): per-file green は作業中の
+  イテレーション用にとどめ、**合格基準は full suite `uv run pytest` で
+  既知失敗のみ** (CLAUDE.md 基準: `tests/test_insights.py` ChromaDB 系 2 件。
+  失敗が既知集合から増えていないことを確認)。本変更は import / CLI / API /
+  scheduler / config / DB を横断するため、collection-time の import error は
+  full run でしか検出できない。**discord_bot 側も全テスト実行**を合格基準に含める。
 
 ## 7. スコープ外 (明示)
 
@@ -234,6 +326,8 @@ migration スクリプトは冪等 (`DROP TABLE IF EXISTS`) とし、実行前�
 
 - 本変更は stick (Live) / Fiosracht (paper) 両方に影響する。
   デプロイ時は §4 の migration + §5 の実 config 掃除をセットで実施。
+- **discord_bot と finance は同時デプロイ必須** (§2.2b)。finance API から
+  `/forecast` / `/run/trade` が消えた状態で旧 bot が呼ぶと 404 になる。
 - technical-llm-omit (未マージ、0 ベース migration 必須) とマージ順序・デプロイ順序を
   合わせて計画すること。
 - 停止対象 job が消えることで Schedule 表示・health エンドポイントの job 一覧も変わる。
