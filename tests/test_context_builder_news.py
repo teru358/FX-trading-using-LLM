@@ -49,6 +49,18 @@ def test_build_news_unavailable_marks_status(tmp_path):
     assert news["_ref"]["status"] == "unavailable"
 
 
+def test_build_news_legacy_provider_without_status_is_ok(tmp_path):
+    """status を返さない旧形式 provider が正常値を返したら status="ok" に倒す (後方互換)。"""
+    now = datetime(2026, 7, 17, 0, 5, 0)
+    def legacy_provider(pair):
+        return {"sentiment_score": 0.4, "confidence": 0.7, "top_reasons": ["x"]}
+    b = _builder(tmp_path, legacy_provider)
+    news = _direct_build_news(b, "EURUSD=X", now)
+    assert news["sentiment_score"] == 0.4
+    assert news["status"] == "ok"                       # unavailable でなく ok
+    assert news["_ref"]["as_of"] == now.isoformat()     # as_of は now に倒す
+
+
 def test_assemble_news_keeps_status(tmp_path):
     now = datetime(2026, 7, 17, 0, 5, 0)
     def provider(pair):

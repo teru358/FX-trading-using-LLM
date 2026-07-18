@@ -275,8 +275,11 @@ class DecisionContextBuilder:
         except Exception:
             logger.exception("[ORCH] news_provider failed for %s — unavailable", pair)
             return {**self._empty_news(), "status": "unavailable", "_ref": None}
-        status = raw.get("status") or "unavailable"
-        as_of = raw.get("as_of")
+        # status 欠落 = 旧形式 provider (status/as_of を返さない公開契約)。正常応答なので
+        # ok + as_of=now に倒す (cached provider は必ず status/as_of を付ける)。未注入・
+        # provider 例外の経路は上で unavailable に倒し済み。
+        status = raw.get("status") or "ok"
+        as_of = raw.get("as_of") or now.isoformat()
         return {
             "sentiment_score": raw.get("sentiment_score"),
             "confidence": raw.get("confidence"),
