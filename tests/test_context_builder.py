@@ -179,7 +179,10 @@ def test_build_falls_back_to_empty_news_when_provider_none(builder: DecisionCont
     ctx = builder.build(
         pair="USDJPY=X", now=datetime(2026, 6, 20, 12, 0, 0), quote=quote,
     )
-    assert ctx["news"] == {"sentiment_score": None, "confidence": None, "top_reasons": []}
+    assert ctx["news"] == {
+        "sentiment_score": None, "confidence": None,
+        "top_reasons": [], "status": "unavailable",
+    }
     snap = builder._orch.get_snapshot(ctx["snapshot_id"])
     assert snap.news_ref is None
 
@@ -279,7 +282,10 @@ def test_build_survives_news_provider_failure(tmp_path: Path) -> None:
     ctx = builder.build(
         pair="USDJPY=X", now=datetime(2026, 6, 20, 12, 0, 0), quote=quote,
     )
-    assert ctx["news"] == {"sentiment_score": None, "confidence": None, "top_reasons": []}
+    assert ctx["news"] == {
+        "sentiment_score": None, "confidence": None,
+        "top_reasons": [], "status": "unavailable",
+    }
 
 
 class _FakeVectorStore:

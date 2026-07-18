@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Callable
 from src.orchestrator.context_builder import (
     DecisionContextBuilder,
     QuoteSnapshot,
+    make_cached_news_provider,
     make_news_provider,
 )
 from src.orchestrator.hindsight_evaluator import make_hindsight_evaluator
@@ -210,7 +211,12 @@ def build_orchestrator_runtime(
 
     context_builder = DecisionContextBuilder(
         orch_store, analysis_store, orch_cfg,
-        news_provider=make_news_provider(config, store),
+        news_provider=make_cached_news_provider(
+            make_news_provider(config, store),
+            ttl_seconds=orch_cfg.entry.news_cache_ttl_seconds,
+            negative_ttl_seconds=orch_cfg.entry.news_cache_negative_ttl_seconds,
+            clock=db_now,
+        ),
         risk_state_provider=make_risk_state_provider(config),
         position_provider=make_position_provider(config),
     )

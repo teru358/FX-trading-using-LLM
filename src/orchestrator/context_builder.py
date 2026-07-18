@@ -257,26 +257,32 @@ class DecisionContextBuilder:
     def _build_news(self, pair: str, now: datetime) -> dict[str, Any]:
         """注入された news_provider から §7 news ブロックを組む。
 
-        provider 未注入なら従来の空 news に倒す (後方互換)。provider が落ちても
-        build 全体を止めない: news は判断材料の 1 つに過ぎず、1 材料の取得失敗で
-        decision サイクル全体を落とすのは過剰 (technical の missing/stale と同じ思想)。
-        失敗時は空 news + _ref なしに倒し、traceback を error ログに残す。
+        status は 3 状態 (ok|stale|unavailable) に統一する。provider 未注入・
+        provider 直例外はいずれも status="unavailable" に倒す (None にしない)。cached
+        provider は例外を投げず status + as_of 付き dict を返す。status を news 本体に残し
+        (assemble が _ref を除外しても watch が識別できる)、as_of は _ref に残す
+        (now で上書きしない・成功時刻を維持・spec §3.6/§3.7)。
 
-        `_ref` は build() が snapshot.news_ref に保存し (§8.1 trace)、返り値 context の
+        provider が落ちても build 全体を止めない: news は判断材料の 1 つに過ぎず、1 材料の
+        取得失敗で decision サイクル全体を落とすのは過剰 (technical の missing/stale と同じ
+        思想)。`_ref` は build() が snapshot.news_ref に保存し (§8.1 trace)、返り値 context の
         news ブロックからは除去される (technical の _ref と同じ扱い)。
         """
         if self._news_provider is None:
-            return {**self._empty_news(), "_ref": None}
+            return {**self._empty_news(), "status": "unavailable", "_ref": None}
         try:
             raw = self._news_provider(pair)
         except Exception:
-            logger.exception("[ORCH] news_provider failed for %s — empty news", pair)
-            return {**self._empty_news(), "_ref": None}
+            logger.exception("[ORCH] news_provider failed for %s — unavailable", pair)
+            return {**self._empty_news(), "status": "unavailable", "_ref": None}
+        status = raw.get("status") or "unavailable"
+        as_of = raw.get("as_of")
         return {
             "sentiment_score": raw.get("sentiment_score"),
             "confidence": raw.get("confidence"),
             "top_reasons": raw.get("top_reasons") or [],
-            "_ref": {"source": "rag_aggregate", "as_of": now.isoformat()},
+            "status": status,
+            "_ref": {"source": "rag_aggregate", "as_of": as_of, "status": status},
         }
 
     def _build_position(self, pair: str, quote_dict: dict[str, Any]) -> dict[str, Any]:
