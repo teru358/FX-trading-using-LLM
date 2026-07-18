@@ -428,6 +428,8 @@ orchestrator:
     require_fresh_technical: true
     max_quote_age_seconds: 10
     max_technical_age_seconds: 5400  # 1800 → 5400 (staleness 90min と整合, day)
+    news_cache_ttl_seconds: 60.0
+    news_cache_negative_ttl_seconds: 30.0
   firing:
     material_news_impact_min: 0.5
     material_bias_delta_min: 0.20

@@ -684,6 +684,8 @@ class OrchestratorEntryConfig:
     require_fresh_technical: bool = True
     max_quote_age_seconds: int = 10
     max_technical_age_seconds: int = 1800
+    news_cache_ttl_seconds: float = 60.0
+    news_cache_negative_ttl_seconds: float = 30.0
 
     def __post_init__(self) -> None:
         # min_rr <= 0 / NaN は hard gate を実質無効化するため起動時に拒否する
@@ -703,6 +705,14 @@ class OrchestratorEntryConfig:
                     not math.isfinite(val):
                 raise ValueError(
                     f"orchestrator.entry.{name} must be a finite number, got {val!r}"
+                )
+        # news キャッシュ TTL: <=0 / 非有限は無効 (キャッシュが常時 miss / 常時 hit になる)。
+        for name in ("news_cache_ttl_seconds", "news_cache_negative_ttl_seconds"):
+            val = getattr(self, name)
+            if not isinstance(val, (int, float)) or isinstance(val, bool) or \
+                    not math.isfinite(val) or val <= 0:
+                raise ValueError(
+                    f"orchestrator.entry.{name} must be finite and > 0, got {val!r}"
                 )
 
 
