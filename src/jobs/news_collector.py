@@ -132,8 +132,14 @@ async def collect_category(
     try:
         news_text_for_search = fetch_result.format_for_llm()[:500]
         query_embedding = await embed_fn(text=news_text_for_search)
-        bullish_hits = store.directional.query(query_embedding, "bullish", top_k=3)
-        bearish_hits = store.directional.query(query_embedding, "bearish", top_k=3)
+        # forecast/hold カードと trade entry カードは退役済み (spec §3.4b)。
+        # 完結した実取引の振り返りのみを教訓として注入する。
+        bullish_hits = store.directional.query(
+            query_embedding, "bullish", top_k=3,
+            phase_filter="complete", session_type_filter="trade")
+        bearish_hits = store.directional.query(
+            query_embedding, "bearish", top_k=3,
+            phase_filter="complete", session_type_filter="trade")
         all_hits = bullish_hits + bearish_hits
         all_hits.sort(key=lambda h: h.get("distance", float("inf")))
         top_hits = all_hits[:3]

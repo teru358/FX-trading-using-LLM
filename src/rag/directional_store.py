@@ -97,15 +97,24 @@ class DirectionalStore:
         direction: str,
         top_k: int = 5,
         phase_filter: str | None = None,
+        session_type_filter: str | None = None,
     ) -> list[dict]:
         """方向別コレクションをベクトル検索する。"""
         col = self._collection(direction)
         if col.count() == 0:
             return []
 
-        where = None
+        clauses: list[dict] = []
         if phase_filter:
-            where = {"phase": {"$eq": phase_filter}}
+            clauses.append({"phase": {"$eq": phase_filter}})
+        if session_type_filter:
+            clauses.append({"session_type": {"$eq": session_type_filter}})
+        if len(clauses) == 1:
+            where = clauses[0]
+        elif clauses:
+            where = {"$and": clauses}
+        else:
+            where = None
 
         try:
             results = col.query(
@@ -127,6 +136,30 @@ class DirectionalStore:
                 "distance": distances[i] if i < len(distances) else None,
             })
         return entries
+
+    def delete_retired_cards(self) -> dict[str, int]:
+        """forecast/hold カードと trade entry カードを削除する (冪等、spec §3.4b)。
+
+        forecast サイクル・取引サイクル退役に伴い、これらの生産者は全て廃止される。
+        既存の蓄積カードが教訓として検索され続けないよう掃除する。
+        戻り値は方向ごとの削除件数。
+        """
+        counts: dict[str, int] = {}
+        for direction in ("bullish", "bearish"):
+            col = self._collection(direction)
+            before = col.count()
+            col.delete(where={"session_type": {"$in": ["forecast", "hold"]}})
+            col.delete(where={"$and": [
+                {"session_type": {"$eq": "trade"}},
+                {"phase": {"$eq": "entry"}},
+            ]})
+            deleted = before - col.count()
+            counts[direction] = deleted
+            if deleted:
+                logger.info(
+                    f"Deleted {deleted} retired cards from {direction} collection"
+                )
+        return counts
 
     def count(self, direction: str) -> int:
         return self._collection(direction).count()
