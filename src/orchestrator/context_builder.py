@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from src.config.schema import OrchestratorConfig
 from src.data.analysis_store import AnalysisStore
 from src.data.orchestrator_store import OrchestratorStore
+from src.orchestrator._ttl_cache import TtlSingleFlightCache
 from src.utils.json_safe import load_json_column as _load_json_column
 
 if TYPE_CHECKING:
@@ -423,6 +424,34 @@ def make_news_provider(config: "AppConfig", store: "VectorStore") -> NewsProvide
             "confidence": sentiment.confidence,
             "top_reasons": list(sentiment.key_themes),
         }
+
+    return provider
+
+
+def make_cached_news_provider(
+    inner: NewsProvider,
+    *,
+    ttl_seconds: float,
+    negative_ttl_seconds: float,
+    clock: Callable[[], datetime],
+) -> NewsProvider:
+    """news_provider を TtlSingleFlightCache でラップし、返却 dict に status/as_of を付ける。
+
+    status: ok (新規成功) | stale (refresh 失敗で前回値) | unavailable (成功履歴なし)。
+    as_of は成功時刻の ISO (unavailable は None)。stale でも as_of は成功時刻を維持する
+    (現在時刻で上書きしない — news_conflict の失効を live trigger で消さないため, spec §3.2)。
+    """
+    cache = TtlSingleFlightCache(
+        ttl_seconds=ttl_seconds, negative_ttl_seconds=negative_ttl_seconds, clock=clock,
+    )
+
+    def provider(pair: str) -> dict:
+        res = cache.get(pair, lambda: inner(pair))
+        if res.status == "unavailable":
+            return {"sentiment_score": None, "confidence": None,
+                    "top_reasons": [], "status": "unavailable", "as_of": None}
+        as_of = res.success_at.isoformat() if res.success_at is not None else None
+        return {**res.value, "status": res.status, "as_of": as_of}
 
     return provider
 
