@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 
-from src.orchestrator.material_landing import MaterialLandingDetector, PlanningTarget
+from src.orchestrator.material_landing import MaterialLandingDetector
 
 
 def _pairs(targets):
