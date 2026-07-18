@@ -119,14 +119,15 @@ class TestReflectionCrud:
         assert r.last_error == "LLM timeout"
         assert r.next_retry_at == NOW + timedelta(hours=1)   # backoff[0]
 
-    def test_backoff_progression_1_2_4_8_16(self, store):
-        expected_hours = [1, 2, 4, 8, 16]
-        for i, h in enumerate(expected_hours[:-1], start=1):
+    def test_backoff_progression_1_2_4_8(self, store):
+        # 5 回目の失敗は dead になるため、backoff は 4 段 (1/2/4/8h) で全段使われる
+        expected_hours = [1, 2, 4, 8]
+        for i, h in enumerate(expected_hours, start=1):
             store.mark_reflection_retry("ord-3", pair="USDJPY=X", error="e", now=NOW)
             r = store.get_reflection("ord-3")
-            if r.status == "retry":
-                assert r.attempt_count == i
-                assert r.next_retry_at == NOW + timedelta(hours=h)
+            assert r.status == "retry"
+            assert r.attempt_count == i
+            assert r.next_retry_at == NOW + timedelta(hours=h)
 
     def test_fifth_failure_becomes_dead(self, store):
         for _ in range(5):
@@ -142,14 +143,17 @@ class TestReflectionCrud:
         assert r.status == "dead"
         assert "not in instruments" in r.last_error
 
-    def test_retry_then_done_overwrites(self, store):
+    def test_retry_then_done_clears_error_state(self, store):
         store.mark_reflection_retry("ord-6", pair="USDJPY=X", error="e", now=NOW)
         store.mark_reflection_done(
             "ord-6", plan_id=None, pair="USDJPY=X", close_reason="stop_loss",
             realized_pnl=-30.0, reflection_text="t",
             was_directionally_correct=False, now=NOW,
         )
-        assert store.get_reflection("ord-6").status == "done"
+        r = store.get_reflection("ord-6")
+        assert r.status == "done"
+        assert r.last_error is None        # done 遷移で error 状態を消去
+        assert r.next_retry_at is None
 
     def test_get_reflections_lists_all(self, store):
         store.mark_reflection_retry("a", pair="P", error="e", now=NOW)
@@ -161,10 +165,14 @@ class TestReflectionCrud:
 class TestOrderIntentLookup:
     def test_get_by_order_id(self, store):
         import sqlalchemy as sa
+        # 現行シグネチャ (orchestrator_store.py:913): owner_run_id: int と
+        # lease_until: datetime が keyword-only 必須
+        owner = store.start_run("OrchestratorRuntime", pair="USDJPY=X",
+                                trigger_type="watch_cycle")
         ok = store.try_insert_order_intent(
             plan_id=1, pair="USDJPY=X", intended_action="buy",
-            trigger_id="t1", decision_id=None, owner_run_id=None,
-            now=NOW, lease_seconds=60,
+            owner_run_id=owner, lease_until=NOW + timedelta(seconds=60),
+            trigger_id="t1", decision_id=None,
         )
         assert ok
         # order_id は broker 送信後に order worker がセットする運用カラム。
@@ -259,8 +267,9 @@ class _Reflection(_Base):
 (b) モジュール定数 (class OrchestratorStore の直前):
 
 ```python
-# reflection retry の指数 backoff (時間)。5 回失敗で dead (spec §3.2b)。
-_REFLECTION_BACKOFF_HOURS = (1, 2, 4, 8, 16)
+# reflection retry の指数 backoff (時間)。5 回目の失敗で dead になるため
+# backoff は 4 段で全段使われる (spec §3.2b、plan レビューで 16h 到達不能を解消)。
+_REFLECTION_BACKOFF_HOURS = (1, 2, 4, 8)
 _REFLECTION_MAX_ATTEMPTS = 5
 # planning 実行中判定の stale 閾値 (秒)。これより古い未完了 run は無視 (spec §3.6)。
 _PLANNING_STALE_SECONDS = 600
@@ -320,6 +329,8 @@ _PLANNING_STALE_SECONDS = 600
             r.reflection_text = reflection_text
             r.was_directionally_correct = was_directionally_correct
             r.status = "done"
+            r.last_error = None       # retry からの遷移で error 状態を消去
+            r.next_retry_at = None
             r.updated_at = now
             session.commit()
 
@@ -1022,20 +1033,28 @@ class TestRunReflectionCycle:
     def test_plan_context_passed(self, tmp_path, orch, monkeypatch):
         """order_intent → plan_id → reasoning が _reflect_and_record に渡る。"""
         _write_trades(tmp_path, [_closed_order("bro-1")])
-        # order_intent を仕込む (order_id="bro-1", plan_id=42)
+        # order_intent を仕込む (order_id="bro-1", plan_id=42)。
+        # 現行シグネチャ: owner_run_id: int + lease_until: datetime 必須
         import sqlalchemy as sa
+        owner = orch.start_run("OrchestratorRuntime", pair="USDJPY=X",
+                               trigger_type="watch_cycle")
         orch.try_insert_order_intent(
-            plan_id=42, pair="USDJPY=X", intended_action="buy", trigger_id="t",
-            decision_id=None, owner_run_id=None, now=NOW, lease_seconds=60)
+            plan_id=42, pair="USDJPY=X", intended_action="buy",
+            owner_run_id=owner, lease_until=NOW + timedelta(seconds=60),
+            trigger_id="t", decision_id=None)
         with orch._engine.connect() as conn:
             conn.execute(sa.text(
                 "UPDATE order_intents SET order_id='bro-1' WHERE plan_id=42"))
             conn.commit()
+        # reasoning getter は record_decision の仕込みが重いので instance mock で固定
+        monkeypatch.setattr(orch, "get_latest_plan_create_reasoning",
+                            lambda pid: f"reasoning-for-{pid}")
         got = {}
 
         async def fake(config, store, orch_store, llm, embed_fn, order,
                        plan_id, entry_analysis):
             got["plan_id"] = plan_id
+            got["entry_analysis"] = entry_analysis
             return ("t", True)
 
         monkeypatch.setattr("src.cycles.reflection._reflect_and_record", fake)
@@ -1046,6 +1065,48 @@ class TestRunReflectionCycle:
         run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
                              slot=_FakeSlot())
         assert got["plan_id"] == 42
+        assert got["entry_analysis"] == "reasoning-for-42"   # 実文字列が渡る
+
+    def test_context_lookup_failure_marks_retry(self, tmp_path, orch, monkeypatch):
+        """plan 文脈取得の失敗も 1 件単位の例外境界に入る (レビュー Medium-4)。"""
+        _write_trades(tmp_path, [_closed_order("o1")])
+        def boom(order_id):
+            raise RuntimeError("db locked")
+        monkeypatch.setattr(orch, "get_order_intent_by_order_id", boom)
+        monkeypatch.setattr("src.cycles.reflection.create_llm_client",
+                            lambda config, role: object())
+        monkeypatch.setattr("src.cycles.reflection.make_embed_fn",
+                            lambda config: object())
+        # controller は例外を漏らさず終了し、retry 行が残る
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        r = orch.get_reflection("o1")
+        assert r.status == "retry"
+
+    def test_done_save_failure_marks_retry(self, tmp_path, orch, monkeypatch):
+        """RAG 成功後の done 保存失敗 → retry (次回 RAG upsert は冪等)。"""
+        _write_trades(tmp_path, [_closed_order("o1")])
+
+        async def ok(config, store, orch_store, llm, embed_fn, order,
+                     plan_id, entry_analysis):
+            return ("t", True)
+
+        calls = {"n": 0}
+        real_done = orch.mark_reflection_done
+        def flaky_done(*args, **kwargs):
+            calls["n"] += 1
+            raise RuntimeError("db locked")
+        monkeypatch.setattr(orch, "mark_reflection_done", flaky_done)
+        monkeypatch.setattr("src.cycles.reflection._reflect_and_record", ok)
+        monkeypatch.setattr("src.cycles.reflection.create_llm_client",
+                            lambda config, role: object())
+        monkeypatch.setattr("src.cycles.reflection.make_embed_fn",
+                            lambda config: object())
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        assert calls["n"] == 1
+        r = orch.get_reflection("o1")
+        assert r.status == "retry"      # 処理済みにはならない → 次回再処理
 ```
 
 注: `try_insert_order_intent` の正確な引数は実装時に既存シグネチャ
@@ -1078,6 +1139,7 @@ import logging
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from src.analysis.price_analyzer import load_user_notes   # 現行定義元 (price_analyzer.py:30)
 from src.analysis.reflector import generate_close_reflection
 from src.llm.factory import create_llm_client
 from src.persistence.state_store import StateStore
@@ -1085,7 +1147,6 @@ from src.rag.directional_writer import record_trade_complete
 from src.rag.embedder import make_embed_fn
 from src.trading.position_manager import Order
 from src.utils.clock import db_now
-from src.utils.user_notes import load_user_notes   # 実装時に既存 import 元を確認
 
 if TYPE_CHECKING:
     from src.data.orchestrator_store import OrchestratorStore
@@ -1151,7 +1212,12 @@ async def _reflect_and_record(
 
 
 def _process_one(config, store, orch_store, llm, embed_fn, order: Order) -> None:
-    """1 件を処理する (slot 内で同期実行)。"""
+    """1 件を処理する (slot 内で同期実行)。
+
+    例外境界: instrument 判定より後の全処理 (文脈取得 / LLM / RAG / done 保存) を
+    1 件単位の try に入れる (レビュー Medium-4)。失敗はこの中で retry 記録し、
+    controller へは漏らさない。
+    """
     now = db_now()
     pair_cfg = next(
         (p for p in config.tradeable_instruments if p.symbol == order.pair),
@@ -1166,28 +1232,35 @@ def _process_one(config, store, orch_store, llm, embed_fn, order: Order) -> None
             f"[REFLECT] {order.order_id} ({order.pair}): pair not in "
             f"instruments — dead-lettered")
         return
-    intent = orch_store.get_order_intent_by_order_id(order.order_id)
-    plan_id = intent.plan_id if intent is not None else None
-    entry_analysis = ""
-    if plan_id is not None:
-        entry_analysis = orch_store.get_latest_plan_create_reasoning(plan_id) or ""
     try:
+        intent = orch_store.get_order_intent_by_order_id(order.order_id)
+        plan_id = intent.plan_id if intent is not None else None
+        entry_analysis = ""
+        if plan_id is not None:
+            entry_analysis = (
+                orch_store.get_latest_plan_create_reasoning(plan_id) or "")
         text, correct = asyncio.run(_reflect_and_record(
             config, store, orch_store, llm, embed_fn, order,
             plan_id, entry_analysis))
+        # done 保存の失敗も retry に落とす (RAG upsert は冪等なので次回無害)
+        orch_store.mark_reflection_done(
+            order.order_id, plan_id=plan_id, pair=order.pair,
+            close_reason=order.close_reason, realized_pnl=order.realized_pnl,
+            reflection_text=text, was_directionally_correct=correct,
+            now=db_now())
     except Exception as e:
-        orch_store.mark_reflection_retry(
-            order.order_id, pair=order.pair,
-            error=f"{type(e).__name__}: {e}", now=db_now())
+        try:
+            orch_store.mark_reflection_retry(
+                order.order_id, pair=order.pair,
+                error=f"{type(e).__name__}: {e}", now=db_now())
+        except Exception:
+            # retry 記録すら失敗 (DB 断等) — ログのみ。未記録なので次回 未試行として再処理
+            logger.exception(
+                f"[REFLECT] {order.order_id}: failed to record retry state")
         logger.warning(
             f"[REFLECT] {order.order_id} failed ({type(e).__name__}: {e}) "
             f"— will retry")
         return
-    orch_store.mark_reflection_done(
-        order.order_id, plan_id=plan_id, pair=order.pair,
-        close_reason=order.close_reason, realized_pnl=order.realized_pnl,
-        reflection_text=text, was_directionally_correct=correct,
-        now=db_now())
     logger.info(f"[REFLECT] {order.order_id} ({order.pair}) reflected "
                 f"(directionally_correct={correct} plan_id={plan_id})")
 
@@ -1372,7 +1445,9 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commi
 - Delete: `src/cycles/trading.py`、`src/data/session_store.py`、
   `src/persistence/adaptive_params_store.py`、`src/analysis/performance_audit.py`、
   `src/analysis/audit_post_hoc.py`、`src/analysis/audit_report.py`、
-  `src/signals/rag_adjustment.py`、`src/trading/atr_calculator.py`
+  `src/signals/rag_adjustment.py`、`src/trading/atr_calculator.py`、
+  `src/trading/entry_context_builder.py` (SLTPResult を import する唯一の同伴者。
+  consumer は trading.py:54 のみ — orchestrator/context_builder.py:103 はコメント言及のみ)
 - Modify: `src/cycles/__init__.py` (:14 trading import 削除)
 - Modify: `src/trading_cycle.py` — **shim 全削除**し、参照元を直 import に更新:
   - `main.py:39` → `from src.cycles.exit_check import run_exit_check_cycle`
@@ -1415,7 +1490,9 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commi
   `tests/test_adaptive_params_store.py`、`tests/test_audit_post_hoc.py`、
   `tests/test_audit_report.py`、`tests/test_audit_integration.py`、
   `tests/test_audit_real_config_integration.py`、`tests/test_audit_no_review.py`、
-  `tests/fixtures/audit/`、`tests/test_reflector.py` (旧版)
+  `tests/fixtures/audit/`、`tests/test_reflector.py` (旧版)、
+  `tests/test_atr_calculator.py`、`tests/test_atr_base_interval.py`、
+  `tests/test_entry_context_builder.py` (存在すれば — atr/entry_context 退役分)
 - Tests 修正: `tests/test_trading_cycle_helpers.py` (削除関数分を除去、
   `_summarize_pair`/`_get_price` 分は温存)、`tests/test_taskf_single_writer_guard.py`
   (trading cycle 依存部の扱いは内容確認の上判断 — orchestrator 側検証なら温存)、
@@ -1435,7 +1512,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commi
 - [ ] **Step 2: 参照残りゼロ確認**
 
 ```bash
-wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && grep -rn 'run_trading_cycle\|trading_cycle\|HoldDecisionStore\|AdaptiveParamsStore\|SessionStore\|rag_adjustment\|record_trade_entry\|record_hold_review\|performance_audit\|audit_post_hoc\|audit_report\|CycleSummaryEvent\|SignalSkippedEvent\|OrderOpenedEvent\|notify_cycle_summary\|notify_order_opened\|notify_signal_skipped\|run_times\|atr_timeframe\|sl_atr_mult\|tp_atr_mult\|calculate_sl_tp' src/ main.py config/settings.yaml.example --include='*.py' --include='*.example' | grep -v Binary"
+wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && grep -rn 'run_trading_cycle\|trading_cycle\|HoldDecisionStore\|AdaptiveParamsStore\|SessionStore\|rag_adjustment\|record_trade_entry\|record_hold_review\|performance_audit\|audit_post_hoc\|audit_report\|CycleSummaryEvent\|SignalSkippedEvent\|OrderOpenedEvent\|notify_cycle_summary\|notify_order_opened\|notify_signal_skipped\|run_times\|atr_timeframe\|sl_atr_mult\|tp_atr_mult\|calculate_sl_tp\|SLTPResult\|entry_context_builder\|build_entry_context\|_compute_atr_from_price_data\|_fetch_and_compute_atr\|_build_macro_context' src/ main.py config/settings.yaml.example --include='*.py' --include='*.example' | grep -v Binary"
 ```
 
 Expected: ヒット 0 件 (`src/trading_cycle.py` 自体も削除済み)。
@@ -1481,23 +1558,75 @@ def test_shadow_pair_subset_warns_but_builds(...):
 ```
 
 main 側 `tests/test_main_failfast.py` — main() を直接叩くのは重いので、
-fail-fast 判定を関数に切り出してテストする:
+判定と起動順序をそれぞれ関数に切り出してテストする (レビュー Medium-5:
+「build → validate → start → API → scheduler」の順序保証が中核):
 
 ```python
-from src.startup import ensure_orchestrator_or_exit  # 新設ヘルパ (下記)
+import pytest
 
-def test_orchestrator_none_raises_system_exit():
-    with pytest.raises(SystemExit):
-        ensure_orchestrator_or_exit(None, enabled=True)
+from src.startup import ensure_orchestrator_or_exit, run_startup_sequence
 
-def test_disabled_raises_system_exit():
-    with pytest.raises(SystemExit):
-        ensure_orchestrator_or_exit(None, enabled=False)
 
-def test_shadow_mode_warns_not_exits(caplog):
-    runtime = object()
-    ensure_orchestrator_or_exit(runtime, enabled=True, mode="shadow")
-    # 例外なし + warning ログ
+class TestEnsureOrExit:
+    def test_orchestrator_none_raises_system_exit(self):
+        with pytest.raises(SystemExit):
+            ensure_orchestrator_or_exit(None, enabled=True)
+
+    def test_disabled_raises_system_exit(self):
+        with pytest.raises(SystemExit):
+            ensure_orchestrator_or_exit(None, enabled=False)
+
+    def test_shadow_mode_warns_not_exits(self, caplog):
+        ensure_orchestrator_or_exit(object(), enabled=True, mode="shadow")
+        assert any("発注は行われません" in r.message for r in caplog.records)
+
+
+class TestStartupSequence:
+    """build → validate → start → API → scheduler の順序保証。"""
+
+    def _spies(self):
+        order = []
+        runtime = type("R", (), {"start": lambda self: order.append("start")})()
+        return order, {
+            "build": lambda: (order.append("build"), runtime)[1],
+            "validate": lambda rt: order.append("validate"),
+            "start_api": lambda: order.append("api"),
+            "start_scheduler": lambda: order.append("scheduler"),
+        }
+
+    def test_happy_path_order(self):
+        order, fns = self._spies()
+        run_startup_sequence(**fns)
+        assert order == ["build", "validate", "start", "api", "scheduler"]
+
+    def test_build_failure_stops_before_api_and_scheduler(self):
+        order, fns = self._spies()
+        def boom():
+            order.append("build")
+            raise RuntimeError("bootstrap failed")
+        fns["build"] = boom
+        with pytest.raises(RuntimeError):
+            run_startup_sequence(**fns)
+        assert "api" not in order and "scheduler" not in order
+
+    def test_validate_exit_stops_before_api_and_scheduler(self):
+        order, fns = self._spies()
+        def refuse(rt):
+            order.append("validate")
+            raise SystemExit(1)
+        fns["validate"] = refuse
+        with pytest.raises(SystemExit):
+            run_startup_sequence(**fns)
+        assert "api" not in order and "scheduler" not in order
+
+    def test_start_failure_stops_before_api_and_scheduler(self):
+        order, fns = self._spies()
+        runtime = type("R", (), {"start": lambda self: (_ for _ in ()).throw(
+            RuntimeError("start failed"))})()
+        fns["build"] = lambda: (order.append("build"), runtime)[1]
+        with pytest.raises(RuntimeError):
+            run_startup_sequence(**fns)
+        assert "api" not in order and "scheduler" not in order
 ```
 
 - [ ] **Step 2: 実装**
@@ -1534,25 +1663,51 @@ def ensure_orchestrator_or_exit(runtime, *, enabled: bool, mode: str = "live") -
         raise SystemExit(1)
     if mode != "live":
         logger.warning(f"[ORCH] mode={mode} — 発注は行われません (検証運転)")
+
+
+def run_startup_sequence(*, build, validate, start_api, start_scheduler):
+    """build → validate → start → API → scheduler の順序を固定する seam
+    (spec §1.5 / plan レビュー Medium-5)。
+
+    どの段の失敗 (例外 / SystemExit) でも後段は実行されない。
+    """
+    runtime = build()
+    validate(runtime)
+    if runtime is not None:
+        runtime.start()
+    start_api()
+    start_scheduler()
+    return runtime
 ```
 
 `main.py` の再構成:
-1. orchestrator 構築ブロック (:551-573 相当) を **API 起動 (:499) より前**に移動。
-2. try/except 継続 guard を撤去し:
+1. 現行の API 起動 (:499-506)・scheduler 起動 (:543-544)・orchestrator 構築
+   (:551-573) を `run_startup_sequence` 呼び出しに再編する:
    ```python
-   from src.startup import ensure_orchestrator_or_exit
+   from src.startup import ensure_orchestrator_or_exit, run_startup_sequence
    from src.orchestrator.bootstrap import build_orchestrator_runtime
-   orchestrator = build_orchestrator_runtime(
-       config, store=store, price_store=price_store,
-       analysis_store=analysis_store, price_provider=price_provider,
-       cadence_resolver=_cadence_resolver,
-   )   # 例外はそのまま落とす (fail-fast)
-   ensure_orchestrator_or_exit(
-       orchestrator, enabled=config.orchestrator.enabled,
-       mode=config.orchestrator.mode)
-   orchestrator.start()
+
+   def _build():
+       return build_orchestrator_runtime(
+           config, store=store, price_store=price_store,
+           analysis_store=analysis_store, price_provider=price_provider,
+           cadence_resolver=_cadence_resolver,
+       )   # 例外はそのまま落とす (fail-fast)
+
+   def _validate(runtime):
+       ensure_orchestrator_or_exit(
+           runtime, enabled=config.orchestrator.enabled,
+           mode=config.orchestrator.mode)
+
+   orchestrator = run_startup_sequence(
+       build=_build, validate=_validate,
+       start_api=_start_api,          # 既存 start_api_server 呼び出しを関数化
+       start_scheduler=_start_scheduler,  # 既存 scheduler_thread.start() を関数化
+   )
    ```
-3. mode=shadow のとき Schedule 表示に
+   Initial collection (news/tech、:510-540) は API の前後どちらでも可 —
+   orchestrator start の後・API の前に置く (現状の相対順序を維持)。
+2. mode=shadow のとき Schedule 表示に
    `sched_table.add_row("Orchestrator", "[yellow]shadow — 発注なし[/yellow]")` を追加。
    live のときは `"live"` を表示。
 

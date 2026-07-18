@@ -199,7 +199,7 @@ instrument 設定に存在しない旧銘柄 — 現行実装は skip してい�
   `next_retry_at`。
 - 検知集合 = closed trades − (`done` ∪ `dead` ∪ `next_retry_at` 未到来の `retry`)。
 - 失敗時: `retry` として upsert し `attempt_count` を増分、
-  `next_retry_at` = 指数 backoff (1h → 2h → 4h → 8h → 16h)。
+  `next_retry_at` = 指数 backoff (1h → 2h → 4h → 8h — 5 回目の失敗は dead になるため 4 段で全段使われる)。
   **5 回失敗で `dead` (dead-letter) に落とし warning ログ**。以後検知対象外。
 - pair が現在の instrument 設定に存在しない order は**即 `dead`**
   (last_error に理由記録)。
