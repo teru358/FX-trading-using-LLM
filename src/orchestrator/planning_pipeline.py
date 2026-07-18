@@ -453,7 +453,9 @@ class PlanningPipeline:
             redraft_count=redraft_count,
             direction=draft.direction, score=final.final_score,
             confidence=final.confidence,
-            reason=_normalize_reason(final.reasoning_summary),
+            # schema は空 reasoning_summary を許容するので fallback を持つ。reason は
+            # [ORCH] planning result の観測性契約 (reason= を必ず残す)。
+            reason=_normalize_reason(final.reasoning_summary) or "plan created",
             derived_rr=risk.derived_rr,
             superseded_plan_ids=superseded,
         )

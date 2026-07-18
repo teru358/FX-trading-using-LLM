@@ -175,11 +175,9 @@ def test_start_result_one_to_one(caplog, planning_runtime_factory, scenario, exp
     assert results == 1
     msg = _decisions(caplog.records)[0]
     assert f"decision={expect_decision}" in msg
+    # non-error decision は必ず reason= を伴う (判断理由を残す契約)。plan_create も
+    # pipeline 側 fallback ("plan created") で非空 reason を保証するため例外を設けない。
     if expect_decision != "error":
-        assert "reason=" in msg or expect_decision == "plan_create"
-    # reject は必ず reason= を伴う (却下理由を残す契約)。stub の reject result は
-    # reason="rr too low" を持つので、緩い or 条件ではなく reason= を必須で固定する。
-    if scenario == "reject":
         assert "reason=" in msg
 
 

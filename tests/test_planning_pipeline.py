@@ -208,6 +208,29 @@ async def test_accept_creates_active_plan(store: OrchestratorStore) -> None:
     assert "plan_create" in _decision_types(store, result)
 
 
+async def test_plan_create_reason_is_non_empty_when_summary_blank(
+    store: OrchestratorStore,
+) -> None:
+    """planner が空の reasoning_summary を返しても result.reason は非空を保つ。
+
+    reason はログ観測性の中心契約 ([ORCH] planning result の reason=)。schema は空文字を
+    許容するので、pipeline 側で fallback を持たないと reason= がログから消える。
+    """
+    final_blank = (
+        '{"decision": "accept", "final_score": 0.72, "confidence": 0.65, '
+        '"reasoning_summary": ""}'
+    )
+    llm = _ScriptedLLM([OPP_YES, _draft_json(), final_blank])
+    pipe = _make_pipeline(store, llm)
+    ctx = _ctx(store)
+    run_id = store.start_run("PlannerAgent", pair="USDJPY=X")
+
+    result = await pipe.run(pair="USDJPY=X", context=ctx, run_id=run_id)
+
+    assert result.outcome == "plan_create"
+    assert result.reason  # 非空 (fallback が効く)
+
+
 async def test_accept_records_agent_outputs_and_opinion(store: OrchestratorStore) -> None:
     llm = _ScriptedLLM([OPP_YES, _draft_json(), FINAL_ACCEPT])
     pipe = _make_pipeline(store, llm)
