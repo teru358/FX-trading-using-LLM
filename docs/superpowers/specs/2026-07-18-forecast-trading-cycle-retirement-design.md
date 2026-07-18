@@ -185,7 +185,8 @@ news_collector への教訓供給を維持する。
 - trades.json (StateStore) を読む。取引サイクル・exit_check・broker 側 SL/TP 執行・
   手動決済のいずれ経由でも trades.json に落ちる限り拾える。
   現行の「exit_check 決済は振り返り漏れ」も解消される。
-- 二重処理防止は `reflections.order_id` の存在チェック (PK/UNIQUE) で行う。
+- 再処理制御は `reflections.status` で行う: **`done` / `dead` は再処理しない。
+  `retry` は `next_retry_at` 到来後にのみ再処理する** (§3.2b)。
 
 ### 3.2b retry 管理と飢餓防止 (再レビュー High-2 対応)
 
@@ -204,9 +205,12 @@ instrument 設定に存在しない旧銘柄 — 現行実装は skip してい�
   (last_error に理由記録)。
 - 成功時のみ `status="done"` (INSERT/upsert は LLM + RAG 成功後 — §3.5 の
   不変条件は status="done" に対して適用)。
-- **1 回の実行枠は 10 件**: 新規 (未試行、新しい順) 優先 2 件 +
-  backfill (retry 到来分含む、古い順) 8 件。片方が枠未満なら他方に融通。
-  初回移行時の大量バックログでも新規決済の振り返りが遅延しない。
+- **1 回の実行枠は 10 件** (分類定義 — 再レビュー Medium-3 対応):
+  1. **未試行 (attempt_count=0) を新しい順に最大 2 件** — 直近決済の振り返りを
+     初回移行バックログより優先する。
+  2. **残りの eligible (未試行の残り + next_retry_at 到来済み retry) を
+     古い順に最大 8 件** (backfill)。
+  片方が枠未満なら他方に融通。watermark は持たない (順序規則だけで一意に決まる)。
 
 ### 3.3 文脈組み立て
 
@@ -235,6 +239,7 @@ instrument 設定に存在しない旧銘柄 — 現行実装は skip してい�
    - `close_reason` TEXT
    - `realized_pnl` REAL
    - `reflection_text` TEXT NULL (`done` 以外は NULL 可)
+   - `was_directionally_correct` BOOLEAN NULL (`done` 時は必須 — §3.5b の機械判定値)
    - `status` TEXT NOT NULL (`done` | `retry` | `dead` — §3.2b)
    - `attempt_count` INTEGER NOT NULL DEFAULT 0
    - `last_error` TEXT NULL
@@ -303,20 +308,36 @@ news_collector の教訓検索は現状 filter なしで全カードを対象に
   3. 各 1 件を **`_llm_slot.try_run_scheduled(process_one, order)` で同期実行**
      (`try_run_scheduled` は呼び出しスレッドで fn を実行し、slot busy なら
      False で skip する — `priority_job_slot.py:70`)。
-  4. **slot busy (False 返り) または planning 実行中なら、その時点で controller
-     を終了**し残りを次回に回す。
+  4. **slot busy (False 返り)・planning 実行中・`_llm_slot.waiting_user_job`
+     が True のいずれかで、その時点で controller を終了**し残りを次回に回す
+     (`waiting_user_job` は slot に既存の待機ユーザー処理フラグ —
+     `priority_job_slot.py:52`。1 件ごとに slot を解放しても controller が
+     即再取得すると最大 10 回連続占有になるため、各件の前に確認する)。
 - planner との干渉は以下で最小化する (planner 側コードは変更しない):
   1. **1 件単位の逐次処理** — 上記の通り slot の取得/解放を 1 件ごとに行い、
      まとめて長時間占有しない。
   2. **planning 実行中は譲る** — 各件の処理前に OrchestratorStore の
-     `agent_runs` に実行中 (running) の planning run が存在するか照会し、
-     存在すれば残りを次回実行に回す (OrchestratorStore に照会 API
-     `has_running_planning_run()` を追加。DB 照会による低優先度化。
-     planner pipeline への semaphore 差し込みはスコープ拡大と planning
-     レイテンシリスクがあるため不採用。プロセス横断の LLM 調停層が必要に
-     なったら別 spec)。
-  3. LLM server (llama.cpp) は同時リクエストをキュー処理するため、
-     万一同時になっても正確性への影響はなく待ち時間のみ。
+     `agent_runs` を照会し、実行中の planning run が存在すれば残りを
+     次回実行に回す (OrchestratorStore に照会 API
+     `has_running_planning_run()` を追加。planner pipeline への semaphore
+     差し込みはスコープ拡大と planning レイテンシリスクがあるため不採用。
+     プロセス横断の LLM 調停層が必要になったら別 spec)。
+     **判定条件と dangling 対策 (再レビュー High-1 対応)**:
+     - 実行中判定は **`trigger_type='planning_cycle' AND finished_at IS NULL`**
+       (`start_run()` は開始時から `status="ok"` のため status では判定できない —
+       `orchestrator_store.py:414` / 実値は `runtime.py:254`)。
+     - **stale 除外**: `started_at` が最大 planning 時間 (10 分) より古い未完了 run
+       は実行中と見なさない (プロセス異常終了の残骸で reflection が永久に
+       譲り続けるのを防ぐ)。
+     - **起動時回収**: orchestrator 起動時に `finished_at IS NULL` の dangling run を
+       `status="failed"` (error_type="dangling") で finish する。
+     - この DB 照会は**競合を完全排除しない best effort** (照会直後に planning が
+       始まる窓は残る)。正確性は LLM server 側のキューイングが担保し、本判定は
+       レイテンシ干渉の低減のみを目的とする。
+  3. LLM server (llama.cpp) は同時リクエストをキュー処理するため、同時になっても
+     出力の正確性には影響しない。ただし待ち時間増により client 側 timeout や
+     circuit breaker が発火し得る — その場合も §3.2b の retry 管理で回収される
+     (運用上の仮定であり、無害の保証ではない)。
 - LLM は既存 `config.llm.reflection` 設定 (モデル / temperature) を再利用。
   新規 config キーは追加しない (interval は固定毎時)。
 
@@ -332,9 +353,11 @@ technical-llm-omit のデプロイと同梱可能な手順として:
   自動作成。手動手順は不要)
 
 migration スクリプトは冪等 (`DROP TABLE IF EXISTS`、ChromaDB 削除も再実行安全) とし、
-実行前に **DB と ChromaDB データディレクトリ (directional collections を含む
-`data/` 配下の RAG 永続化先) の両方をシステム停止中にバックアップ**する手順を
-明記する (rsync 事故の教訓に従い、バックアップ→実行の順を厳守)。
+実行前に **DB・ChromaDB データディレクトリ (directional collections を含む
+`data/` 配下の RAG 永続化先)・state_dir (削除対象の adaptive params JSON を含む)
+をシステム停止中にバックアップ**する手順を明記する
+(rsync 事故の教訓に従い、バックアップ→実行の順を厳守。rollback は
+このバックアップ + `git revert` で行う)。
 
 ## 5. config 変更
 
@@ -348,16 +371,18 @@ migration スクリプトは冪等 (`DROP TABLE IF EXISTS`、ChromaDB 削除も�
 ## 6. テスト戦略
 
 - **reflection job**: TDD で新規作成。
-  - 検知差分 (closed − 記録済み = 未処理集合)
-  - 処理件数上限と古い順
+  - 検知差分 (closed − (`done` ∪ `dead` ∪ `next_retry_at` 未到来の `retry`))
+  - 実行枠の分類・順序 (未試行新しい順 2 + eligible 古い順 8、融通)
   - plan 文脈あり / なし (plan_id NULL) の両経路
-  - LLM 失敗 → 記録なし → 次回再試行
-  - RAG 成功 + INSERT 失敗 → 次回再処理で冪等
-  - 二重処理防止 (記録済み order_id は再処理しない)
+  - LLM 失敗 → `retry` 行保存 (attempt_count 増分 + backoff) → next_retry_at
+    到来後に再処理される
+  - RAG 成功 + `done` 記録失敗 → 次回再処理で冪等
+  - `done` / `dead` は再処理しない。`retry` は next_retry_at 到来後のみ再処理
 - **retry 管理** (§3.2b): 失敗→retry→backoff→dead の遷移、instrument 不在→即 dead、
   新規優先 2 + backfill 8 の枠配分、dead の検知除外。
 - **実行制御** (§3.6): slot busy で controller 即終了、planning 実行中で譲る、
-  guard が controller 完了まで保持される。
+  `waiting_user_job` で譲る、stale planning run は実行中と見なさない、
+  起動時 dangling 回収、guard が controller 完了まで保持される。
 - **reflections テーブル**: OrchestratorStore migration テスト既存パターンに追加。
 - **directional RAG cleanup** (§3.4b / 再レビュー Medium-5):
   - 複合 filter が `session_type=trade AND phase=complete` のみ返す
@@ -391,8 +416,12 @@ migration スクリプトは冪等 (`DROP TABLE IF EXISTS`、ChromaDB 削除も�
 
 - 本変更は stick (Live) / Fiosracht (paper) 両方に影響する。
   デプロイ時は §4 の migration + §5 の実 config 掃除をセットで実施。
-- **discord_bot と finance は同時デプロイ必須** (§2.2b)。finance API から
-  `/forecast` / `/run/trade` が消えた状態で旧 bot が呼ぶと 404 になる。
+- **デプロイ順序** (§2.2b): bot 側の削除は旧 finance API とも互換
+  (導線を消すだけ) なので、404 窓を作らない順序は:
+  1. discord_bot 更新 (forecast / run_trade 導線削除)
+  2. finance 停止 → バックアップ (§4) → migration 実行
+  3. finance 更新・起動 (fail-fast 検証が通ることを確認)
+  4. 疎通確認 (orchestrator 稼働・reflection job・bot コマンド)
 - technical-llm-omit (未マージ、0 ベース migration 必須) とマージ順序・デプロイ順序を
   合わせて計画すること。
 - 停止対象 job が消えることで Schedule 表示・health エンドポイントの job 一覧も変わる。
