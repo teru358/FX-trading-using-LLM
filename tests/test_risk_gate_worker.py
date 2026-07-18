@@ -356,6 +356,37 @@ class TestPass:
         assert isinstance(d["issues"], list)
 
 
+class TestDerivedRrExposed:
+    """pre_check は derive_rr を 1 回導出し RiskGateResult.derived_rr に載せる。
+
+    pass / RR 起因 fixable reject では値、structural reject では None。
+    """
+
+    def test_pre_check_pass_exposes_derived_rr(self, worker: RiskGateWorker) -> None:
+        # clean long: 計画 RR = (152-150)/(150-149) = 2.0 >= min 1.5。
+        result = worker.pre_check(_draft(), _ctx(), include_executable_price=False)
+        assert result.passed is True
+        assert result.derived_rr is not None
+        assert result.derived_rr >= worker._min_rr
+
+    def test_pre_check_rr_reject_exposes_derived_rr(self, worker: RiskGateWorker) -> None:
+        # tp=150.5 → 計画 RR = (150.5-150.0)/(150.0-149.0) = 0.5 < min。
+        result = worker.pre_check(_draft(tp=150.5), _ctx(), include_executable_price=False)
+        assert result.passed is False
+        assert result.reject_class == "fixable"
+        assert result.derived_rr is not None
+        assert result.derived_rr < worker._min_rr
+
+    def test_pre_check_structural_reject_derived_rr_none(self, worker: RiskGateWorker) -> None:
+        # halt 中 → structural reject。RR は導出しない → None。
+        result = worker.pre_check(
+            _draft(), _ctx(halt="hard"), include_executable_price=False
+        )
+        assert result.passed is False
+        assert result.reject_class == "structural"
+        assert result.derived_rr is None
+
+
 class TestStructuralReject:
     def test_halt_is_structural(self, worker: RiskGateWorker) -> None:
         res = worker.pre_check(_draft(), _ctx(halt="hard"), include_executable_price=False)

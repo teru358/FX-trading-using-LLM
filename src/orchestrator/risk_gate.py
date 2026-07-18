@@ -128,6 +128,7 @@ class RiskGateResult:
     passed: bool
     reject_class: str | None = None  # None | "structural" | "fixable"
     issues: list[str] = field(default_factory=list)
+    derived_rr: float | None = None  # RR 導出済み経路のみ値・structural/導出前は None
 
     def to_dict(self) -> dict[str, Any]:
         """record_decision(risk_gate_result=...) 用の JSON 安全 dict。"""
@@ -135,6 +136,7 @@ class RiskGateResult:
             "passed": self.passed,
             "reject_class": self.reject_class,
             "issues": list(self.issues),
+            "derived_rr": self.derived_rr,
         }
 
 
@@ -191,13 +193,20 @@ class RiskGateWorker:
         if structural:
             return RiskGateResult(passed=False, reject_class=STRUCTURAL, issues=structural)
 
-        fixable = self._fixable_issues(
-            draft, context, include_executable_price=include_executable_price
+        # derive_rr は 1 回だけ計算し、fixable 判定と結果 (derived_rr) の両方で使う
+        # (以前は _fixable_issues 内で二重に呼んでいた)。structural を通過した経路のみ
+        # RR を導出する = structural reject の derived_rr は None のまま。
+        derived = derive_rr(
+            draft, context.get("quote"),
+            include_executable_price=include_executable_price,
         )
+        fixable = self._fixable_issues(draft, context, derived_rr=derived)
         if fixable:
-            return RiskGateResult(passed=False, reject_class=FIXABLE, issues=fixable)
+            return RiskGateResult(
+                passed=False, reject_class=FIXABLE, issues=fixable, derived_rr=derived,
+            )
 
-        return RiskGateResult(passed=True, reject_class=None, issues=[])
+        return RiskGateResult(passed=True, reject_class=None, issues=[], derived_rr=derived)
 
     # ── structural (B): 再起案不可 ──────────────────────────────
 
@@ -223,7 +232,7 @@ class RiskGateWorker:
     # ── fixable (A): ExecutionOpinion 再起案で直せる可能性 ────────
 
     def _fixable_issues(
-        self, draft, context: dict[str, Any], *, include_executable_price: bool
+        self, draft, context: dict[str, Any], *, derived_rr: float | None,
     ) -> list[str]:
         issues: list[str] = []
         action = draft.action
@@ -271,10 +280,8 @@ class RiskGateWorker:
         # RR: LLM 申告 (action["rr"]) は信用せず derive_rr の導出値で判定する
         # (spec 2026-07-16 §2.B — 申告過大の偽 pass / 申告過小の誤 reject を両方塞ぐ)。
         # 導出不能は楽観通過させず fixable reject (spread unknown と同じ思想)。
-        derived = derive_rr(
-            draft, context.get("quote"),
-            include_executable_price=include_executable_price,
-        )
+        # RR は pre_check で 1 回だけ導出済み — ここでは引数の値を使う (再計算しない)。
+        derived = derived_rr
         if derived is None:
             if sl is not None and tp is not None:
                 # sl/tp 欠落時は上の missing issue が既に立っている — entry 起因のみ追加。
