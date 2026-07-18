@@ -23,9 +23,8 @@
 - コミットメッセージは conventional commits (日本語可)。attribution なし。
 - 回帰基準: 作業中は per-file green、**最終合格基準は full suite `uv run pytest` で
   既知失敗のみ** (`tests/test_insights.py` ChromaDB 系 2 件 — CLAUDE.md 基準)。
-- **実行順序は Task 番号順** (0→1→…→11)。文書の物理配置では Task 8 (削除+登録) が
-  Task 7 (fail-fast) の前に並ぶが、**fail-fast (Task 7) を削除 (Task 8) より先に
-  実行する** (plan レビュー Medium-4: 中間コミットの起動安全性)。
+- 実行順序は Task 番号順 (0→1→…→11)。fail-fast (Task 7) が削除 (Task 8) より
+  先なのは意図的 (中間コミットの起動安全性)。
 
 ## ファイル構成 (最終形)
 
@@ -548,11 +547,14 @@ class TestMachineDirectionJudgment:
             llm=_FakeLLM(_valid_json(was_directionally_correct=True)))
         assert r.was_directionally_correct is False
 
-    async def test_sell_close_below_entry_is_correct(self):
+    async def test_sell_close_below_entry_is_correct(self, caplog):
         r = await generate_close_reflection(
             pair_cfg=PAIR, order=_order("sell", 150.0, 149.0, "take_profit"),
             llm=_FakeLLM(_valid_json()))
         assert r.was_directionally_correct is True
+        # 一致時は warning なし + full_text (RAG へ渡す本文) に機械判定値
+        assert not any("machine verdict" in rec.message for rec in caplog.records)
+        assert "directionally_correct=True" in r.full_text
 
     async def test_trailing_sl_with_profit_buy_is_correct(self):
         # 旧実装の won = (close_reason == "take_profit") では誤判定していたケース
@@ -1071,8 +1073,46 @@ class TestRunReflectionCycle:
         run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
                              slot=_FakeSlot())
         assert seen == ["good-1"]                        # 正常行は処理
-        assert orch.get_reflection("bad-1").status == "dead"   # 壊れ行は dead
-        assert "parse_error" in orch.get_reflection("bad-1").last_error
+        r = orch.get_reflection("bad-1")
+        assert r.status == "retry"                       # 壊れ行は retry (即 dead にしない)
+        assert "parse_error" in r.last_error
+
+    def test_parse_retry_recovers_after_fix(self, tmp_path, orch, monkeypatch):
+        """parser/データ修正後、retry 行は backoff 到来で正常処理される。"""
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        # 1 回目: 壊れ行 → retry
+        broken = {"order_id": "fix-1", "pair": "USDJPY=X",
+                  "opened_at": "not-a-datetime"}
+        (state / "trades.json").write_text(json.dumps([broken]), encoding="utf-8")
+        monkeypatch.setattr("src.cycles.reflection.create_llm_client",
+                            lambda config, role: object())
+        monkeypatch.setattr("src.cycles.reflection.make_embed_fn",
+                            lambda config: object())
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        assert orch.get_reflection("fix-1").status == "retry"
+        # 2 回目: データ修正 + backoff 経過相当 → 処理されて done
+        (state / "trades.json").write_text(
+            json.dumps([_closed_order("fix-1").to_dict()]), encoding="utf-8")
+        with orch._engine.connect() as conn:
+            import sqlalchemy as sa
+            conn.execute(sa.text(
+                "UPDATE reflections SET next_retry_at = '2000-01-01 00:00:00' "
+                "WHERE order_id='fix-1'"))
+            conn.commit()
+        seen = []
+
+        async def fake(config, store, orch_store, llm, embed_fn, order,
+                       plan_id, entry_analysis):
+            seen.append(order.order_id)
+            return ("t", True)
+
+        monkeypatch.setattr("src.cycles.reflection._reflect_and_record", fake)
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        assert seen == ["fix-1"]
+        assert orch.get_reflection("fix-1").status == "done"
 
     def test_trades_json_not_a_list_is_noop(self, tmp_path, orch, monkeypatch):
         state = tmp_path / "state"
@@ -1214,7 +1254,10 @@ def _parse_closed_trades(raw, orch_store, now: datetime) -> list[Order]:
     """trades.json の生 dict 群を行単位で Order に変換する。
 
     不正行が 1 つあっても他の行の処理を止めない (plan レビュー Medium-2)。
-    order_id を持つ壊れ行は dead(parse_error) で記録し、以後の検知から外す。
+    order_id を持つ壊れ行は retry(parse_error) で記録する — デシリアライズ不具合
+    (新フィールド追従漏れ等) は parser 修正で直り得るため即 dead にしない
+    (即 dead は spec 上 instrument 不在のみ)。恒久的に壊れた行は backoff の末
+    5 回で自然に dead へ落ちる。
     """
     if not isinstance(raw, list):
         logger.warning(f"[REFLECT] trades.json is not a list "
@@ -1231,12 +1274,12 @@ def _parse_closed_trades(raw, orch_store, now: datetime) -> list[Order]:
         except Exception as e:
             if oid:
                 try:
-                    orch_store.mark_reflection_dead(
+                    orch_store.mark_reflection_retry(
                         oid, pair=str(d.get("pair", "?")),
                         error=f"parse_error: {type(e).__name__}: {e}", now=now)
                 except Exception:
                     logger.exception(
-                        f"[REFLECT] {oid}: failed to dead-letter parse error")
+                        f"[REFLECT] {oid}: failed to record parse error")
             logger.warning(
                 f"[REFLECT] broken trade row skipped (order_id={oid}): {e}")
             continue
@@ -1501,12 +1544,221 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commi
 
 ---
 
+### Task 7: fail-fast 起動再構成 + pair 整合チェック
+
+**Files:**
+- Modify: `main.py` (起動順序: orchestrator 構築を API/scheduler より前へ、継続 guard 撤去)
+- Modify: `src/orchestrator/bootstrap.py` (pair 整合チェック)
+- Test: `tests/test_main_failfast.py` (新規) + bootstrap テスト追記
+
+spec: §1.5。
+
+- [ ] **Step 1: failing tests を書く**
+
+bootstrap 側 (`tests/test_orchestrator_bootstrap*.py` 既存に追記 or 新規):
+
+```python
+def test_disabled_returns_none_unchanged(...):
+    # enabled=False → None (従来通り。exit 判断は main 側)
+
+def test_live_pair_subset_raises(...):
+    # mode="live" かつ orch pairs が tradeable の真部分集合 → RuntimeError
+
+def test_shadow_pair_subset_warns_but_builds(...):
+    # mode="shadow" 同条件 → 構築成功 (warning のみ)
+```
+
+main 側 `tests/test_main_failfast.py` — main() を直接叩くのは重いので、
+判定と起動順序をそれぞれ関数に切り出してテストする (レビュー Medium-5:
+「build → validate → start → API → scheduler」の順序保証が中核):
+
+```python
+import pytest
+
+from src.startup import ensure_orchestrator_or_exit, run_startup_sequence
+
+
+class TestEnsureOrExit:
+    def test_orchestrator_none_raises_system_exit(self):
+        with pytest.raises(SystemExit):
+            ensure_orchestrator_or_exit(None, enabled=True)
+
+    def test_disabled_raises_system_exit(self):
+        with pytest.raises(SystemExit):
+            ensure_orchestrator_or_exit(None, enabled=False)
+
+    def test_shadow_mode_warns_not_exits(self, caplog):
+        ensure_orchestrator_or_exit(object(), enabled=True, mode="shadow")
+        assert any("発注は行われません" in r.message for r in caplog.records)
+
+
+class TestStartupSequence:
+    """build → validate → initialize → start → API → scheduler の順序保証。
+
+    initialize (初回 news/tech 収集) は runtime.start() より前 (plan レビュー High-1:
+    orchestrator の planning/watch loop は start() 直後から動くため、
+    初回収集前の古い snapshot で判断・発注させない)。
+    """
+
+    def _spies(self):
+        order = []
+        runtime = type("R", (), {"start": lambda self: order.append("start")})()
+        return order, {
+            "build": lambda: (order.append("build"), runtime)[1],
+            "validate": lambda rt: order.append("validate"),
+            "initialize": lambda: order.append("init"),
+            "start_api": lambda: order.append("api"),
+            "start_scheduler": lambda: order.append("scheduler"),
+        }
+
+    def test_happy_path_order(self):
+        order, fns = self._spies()
+        run_startup_sequence(**fns)
+        assert order == ["build", "validate", "init", "start", "api", "scheduler"]
+
+    def test_build_failure_stops_everything_after(self):
+        order, fns = self._spies()
+        def boom():
+            order.append("build")
+            raise RuntimeError("bootstrap failed")
+        fns["build"] = boom
+        with pytest.raises(RuntimeError):
+            run_startup_sequence(**fns)
+        assert order == ["build"]
+
+    def test_validate_exit_stops_everything_after(self):
+        order, fns = self._spies()
+        def refuse(rt):
+            order.append("validate")
+            raise SystemExit(1)
+        fns["validate"] = refuse
+        with pytest.raises(SystemExit):
+            run_startup_sequence(**fns)
+        assert order == ["build", "validate"]
+
+    def test_initialize_runs_before_runtime_start(self):
+        order, fns = self._spies()
+        run_startup_sequence(**fns)
+        assert order.index("init") < order.index("start")
+
+    def test_initialize_failure_stops_start_api_scheduler(self):
+        order, fns = self._spies()
+        def boom():
+            order.append("init")
+            raise RuntimeError("initial collection failed")
+        fns["initialize"] = boom
+        with pytest.raises(RuntimeError):
+            run_startup_sequence(**fns)
+        assert order == ["build", "validate", "init"]   # start/api/scheduler なし
+
+    def test_start_failure_stops_before_api_and_scheduler(self):
+        order, fns = self._spies()
+        runtime = type("R", (), {"start": lambda self: (_ for _ in ()).throw(
+            RuntimeError("start failed"))})()
+        fns["build"] = lambda: (order.append("build"), runtime)[1]
+        with pytest.raises(RuntimeError):
+            run_startup_sequence(**fns)
+        assert "api" not in order and "scheduler" not in order
+```
+
+- [ ] **Step 2: 実装**
+
+`src/orchestrator/bootstrap.py` — pairs 解決 (`:183-201`) の後に:
+
+```python
+    tradeable = {p.symbol for p in config.tradeable_instruments}
+    selected = set(pairs)
+    if selected != tradeable:
+        missing = sorted(tradeable - selected)
+        if orch_cfg.mode == "live":
+            raise RuntimeError(
+                f"[ORCH] pair set mismatch in live mode: {missing} have no "
+                f"ordering path (spec §1.5). Fix orchestrator.pairs or "
+                f"instruments config.")
+        logger.warning(
+            f"[ORCH] pair subset in {orch_cfg.mode} mode: {missing} not "
+            f"covered (allowed outside live)")
+```
+
+`src/startup.py` (既存 startup_checks の隣) に新設:
+
+```python
+def ensure_orchestrator_or_exit(runtime, *, enabled: bool, mode: str = "live") -> None:
+    """発注経路の存在を保証する (spec §1.5)。無ければ起動中止。"""
+    if not enabled:
+        _console.print("[red][FATAL] orchestrator.enabled=false — "
+                       "発注経路がありません。起動を中止します[/red]")
+        raise SystemExit(1)
+    if runtime is None:
+        _console.print("[red][FATAL] orchestrator の構築に失敗しました。"
+                       "起動を中止します[/red]")
+        raise SystemExit(1)
+    if mode != "live":
+        logger.warning(f"[ORCH] mode={mode} — 発注は行われません (検証運転)")
+
+
+def run_startup_sequence(*, build, validate, initialize, start_api, start_scheduler):
+    """build → validate → initialize → start → API → scheduler の順序を固定する
+    seam (spec §1.5 / plan レビュー Medium-5 / High-1)。
+
+    initialize は初回 news/tech 収集。orchestrator の planning/watch loop は
+    start() 直後から動くため、初回収集を start() より前に置き、古い snapshot で
+    判断・発注させない。どの段の失敗 (例外 / SystemExit) でも後段は実行されない。
+    """
+    runtime = build()
+    validate(runtime)
+    initialize()
+    if runtime is not None:
+        runtime.start()
+    start_api()
+    start_scheduler()
+    return runtime
+```
+
+`main.py` の再構成:
+1. 現行の API 起動 (:499-506)・scheduler 起動 (:543-544)・orchestrator 構築
+   (:551-573) を `run_startup_sequence` 呼び出しに再編する:
+   ```python
+   from src.startup import ensure_orchestrator_or_exit, run_startup_sequence
+   from src.orchestrator.bootstrap import build_orchestrator_runtime
+
+   def _build():
+       return build_orchestrator_runtime(
+           config, store=store, price_store=price_store,
+           analysis_store=analysis_store, price_provider=price_provider,
+           cadence_resolver=_cadence_resolver,
+       )   # 例外はそのまま落とす (fail-fast)
+
+   def _validate(runtime):
+       ensure_orchestrator_or_exit(
+           runtime, enabled=config.orchestrator.enabled,
+           mode=config.orchestrator.mode)
+
+   orchestrator = run_startup_sequence(
+       build=_build, validate=_validate,
+       initialize=_initial_collection,    # 既存 Initial collection (:510-540) を関数化
+       start_api=_start_api,              # 既存 start_api_server 呼び出しを関数化
+       start_scheduler=_start_scheduler,  # 既存 scheduler_thread.start() を関数化
+   )
+   ```
+   Initial collection (news/tech、:510-540) は `_initial_collection` として関数化し、
+   **runtime.start() より前** に実行する (High-1: 古い snapshot での判断・発注防止)。
+2. mode=shadow のとき Schedule 表示に
+   `sched_table.add_row("Orchestrator", "[yellow]shadow — 発注なし[/yellow]")` を追加。
+   live のときは `"live"` を表示。
+
+- [ ] **Step 3: green 確認 + commit**
+
+```bash
+wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_main_failfast.py tests/test_orchestrator_bootstrap*.py tests/test_main_wiring.py -q 2>&1 | tail -3 && git add -A && git commit -m 'feat(main): fail-fast起動 (orchestrator必須/構築前倒し/live pair整合/shadow警告)'"
+```
+
+---
+
 ### Task 8: 取引サイクル系 完全削除 + reflection job 登録
 
-> **実行順注意 (plan レビュー Medium-4)**: このタスクは文書上 Task 7 (fail-fast) の
-> 前に並んでいるが、**実行は必ず Task 7 の後**。番号順に実行すること。
-> fail-fast を先に入れることで、削除後の中間コミットでも発注経路の消失が
-> 起動時に検出される。
+> **順序意図 (plan レビュー Medium-4)**: fail-fast (Task 7) を先に入れてから
+> 削除することで、削除後の中間コミットでも発注経路の消失が起動時に検出される。
 
 **reflection job 登録 (このタスクの同一コミットで実施 — 旧経路削除と同時):**
 
@@ -1622,210 +1874,6 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commit -m 'feat!: 取引サイクル完全削除 + reflection job登録 (旧新経路の重複なし切替)'"
-```
-
----
-
-### Task 7: fail-fast 起動再構成 + pair 整合チェック
-
-> **実行順注意**: 文書上は Task 8 (削除) の後に並ぶが、**実行は Task 8 より先**
-> (番号順)。
-
-**Files:**
-- Modify: `main.py` (起動順序: orchestrator 構築を API/scheduler より前へ、継続 guard 撤去)
-- Modify: `src/orchestrator/bootstrap.py` (pair 整合チェック)
-- Test: `tests/test_main_failfast.py` (新規) + bootstrap テスト追記
-
-spec: §1.5。
-
-- [ ] **Step 1: failing tests を書く**
-
-bootstrap 側 (`tests/test_orchestrator_bootstrap*.py` 既存に追記 or 新規):
-
-```python
-def test_disabled_returns_none_unchanged(...):
-    # enabled=False → None (従来通り。exit 判断は main 側)
-
-def test_live_pair_subset_raises(...):
-    # mode="live" かつ orch pairs が tradeable の真部分集合 → RuntimeError
-
-def test_shadow_pair_subset_warns_but_builds(...):
-    # mode="shadow" 同条件 → 構築成功 (warning のみ)
-```
-
-main 側 `tests/test_main_failfast.py` — main() を直接叩くのは重いので、
-判定と起動順序をそれぞれ関数に切り出してテストする (レビュー Medium-5:
-「build → validate → start → API → scheduler」の順序保証が中核):
-
-```python
-import pytest
-
-from src.startup import ensure_orchestrator_or_exit, run_startup_sequence
-
-
-class TestEnsureOrExit:
-    def test_orchestrator_none_raises_system_exit(self):
-        with pytest.raises(SystemExit):
-            ensure_orchestrator_or_exit(None, enabled=True)
-
-    def test_disabled_raises_system_exit(self):
-        with pytest.raises(SystemExit):
-            ensure_orchestrator_or_exit(None, enabled=False)
-
-    def test_shadow_mode_warns_not_exits(self, caplog):
-        ensure_orchestrator_or_exit(object(), enabled=True, mode="shadow")
-        assert any("発注は行われません" in r.message for r in caplog.records)
-
-
-class TestStartupSequence:
-    """build → validate → initialize → start → API → scheduler の順序保証。
-
-    initialize (初回 news/tech 収集) は runtime.start() より前 (plan レビュー High-1:
-    orchestrator の planning/watch loop は start() 直後から動くため、
-    初回収集前の古い snapshot で判断・発注させない)。
-    """
-
-    def _spies(self):
-        order = []
-        runtime = type("R", (), {"start": lambda self: order.append("start")})()
-        return order, {
-            "build": lambda: (order.append("build"), runtime)[1],
-            "validate": lambda rt: order.append("validate"),
-            "initialize": lambda: order.append("init"),
-            "start_api": lambda: order.append("api"),
-            "start_scheduler": lambda: order.append("scheduler"),
-        }
-
-    def test_happy_path_order(self):
-        order, fns = self._spies()
-        run_startup_sequence(**fns)
-        assert order == ["build", "validate", "init", "start", "api", "scheduler"]
-
-    def test_build_failure_stops_everything_after(self):
-        order, fns = self._spies()
-        def boom():
-            order.append("build")
-            raise RuntimeError("bootstrap failed")
-        fns["build"] = boom
-        with pytest.raises(RuntimeError):
-            run_startup_sequence(**fns)
-        assert order == ["build"]
-
-    def test_validate_exit_stops_everything_after(self):
-        order, fns = self._spies()
-        def refuse(rt):
-            order.append("validate")
-            raise SystemExit(1)
-        fns["validate"] = refuse
-        with pytest.raises(SystemExit):
-            run_startup_sequence(**fns)
-        assert order == ["build", "validate"]
-
-    def test_initialize_runs_before_runtime_start(self):
-        order, fns = self._spies()
-        run_startup_sequence(**fns)
-        assert order.index("init") < order.index("start")
-
-    def test_start_failure_stops_before_api_and_scheduler(self):
-        order, fns = self._spies()
-        runtime = type("R", (), {"start": lambda self: (_ for _ in ()).throw(
-            RuntimeError("start failed"))})()
-        fns["build"] = lambda: (order.append("build"), runtime)[1]
-        with pytest.raises(RuntimeError):
-            run_startup_sequence(**fns)
-        assert "api" not in order and "scheduler" not in order
-```
-
-- [ ] **Step 2: 実装**
-
-`src/orchestrator/bootstrap.py` — pairs 解決 (`:183-201`) の後に:
-
-```python
-    tradeable = {p.symbol for p in config.tradeable_instruments}
-    selected = set(pairs)
-    if selected != tradeable:
-        missing = sorted(tradeable - selected)
-        if orch_cfg.mode == "live":
-            raise RuntimeError(
-                f"[ORCH] pair set mismatch in live mode: {missing} have no "
-                f"ordering path (spec §1.5). Fix orchestrator.pairs or "
-                f"instruments config.")
-        logger.warning(
-            f"[ORCH] pair subset in {orch_cfg.mode} mode: {missing} not "
-            f"covered (allowed outside live)")
-```
-
-`src/startup.py` (既存 startup_checks の隣) に新設:
-
-```python
-def ensure_orchestrator_or_exit(runtime, *, enabled: bool, mode: str = "live") -> None:
-    """発注経路の存在を保証する (spec §1.5)。無ければ起動中止。"""
-    if not enabled:
-        _console.print("[red][FATAL] orchestrator.enabled=false — "
-                       "発注経路がありません。起動を中止します[/red]")
-        raise SystemExit(1)
-    if runtime is None:
-        _console.print("[red][FATAL] orchestrator の構築に失敗しました。"
-                       "起動を中止します[/red]")
-        raise SystemExit(1)
-    if mode != "live":
-        logger.warning(f"[ORCH] mode={mode} — 発注は行われません (検証運転)")
-
-
-def run_startup_sequence(*, build, validate, initialize, start_api, start_scheduler):
-    """build → validate → initialize → start → API → scheduler の順序を固定する
-    seam (spec §1.5 / plan レビュー Medium-5 / High-1)。
-
-    initialize は初回 news/tech 収集。orchestrator の planning/watch loop は
-    start() 直後から動くため、初回収集を start() より前に置き、古い snapshot で
-    判断・発注させない。どの段の失敗 (例外 / SystemExit) でも後段は実行されない。
-    """
-    runtime = build()
-    validate(runtime)
-    initialize()
-    if runtime is not None:
-        runtime.start()
-    start_api()
-    start_scheduler()
-    return runtime
-```
-
-`main.py` の再構成:
-1. 現行の API 起動 (:499-506)・scheduler 起動 (:543-544)・orchestrator 構築
-   (:551-573) を `run_startup_sequence` 呼び出しに再編する:
-   ```python
-   from src.startup import ensure_orchestrator_or_exit, run_startup_sequence
-   from src.orchestrator.bootstrap import build_orchestrator_runtime
-
-   def _build():
-       return build_orchestrator_runtime(
-           config, store=store, price_store=price_store,
-           analysis_store=analysis_store, price_provider=price_provider,
-           cadence_resolver=_cadence_resolver,
-       )   # 例外はそのまま落とす (fail-fast)
-
-   def _validate(runtime):
-       ensure_orchestrator_or_exit(
-           runtime, enabled=config.orchestrator.enabled,
-           mode=config.orchestrator.mode)
-
-   orchestrator = run_startup_sequence(
-       build=_build, validate=_validate,
-       initialize=_initial_collection,    # 既存 Initial collection (:510-540) を関数化
-       start_api=_start_api,              # 既存 start_api_server 呼び出しを関数化
-       start_scheduler=_start_scheduler,  # 既存 scheduler_thread.start() を関数化
-   )
-   ```
-   Initial collection (news/tech、:510-540) は `_initial_collection` として関数化し、
-   **runtime.start() より前** に実行する (High-1: 古い snapshot での判断・発注防止)。
-2. mode=shadow のとき Schedule 表示に
-   `sched_table.add_row("Orchestrator", "[yellow]shadow — 発注なし[/yellow]")` を追加。
-   live のときは `"live"` を表示。
-
-- [ ] **Step 3: green 確認 + commit**
-
-```bash
-wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_main_failfast.py tests/test_orchestrator_bootstrap*.py tests/test_main_wiring.py -q 2>&1 | tail -3 && git add -A && git commit -m 'feat(main): fail-fast起動 (orchestrator必須/構築前倒し/live pair整合/shadow警告)'"
 ```
 
 ---
@@ -1989,11 +2037,10 @@ Expected: **失敗は既知のみ** (`tests/test_insights.py` ChromaDB 系 2 件
 §5 の実 config 削除キー一覧 + §4 のバックアップ手順を転記)。
 デプロイは本 plan のスコープ外 (ユーザー実施)。
 
-- [ ] **Step 3: commit**
+- [ ] **Step 3: ノートはローカル保存のみ**
 
-```bash
-wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -f docs/superpowers/notes/2026-07-18-cycle-retirement-deploy.md && git commit -m 'docs: cycle-retirement デプロイ手順ノート'"
-```
+deploy note は commit しない (docs/ は gitignore 運用 — plan レビュー Low-4)。
+ユーザーが必要と判断すれば手動で `git add -f` する。
 
 ---
 
