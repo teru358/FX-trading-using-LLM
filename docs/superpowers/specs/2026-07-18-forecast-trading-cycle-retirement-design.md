@@ -37,7 +37,7 @@ orchestrator が旧シグナル系から借りているのは `TradeSignal` data
 | 生産物 | 生産者 | consumer | 退役後 |
 |---|---|---|---|
 | forecast 精度 (`forecasts` reviewed=1) | forecast サイクルのみ | `signal_combiner` accuracy 分岐・weekly_diagnosis・ask・API/views | consumer ごと削除 |
-| adaptive params (JSON) | `_finalize_closed_orders` | `_apply_atr_sltp_to_signal` (取引サイクルのみ) | 両方削除 |
+| adaptive params (YAML) | `_finalize_closed_orders` | `_apply_atr_sltp_to_signal` (取引サイクルのみ) | 両方削除 |
 | HOLD レビュー (`hold_decisions`) | 取引サイクル Phase 2.5 | RAG カード供給のみ | 削除 |
 | session (`trading_sessions`) | `create_session` (live で死コード) / `close_session` | performance_audit・ask・views | 全て削除 |
 | directional RAG complete カード | `_finalize_closed_orders` / `_review_hold_decisions` | **news_collector (生存)**・`_adjust_signal_with_rag` (退役) | reflection job が供給継続 |
@@ -57,7 +57,7 @@ directional RAG complete カードだけは生きた consumer が残る
 
 - `forecasts` / `hold_decisions` — `src/data/analysis_store.py` 内 (prices.db 同居)
 - `trading_sessions` — `src/data/session_store.py` (prices.db 同居)
-- adaptive params — SQLite でなく **state_dir 配下の JSON ファイル**
+- adaptive params — SQLite でなく **state_dir 配下の YAML ファイル (adaptive_params.yaml)**
   (`src/persistence/adaptive_params_store.py`)
 - `src/trading_cycle.py` は後方互換 shim (cycles/ からの re-export)。
   main.py / cli.py / tui.py / api / views が経由。
@@ -346,7 +346,7 @@ news_collector の教訓検索は現状 filter なしで全カードを対象に
 technical-llm-omit のデプロイと同梱可能な手順として:
 
 - DROP TABLE: `forecasts`、`hold_decisions`、`trading_sessions`
-- ファイル削除: state_dir の adaptive params JSON
+- ファイル削除: state_dir の adaptive params YAML (adaptive_params.yaml)
 - directional RAG (ChromaDB): `session_type in ("forecast", "hold")` カードと
   `phase="entry"` カードを削除 (§3.4b)
 - CREATE: `reflections` (ORM model 追加により起動時 `metadata.create_all()` で
@@ -354,7 +354,7 @@ technical-llm-omit のデプロイと同梱可能な手順として:
 
 migration スクリプトは冪等 (`DROP TABLE IF EXISTS`、ChromaDB 削除も再実行安全) とし、
 実行前に **DB・ChromaDB データディレクトリ (directional collections を含む
-`data/` 配下の RAG 永続化先)・state_dir (削除対象の adaptive params JSON を含む)
+`data/` 配下の RAG 永続化先)・state_dir (削除対象の adaptive params YAML (adaptive_params.yaml) を含む)
 をシステム停止中にバックアップ**する手順を明記する
 (rsync 事故の教訓に従い、バックアップ→実行の順を厳守。rollback は
 このバックアップ + `git revert` で行う)。
