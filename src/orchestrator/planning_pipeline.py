@@ -94,7 +94,19 @@ class PipelineResult:
     score: float | None = None
     confidence: float | None = None
     reason: str | None = None
+    derived_rr: float | None = None   # RR 導出済み経路のみ値・導出前 reject は None
     superseded_plan_ids: list[int] = field(default_factory=list)
+
+
+_REASON_MAX_LEN = 200
+
+
+def _normalize_reason(reason: str | None) -> str:
+    """ログ 1 行を壊さないよう改行除去 + 長さ制限する。"""
+    if not reason:
+        return ""
+    flat = " ".join(str(reason).split())   # 改行・連続空白を単一空白へ
+    return flat[:_REASON_MAX_LEN]
 
 
 class PlanningPipeline:
