@@ -120,7 +120,7 @@ def make_news_material_provider(
     """
     from src.analysis.news_aggregator import aggregate_news_sentiment
 
-    by_symbol = {inst.symbol: inst for inst in config.instruments}
+    by_symbol = {inst.symbol: inst for inst in config.enabled_instruments}
     cache = TtlSingleFlightCache(
         ttl_seconds=ttl_seconds,
         negative_ttl_seconds=negative_ttl_seconds,
@@ -145,6 +145,9 @@ def make_news_material_provider(
             return 0.0
         return abs(sent.sentiment_score)
 
+    # NOTE: impact と key は別々の cache.get 呼び出し。TTL 境界がこの 2 呼び出しの
+    # 間に落ちると別集計を見うるが、消費 key の 1 tick ズレは次 tick で自己修正する
+    # (原子性のための追加ロックは不要)。
     def get_news_key(pair: str) -> str | None:
         sent = _sentiment(pair)
         if sent is None:
