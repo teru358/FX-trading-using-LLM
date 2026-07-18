@@ -23,6 +23,9 @@
 - コミットメッセージは conventional commits (日本語可)。attribution なし。
 - 回帰基準: 作業中は per-file green、**最終合格基準は full suite `uv run pytest` で
   既知失敗のみ** (`tests/test_insights.py` ChromaDB 系 2 件 — CLAUDE.md 基準)。
+- **実行順序は Task 番号順** (0→1→…→11)。文書の物理配置では Task 8 (削除+登録) が
+  Task 7 (fail-fast) の前に並ぶが、**fail-fast (Task 7) を削除 (Task 8) より先に
+  実行する** (plan レビュー Medium-4: 中間コミットの起動安全性)。
 
 ## ファイル構成 (最終形)
 
@@ -226,9 +229,6 @@ class TestPlanningRunQuery:
         assert run.finished_at is not None
 ```
 
-注意 (実装時判断): `set_order_intent_order_id` 相当の既存 API がない場合、テストでは
-`sqlalchemy` の生 UPDATE で `order_id` を埋める (order_intents の `order_id` は
-order worker が broker 応答後に書く運用カラム)。実装対象は逆引き getter のみ。
 
 - [ ] **Step 2: テストが fail することを確認**
 
@@ -439,7 +439,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add src/data/orches
 **Files:**
 - Modify: `src/analysis/reflector.py`
 - Modify: `src/rag/directional_writer.py:71-113`
-- Test: `tests/test_reflector_strict.py` (新規。旧 `tests/test_reflector.py` は Task 7 で削除)
+- Test: `tests/test_reflector_strict.py` (新規。旧 `tests/test_reflector.py` は Task 8 で削除)
 
 spec: §3.3 (プロンプト簡素化)、§3.5 (fallback 削除・例外伝搬)、§3.5b (schema validation + 機械判定)。
 
@@ -532,11 +532,15 @@ async def test_wrong_type_raises():
 class TestMachineDirectionJudgment:
     """方向正誤は価格方向の機械判定 (spec §3.5b)。LLM 申告は上書きされる。"""
 
-    async def test_buy_close_above_entry_is_correct(self):
+    async def test_buy_close_above_entry_is_correct(self, caplog):
         r = await generate_close_reflection(
             pair_cfg=PAIR, order=_order("buy", 150.0, 151.0, "manual"),
             llm=_FakeLLM(_valid_json(was_directionally_correct=False)))
         assert r.was_directionally_correct is True   # 機械判定が勝つ
+        # LLM 申告との不一致は warning に残る (spec §3.5b「整合確認」)
+        assert any("machine verdict" in rec.message for rec in caplog.records)
+        # RAG カード本文は機械判定値を明記する
+        assert "directionally_correct=True" in r.full_text
 
     async def test_buy_close_below_entry_is_incorrect(self):
         r = await generate_close_reflection(
@@ -628,14 +632,26 @@ Expected: `ImportError: cannot import name 'ReflectionValidationError'` 等で F
    ```
 5. 機械判定 (`won = close_reason == "take_profit"` を置換):
    ```python
-   # 方向正誤は価格方向の機械判定 (spec §3.5b)。LLM 申告は採用しない。
+   # 方向正誤は価格方向の機械判定を正とする (spec §3.5b)。
    if order.direction == "buy":
        correct = close_price > order.entry_price
    else:
        correct = close_price < order.entry_price
+   # LLM 申告は叙述の整合確認に使う (spec §3.5b)。不一致は lesson が逆方向の
+   # 解釈を含む可能性があるため warning を残す。
+   if data["was_directionally_correct"] != correct:
+       logger.warning(
+           f"[REFLECT] {order.order_id}: LLM directional claim "
+           f"({data['was_directionally_correct']}) != machine verdict "
+           f"({correct}) — using machine verdict")
    ```
-   `Reflection(was_directionally_correct=correct, ...)` に使う。
-   `data["was_directionally_correct"]` は validation のみで正誤には不使用。
+   `Reflection(was_directionally_correct=correct, ...)` に機械判定を使い、
+   **`full_text` にも機械判定値を明記する** (RAG カード本文が正誤の正を持つ):
+   ```python
+   full_text = (
+       f"... | directionally_correct={correct} | Lesson: {lesson}"
+   )   # 既存 full_text 組み立てに directionally_correct= を追加
+   ```
 
 `src/rag/directional_writer.py` の `record_trade_complete` (`:92-113`):
 try/except を外し例外伝搬にする (embedding 生成 + upsert をベタに実行)。
@@ -644,7 +660,7 @@ try/except を外し例外伝搬にする (embedding 生成 + upsert をベタ�
 
 `_finalize_closed_orders` (trading.py) は旧シグネチャで呼んでいるため、この時点で
 trading 系テストが壊れる場合は **trading.py 側の呼び出しを新シグネチャに合わせる
-最小修正** を入れる (Task 7 で削除されるまでの暫定):
+最小修正** を入れる (Task 8 で削除されるまでの暫定):
 `generate_close_reflection(pair_cfg=..., order=..., llm=..., temperature=...,
 user_notes=..., entry_analysis=entry_analysis)` とし、adaptive 提案ブロック
 (`reflection.atr_params_suggestion` 参照部, trading.py:348-364) を削除、
@@ -1030,6 +1046,45 @@ class TestRunReflectionCycle:
         run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
                              slot=_FakeSlot())   # 例外なく終了
 
+    def test_broken_row_does_not_block_valid_rows(self, tmp_path, orch, monkeypatch):
+        """不正行混在でも正常行は処理される (plan レビュー Medium-2)。"""
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        good = _closed_order("good-1").to_dict()
+        broken = {"order_id": "bad-1", "pair": "USDJPY=X",
+                  "opened_at": "not-a-datetime"}   # from_dict が落ちる行
+        no_id = {"pair": "USDJPY=X"}               # order_id なし不正行
+        (state / "trades.json").write_text(
+            json.dumps([broken, no_id, good]), encoding="utf-8")
+        seen = []
+
+        async def fake(config, store, orch_store, llm, embed_fn, order,
+                       plan_id, entry_analysis):
+            seen.append(order.order_id)
+            return ("t", True)
+
+        monkeypatch.setattr("src.cycles.reflection._reflect_and_record", fake)
+        monkeypatch.setattr("src.cycles.reflection.create_llm_client",
+                            lambda config, role: object())
+        monkeypatch.setattr("src.cycles.reflection.make_embed_fn",
+                            lambda config: object())
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        assert seen == ["good-1"]                        # 正常行は処理
+        assert orch.get_reflection("bad-1").status == "dead"   # 壊れ行は dead
+        assert "parse_error" in orch.get_reflection("bad-1").last_error
+
+    def test_trades_json_not_a_list_is_noop(self, tmp_path, orch, monkeypatch):
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        (state / "trades.json").write_text('{"oops": true}', encoding="utf-8")
+        monkeypatch.setattr("src.cycles.reflection.create_llm_client",
+                            lambda config, role: object())
+        monkeypatch.setattr("src.cycles.reflection.make_embed_fn",
+                            lambda config: object())
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())   # warning のみで終了
+
     def test_plan_context_passed(self, tmp_path, orch, monkeypatch):
         """order_intent → plan_id → reasoning が _reflect_and_record に渡る。"""
         _write_trades(tmp_path, [_closed_order("bro-1")])
@@ -1109,8 +1164,6 @@ class TestRunReflectionCycle:
         assert r.status == "retry"      # 処理済みにはならない → 次回再処理
 ```
 
-注: `try_insert_order_intent` の正確な引数は実装時に既存シグネチャ
-(orchestrator_store.py:913) に合わせて調整すること。
 
 - [ ] **Step 2: fail 確認**
 
@@ -1155,6 +1208,41 @@ logger = logging.getLogger(__name__)
 
 _NEW_QUOTA = 2      # 未試行 (新しい順) の優先枠 (spec §3.2b)
 _TOTAL_QUOTA = 10   # 1 回の実行枠
+
+
+def _parse_closed_trades(raw, orch_store, now: datetime) -> list[Order]:
+    """trades.json の生 dict 群を行単位で Order に変換する。
+
+    不正行が 1 つあっても他の行の処理を止めない (plan レビュー Medium-2)。
+    order_id を持つ壊れ行は dead(parse_error) で記録し、以後の検知から外す。
+    """
+    if not isinstance(raw, list):
+        logger.warning(f"[REFLECT] trades.json is not a list "
+                       f"({type(raw).__name__}) — skipped")
+        return []
+    orders: list[Order] = []
+    for d in raw:
+        if not isinstance(d, dict):
+            logger.warning(f"[REFLECT] non-dict trade row skipped: {d!r:.80}")
+            continue
+        oid = d.get("order_id")
+        try:
+            order = Order.from_dict(dict(d))
+        except Exception as e:
+            if oid:
+                try:
+                    orch_store.mark_reflection_dead(
+                        oid, pair=str(d.get("pair", "?")),
+                        error=f"parse_error: {type(e).__name__}: {e}", now=now)
+                except Exception:
+                    logger.exception(
+                        f"[REFLECT] {oid}: failed to dead-letter parse error")
+            logger.warning(
+                f"[REFLECT] broken trade row skipped (order_id={oid}): {e}")
+            continue
+        if order.status == "closed":
+            orders.append(order)
+    return orders
 
 
 def _select_targets(
@@ -1277,8 +1365,7 @@ def run_reflection_cycle(config, store, orch_store, *, slot) -> None:
         logger.warning("[REFLECT] trades.json read failed — skipped",
                        exc_info=True)
         return
-    closed = [Order.from_dict(d) for d in raw
-              if d.get("status", "closed") == "closed"]
+    closed = _parse_closed_trades(raw, orch_store, now)
     targets = _select_targets(closed, orch_store, now)
     if not targets:
         return
@@ -1297,8 +1384,6 @@ def run_reflection_cycle(config, store, orch_store, *, slot) -> None:
             break   # slot busy — 残りは次回
 ```
 
-`load_user_notes` の import 元は実装時に trading.py の旧 import
-(`from src.??? import load_user_notes`) を確認して合わせる。
 
 - [ ] **Step 4: green 確認**
 
@@ -1314,37 +1399,17 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add src/cycles/refl
 
 ---
 
-### Task 5: main.py 配線 (reflection job) + bootstrap dangling 回収
+### Task 5: bootstrap dangling 回収
+
+**注意 (plan レビュー Medium-4)**: reflection job の **scheduler 登録はここでは行わない**。
+旧 `_finalize_closed_orders` が残っている間に登録すると旧・新二経路で LLM reflection が
+走るため、登録は旧取引サイクル削除と同一コミット (Task 8) で行う。
 
 **Files:**
-- Modify: `main.py` (`_guards` + ジョブ登録 + Schedule 表示)
 - Modify: `src/orchestrator/bootstrap.py` (dangling 回収)
-- Test: `tests/test_main_wiring.py` (追記)、`tests/test_orchestrator_bootstrap.py` 相当 (既存があれば追記)
+- Test: 既存 bootstrap テストに追記
 
 - [ ] **Step 1: 実装**
-
-`main.py`:
-
-1. `_guards` に追加 (skip_predicate なし — 決済は休場中も残るため):
-   ```python
-   "reflection": JobGuard("reflection"),
-   ```
-2. ジョブ登録 (exit_check 登録 `:374-378` の直後、毎時):
-   ```python
-   # 決済振り返り (毎時・LLM slot 1件ずつ・spec §3.6)
-   from src.data.orchestrator_store import OrchestratorStore as _OrchStoreForReflect
-   _reflect_store = _OrchStoreForReflect(config.prices_db_path)
-   from src.cycles.reflection import run_reflection_cycle
-   for t in technical_times:
-       schedule.every().day.at(t, news_tz).do(
-           _run_with_guard, _guards["reflection"],
-           run_reflection_cycle, config, store, _reflect_store, slot=_llm_slot,
-       )
-   ```
-3. Schedule 表示に行追加:
-   ```python
-   sched_table.add_row("Reflection", "every :00  (close reflection, 1-per-slot)")
-   ```
 
 `src/orchestrator/bootstrap.py` — `OrchestratorStore` 生成直後 (`:178` 付近) に:
 
@@ -1359,10 +1424,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add src/cycles/refl
 
 - [ ] **Step 2: テスト**
 
-`tests/test_main_wiring.py` に reflection ジョブ登録の検証を追記
-(既存のジョブ登録テストのパターンに従い、`schedule` のジョブ一覧に reflection guard
-経由の登録が 24 件あることを確認)。bootstrap 側は既存 bootstrap テストに
-「起動時に dangling run が failed になる」ケースを追加:
+既存 bootstrap テストに「起動時に dangling run が failed になる」ケースを追加:
 
 ```python
 def test_bootstrap_recovers_dangling_runs(...):
@@ -1373,7 +1435,7 @@ def test_bootstrap_recovers_dangling_runs(...):
 - [ ] **Step 3: green 確認 + commit**
 
 ```bash
-wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_main_wiring.py tests/test_reflection_cycle.py -q 2>&1 | tail -3 && git add -A main.py src/orchestrator/bootstrap.py tests/ && git commit -m 'feat(main): reflection job配線 + orchestrator起動時のdangling run回収'"
+wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_reflection_cycle.py -q 2>&1 | tail -3 && git add -A src/orchestrator/bootstrap.py tests/ && git commit -m 'feat(orchestrator): 起動時のdangling run回収'"
 ```
 
 ---
@@ -1409,11 +1471,11 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
   :142-144 の `if accuracy_force_hold:` 削除に伴い :145 の `elif` を `if` に繰り上げ。
 - `weekly_diagnosis` は forecast_store 引数を除去し、j2 テンプレート
   (`prompts/weekly_diagnosis_user.j2`) から `accuracy_section` 変数を除去。
-- `ask_context_builder` の `build_trade_summary`/session 依存は **Task 7 で削除**
+- `ask_context_builder` の `build_trade_summary`/session 依存は **Task 8 で削除**
   (このタスクでは forecast 分のみ)。
 - main.py の forecast_times/`_skipped_forecast` 変数群 (:308-322) と
   ジョブ登録 (:407-416) を削除。`run_times` 参照 (:316/:409-410) はここでは
-  forecast フィルタ分のみ消え、`run_times` 本体は Task 7 で削除。
+  forecast フィルタ分のみ消え、`run_times` 本体は Task 8 で削除。
 
 - [ ] **Step 2: 参照残りゼロ確認**
 
@@ -1439,7 +1501,38 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commi
 
 ---
 
-### Task 7: 取引サイクル系 完全削除
+### Task 8: 取引サイクル系 完全削除 + reflection job 登録
+
+> **実行順注意 (plan レビュー Medium-4)**: このタスクは文書上 Task 7 (fail-fast) の
+> 前に並んでいるが、**実行は必ず Task 7 の後**。番号順に実行すること。
+> fail-fast を先に入れることで、削除後の中間コミットでも発注経路の消失が
+> 起動時に検出される。
+
+**reflection job 登録 (このタスクの同一コミットで実施 — 旧経路削除と同時):**
+
+`main.py`:
+1. `_guards` に追加 (skip_predicate なし — 決済は休場中も残るため):
+   ```python
+   "reflection": JobGuard("reflection"),
+   ```
+2. ジョブ登録 (exit_check 登録の直後、毎時):
+   ```python
+   # 決済振り返り (毎時・LLM slot 1件ずつ・spec §3.6)
+   from src.data.orchestrator_store import OrchestratorStore as _OrchStoreForReflect
+   _reflect_store = _OrchStoreForReflect(config.prices_db_path)
+   from src.cycles.reflection import run_reflection_cycle
+   for t in technical_times:
+       schedule.every().day.at(t, news_tz).do(
+           _run_with_guard, _guards["reflection"],
+           run_reflection_cycle, config, store, _reflect_store, slot=_llm_slot,
+       )
+   ```
+3. Schedule 表示に行追加:
+   ```python
+   sched_table.add_row("Reflection", "every :00  (close reflection, 1-per-slot)")
+   ```
+4. `tests/test_main_wiring.py` に reflection ジョブ登録の検証を追記
+   (schedule のジョブ一覧に reflection guard 経由の登録が 24 件あること)。
 
 **Files (削除):**
 - Delete: `src/cycles/trading.py`、`src/data/session_store.py`、
@@ -1528,12 +1621,15 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 - [ ] **Step 4: commit**
 
 ```bash
-wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commit -m 'feat!: 取引サイクル完全削除 (cycle/hold/adaptive/session/audit/rag_adjustment/notifier/CLI/API/config)'"
+wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commit -m 'feat!: 取引サイクル完全削除 + reflection job登録 (旧新経路の重複なし切替)'"
 ```
 
 ---
 
-### Task 8: fail-fast 起動再構成 + pair 整合チェック
+### Task 7: fail-fast 起動再構成 + pair 整合チェック
+
+> **実行順注意**: 文書上は Task 8 (削除) の後に並ぶが、**実行は Task 8 より先**
+> (番号順)。
 
 **Files:**
 - Modify: `main.py` (起動順序: orchestrator 構築を API/scheduler より前へ、継続 guard 撤去)
@@ -1582,7 +1678,12 @@ class TestEnsureOrExit:
 
 
 class TestStartupSequence:
-    """build → validate → start → API → scheduler の順序保証。"""
+    """build → validate → initialize → start → API → scheduler の順序保証。
+
+    initialize (初回 news/tech 収集) は runtime.start() より前 (plan レビュー High-1:
+    orchestrator の planning/watch loop は start() 直後から動くため、
+    初回収集前の古い snapshot で判断・発注させない)。
+    """
 
     def _spies(self):
         order = []
@@ -1590,6 +1691,7 @@ class TestStartupSequence:
         return order, {
             "build": lambda: (order.append("build"), runtime)[1],
             "validate": lambda rt: order.append("validate"),
+            "initialize": lambda: order.append("init"),
             "start_api": lambda: order.append("api"),
             "start_scheduler": lambda: order.append("scheduler"),
         }
@@ -1597,9 +1699,9 @@ class TestStartupSequence:
     def test_happy_path_order(self):
         order, fns = self._spies()
         run_startup_sequence(**fns)
-        assert order == ["build", "validate", "start", "api", "scheduler"]
+        assert order == ["build", "validate", "init", "start", "api", "scheduler"]
 
-    def test_build_failure_stops_before_api_and_scheduler(self):
+    def test_build_failure_stops_everything_after(self):
         order, fns = self._spies()
         def boom():
             order.append("build")
@@ -1607,9 +1709,9 @@ class TestStartupSequence:
         fns["build"] = boom
         with pytest.raises(RuntimeError):
             run_startup_sequence(**fns)
-        assert "api" not in order and "scheduler" not in order
+        assert order == ["build"]
 
-    def test_validate_exit_stops_before_api_and_scheduler(self):
+    def test_validate_exit_stops_everything_after(self):
         order, fns = self._spies()
         def refuse(rt):
             order.append("validate")
@@ -1617,7 +1719,12 @@ class TestStartupSequence:
         fns["validate"] = refuse
         with pytest.raises(SystemExit):
             run_startup_sequence(**fns)
-        assert "api" not in order and "scheduler" not in order
+        assert order == ["build", "validate"]
+
+    def test_initialize_runs_before_runtime_start(self):
+        order, fns = self._spies()
+        run_startup_sequence(**fns)
+        assert order.index("init") < order.index("start")
 
     def test_start_failure_stops_before_api_and_scheduler(self):
         order, fns = self._spies()
@@ -1665,14 +1772,17 @@ def ensure_orchestrator_or_exit(runtime, *, enabled: bool, mode: str = "live") -
         logger.warning(f"[ORCH] mode={mode} — 発注は行われません (検証運転)")
 
 
-def run_startup_sequence(*, build, validate, start_api, start_scheduler):
-    """build → validate → start → API → scheduler の順序を固定する seam
-    (spec §1.5 / plan レビュー Medium-5)。
+def run_startup_sequence(*, build, validate, initialize, start_api, start_scheduler):
+    """build → validate → initialize → start → API → scheduler の順序を固定する
+    seam (spec §1.5 / plan レビュー Medium-5 / High-1)。
 
-    どの段の失敗 (例外 / SystemExit) でも後段は実行されない。
+    initialize は初回 news/tech 収集。orchestrator の planning/watch loop は
+    start() 直後から動くため、初回収集を start() より前に置き、古い snapshot で
+    判断・発注させない。どの段の失敗 (例外 / SystemExit) でも後段は実行されない。
     """
     runtime = build()
     validate(runtime)
+    initialize()
     if runtime is not None:
         runtime.start()
     start_api()
@@ -1701,12 +1811,13 @@ def run_startup_sequence(*, build, validate, start_api, start_scheduler):
 
    orchestrator = run_startup_sequence(
        build=_build, validate=_validate,
-       start_api=_start_api,          # 既存 start_api_server 呼び出しを関数化
+       initialize=_initial_collection,    # 既存 Initial collection (:510-540) を関数化
+       start_api=_start_api,              # 既存 start_api_server 呼び出しを関数化
        start_scheduler=_start_scheduler,  # 既存 scheduler_thread.start() を関数化
    )
    ```
-   Initial collection (news/tech、:510-540) は API の前後どちらでも可 —
-   orchestrator start の後・API の前に置く (現状の相対順序を維持)。
+   Initial collection (news/tech、:510-540) は `_initial_collection` として関数化し、
+   **runtime.start() より前** に実行する (High-1: 古い snapshot での判断・発注防止)。
 2. mode=shadow のとき Schedule 表示に
    `sched_table.add_row("Orchestrator", "[yellow]shadow — 発注なし[/yellow]")` を追加。
    live のときは `"live"` を表示。
@@ -1926,6 +2037,6 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/discord_bot && git add -A && git c
 
 1. finance full suite: 既知失敗 (`test_insights.py` 2 件) のみ
 2. discord_bot full suite: 全 PASS
-3. grep 検証 (Task 6/7 の Step 2) ヒット 0 件
+3. grep 検証 (Task 6/8 の grep 検証 Step) ヒット 0 件
 4. spec §1.5 fail-fast がテストで担保されている
 5. デプロイノートが存在する (Task 10)
