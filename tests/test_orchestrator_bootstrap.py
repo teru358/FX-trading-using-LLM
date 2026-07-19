@@ -510,6 +510,66 @@ def test_live_full_coverage_builds(tmp_path: Path, monkeypatch) -> None:
     assert isinstance(rt, OrchestratorRuntime)
 
 
+def _one_trade_one_watch_config() -> AppConfig:
+    trade = InstrumentConfig(symbol="USDJPY=X", display_name="USD/JPY", asset_type="fx",
+                             mode="trade", base_currency="USD", quote_currency="JPY")
+    watch = InstrumentConfig(symbol="GBPUSD=X", display_name="GBP/USD", asset_type="fx",
+                             mode="watch", base_currency="GBP", quote_currency="USD")
+    cfg = AppConfig(instruments=[trade, watch])
+    cfg.orchestrator.enabled = True
+    return cfg
+
+
+def test_live_non_tradeable_pair_raises(tmp_path: Path, monkeypatch) -> None:
+    """live で orchestrator.pairs に非 tradeable symbol が混ざれば起動中止。
+
+    黙って drop すると残りが tradeable 全体と一致してしまい整合チェックを
+    素通りする。運用者は発注していると信じるが発注経路が無い = §1.5 が潰そうと
+    している「無音の発注経路欠落」そのもの (レビュー H-2)。
+    """
+    _patch_heavy(monkeypatch, tmp_path)
+    cfg = _one_trade_one_watch_config()
+    cfg.orchestrator.mode = "live"
+    cfg.orchestrator.pairs = ["USDJPY=X", "GBPUSD=X"]  # GBPUSD は mode=watch
+    with pytest.raises(RuntimeError) as exc:
+        bs.build_orchestrator_runtime(
+            cfg, store=object(), price_store=object(),
+            analysis_store=_FakeAnalysisStore(), price_provider=_FakePriceProvider(),
+        )
+    assert "GBPUSD=X" in str(exc.value)
+
+
+def test_non_live_non_tradeable_pair_warns_but_builds(
+    tmp_path: Path, monkeypatch, caplog,
+) -> None:
+    """live 以外は従来どおり warning のみで除外して構築を続ける。"""
+    _patch_heavy(monkeypatch, tmp_path)
+    cfg = _one_trade_one_watch_config()
+    cfg.orchestrator.mode = "shadow"
+    cfg.orchestrator.pairs = ["USDJPY=X", "GBPUSD=X"]
+    with caplog.at_level("WARNING"):
+        rt = bs.build_orchestrator_runtime(
+            cfg, store=object(), price_store=object(),
+            analysis_store=_FakeAnalysisStore(), price_provider=_FakePriceProvider(),
+        )
+    assert isinstance(rt, OrchestratorRuntime)
+    assert any("GBPUSD=X" in r.getMessage() for r in caplog.records)
+
+
+def test_live_all_pairs_non_tradeable_raises(tmp_path: Path, monkeypatch) -> None:
+    """全 pair が非 tradeable でも live なら None 返却ではなく起動中止。"""
+    _patch_heavy(monkeypatch, tmp_path)
+    cfg = _one_trade_one_watch_config()
+    cfg.orchestrator.mode = "live"
+    cfg.orchestrator.pairs = ["GBPUSD=X"]
+    with pytest.raises(RuntimeError) as exc:
+        bs.build_orchestrator_runtime(
+            cfg, store=object(), price_store=object(),
+            analysis_store=_FakeAnalysisStore(), price_provider=_FakePriceProvider(),
+        )
+    assert "GBPUSD=X" in str(exc.value)
+
+
 def test_shadow_pair_subset_warns_but_builds(tmp_path: Path, monkeypatch, caplog) -> None:
     """mode=shadow なら同条件でも構築成功 (warning のみ)。"""
     _patch_heavy(monkeypatch, tmp_path)
