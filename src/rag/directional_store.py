@@ -16,6 +16,16 @@ logger = logging.getLogger(__name__)
 _BULLISH_COL = "fx_reflections_bullish"
 _BEARISH_COL = "fx_reflections_bearish"
 
+# 退役カード (forecast/hold + trade entry) の where 条件 (spec §3.4b)。
+# migration スクリプトの dry-run 件数カウントと共有し、条件のドリフトを防ぐ。
+RETIRED_CARDS_WHERE = {"$or": [
+    {"session_type": {"$in": ["forecast", "hold"]}},
+    {"$and": [
+        {"session_type": {"$eq": "trade"}},
+        {"phase": {"$eq": "entry"}},
+    ]},
+]}
+
 
 class DirectionalStore:
     """方向別のChromaDBコレクションを管理する。"""
@@ -170,16 +180,7 @@ class DirectionalStore:
             col = self._collection(direction)
             # 削除は 1 回の $or にまとめる (中間状態を作らない)。件数は
             # count 差分ではなく対象 ID 数で確定する (並行 upsert に非依存)。
-            retired = col.get(
-                where={"$or": [
-                    {"session_type": {"$in": ["forecast", "hold"]}},
-                    {"$and": [
-                        {"session_type": {"$eq": "trade"}},
-                        {"phase": {"$eq": "entry"}},
-                    ]},
-                ]},
-                include=[],
-            )
+            retired = col.get(where=RETIRED_CARDS_WHERE, include=[])
             ids = retired["ids"]
             if ids:
                 col.delete(ids=ids)
