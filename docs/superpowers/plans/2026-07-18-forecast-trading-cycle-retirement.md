@@ -1557,7 +1557,10 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
   - `:143` `forecast_accuracy_feedback` (以下のブロック一式)
   - `:216-219` forecast 4 キー (`forecast_review_interval` / `forecast_start_hour` /
     `forecast_min_combined` / `forecast_significance` 相当)
-  - `:256` notify の forecast 関連キー (残り 2 キーは Task 8)
+  - ~~`:256` notify の forecast 関連キー (残り 2 キーは Task 8)~~ — **Task 6 実施時の実測で
+    実在しないことを確認**。notification 節に forecast 関連キーは無く、notify 3 キー
+    (`notify_on_cycle_summary` / `notify_on_order_open` / `notify_on_signal_skipped`) は
+    すべて trading.py 専用消費のため **3 キーとも Task 8 で削除**する。
   ※ 行番号は目印。実際は**キー名で探す**こと。
   ※ `run_times` (`:161`)・`atr_timeframe` (`:128`)・`rag_adjustment_*` (`:118`) は Task 8 側。
 - Tests: `tests/test_accuracy_feedback.py` 削除。`tests/test_forecast*.py` があれば削除。
@@ -2009,7 +2012,10 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
   - `:118` `rag_adjustment_enabled` 以下 9 キー
   - `:128` `atr_timeframe` 以下 sl/tp_atr_mult 6 キー
   - `:161` `run_times`
-  - `:258/:260` notify 2 キー (残り 1 キーは Task 6 側)
+  - notify **3 キー全部** (`notify_on_cycle_summary` / `notify_on_order_open` /
+    `notify_on_signal_skipped`) — 旧 plan の「2 キー (残り 1 キーは Task 6 側)」は誤り。
+    Task 6 実測で forecast 関連 notify キーは実在せず、3 キーとも trading 専用のため
+    ここでまとめて削除する
   - `api.run_trade_soft_timeout_sec`
   - **`vol_regime_*` 6 キー** (`vol_regime_enabled` / `vol_regime_ewma_span` /
     `vol_regime_high_threshold` / `vol_regime_low_threshold` /
