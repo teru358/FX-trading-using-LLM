@@ -230,5 +230,3 @@ class AskContextBuilder:
         else:
             lines.append("No open positions.")
         return "\n".join(lines)
-
-

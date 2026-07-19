@@ -2607,6 +2607,32 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/discord_bot && git add -A && git c
 
 ---
 
+## 将来課題 (本 plan スコープ外)
+
+### scheduled job 用の優先度付きキュー (外部レビュー High の本来解)
+
+**現状の暫定策** — reflection と news の LLM slot 衝突は「reflection を news と別の
+分 (既定 :07) へ移す + reflection の 1 回あたり実行時間を 600s で打ち切る」で回避した
+(`main._pick_reflection_minute` / `src/cycles/reflection.py:_TIME_BUDGET_SECONDS`)。
+
+**残る問題** — `PriorityJobSlot.try_run_scheduled` は競合時に**待機も再投入もせず即
+スキップ**する (`src/concurrency/priority_job_slot.py:70`)。時刻をずらしても、前段
+ジョブが長引いて次ジョブの時刻に食い込めば、その回は依然として**無言で欠落**する。
+時間上限はこの窓を縮めるだけで、なくすものではない。
+
+**本来解** — scheduled job 用の優先度付きキューを設け、slot 競合時は skip せず
+**優先度順に待機実行**する (`news > reflection`)。あわせて:
+
+- 同一ジョブの多重滞留を防ぐ dedupe (同種ジョブがキューに居れば新規を捨てる)
+- 陳腐化した待機ジョブの破棄 (news は次回収集が来たら古い方を捨てて良い)
+- ユーザージョブ (`waiting_user_job`) との優先度関係の再定義
+
+**着手しなかった理由** — キュー化は `PriorityJobSlot` の契約変更であり、news / econ /
+technical / ask / reflection の全 consumer に影響する。cycle-retirement のスコープを
+明確に超えるため、必要になった時点で別 spec とする。
+
+---
+
 ## 完了条件
 
 1. finance full suite: **0 failed** (`tests/test_analysis_store_write.py` の date-flake は
