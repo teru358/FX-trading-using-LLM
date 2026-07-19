@@ -1096,10 +1096,12 @@ class OrchestratorStore:
         attempt_count は保持する ("何回失敗した末に成功したか" は
         reflection job の健全性指標として残す)。
 
-        既に dead の行には書かない (terminal、レビュー HIGH-2)。
+        既に terminal (done / dead) の行には書かない (レビュー HIGH-2)。
+        遮断されたことは warning で残す — 黙って捨てると「保存したのに
+        反映されない」無症状の失敗になる (レビュー LOW-1)。
         """
         with Session(self._engine) as session:
-            self._upsert_reflection(
+            written = self._upsert_reflection(
                 session, order_id, pair=pair, now=now,
                 values={
                     "plan_id": plan_id,
@@ -1112,6 +1114,11 @@ class OrchestratorStore:
                     "next_retry_at": None,
                 },
             )
+            if written is None:
+                session.rollback()
+                logger.warning(
+                    f"[REFLECT] {order_id} は terminal のため done 記録を無視")
+                return
             session.commit()
 
     def mark_reflection_retry(
@@ -1171,10 +1178,11 @@ class OrchestratorStore:
     ) -> None:
         """恒久不能 (instrument 不在等) を即 dead 記録する。
 
-        既に done の行には書かない (terminal、レビュー HIGH-2)。
+        既に terminal (done / dead) の行には書かない (レビュー HIGH-2)。
+        遮断は warning で残す (レビュー LOW-1、mark_reflection_done と同様)。
         """
         with Session(self._engine) as session:
-            self._upsert_reflection(
+            written = self._upsert_reflection(
                 session, order_id, pair=pair, now=now,
                 values={
                     "status": "dead",
@@ -1182,6 +1190,11 @@ class OrchestratorStore:
                     "next_retry_at": None,
                 },
             )
+            if written is None:
+                session.rollback()
+                logger.warning(
+                    f"[REFLECT] {order_id} は terminal のため dead 記録を無視: {error}")
+                return
             session.commit()
 
     # ── planning 実行中照会 (spec §3.6, best effort) ────────────

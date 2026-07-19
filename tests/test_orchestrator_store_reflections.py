@@ -1,6 +1,7 @@
 """reflections テーブルと planning 照会 API のテスト (spec §3.2b/§3.4/§3.6)。"""
 from __future__ import annotations
 
+import logging
 import threading
 from datetime import timedelta
 
@@ -183,6 +184,61 @@ class TestReflectionCrud:
             realized_pnl=0.0, reflection_text="t",
             was_directionally_correct=True, now=NOW)
         assert store.get_reflection("ord-t2").status == "done"
+
+    def test_done_blocked_by_terminal_logs_warning(self, store, caplog):
+        """terminal 行への done が無言で消えないこと (レビュー LOW-1)。
+
+        現状の呼び出し経路 (_select_targets が terminal を除外) では起きないが、
+        再生成機能などを足したときに「保存したのに反映されない」無症状の失敗に
+        なる。retry と同じく warning を出す。
+        """
+        store.mark_reflection_dead("ord-l1", pair="P", error="gone", now=NOW)
+        with caplog.at_level(logging.WARNING,
+                             logger="src.data.orchestrator_store"):
+            store.mark_reflection_done(
+                "ord-l1", plan_id=99, pair="P", close_reason="take_profit",
+                realized_pnl=42.0, reflection_text="t",
+                was_directionally_correct=True, now=NOW)
+        assert any("ord-l1" in m and "terminal" in m for m in caplog.messages), \
+            f"遮断が無言だった: {caplog.messages!r}"
+        r = store.get_reflection("ord-l1")
+        assert r.status == "dead"
+        assert r.plan_id is None        # 書き込みは実際に弾かれている
+
+    def test_dead_blocked_by_terminal_logs_warning(self, store, caplog):
+        store.mark_reflection_done(
+            "ord-l2", plan_id=1, pair="P", close_reason="take_profit",
+            realized_pnl=1.0, reflection_text="t",
+            was_directionally_correct=True, now=NOW)
+        with caplog.at_level(logging.WARNING,
+                             logger="src.data.orchestrator_store"):
+            store.mark_reflection_dead("ord-l2", pair="P", error="gone", now=NOW)
+        assert any("ord-l2" in m and "terminal" in m for m in caplog.messages), \
+            f"遮断が無言だった: {caplog.messages!r}"
+        assert store.get_reflection("ord-l2").status == "done"
+
+    def test_repeated_done_is_reported_not_silent(self, store, caplog):
+        """done 行への 2 回目の done も遮断され、無言ではない。
+
+        ON CONFLICT WHERE status='retry' は同一状態の再書き込みも弾くため、
+        別 plan_id / 別 pnl での上書きは反映されない。行数は 1 のままで、
+        既存の冪等性テストの期待 (1 行 / status=done) は満たす。
+        """
+        for _ in range(2):
+            store.mark_reflection_done(
+                "ord-l3", plan_id=1, pair="P", close_reason="take_profit",
+                realized_pnl=1.0, reflection_text="t",
+                was_directionally_correct=True, now=NOW)
+        with caplog.at_level(logging.WARNING,
+                             logger="src.data.orchestrator_store"):
+            store.mark_reflection_done(
+                "ord-l3", plan_id=2, pair="P", close_reason="stop_loss",
+                realized_pnl=-9.0, reflection_text="new",
+                was_directionally_correct=False, now=NOW)
+        assert any("ord-l3" in m for m in caplog.messages)
+        r = store.get_reflection("ord-l3")
+        assert r.plan_id == 1           # 初回の値が保持される
+        assert r.reflection_text == "t"
 
     def test_retry_rolls_back_entirely_when_terminal_update_fails(
             self, store, monkeypatch):
