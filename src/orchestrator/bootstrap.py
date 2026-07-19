@@ -195,6 +195,18 @@ def build_orchestrator_runtime(
         pairs = [s for s in configured if s in tradeable_set]
         dropped = [s for s in configured if s not in tradeable_set]
         if dropped:
+            # live では黙って drop してはならない (spec §1.5 / 実装後レビュー H-2)。
+            # drop すると残った pairs が tradeable 全体と一致してしまい、下の pair
+            # 整合チェックを素通りして起動が成功する。運用者は drop された pair も
+            # 発注していると信じるが発注経路は存在しない = §1.5 が潰そうとしている
+            # 「無音の発注経路欠落」そのもの。
+            if orch_cfg.mode == "live":
+                raise RuntimeError(
+                    f"[ORCH] orchestrator.pairs に tradeable でない symbol が"
+                    f"含まれています: {dropped} (live mode)。これらの発注経路は"
+                    f"存在しません。instruments 側で mode: trade にするか、"
+                    f"orchestrator.pairs から外してください。"
+                )
             logger.warning(
                 "[ORCH] orchestrator.pairs に tradeable でない symbol が含まれ除外: %s",
                 dropped,
