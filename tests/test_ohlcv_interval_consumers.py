@@ -1,9 +1,9 @@
 """interval-less load_ohlcv 残存箇所の掃討 (codex Med#1 同族)。
 
-- performance_audit._load_pair_ohlcv: audit CLI が traded pair の OHLCV を読む経路。
-  cache は ohlcv_interval で書かれるため、interval 無指定だと day モードで空になる。
 - econ_impact_job.collect_econ_impact: econ カレンダー反応窓の読み出し。
   tradeable pair の cache は _ohlcv_interval_for (= ohlcv_interval) で書かれる。
+
+(performance_audit._load_pair_ohlcv の 2 件は Task 8 で audit 系ごと退役したため削除。)
 """
 from __future__ import annotations
 
@@ -25,35 +25,6 @@ class _RecordingStore:
     def load_ohlcv(self, symbol, start, end, *, interval="1h"):
         self.calls.append((symbol, interval))
         return self._df
-
-
-# ── performance_audit._load_pair_ohlcv ────────────────────────
-
-
-def test_audit_load_pair_ohlcv_uses_interval_singleton(monkeypatch):
-    """_ohlcv_interval_singleton (run_audit で ohlcv_interval に設定) が伝搬すること。"""
-    from src.analysis import performance_audit
-
-    store = _RecordingStore()
-    monkeypatch.setattr(performance_audit, "_price_store_singleton", store)
-    monkeypatch.setattr(performance_audit, "_ohlcv_interval_singleton", "15m")
-
-    performance_audit._load_pair_ohlcv(
-        "USDJPY=X", since=datetime(2026, 7, 1), until=datetime(2026, 7, 2),
-    )
-    assert store.calls == [("USDJPY=X", "15m")]
-
-
-def test_audit_load_pair_ohlcv_default_interval_is_1h(monkeypatch):
-    """既定 (singleton 未設定相当) は従来通り 1h (挙動不変)。"""
-    from src.analysis import performance_audit
-
-    store = _RecordingStore()
-    monkeypatch.setattr(performance_audit, "_price_store_singleton", store)
-    monkeypatch.setattr(performance_audit, "_ohlcv_interval_singleton", "1h")
-
-    performance_audit._load_pair_ohlcv("USDJPY=X", since=datetime(2026, 7, 1))
-    assert store.calls == [("USDJPY=X", "1h")]
 
 
 # ── econ_impact_job.collect_econ_impact ──────────────────
