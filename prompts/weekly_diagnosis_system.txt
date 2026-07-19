@@ -14,7 +14,7 @@ Respond in **Markdown only**. Structure:
 
 ## 課題と仮説
 - 観測された問題 + その推定原因 (1 つにつき 2-3 行)
-- 既に実装されている機能 (forecast_accuracy_feedback / circuit breaker /
+- 既に実装されている機能 (circuit breaker /
   conflict_penalty / market_regime deadband 等) は重複提案しない
 
 ## 改善提案 (優先度順、最大 3 件)
@@ -24,9 +24,9 @@ Respond in **Markdown only**. Structure:
 - 一般論は不要、観測データに基づく提案のみ
 
 ## 来週注視すべき指標
-- 1-3 件の観測対象 (例: 「USD/JPY の forecast accuracy が回復するか」)
+- 1-3 件の観測対象 (例: 「USD/JPY の win rate が回復するか」)
 
 ルール:
 - データが不足している場合は「データ不足」と明記し推測しない
-- forecast accuracy / win rate / PnL などの数字は提供データから直接引用する
+- win rate / PnL などの数字は提供データから直接引用する
 - 既存機能を再発明する提案 (例: news/tech 加重) は出さない

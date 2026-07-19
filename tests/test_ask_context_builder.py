@@ -3,7 +3,6 @@ import pytest
 from src.rag.ask_context_builder import extract_pairs
 from src.rag.ask_context_builder import merge_and_rank_results
 from src.rag.ask_context_builder import build_trade_summary
-from src.rag.ask_context_builder import build_forecast_accuracy
 
 
 def _make_instruments():
@@ -102,35 +101,3 @@ def test_trade_summary_no_pair_gives_total():
 def test_trade_summary_empty():
     result = build_trade_summary([], pairs=["EURUSD=X"])
     assert "No trade history" in result
-
-
-# build_forecast_accuracy tests
-
-def _make_forecasts(data):
-    from dataclasses import dataclass
-    @dataclass
-    class FakeForecast:
-        pair: str
-        predicted_direction: str
-        latest_price_delta: float
-        stop_loss: float
-        current_price: float
-        reviewed: int
-    return [
-        FakeForecast(pair=pair, predicted_direction=direction, latest_price_delta=delta, stop_loss=1.0, current_price=1.5, reviewed=1)
-        for pair, direction, delta in data
-    ]
-
-def test_forecast_accuracy_basic():
-    forecasts = _make_forecasts([
-        ("EURUSD=X", "bullish", 0.01),
-        ("EURUSD=X", "bullish", -0.01),
-        ("EURUSD=X", "bearish", -0.01),
-    ])
-    result = build_forecast_accuracy({"EURUSD=X": forecasts}, pairs=["EURUSD=X"])
-    assert "EURUSD=X" in result
-    assert "Correct: 2" in result
-
-def test_forecast_accuracy_empty():
-    result = build_forecast_accuracy({}, pairs=[])
-    assert "No forecast data" in result

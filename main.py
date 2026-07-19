@@ -33,10 +33,10 @@ from src.jobs.technical_schedule import (
 from src.logging_setup import setup_logging
 from src.rag.vector_store import VectorStore
 from src.startup import startup_checks
-from src.data.analysis_store import ForecastStore, HoldDecisionStore
+from src.data.analysis_store import HoldDecisionStore
 from src.data.price_provider import PriceProvider
 from src.trading.market_state import market_skip_check
-from src.trading_cycle import run_exit_check_cycle, run_forecast_cycle, run_trading_cycle
+from src.trading_cycle import run_exit_check_cycle, run_trading_cycle
 
 _console = Console()
 _stop = threading.Event()
@@ -50,7 +50,6 @@ _llm_slot = PriorityJobSlot("llm")
 _guards: dict[str, JobGuard] = {
     "price_monitor": JobGuard("price_monitor", skip_predicate=market_skip_check),
     "exit_check": JobGuard("exit_check", skip_predicate=market_skip_check),
-    "forecast": JobGuard("forecast", skip_predicate=market_skip_check),
     "technical": JobGuard("technical", skip_predicate=market_skip_check),
     "econ": JobGuard("econ_calendar"),
     "weekly_diagnosis": JobGuard("weekly_diagnosis"),
@@ -212,7 +211,6 @@ def main() -> None:
     store = VectorStore(config.rag_db_path)
     price_store = PriceStore(config.prices_db_path)
     analysis_store = AnalysisStore(config.prices_db_path)
-    forecast_store = ForecastStore(config.prices_db_path)
     hold_store = HoldDecisionStore(config.prices_db_path)
     price_provider = PriceProvider(config)
 
@@ -305,21 +303,6 @@ def main() -> None:
         "Exit check",
         "every :00  (SL/TP + position review, no LLM)",
     )
-    forecast_interval = config.analysis.forecast_review_interval_hours
-    forecast_start = config.analysis.forecast_start_hour
-    _fcast_offset = forecast_start
-    _fcast_interval = forecast_interval
-    forecast_times = [
-        f"{(_fcast_offset + h) % 24:02d}:00"
-        for h in range(0, 24, _fcast_interval)
-    ]
-    _skipped_forecast = [t for t in forecast_times if t in run_times]
-    _skip_note = f"  skip=[dim]{','.join(_skipped_forecast)}[/dim](=trade)" if _skipped_forecast else ""
-    sched_table.add_row(
-        "Forecast cycle",
-        f"every [cyan]{forecast_interval}[/cyan]h offset=[cyan]{forecast_start:02d}:00[/cyan]  "
-        f"({' / '.join(forecast_times)}){_skip_note}  (signal verify + new forecast, no LLM)",
-    )
     sched_table.add_row("Trading cycles",  f"[cyan]{' / '.join(run_times)}[/cyan]  ({tz})")
     monitor_status = (
         f"every [cyan]{config.price_monitor.interval_minutes}[/cyan] min  :00 aligned  "
@@ -404,17 +387,6 @@ def main() -> None:
                 _run_with_guard, _guards["technical"], _tech_dispatch, t,
             )
 
-    # 5. 予測サイクル（LLMなし・取引判定の直前）
-    #    取引判定と同時刻の場合はスキップ（取引判定が最新データで判断するため）
-    run_times_set = set(run_times)
-    forecast_times_filtered = [t for t in forecast_times if t not in run_times_set]
-    for t in forecast_times_filtered:
-        schedule.every().day.at(t, news_tz).do(
-            _run_with_guard, _guards["forecast"],
-            run_forecast_cycle, config, store, analysis_store, forecast_store,
-            price_provider=price_provider, price_store=price_store,
-        )
-
     # 6. 取引判定（LLMあり・指定時刻のみ）
     for t in run_times:
         schedule.every().day.at(t, tz).do(
@@ -469,7 +441,7 @@ def main() -> None:
             )
         else:
             def _weekly_diagnosis_run():
-                _run_weekly(config, forecast_store)
+                _run_weekly(config)
 
             _wd_picker.at(_wd_cfg.at_time, news_tz).do(
                 _run_with_guard, _guards["weekly_diagnosis"], _weekly_diagnosis_run,
@@ -502,7 +474,7 @@ def main() -> None:
         # 生成 (無効時に不要な DB を作らない — 実装後レビュー Low-Med)。engine は
         # _get_engine が db_path 単位で共有するため runtime 側と実体は同一。
         start_api_server(config, store, analysis_store, _llm_slot,
-                         price_store, hold_store, forecast_store,
+                         price_store, hold_store,
                          _api_orchestrator_store(config))
 
     # 起動直後にニュース収集+テクニカル分析を1回実行
@@ -513,7 +485,7 @@ def main() -> None:
     if market_skip_check():
         _console.print(
             "[yellow]Market is currently closed.[/yellow] "
-            "[dim]Price-dependent jobs (price_monitor / exit_check / forecast / "
+            "[dim]Price-dependent jobs (price_monitor / exit_check / "
             "technical / trading) will stay paused until market open.[/dim]"
         )
 
@@ -586,7 +558,7 @@ def main() -> None:
                 _console.print("\n[dim]終了します...[/dim]")
                 _stop.set()
         else:
-            run_commands(config, store, analysis_store, _stop, _llm_slot, forecast_store, price_store, hold_store, price_provider=price_provider)
+            run_commands(config, store, analysis_store, _stop, _llm_slot, price_store, hold_store, price_provider=price_provider)
     finally:
         _stop.set()
         if orchestrator is not None:

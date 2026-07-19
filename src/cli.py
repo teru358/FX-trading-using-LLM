@@ -21,7 +21,7 @@ from src.trading.position_manager import PositionManager
 from src.data.orchestrator_store import OrchestratorStore
 from src.orchestrator.plan_view import plan_to_row
 from src.trading_cycle import run_trading_cycle
-from src.views import run_analysis_summary, run_ask, run_forecast_view, run_news_view, run_tech_view
+from src.views import run_analysis_summary, run_ask, run_news_view, run_tech_view
 
 _console = Console()
 logger = logging.getLogger(__name__)
@@ -32,7 +32,6 @@ _HELP = """\
   [cyan]run news[/cyan]             — 最新ニュースセンチメントを表示（保存済みデータ）
   [cyan]run tech[/cyan]             — 最新テクニカルスナップショットを表示（保存済みデータ）
   [cyan]run analyze[/cyan]          — 総合分析シグナルを表示（保存済みデータ）
-  [cyan]run forecast[/cyan] (pair)  — 直近24hの予測サイクルデータを表示  例: run forecast EURUSD=X
   [cyan]run trade[/cyan]            — 取引判定ループを今すぐ実行（動作確認用）
   [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問・コメントを送信
   [cyan]audit[/cyan] (days)         — 過去トレードの統計診断レポート生成
@@ -356,7 +355,6 @@ def run_commands(
     analysis_store,
     stop_event: threading.Event,
     llm_slot,  # PriorityJobSlot — avoid forward-import at module top; use string annotation instead
-    forecast_store=None,
     price_store=None,
     hold_store=None,
     price_provider=None,
@@ -400,12 +398,6 @@ def run_commands(
                 elif sub in ("analyze", "a", "analysis"):
                     _console.print("[cyan]総合分析を表示中...[/cyan]")
                     run_analysis_summary(config, store, analysis_store)
-                elif sub in ("forecast", "f"):
-                    if forecast_store is None:
-                        _console.print("[red]forecast_store が利用できません[/red]")
-                    else:
-                        pair_filter = args[1] if len(args) > 1 else None
-                        run_forecast_view(config, forecast_store, pair_filter)
                 elif sub in ("trade", "tr"):
                     if price_store is None or hold_store is None:
                         _console.print("[red]price_store / hold_store が利用できません[/red]")
@@ -416,7 +408,7 @@ def run_commands(
                         )
                 else:
                     _console.print(
-                        f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | forecast | trade"
+                        f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | trade"
                     )
             elif cmd == "ask":
                 if not args:

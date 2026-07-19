@@ -134,37 +134,6 @@ async def analyze() -> dict[str, Any]:
     return {"signals": output}
 
 
-@router.get("/forecast", dependencies=[Depends(verify_api_key)])
-def forecast(pair: str | None = None, hours: int = 24) -> dict[str, Any]:
-    """直近 N 時間の予測サイクルレコードを返す (skip 含む全レコード)。"""
-    assert state.config is not None and state.forecast_store is not None
-
-    instruments = state.config.tradeable_instruments
-    if pair:
-        instruments = [i for i in instruments if i.symbol.upper() == pair.upper()]
-
-    result: dict[str, Any] = {}
-    for inst in instruments:
-        records = state.forecast_store.get_recent_all(inst.symbol, hours=hours)
-        result[inst.symbol] = [
-            {
-                "id":                  r.id,
-                "forecast_ts":         r.forecast_ts.isoformat(),
-                "current_price":       r.current_price,
-                "predicted_direction": r.predicted_direction,
-                "combined_score":      r.combined_score,
-                "confidence":          r.confidence,
-                "signal_reason":       r.signal_reason,
-                "reviewed":            r.reviewed,
-                "latest_review_ts":    r.latest_review_ts.isoformat() if r.latest_review_ts else None,
-                "latest_price_delta":  r.latest_price_delta,
-            }
-            for r in records
-        ]
-
-    return {"hours": hours, "forecasts": result}
-
-
 @router.get("/feeds", dependencies=[Depends(verify_api_key)])
 def feeds() -> dict[str, Any]:
     """RSS フィード疎通確認 (カテゴリ別・フィード別の状態を返す)。"""

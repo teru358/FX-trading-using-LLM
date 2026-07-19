@@ -9,7 +9,7 @@
 - ``routes.health``  — /status (プロセス + halt + サブシステム健全性 統合), /logs, /usage, /schedule
 - ``routes.account`` — /account (残高 + ポジション一覧、halt は /status へ集約)
 - ``routes.admin``   — /admin/halt, /admin/resume (MT5 bridge へのプロキシ)
-- ``routes.data``    — /news, /tech, /analyze, /forecast, /feeds
+- ``routes.data``    — /news, /tech, /analyze, /feeds
 - ``routes.trading`` — /run/trade, /close/{pair}
 - ``routes.ask``     — /ask
 
@@ -66,7 +66,6 @@ def start_api_server(
     llm_slot: PriorityJobSlot,
     price_store: PriceStore,
     hold_store,        # HoldDecisionStore
-    forecast_store,    # ForecastStore
     orchestrator_store=None,  # OrchestratorStore (gate spec F-5)
 ) -> threading.Thread:
     """バックグラウンドスレッドで uvicorn を起動する。"""
@@ -76,7 +75,6 @@ def start_api_server(
     state.llm_slot = llm_slot
     state.price_store = price_store
     state.hold_store = hold_store
-    state.forecast_store = forecast_store
     state.orchestrator_store = orchestrator_store
     state.started_at = db_now()
 

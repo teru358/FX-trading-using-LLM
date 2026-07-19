@@ -93,7 +93,6 @@ async def _process_pair(
     analysis_store: AnalysisStore,
     llm: LLMClient,  # 常に None (technical-llm-omit); シグネチャ互換のため残置・本体未使用
     price_provider: PriceProvider | None = None,
-    forecast_store=None,
 ):
     """1ペアの分析→シグナル生成。
 
@@ -130,18 +129,6 @@ async def _process_pair(
 
         account = position_mgr.get_account_state()
 
-        # Forecast accuracy auto-feedback の provider を構築
-        # forecast_store 未提供なら provider=None で従来動作
-        accuracy_provider = None
-        if forecast_store is not None and config.trading.forecast_accuracy_feedback.enabled:
-            from functools import partial
-            from src.signals.accuracy_tracker import compute_recent_accuracy
-            accuracy_provider = partial(
-                compute_recent_accuracy,
-                forecast_store,
-                hours=config.trading.forecast_accuracy_feedback.lookback_hours,
-            )
-
         signal = combine_signals(
             news=news,
             price=price,
@@ -156,8 +143,6 @@ async def _process_pair(
             min_lot_size=config.trading.min_lot_size,
             lot_unit=config.trading.lot_unit,
             min_rr_ratio=config.trading.min_rr_ratio,
-            accuracy_provider=accuracy_provider,
-            accuracy_config=config.trading.forecast_accuracy_feedback,
         )
         return PairAnalysisOutcome(signal=signal, macro_ctx=macro_ctx)
     except Exception as e:
@@ -377,7 +362,9 @@ async def _review_hold_decisions(
                 hold=hold,
                 current_price=current_price,
                 review_ts=db_now(),
-                significance_atr_ratio=config.analysis.forecast_significance_atr_ratio,
+                # 旧 config.analysis の予測サイクル用キー削除に伴い既定値 0.30 を直書き
+                # (取引サイクル自体が Task 8 で退役予定)
+                significance_atr_ratio=0.30,
                 atr_value=hold_atr,
             )
             logger.info(f"[HOLD REVIEW] {hold.pair}: {review_text}")
@@ -445,7 +432,6 @@ async def _phase_analyze_pairs(
     analysis_store: AnalysisStore,
     llm_price: LLMClient,
     price_provider: PriceProvider | None,
-    forecast_store=None,
 ) -> tuple[list, dict[str, str], list[str]]:
     """Phase 3: 全ペアを並列分析してシグナル + macro_ctx を生成する。"""
     semaphore = asyncio.Semaphore(config.llm.provider_config.max_concurrent)
@@ -457,7 +443,6 @@ async def _phase_analyze_pairs(
                     pair_cfg, config, position_mgr, store, price_store, analysis_store,
                     llm_price,
                     price_provider=price_provider,
-                    forecast_store=forecast_store,
                 )
             except Exception as e:  # noqa: BLE001 — _process_pair 捕捉漏れの防御網
                 logger.error(
@@ -1014,7 +999,6 @@ async def trading_cycle(
     hold_store: HoldDecisionStore,
     price_provider: PriceProvider | None = None,
     session_store=None,
-    forecast_store=None,
 ) -> None:
     """取引サイクル全体のオーケストレーター。"""
     run_start = local_now(config)
@@ -1095,7 +1079,6 @@ async def trading_cycle(
     # Phase 3: 並列ペア分析 (data_health は後続タスクで notify_cycle_summary に渡す)
     signals, macro_ctxs, data_health = await _phase_analyze_pairs(
         config, position_mgr, store, price_store, analysis_store, llm_price, price_provider,
-        forecast_store=forecast_store,
     )
 
     # Phase 4a: position_review (Layer 1-3) → 決済 → 振り返り
@@ -1151,14 +1134,11 @@ def run_trading_cycle(
     """
     if gate is not None:
         gate.probe(caller="trading", sync_balance=True)
-    from src.data.analysis_store import ForecastStore
     from src.data.session_store import SessionStore
     state_store = StateStore(config.state_dir)
     position_mgr = PositionManager(state_store, context="TradingCycle")
     session_store = SessionStore(config.prices_db_path)
-    forecast_store = ForecastStore(config.prices_db_path)
     asyncio.run(trading_cycle(
         config, position_mgr, store, price_store, analysis_store, hold_store,
         price_provider=price_provider, session_store=session_store,
-        forecast_store=forecast_store,
     ))

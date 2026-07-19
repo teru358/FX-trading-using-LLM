@@ -434,7 +434,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 
 Expected: 全 PASS。
 
-- [ ] **Step 5: commit**
+- [x] **Step 5: commit**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add src/data/orchestrator_store.py tests/test_orchestrator_store_reflections.py && git commit -m 'feat(orchestrator): reflections テーブル + retry管理 + order_id逆引き + planning照会API'"
@@ -1498,7 +1498,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 
 ### Task 6: forecast 系 完全削除
 
-- [ ] **Step 0: baseline 確定 (削除に着手する前に必ず実施)**
+- [x] **Step 0: baseline 確定 (削除に着手する前に必ず実施)**
 
 削除作業を始めると、本ブランチ由来の新規失敗と、それ以前から存在する失敗の区別が
 つかなくなる。**Task 6 の他ステップより先に**以下を済ませ、baseline を green に揃える。
@@ -1565,7 +1565,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
   `tests/test_directional_writer_horizon.py`/`tests/test_integration_directional.py`/
   `tests/test_config_loader.py`/`tests/test_config_example_sync.py` の該当部分を修正。
 
-- [ ] **Step 1: 上記リストを順に削除・修正する**
+- [x] **Step 1: 上記リストを順に削除・修正する**
 
 方針:
 - `combine_signals` は accuracy 引数と分岐だけ削除して温存 (`_summarize_pair` が使う)。
@@ -1578,7 +1578,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
   ジョブ登録 (:407-416) を削除。`run_times` 参照 (:316/:409-410) はここでは
   forecast フィルタ分のみ消え、`run_times` 本体は Task 8 で削除。
 
-- [ ] **Step 2: 参照残りゼロ確認**
+- [x] **Step 2: 参照残りゼロ確認**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && grep -rn 'ForecastStore\|run_forecast_cycle\|forecast_cycle\|accuracy_tracker\|compute_recent_accuracy\|ForecastAccuracyFeedbackConfig\|forecast_accuracy_feedback\|record_forecast_entry\|record_forecast_review\|build_forecast_accuracy\|forecast_review_interval\|forecast_start_hour\|forecast_min_combined\|forecast_significance' src/ scripts/ main.py prompts/ config/settings.yaml.example --include='*' | grep -v Binary"
@@ -1591,7 +1591,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && grep -rn 'ForecastStore
 
 Expected: ヒット 0 件。
 
-- [ ] **Step 3: 影響 per-file テスト green 確認**
+- [x] **Step 3: 影響 per-file テスト green 確認**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_signal_combiner.py tests/test_weekly_diagnosis.py tests/test_ask_context_builder.py tests/test_config_loader.py tests/test_config_example_sync.py tests/test_main_wiring.py tests/test_directional_writer_horizon.py tests/test_integration_directional.py -q 2>&1 | tail -3"
@@ -1600,7 +1600,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 **再レビュー Medium-4 で実在確認済み** — 上記 8 ファイルはすべて `tests/` に実在する
 (`ls tests/` で確認)。Task 8 側のコマンドと違いこちらは修正不要だった。
 
-- [ ] **Step 4: 削除後の不変条件確認**
+- [x] **Step 4: 削除後の不変条件確認**
 
 削除で壊れていないことを確認する (特に `src/cycles/__init__.py` の修正漏れ検出):
 

@@ -3,18 +3,12 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Callable
 
 from src.analysis.news_analyzer import NewsSentiment
 from src.analysis.price_analyzer import PriceAnalysis
-from src.config.schema import ForecastAccuracyFeedbackConfig
-from src.signals.accuracy_tracker import AccuracyResult
 from src.utils.clock import db_now
 
 logger = logging.getLogger(__name__)
-
-# accuracy_provider 型: pair symbol → AccuracyResult or None
-AccuracyProvider = Callable[[str], AccuracyResult | None]
 
 
 @dataclass
@@ -49,8 +43,6 @@ def combine_signals(
     min_lot_size: float = 1000.0,
     lot_unit: float = 1000.0,
     min_rr_ratio: float = 0.0,        # 未使用 (ATR後に _apply_atr_sltp_to_signal で判定)
-    accuracy_provider: AccuracyProvider | None = None,
-    accuracy_config: ForecastAccuracyFeedbackConfig | None = None,
 ) -> TradeSignal:
     # Dynamic weight adjustment based on news confidence
     if news.confidence >= 0.80:
@@ -98,51 +90,7 @@ def combine_signals(
     elif regime == "ranging":
         effective_deadband *= 1.2
 
-    # ── Forecast accuracy auto-feedback ──
-    # 直近サイクルの予測精度が低いペアでは confidence をペナルティ、
-    # 著しく低い場合は action="hold" を強制 (誤った方向への新規 entry を防ぐ)。
-    accuracy_note = ""
-    accuracy_force_hold = False
-    if (
-        accuracy_provider is not None
-        and accuracy_config is not None
-        and accuracy_config.enabled
-    ):
-        try:
-            acc = accuracy_provider(pair_cfg.symbol)
-        except Exception as e:  # noqa: BLE001 - provider 失敗で signal は止めない
-            logger.warning(f"[SIGNAL] {pair_cfg.display_name}: accuracy_provider raised: {e}")
-            acc = None
-        if acc is not None and acc.sample_count >= accuracy_config.min_samples:
-            if acc.accuracy < accuracy_config.hard_threshold:
-                accuracy_force_hold = True
-                accuracy_note = (
-                    f"⚠ forecast accuracy {acc.accuracy:.0%} "
-                    f"({acc.correct_count}/{acc.sample_count}) "
-                    f"< hard {accuracy_config.hard_threshold:.0%} → forced HOLD"
-                )
-                logger.warning(
-                    f"[SIGNAL] {pair_cfg.display_name}: forced HOLD by accuracy "
-                    f"{acc.accuracy:.0%} ({acc.correct_count}/{acc.sample_count})"
-                )
-            elif acc.accuracy < accuracy_config.soft_threshold:
-                old_conf = combined_confidence
-                combined_confidence *= accuracy_config.confidence_penalty
-                accuracy_note = (
-                    f"⚠ forecast accuracy {acc.accuracy:.0%} "
-                    f"({acc.correct_count}/{acc.sample_count}) "
-                    f"→ conf×{accuracy_config.confidence_penalty} "
-                    f"({old_conf:.2f}→{combined_confidence:.2f})"
-                )
-                logger.info(
-                    f"[SIGNAL] {pair_cfg.display_name}: accuracy penalty "
-                    f"{old_conf:.2f}→{combined_confidence:.2f} (acc={acc.accuracy:.0%})"
-                )
-
-    if accuracy_force_hold:
-        action = "hold"
-        reason = "forecast accuracy below hard_threshold"
-    elif combined_confidence < confidence_threshold:
+    if combined_confidence < confidence_threshold:
         action = "hold"
         reason = f"confidence too low ({combined_confidence:.2f} < {confidence_threshold})"
     elif combined_score > effective_deadband:
@@ -187,8 +135,6 @@ def combine_signals(
         f"テクニカル(ルール): {price.bias_score:+.2f} ({price.confidence:.0%}) — {price.direction_bias}",
     ]
     detail_lines.append(f"合成: {combined_score:+.3f} → {action.upper()} ({reason})")
-    if accuracy_note:
-        detail_lines.append(accuracy_note)
     detail_reason = "\n".join(detail_lines)
 
     signal = TradeSignal(

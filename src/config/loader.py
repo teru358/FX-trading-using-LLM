@@ -44,7 +44,6 @@ from src.config.schema import (
     OandaConfig,
     ProviderConfig,
     ProvidersConfig,
-    ForecastAccuracyFeedbackConfig,
     PriceMonitorConfig,
     RagConfig,
     ScheduleConfig,
@@ -501,13 +500,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     # ── フラット configs (_from_dict で自動構築) ──────────────────
 
     trading_raw = _strip_deprecated_keys(raw.get("trading", {}) or {})
-    # ネスト dataclass: forecast_accuracy_feedback (TradingConfig 配下)
-    fa_raw = trading_raw.pop("forecast_accuracy_feedback", None)
     trading = _from_dict(TradingConfig, trading_raw)
-    if isinstance(fa_raw, dict):
-        trading.forecast_accuracy_feedback = _from_dict(
-            ForecastAccuracyFeedbackConfig, fa_raw
-        )
     schedule = _from_dict(ScheduleConfig, raw.get("schedule", {}))
     news_collection = _from_dict(NewsCollectionConfig, raw.get("news_collection", {}))
     rag = _from_dict(RagConfig, raw.get("rag", {}))
@@ -605,10 +598,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         indicators=indicator_cfg,
         chart_patterns=pattern_cfg,
         multi_timeframe=mtf_cfg,
-        forecast_review_interval_hours=an.get("forecast_review_interval_hours", 8),
-        forecast_start_hour=an.get("forecast_start_hour", 0),
-        forecast_min_combined_score=an.get("forecast_min_combined_score", 0.15),
-        forecast_significance_atr_ratio=an.get("forecast_significance_atr_ratio", 0.30),
     )
 
     # ── バリデーション ────────────────────────────────────────────

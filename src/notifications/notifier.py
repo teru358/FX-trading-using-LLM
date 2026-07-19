@@ -103,7 +103,6 @@ class CycleSummaryEvent:
 
 _SOURCE_LABELS = {
     "trading": "取引サイクル",
-    "forecast": "予測サイクル",
     "monitor": "価格監視",
     "exit_check": "決済判定",
     "manual": "手動",

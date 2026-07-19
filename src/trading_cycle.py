@@ -10,9 +10,8 @@ tests) が ``from src.trading_cycle import ...`` で
 """
 from __future__ import annotations
 
-# 公開 API: 3 サイクル本体 + 同期ラッパー
+# 公開 API: サイクル本体 + 同期ラッパー
 from src.cycles.exit_check import exit_check_cycle, run_exit_check_cycle
-from src.cycles.forecast import forecast_cycle, run_forecast_cycle
 from src.cycles.trading import (
     _adjust_signal_with_rag,
     _apply_atr_sltp_to_signal,
@@ -40,13 +39,11 @@ from src.cycles._helpers import (
 )
 
 __all__ = [
-    # 3 サイクル
+    # サイクル
     "trading_cycle",
     "run_trading_cycle",
     "exit_check_cycle",
     "run_exit_check_cycle",
-    "forecast_cycle",
-    "run_forecast_cycle",
     # 共通ヘルパー
     "_get_price",
     "_get_ohlcv",

@@ -85,50 +85,16 @@ def build_trade_summary(sessions: list, pairs: list[str]) -> str:
     return "\n".join(lines)
 
 
-def build_forecast_accuracy(forecasts_by_pair: dict[str, list], pairs: list[str]) -> str:
-    if not forecasts_by_pair:
-        return "=== Forecast Accuracy ===\nNo forecast data available."
-
-    target_pairs = pairs if pairs else list(forecasts_by_pair.keys())
-    lines = ["=== Forecast Accuracy (24h) ==="]
-    has_data = False
-
-    for pair in target_pairs:
-        records = forecasts_by_pair.get(pair, [])
-        reviewed = [r for r in records if r.reviewed == 1 and r.latest_price_delta is not None]
-        if not reviewed:
-            continue
-        has_data = True
-
-        correct = 0
-        for r in reviewed:
-            delta = r.latest_price_delta
-            if r.predicted_direction == "bullish" and delta > 0:
-                correct += 1
-            elif r.predicted_direction == "bearish" and delta < 0:
-                correct += 1
-
-        total = len(reviewed)
-        accuracy = correct / total * 100 if total else 0
-        lines.append(f"{pair}: {total} forecasts | Correct: {correct} ({accuracy:.0f}%) | Incorrect: {total - correct}")
-
-    if not has_data:
-        return "=== Forecast Accuracy ===\nNo forecast data available."
-
-    return "\n".join(lines)
-
-
 class AskContextBuilder:
     """askコマンド用のコンテキストを構築する。"""
 
     def __init__(self, config, store, analysis_store, position_mgr,
-                 session_store=None, forecast_store=None) -> None:
+                 session_store=None) -> None:
         self._config = config
         self._store = store
         self._analysis_store = analysis_store
         self._position_mgr = position_mgr
         self._session_store = session_store
-        self._forecast_store = forecast_store
 
     async def build(self, user_message: str) -> dict[str, str]:
         config = self._config
@@ -144,13 +110,11 @@ class AskContextBuilder:
         news = self._build_news_context()
         positions = self._build_positions()
         trade_summary = self._build_trade_summary(pairs)
-        forecast_accuracy = self._build_forecast_accuracy(pairs)
 
         return {
             "open_positions": positions,
             "semantic_results": semantic_results,
             "trade_summary": trade_summary,
-            "forecast_accuracy": forecast_accuracy,
             "technical_snapshots": technical,
             "news_context": news,
         }
@@ -325,15 +289,3 @@ class AskContextBuilder:
             for r in results:
                 sa_session.expunge(r)
         return build_trade_summary(list(results), pairs)
-
-    def _build_forecast_accuracy(self, pairs: list[str]) -> str:
-        if not self._forecast_store:
-            return ""
-        config = self._config
-        target_pairs = pairs if pairs else [i.symbol for i in config.tradeable_instruments]
-        forecasts_by_pair: dict[str, list] = {}
-        for pair in target_pairs:
-            records = self._forecast_store.get_recent_forecasts(pair, hours=24)
-            if records:
-                forecasts_by_pair[pair] = records
-        return build_forecast_accuracy(forecasts_by_pair, pairs)

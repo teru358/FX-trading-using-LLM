@@ -1,13 +1,12 @@
 """方向別 RAG (`store.directional`) への書き込み定型ロジックを集約する。
 
-trading_cycle / forecast_cycle / hold_review などから繰り返し呼ばれていた
+trading_cycle / hold_review などから繰り返し呼ばれていた
 upsert 呼び出しを「何を書くか」だけで指定できるようにする。direction の
 正規化、テキスト整形、embed → upsert、例外時のログまでをここに閉じ込める。
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from src.rag.vector_store import VectorStore
@@ -110,87 +109,6 @@ async def record_trade_complete(
         close_reason=closed_order.close_reason,
         **extra,
     )
-
-
-# ── forecast ──────────────────────────────────────────────────────
-
-
-async def record_forecast_entry(
-    store: VectorStore,
-    embed_fn: EmbedFn,
-    pair: str,
-    signal: Any,
-    now: datetime,
-    horizon: str | None = None,
-) -> None:
-    """新規予測をエントリーフェーズとして directional RAG に登録する。"""
-    direction = _normalize_direction(
-        getattr(signal, "predicted_direction", None),
-        fallback_score=signal.combined_score,
-    )
-    text = (
-        f"{pair} {direction} forecast | "
-        f"score={signal.combined_score:+.3f} conf={signal.confidence:.2f} | "
-        f"{signal.detail_reason}"
-    )
-    try:
-        embedding = await embed_fn(text)
-        ts_str = now.strftime("%Y%m%d_%H%M")
-        # horizon キー無し = legacy swing カード規約 (spec V-1)。None は渡さない。
-        extra = {"horizon": horizon} if horizon else {}
-        store.directional.upsert(
-            entry_id=f"forecast_{pair}_{ts_str}_entry",
-            text=text,
-            embedding=embedding,
-            direction=direction,
-            pair=pair,
-            session_id=f"forecast_{pair}_{ts_str}",
-            session_type="forecast",
-            phase="entry",
-            signal_score=signal.combined_score,
-            confidence=signal.confidence,
-            **extra,
-        )
-    except Exception as e:
-        logger.warning(f"[FORECAST/DIR] {pair} entry: {e}")
-
-
-async def record_forecast_review(
-    store: VectorStore,
-    embed_fn: EmbedFn,
-    pair: str,
-    forecast: Any,
-    review_text: str,
-    current_price: float,
-    horizon: str | None = None,
-) -> None:
-    """既存予測の検証結果を directional RAG に登録する。"""
-    direction = _normalize_direction(
-        getattr(forecast, "predicted_direction", None),
-        fallback_score=forecast.combined_score,
-    )
-    delta = current_price - forecast.current_price
-    actual_dir = "bullish" if delta > 0 else "bearish"
-    try:
-        embedding = await embed_fn(review_text)
-        # horizon キー無し = legacy swing カード規約 (spec V-1)。None は渡さない。
-        extra = {"horizon": horizon} if horizon else {}
-        store.directional.upsert(
-            entry_id=f"forecast_{forecast.id}_complete",
-            text=review_text,
-            embedding=embedding,
-            direction=direction,
-            pair=pair,
-            session_id=f"forecast_{forecast.id}",
-            session_type="forecast",
-            phase="complete",
-            signal_score=forecast.combined_score,
-            confidence=forecast.confidence,
-            outcome="correct" if direction == actual_dir else "incorrect",
-            **extra,
-        )
-    except Exception as e:
-        logger.warning(f"[FORECAST/DIR] {pair} fc={forecast.id}: {e}")
 
 
 # ── hold ──────────────────────────────────────────────────────────

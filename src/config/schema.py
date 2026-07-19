@@ -176,28 +176,6 @@ class TradingConfig:
     vol_regime_high_risk_scale: float = 0.5  # high vol 時の risk_per_trade 倍率
     vol_regime_low_risk_scale: float = 1.0   # low vol 時 (デフォルト = 等倍、拡大はリスク増なので慎重に)
 
-    # Forecast accuracy auto-feedback (直近サイクルの予測精度を signal に反映)
-    forecast_accuracy_feedback: "ForecastAccuracyFeedbackConfig" = field(
-        default_factory=lambda: ForecastAccuracyFeedbackConfig()
-    )
-
-
-@dataclass
-class ForecastAccuracyFeedbackConfig:
-    """ForecastStore の直近予測精度を signal の confidence/action に反映する設定。
-
-    予測 hit 率 (predicted_direction × latest_price_delta の符号一致率) が
-    soft_threshold 未満なら confidence × confidence_penalty、
-    hard_threshold 未満なら action="hold" を強制する。
-    サンプル数が min_samples 未満の場合は適用しない (false positive 防止)。
-    """
-    enabled: bool = False
-    lookback_hours: int = 24
-    min_samples: int = 4              # 適用に必要な reviewed forecast 数の下限
-    soft_threshold: float = 0.50      # この値未満で confidence ペナルティ
-    hard_threshold: float = 0.33      # この値未満で action=hold 強制
-    confidence_penalty: float = 0.7   # soft 適用時の confidence 乗数
-
 
 @dataclass
 class NewsCollectionConfig:
@@ -451,10 +429,6 @@ class AnalysisConfig:
     chart_patterns: ChartPatternConfig = field(default_factory=ChartPatternConfig)
     # 選択的 MTF 分析設定 (enabled=False で従来の単一 TF 動作に fallback)
     multi_timeframe: MultiTimeframeConfig = field(default_factory=MultiTimeframeConfig)
-    forecast_review_interval_hours: int = 8        # B: 予測検証ウィンドウ（時間）
-    forecast_start_hour: int = 0                   # 予測サイクル開始時刻オフセット（0〜23）
-    forecast_min_combined_score: float = 0.15      # C: 予測生成の最低スコア閾値（±）
-    forecast_significance_atr_ratio: float = 0.30  # A: 有意性判定の ATR proxy 比率
 
 
 @dataclass

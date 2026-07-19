@@ -1,7 +1,7 @@
 """週次自己診断レポートジョブ。
 
 FX 休場 (土日) に schedule ライブラリから呼び出し、過去 N 日のパフォーマンス、
-予測精度、LLM 使用量、現状設定を集約して Claude に診断レポートを生成させる。
+LLM 使用量、現状設定を集約して Claude に診断レポートを生成させる。
 出力は Markdown ファイル + Discord embed (オプション)。
 
 cron に依存せず、main.py の schedule.every().<weekday>.at(time) で起動する。
@@ -19,7 +19,6 @@ from src.analysis.prompt_loader import load_prompt, render_prompt
 from src.config import BASE_DIR, AppConfig
 from src.llm.factory import create_llm_client
 from src.persistence.state_store import StateStore
-from src.signals.accuracy_tracker import compute_recent_accuracy
 from src.trading.position_manager import PositionManager
 from src.utils.clock import db_now, local_now
 
@@ -87,33 +86,6 @@ def _build_performance_section(
     return "\n".join(lines)
 
 
-def _build_accuracy_section(
-    config: AppConfig, forecast_store, lookback_days: int,
-) -> str:
-    """ペア別の forecast accuracy 集計。"""
-    pairs = (
-        config.tradeable_instruments + config.watch_only_instruments
-    )
-    hours = lookback_days * 24
-    lines: list[str] = []
-    for inst in pairs:
-        result = compute_recent_accuracy(forecast_store, inst.symbol, hours=hours)
-        if result is None:
-            lines.append(f"- {inst.display_name} ({inst.symbol}): データ不足")
-            continue
-        marker = ""
-        if result.accuracy < 0.33:
-            marker = "  ⚠ hard_threshold (33%) 未満"
-        elif result.accuracy < 0.50:
-            marker = "  ⚠ soft_threshold (50%) 未満"
-        lines.append(
-            f"- {inst.display_name} ({inst.symbol}): "
-            f"{result.correct_count}/{result.sample_count} = {result.accuracy:.0%}"
-            f"{marker}"
-        )
-    return "\n".join(lines) if lines else "予測データなし。"
-
-
 def _build_llm_status_section() -> str:
     """LLM プロバイダの CB スナップショット。"""
     try:
@@ -142,13 +114,9 @@ def _build_llm_status_section() -> str:
 
 def _build_existing_features_section(config: AppConfig) -> str:
     """LLM が既存機能を再発明しないようにサマリを渡す。"""
-    fa = config.trading.forecast_accuracy_feedback
     items = [
         "- conflict_penalty: news×price 方向矛盾時 confidence × (1 - 0.3 × min_conf)",
         "- market_regime deadband: trending → ×0.8, ranging → ×1.2",
-        f"- forecast_accuracy_feedback: {'有効' if fa.enabled else '無効'} "
-        f"(soft={fa.soft_threshold}, hard={fa.hard_threshold}, "
-        f"penalty=×{fa.confidence_penalty})",
         "- circuit_breaker: 連続失敗 3 回で 300s OPEN、半開で再試行",
         "- TV consensus 矛盾検出: TV 方向と price 方向が逆なら conf ×0.7",
         "- drawdown_kill_switch: peak から閾値以上落ちたら新規 entry 停止",
@@ -160,7 +128,6 @@ def _build_existing_features_section(config: AppConfig) -> str:
 
 def _build_settings_section(config: AppConfig) -> str:
     t = config.trading
-    fa = t.forecast_accuracy_feedback
     lines = [
         f"- news_weight: {t.news_weight}",
         f"- price_weight: {t.price_weight}",
@@ -168,9 +135,6 @@ def _build_settings_section(config: AppConfig) -> str:
         f"- signal_confidence_threshold: {t.signal_confidence_threshold}",
         f"- risk_per_trade: {t.risk_per_trade}",
         f"- min_rr_ratio: {t.min_rr_ratio}",
-        f"- forecast_accuracy_feedback: enabled={fa.enabled}, "
-        f"soft={fa.soft_threshold}, hard={fa.hard_threshold}, "
-        f"min_samples={fa.min_samples}, penalty=×{fa.confidence_penalty}",
         f"- drawdown_kill_switch_enabled: {t.drawdown_kill_switch_enabled}",
         f"- vol_regime_enabled: {t.vol_regime_enabled}",
     ]
@@ -182,7 +146,6 @@ def _build_settings_section(config: AppConfig) -> str:
 
 async def _run_diagnosis_async(
     config: AppConfig,
-    forecast_store,
 ) -> tuple[str, Path]:
     """LLM を呼んで診断レポートを生成し、ファイルに保存する。
 
@@ -201,7 +164,6 @@ async def _run_diagnosis_async(
         lookback_days=cfg.lookback_days,
         generated_at=now.strftime("%Y-%m-%d %H:%M %Z"),
         performance_section=_build_performance_section(config, cfg.lookback_days),
-        accuracy_section=_build_accuracy_section(config, forecast_store, cfg.lookback_days),
         llm_status_section=_build_llm_status_section(),
         existing_features_section=_build_existing_features_section(config),
         settings_section=_build_settings_section(config),
@@ -271,7 +233,6 @@ def _extract_summary_block(report: str) -> str | None:
 
 def run_weekly_diagnosis(
     config: AppConfig,
-    forecast_store,
 ) -> None:
     """schedule ライブラリから呼ばれる同期エントリポイント。
 
@@ -282,7 +243,7 @@ def run_weekly_diagnosis(
         return
 
     try:
-        report, path = asyncio.run(_run_diagnosis_async(config, forecast_store))
+        report, path = asyncio.run(_run_diagnosis_async(config))
         _send_discord_embed(report, path, config)
         logger.info(f"[WEEKLY] Diagnosis complete: {path}")
     except Exception as e:  # noqa: BLE001 - デーモン停止防止
