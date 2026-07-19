@@ -1488,7 +1488,7 @@ def test_bootstrap_recovers_dangling_runs(...):
     # (enabled=True の最小 config) → run が failed/dangling になる
 ```
 
-- [ ] **Step 3: green 確認 + commit**
+- [x] **Step 3: green 確認 + commit**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_reflection_cycle.py -q 2>&1 | tail -3 && git add -A src/orchestrator/bootstrap.py tests/ && git commit -m 'feat(orchestrator): 起動時のdangling run回収'"
@@ -2314,7 +2314,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commi
 
 spec: §4。雛形は `scripts/migrate_directional_rag.py` (sys.path + load_config パターン)。
 
-- [ ] **Step 1: failing test を書く**
+- [x] **Step 1: failing test を書く**
 
 `tests/test_migrate_cycle_retirement.py` — スクリプトの中核関数を import してテスト:
 
@@ -2367,7 +2367,7 @@ def test_delete_adaptive_params(tmp_path):
     assert delete_adaptive_params(tmp_path) is False   # 冪等
 ```
 
-- [ ] **Step 2: 実装**
+- [x] **Step 2: 実装**
 
 `scripts/migrate_cycle_retirement.py`:
 
