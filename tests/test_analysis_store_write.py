@@ -1,16 +1,19 @@
 # tests/test_analysis_store_write.py
 import json
-from datetime import datetime
 
 from src.analysis.technical_snapshot_data import TechnicalSnapshotData
 from src.data.analysis_store import AnalysisStore
+from src.utils.clock import db_now
+
+# seed は db_now() 相対 (固定過去日付は 48h prune 窓で時限崩壊する — date-flake 防止)
+NOW = db_now()
 
 
 def test_add_snapshot_persists_json_columns(tmp_path):
     store = AnalysisStore(tmp_path / "w.db")
     data = TechnicalSnapshotData(
         pair="USDJPY=X",
-        analyzed_at=datetime(2026, 7, 11, 12, 0, 0),
+        analyzed_at=NOW,
         bias_score=0.42, confidence=0.61, direction_bias="long",
         mtf_alignment=0.67,
         tf_scores={"long": {"score": 0.55, "direction": "long"}},
@@ -31,7 +34,7 @@ def test_add_snapshot_persists_json_columns(tmp_path):
 def test_add_snapshot_single_tf_nulls_mtf(tmp_path):
     store = AnalysisStore(tmp_path / "w2.db")
     data = TechnicalSnapshotData(
-        pair="EURUSD=X", analyzed_at=datetime(2026, 7, 11, 12, 0, 0),
+        pair="EURUSD=X", analyzed_at=NOW,
         bias_score=0.1, confidence=0.5, direction_bias="long",
     )
     store.add_snapshot(data)
