@@ -69,6 +69,24 @@ def _run_with_guard(guard: JobGuard, fn, *args, **kwargs) -> None:
     guard.spawn_if_idle(fn, *args, **kwargs)
 
 
+# reflection は spec §3.6 で「毎時」と決まっている独立要件。technical の cadence
+# (technical_watch_interval_hours 等) とは無関係なので、時刻列を借用せず自前で持つ。
+_REFLECTION_TIMES = [f"{h:02d}:00" for h in range(24)]
+
+
+def _register_reflection_jobs(tz_name: str, fn, *args) -> None:
+    """決済振り返りジョブを毎時スロットへ登録する (spec §3.6)。
+
+    main() から切り出したのはテスト可能な seam にするため。休場中も決済は残るので
+    reflection guard には skip_predicate を付けない。LLM は guard 配下で slot を
+    取るため、``_run_with_slot`` は使わない。
+    """
+    for t in _REFLECTION_TIMES:
+        schedule.every().day.at(t, tz_name).do(
+            _run_with_guard, _guards["reflection"], fn, *args, slot=_llm_slot,
+        )
+
+
 def _run_with_slot(fn, *args, **kwargs) -> None:
     """スケジューラから呼ばれたLLMジョブをスロット経由で実行する。
 
@@ -369,11 +387,9 @@ def main() -> None:
     from src.data.orchestrator_store import OrchestratorStore as _OrchStoreForReflect
     _reflect_store = _OrchStoreForReflect(config.prices_db_path)
     from src.cycles.reflection import run_reflection_cycle
-    for t in technical_times:
-        schedule.every().day.at(t, news_tz).do(
-            _run_with_guard, _guards["reflection"],
-            run_reflection_cycle, config, store, _reflect_store, slot=_llm_slot,
-        )
+    _register_reflection_jobs(
+        news_tz, run_reflection_cycle, config, store, _reflect_store,
+    )
 
     # 3. ニュース収集（LLMあり・時間がかかる）
     for t in news_times:

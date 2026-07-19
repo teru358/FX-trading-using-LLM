@@ -6,6 +6,7 @@ orchestrator 無効時に不要な DB を作らない)。
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 from main import _api_orchestrator_store
@@ -55,54 +56,64 @@ def test_reflection_guard_exists_without_skip_predicate():
     assert guard._skip_predicate is None
 
 
-def test_reflection_job_registered_hourly_via_guard(monkeypatch):
-    """main.py の登録形をそのまま実行し、毎時 24 件が guard 経由で載ること。
-
-    main() は monolithic で直接呼べないため、登録に使う構成要素
-    (technical_times / _run_with_guard / reflection guard) を main から
-    取り出して同じ形で登録し、schedule 上の結果を検証する。
-    """
+@contextmanager
+def _isolated_schedule():
+    """グローバル schedule レジストリを退避し、空の状態でテストへ貸し出す。"""
     import schedule as sched_mod
-
-    import main
-    from src.cycles.reflection import run_reflection_cycle
 
     saved = list(sched_mod.jobs)
     sched_mod.clear()
     try:
-        technical_times = [f"{h:02d}:00" for h in range(24)]
-        for t in technical_times:
-            sched_mod.every().day.at(t, "Asia/Tokyo").do(
-                main._run_with_guard, main._guards["reflection"],
-                run_reflection_cycle, None, None, None, slot=None,
-            )
-
-        jobs = list(sched_mod.jobs)
-        # 毎時 24 件
-        assert len(jobs) == 24
-        assert sorted(j.at_time.strftime("%H:%M") for j in jobs) == technical_times
-
-        # 全件が reflection guard 経由で run_reflection_cycle を対象にしている
-        for j in jobs:
-            args = j.job_func.args
-            assert args[0] is main._guards["reflection"]
-            assert args[1] is run_reflection_cycle
+        yield sched_mod
     finally:
         sched_mod.clear()
         sched_mod.jobs.extend(saved)
 
 
-def test_main_registers_reflection_with_guard_and_slot():
-    """main.py 本体が guard 経由 + slot 渡しで reflection を登録していること。"""
+def test_reflection_jobs_registered_hourly_via_guard():
+    """main._register_reflection_jobs を実際に呼び、実レジストリの中身を検証する。
+
+    テスト側ではジョブを 1 件も登録しない。登録するのは main.py の実物だけなので、
+    登録処理を消す/頻度を変える/guard を外すといった変更はすべてここで落ちる。
+
+    期待時刻は spec §3.6 の「毎時」をハードコードする。実装から導出すると
+    「実装が自分自身と一致すること」を確かめるだけの自己参照テストに戻る。
+    """
+    import main
+    from src.cycles.reflection import run_reflection_cycle
+
+    expected_times = [f"{h:02d}:00" for h in range(24)]  # spec §3.6: 毎時
+
+    with _isolated_schedule() as sched_mod:
+        main._register_reflection_jobs(
+            "Asia/Tokyo", run_reflection_cycle, "cfg", "store", "reflect_store",
+        )
+        jobs = list(sched_mod.jobs)
+
+        # 毎時 24 スロット・各正時 (頻度低下・登録漏れをここで検出する)
+        assert len(jobs) == 24
+        assert sorted(j.at_time.strftime("%H:%M") for j in jobs) == expected_times
+
+        for j in jobs:
+            # guard 経由であること (_run_with_slot への差し替えを検出する)
+            assert j.job_func.func is main._run_with_guard
+            args = j.job_func.args
+            assert args[0] is main._guards["reflection"]
+            assert args[1] is run_reflection_cycle
+            assert args[2:] == ("cfg", "store", "reflect_store")
+            # LLM slot は guard 配下へ渡される (spec §3.6)
+            assert j.job_func.keywords == {"slot": main._llm_slot}
+
+
+def test_main_calls_reflection_registration_seam():
+    """main() が seam を呼んでおり、直接ループで登録し直していないこと。"""
     import inspect
 
     import main
 
-    src = inspect.getsource(main)
-    assert 'JobGuard("reflection")' in src
-    assert '_guards["reflection"]' in src
-    assert "run_reflection_cycle, config, store, _reflect_store, slot=_llm_slot" in src
-    # slot 経由 (_run_with_slot) ではなく guard 配下の同期実行であること (spec §3.6)
+    src = inspect.getsource(main.main)
+    assert "_register_reflection_jobs(" in src
+    # slot 経由 (_run_with_slot) ではなく guard 配下であること (spec §3.6)
     assert "_run_with_slot, run_reflection_cycle" not in src
-    # 毎時登録 (technical_times = 24 スロット) を使っていること
-    assert "for t in technical_times:" in src
+    # technical の cadence を借用しないこと (reflection は毎時固定の独立要件)
+    assert "_register_reflection_jobs(\n        technical_times" not in src
