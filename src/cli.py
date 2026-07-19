@@ -20,7 +20,6 @@ from src.rag.vector_store import VectorStore
 from src.trading.position_manager import PositionManager
 from src.data.orchestrator_store import OrchestratorStore
 from src.orchestrator.plan_view import plan_to_row
-from src.trading_cycle import run_trading_cycle
 from src.views import run_analysis_summary, run_ask, run_news_view, run_tech_view
 
 _console = Console()
@@ -32,9 +31,7 @@ _HELP = """\
   [cyan]run news[/cyan]             — 最新ニュースセンチメントを表示（保存済みデータ）
   [cyan]run tech[/cyan]             — 最新テクニカルスナップショットを表示（保存済みデータ）
   [cyan]run analyze[/cyan]          — 総合分析シグナルを表示（保存済みデータ）
-  [cyan]run trade[/cyan]            — 取引判定ループを今すぐ実行（動作確認用）
   [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問・コメントを送信
-  [cyan]audit[/cyan] (days)         — 過去トレードの統計診断レポート生成
   [cyan]plans[/cyan]  (plan)        — 保持中の取引plan(承認待ち/監視中)を表示
   [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
   [cyan]halt[/cyan] soft|hard       — bridge を halt 状態にする (reason 任意)
@@ -205,36 +202,6 @@ def _cmd_close(config: AppConfig, pair_arg: str) -> None:
     asyncio.run(_do())
 
 
-def _cmd_audit(config: AppConfig, args: list[str]) -> None:
-    """audit [days] を実行する。"""
-    from src.analysis.performance_audit import run_audit
-
-    days = 30
-    if args:
-        try:
-            days = int(args[0])
-        except ValueError:
-            _console.print(f"[red]引数が不正: {args[0]}[/red]")
-            return
-
-    _console.print(f"[cyan]audit 実行中 (days={days})...[/cyan]")
-    try:
-        result = run_audit(config, days=days)
-    except Exception as e:
-        _console.print(f"[red]audit 失敗: {type(e).__name__}: {e}[/red]")
-        logger.exception("[AUDIT] run_audit failed")
-        return
-
-    from rich.panel import Panel
-    from rich.table import Table
-    tbl = Table(show_header=False, box=None)
-    tbl.add_row("Sessions", str(result.session_count))
-    tbl.add_row("Report", str(result.report_path))
-    if result.flag_counts:
-        tbl.add_row("Flags", ", ".join(f"{k}:{v}" for k, v in result.flag_counts.items()))
-    _console.print(Panel(tbl, title="Audit Summary", border_style="cyan"))
-
-
 def _cmd_halt(config: AppConfig, args: list[str]) -> None:
     """halt {soft|hard} [reason] — bridge を halt 状態にする。
 
@@ -356,7 +323,6 @@ def run_commands(
     stop_event: threading.Event,
     llm_slot,  # PriorityJobSlot — avoid forward-import at module top; use string annotation instead
     price_store=None,
-    hold_store=None,
     price_provider=None,
 ) -> None:
     _console.print("[dim]コマンド入力モード — [cyan]help[/cyan] で一覧表示[/dim]\n")
@@ -398,17 +364,9 @@ def run_commands(
                 elif sub in ("analyze", "a", "analysis"):
                     _console.print("[cyan]総合分析を表示中...[/cyan]")
                     run_analysis_summary(config, store, analysis_store)
-                elif sub in ("trade", "tr"):
-                    if price_store is None or hold_store is None:
-                        _console.print("[red]price_store / hold_store が利用できません[/red]")
-                    else:
-                        _console.print("[cyan]取引判定ループを実行中 (LLMスロット取得待機)...[/cyan]")
-                        llm_slot.run_user_blocking(
-                            run_trading_cycle, config, store, price_store, analysis_store, hold_store
-                        )
                 else:
                     _console.print(
-                        f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | trade"
+                        f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze"
                     )
             elif cmd == "ask":
                 if not args:
@@ -435,8 +393,6 @@ def run_commands(
                 _cmd_halt(config, args)
             elif cmd == "resume":
                 _cmd_resume(config)
-            elif cmd == "audit":
-                _cmd_audit(config, args)
             elif cmd in ("plans", "plan"):
                 _cmd_plans(config)
             else:

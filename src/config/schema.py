@@ -141,24 +141,6 @@ class TradingConfig:
     protect_lock_r: float = 1.0
     giveback_close_r: float = 0.4
     giveback_close_min_mfe_r: float = 0.8
-    # RAG方向別スコア補正
-    rag_adjustment_enabled: bool = True
-    rag_adjustment_max: float = 0.15
-    rag_adjustment_min_hits: int = 2
-    rag_adjustment_search_top_n: int = 5
-    rag_adjustment_same_weight: float = 0.10
-    rag_adjustment_opposite_weight: float = 0.10
-    rag_adjustment_trade_multiplier: float = 1.0
-    rag_adjustment_forecast_multiplier: float = 0.5
-    rag_adjustment_hold_multiplier: float = 0.3
-    # ATRベースSL/TP
-    atr_timeframe: str = "4h"            # ATR 計算用の足種 ("1h" / "4h" / "1d")。テクニカル分析の ohlcv_interval とは独立
-    sl_atr_mult_default: float = 3.0
-    tp_atr_mult_default: float = 6.0
-    sl_atr_mult_min: float = 1.0
-    sl_atr_mult_max: float = 5.0
-    tp_atr_mult_min: float = 2.0
-    tp_atr_mult_max: float = 10.0
     # Scale-in (順張り増し玉): 既存ポジと同方向で強い signal が来た時に追加発注
     scale_in_enabled: bool = False
     scale_in_conf_margin: float = 0.05    # confidence 上回り幅
@@ -168,13 +150,6 @@ class TradingConfig:
     # Drawdown kill switch (新規エントリーのみ停止、既存ポジションは保持)
     drawdown_kill_switch_enabled: bool = False
     drawdown_kill_switch_max_pct: float = 0.10   # peak からこの割合以上落ちたら新規停止 (例: 0.10 = 10%)
-    # ボラレジーム (EWMA ベース position sizing)
-    vol_regime_enabled: bool = False
-    vol_regime_ewma_span: int = 20           # ATR の EWMA 期間 (bar 数)
-    vol_regime_high_threshold: float = 1.3   # ATR/EWMA > この値 → high vol
-    vol_regime_low_threshold: float = 0.7    # ATR/EWMA < この値 → low vol
-    vol_regime_high_risk_scale: float = 0.5  # high vol 時の risk_per_trade 倍率
-    vol_regime_low_risk_scale: float = 1.0   # low vol 時 (デフォルト = 等倍、拡大はリスク増なので慎重に)
 
 
 @dataclass
@@ -290,7 +265,6 @@ class RagConfig:
 
 @dataclass
 class ScheduleConfig:
-    run_times: list[str] = field(default_factory=lambda: ["15:00", "21:00"])
     timezone: str = "Asia/Tokyo"
     # technical 収集の間隔 (時間)。既定は現状維持 = 毎時 (1h)。
     # trade は cadence resolver で boost される土台、watch は低頻度固定用。
@@ -348,11 +322,8 @@ class TwelveDataConfig:
 @dataclass
 class NotifierConfig:
     enabled: bool = False                 # true で Discord 通知を有効化
-    notify_on_order_open: bool = True
     notify_on_order_close: bool = True
-    notify_on_signal_skipped: bool = True
     notify_on_price_alert: bool = True    # 価格急変動通知
-    notify_on_cycle_summary: bool = True  # 取引サイクル結果を1通に集約 (false で旧 per-event 通知)
 
 
 @dataclass
@@ -510,7 +481,6 @@ class ApiConfig:
     """REST API サーバー設定。"""
     enabled: bool = False
     port: int = 8811
-    run_trade_soft_timeout_sec: float = 10.0  # POST /run/trade: この秒数内に完了したら同期返答、超過で非同期化
     ask_soft_timeout_sec: float = 60.0         # POST /ask: 同上
 
 

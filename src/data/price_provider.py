@@ -192,7 +192,6 @@ class PriceProvider:
             daily = 0
 
         daily += (n_trade + n_watch_td) * 24
-        daily += n_trade * len(self._config.schedule.run_times)
         return daily
 
     def status_line(self) -> str:

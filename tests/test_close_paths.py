@@ -66,7 +66,6 @@ def test_api_close_route_uses_broker(tmp_path, monkeypatch):
     cfg.tradeable_instruments = []
     cfg.paper_provider = "yfinance"
     cfg.price_monitor.interval_minutes = 5
-    cfg.schedule.run_times = []
 
     write(tmp_path, BalanceSnapshot(
         balance=100_000.0, deposit=100_000.0, peak_balance=100_000.0,

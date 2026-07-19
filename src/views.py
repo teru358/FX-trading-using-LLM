@@ -1,7 +1,7 @@
 """CLI / API から呼ばれる参照系ビュー関数群。
 
-trading_cycle.py から責務分離したファイル。保存済みデータを読み出して
-表示または応答するだけで、新規取得や実取引は行わない。
+保存済みデータを読み出して表示または応答するだけで、
+新規取得や実取引は行わない。
 
 対応エンドポイント:
   run_news_view         — 保存済みニュースセンチメント表示
@@ -19,7 +19,6 @@ import re as _re
 from src.analysis.prompt_loader import load_prompt, render_prompt
 from src.config import AppConfig
 from src.data.analysis_store import AnalysisStore
-from src.data.session_store import SessionStore
 from src.llm.factory import create_llm_client
 from src.persistence.state_store import StateStore
 from src.rag.ask_context_builder import AskContextBuilder, extract_pairs
@@ -66,9 +65,9 @@ async def _analysis_summary(
     analysis_store: AnalysisStore,
 ) -> None:
     """保存済みの最新分析結果を集約して総合分析サマリーを表示する。"""
-    # trading_cycle 内のヘルパ (_summarize_pair) を再利用。views.py → trading_cycle.py
-    # への片方向依存で循環を作らない (trading_cycle.py からは views.py を import しない)。
-    from src.trading_cycle import _summarize_pair
+    # cycles の共有ヘルパ (_summarize_pair) を再利用。views.py → src.cycles への
+    # 片方向依存で循環を作らない (cycles からは views.py を import しない)。
+    from src.cycles._helpers import _summarize_pair
 
     run_start = local_now(config)
     logger.info(f"=== Analysis summary: {run_start.strftime('%Y-%m-%d %H:%M %Z')} ===")
@@ -115,14 +114,12 @@ async def _run_ask(
 ) -> str:
     state_store = StateStore(config.state_dir)
     position_mgr = PositionManager(state_store, context="Ask")
-    session_store = SessionStore(config.prices_db_path)
 
     builder = AskContextBuilder(
         config=config,
         store=store,
         analysis_store=analysis_store,
         position_mgr=position_mgr,
-        session_store=session_store,
     )
     context_dict = await builder.build(user_message)
 

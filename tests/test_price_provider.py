@@ -30,7 +30,6 @@ def _make_config(provider: str = "yfinance"):
         MagicMock(symbol="USDJPY=X", asset_type="fx"),
     ]
     cfg.price_monitor.interval_minutes = 5
-    cfg.schedule.run_times = ["09:30", "15:00", "21:30"]
     return cfg
 
 
@@ -75,7 +74,6 @@ def _make_mt5_config():
     cfg.trading.ohlcv_interval = "1h"
     cfg.tradeable_instruments = [MagicMock(symbol="USDJPY=X", asset_type="fx")]
     cfg.price_monitor.interval_minutes = 5
-    cfg.schedule.run_times = ["09:30"]
     return cfg
 
 

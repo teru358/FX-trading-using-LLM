@@ -29,7 +29,6 @@ class APIState:
     analysis_store: AnalysisStore | None = None
     llm_slot: PriorityJobSlot | None = None
     price_store: PriceStore | None = None
-    hold_store: Any = None        # HoldDecisionStore
     orchestrator_store: Any = None  # OrchestratorStore (gate spec F-5)
     started_at: datetime | None = None
 

@@ -37,15 +37,14 @@ from src.startup import (
     run_startup_sequence,
     startup_checks,
 )
-from src.data.analysis_store import HoldDecisionStore
+from src.cycles.exit_check import run_exit_check_cycle
 from src.data.price_provider import PriceProvider
 from src.trading.market_state import market_skip_check
-from src.trading_cycle import run_exit_check_cycle, run_trading_cycle
 
 _console = Console()
 _stop = threading.Event()
 _logger = logging.getLogger("finance.main")
-# LLMジョブ用の単一スロット (news/tech/trade/econ/ask/run_trade の排他制御)
+# LLMジョブ用の単一スロット (news/tech/econ/ask/reflection の排他制御)
 _llm_slot = PriorityJobSlot("llm")
 
 # 個別ジョブのガード (LLM 不使用の軽量ジョブ)
@@ -74,14 +73,9 @@ def _run_with_slot(fn, *args, **kwargs) -> None:
     """スケジューラから呼ばれたLLMジョブをスロット経由で実行する。
 
     スレッドで spawn してからスロット取得を試みる (非 blocking)。
-    ``_market_aware=True`` を渡すと、FX 市場休場中は無音スキップする
-    (テクニカル/取引サイクルに使用)。ニュース収集などは休日でも走る想定。
+    ニュース収集などは休日でも走る想定。
     """
-    market_aware = kwargs.pop("_market_aware", False)
-
     def _try() -> None:
-        if market_aware and market_skip_check():
-            return
         _llm_slot.try_run_scheduled(fn, *args, **kwargs)
     threading.Thread(
         target=_try,
@@ -217,11 +211,10 @@ def main() -> None:
     store = VectorStore(config.rag_db_path)
     price_store = PriceStore(config.prices_db_path)
     analysis_store = AnalysisStore(config.prices_db_path)
-    hold_store = HoldDecisionStore(config.prices_db_path)
     price_provider = PriceProvider(config)
 
     # BridgeHealthGate: bridge プリフライト + halt 連携の単一ゲート。
-    # 各 cycle (tech / 取引 / price_monitor) 冒頭で probe を呼び、health 連続2回失敗で
+    # 各 cycle (tech / exit_check / price_monitor) 冒頭で probe を呼び、health 連続2回失敗で
     # soft halt 発動。balance 同期 (live モード時のみ) も同経路に集約。
     from src.notifications.notifier import create_notifier as _create_notifier
     from src.trading.bridge_health_gate import BridgeHealthGate
@@ -244,7 +237,6 @@ def main() -> None:
     tz = config.schedule.timezone
     news_tz = config.news_collection.timezone
     interval = config.news_collection.interval_minutes
-    run_times = config.schedule.run_times
 
     news_offset = config.news_collection.offset_minutes
     news_times = [
@@ -410,16 +402,6 @@ def main() -> None:
                 _run_with_guard, _guards["technical"], _tech_dispatch, t,
             )
 
-    # 6. 取引判定（LLMあり・指定時刻のみ）
-    for t in run_times:
-        schedule.every().day.at(t, tz).do(
-            _run_with_slot,
-            run_trading_cycle, config, store, price_store, analysis_store, hold_store,
-            price_provider=price_provider,
-            gate=bridge_gate,
-            _market_aware=True,
-        )
-
     # 経済指標カレンダー日次フェッチ (オプション)
     if config.economic_calendar.enabled:
         from src.data.econ_event_store import EconEventStore
@@ -529,7 +511,7 @@ def main() -> None:
             _console.print(
                 "[yellow]Market is currently closed.[/yellow] "
                 "[dim]Price-dependent jobs (price_monitor / exit_check / "
-                "technical / trading) will stay paused until market open.[/dim]"
+                "technical) will stay paused until market open.[/dim]"
             )
 
         if args.skip_news:
@@ -564,7 +546,7 @@ def main() -> None:
         # 注: _api_orchestrator_store の disabled 分岐は spec §1.5 の fail-fast 化
         # (orchestrator 無効なら起動中止) 以降は到達しない。無害なので防御的に残す。
         start_api_server(config, store, analysis_store, _llm_slot,
-                         price_store, hold_store,
+                         price_store,
                          _api_orchestrator_store(config))
 
     def _start_scheduler():
@@ -598,7 +580,7 @@ def main() -> None:
                 _console.print("\n[dim]終了します...[/dim]")
                 _stop.set()
         else:
-            run_commands(config, store, analysis_store, _stop, _llm_slot, price_store, hold_store, price_provider=price_provider)
+            run_commands(config, store, analysis_store, _stop, _llm_slot, price_store, price_provider=price_provider)
     finally:
         _stop.set()
         if orchestrator is not None:

@@ -549,35 +549,6 @@ def _cmd_analyze() -> None:
     _console.print(tbl)
 
 
-def _cmd_run_trade() -> None:
-    """取引判定ループを実行。
-
-    /run/trade のレスポンスは 2 形態:
-      - ``status="completed"``: 同期完了。balance / total_trades /
-        open_positions_count を表示。
-      - ``status="accepted"``: 通知 ON かつ soft_timeout 超過。バックグラウンド
-        継続中 → notice を表示して終了 (完了は Discord 通知)。
-    """
-    _console.print("[cyan]取引判定ループを実行中... (完了まで待機)[/cyan]")
-    data = _post("/run/trade")
-    if data is None:
-        return
-    if data.get("status") == "accepted":
-        _console.print(
-            f"\n[yellow]{data.get('message') or '取引サイクルを実行中です。'}[/yellow]\n"
-        )
-        return
-    elapsed = data.get("elapsed_seconds", "—")
-    balance = data.get("balance")
-    balance_str = f"{balance:,.2f}" if isinstance(balance, (int, float)) else "—"
-    _console.print(
-        f"\n[green]完了[/green] ({elapsed}s)  "
-        f"残高: [bold]{balance_str}[/bold]  "
-        f"取引数: {data.get('total_trades', '—')}  "
-        f"ポジション: {data.get('open_positions_count', 0)}件\n"
-    )
-
-
 def _cmd_ask(message: str) -> None:
     """CLI 版: 回答は必ず Client に返させ (notify=False)、Discord 通知は発生させない。
 
@@ -961,13 +932,12 @@ _HELP = """\
   [cyan]run news[/cyan]             — 最新ニュースセンチメント
   [cyan]run tech[/cyan]             — 最新テクニカルスナップショット
   [cyan]run analyze[/cyan]          — 総合分析シグナル
-  [cyan]run trade[/cyan]            — 取引判定ループを今すぐ実行
   [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問  例: ask USDJPYの見通しは？
   [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
   [cyan]logs[/cyan] (N)             — activity.log の末尾N行（デフォルト50）
   [cyan]feeds[/cyan]                — RSSフィード疎通確認
   [cyan]usage[/cyan]                — LLM使用量 / CB状態 / usage_limit集計
-  [cyan]schedule[/cyan]             — スケジュール (取引/ニュース/技術/exit_check)
+  [cyan]schedule[/cyan]             — スケジュール (ニュース/技術/exit_check/reflection)
   [cyan]hosts[/cyan]                — ホストプロファイル一覧
   [cyan]use[/cyan] <name>           — 接続先ホスト切替  例: use remote
   [cyan]halt[/cyan] soft|hard       — 取引停止 (soft=新規のみ停止 / hard=全決済 / 理由 任意)
@@ -1000,7 +970,7 @@ def _dispatch(raw: str) -> bool:
         _cmd_schedule()
     elif cmd == "run":
         if not args:
-            _console.print("[red]使い方: run news | tech | analyze | trade[/red]")
+            _console.print("[red]使い方: run news | tech | analyze[/red]")
         else:
             sub = args[0].lower()
             if sub in ("news", "n"):
@@ -1009,10 +979,8 @@ def _dispatch(raw: str) -> bool:
                 _cmd_tech()
             elif sub in ("analyze", "a", "analysis"):
                 _cmd_analyze()
-            elif sub in ("trade", "tr"):
-                _cmd_run_trade()
             else:
-                _console.print(f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | trade")
+                _console.print(f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze")
     elif cmd == "ask":
         if not args:
             _console.print("[red]使い方: ask <メッセージ>[/red]")

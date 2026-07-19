@@ -57,7 +57,6 @@ class TuiApp(App):
         stop_event: threading.Event | None = None,
         llm_slot=None,  # PriorityJobSlot
         price_store=None,
-        hold_store=None,
         price_provider=None,
     ) -> None:
         super().__init__()
@@ -72,7 +71,6 @@ class TuiApp(App):
             llm_slot = PriorityJobSlot("tui-fallback")
         self._llm_slot = llm_slot
         self._price_store = price_store
-        self._hold_store = hold_store
         self._price_provider = price_provider
         self._tui_handler: TuiLogHandler | None = None
         self._disabled_handlers: list[logging.Handler] = []
@@ -173,7 +171,6 @@ class TuiApp(App):
                 "  [cyan]run news[/cyan]             — 最新ニュースセンチメントを表示\n"
                 "  [cyan]run tech[/cyan]             — 最新テクニカルスナップショットを表示\n"
                 "  [cyan]run analyze[/cyan]          — 総合分析シグナルを表示\n"
-                "  [cyan]run trade[/cyan]            — 取引判定ループを実行\n"
                 "  [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問\n"
                 "  [cyan]close[/cyan] (pair)         — ポジションを手動決済\n"
                 "  [cyan]feeds[/cyan]                — RSSフィード疎通確認\n"
@@ -273,13 +270,12 @@ class TuiApp(App):
         self._write_rich(tbl)
 
     def _cmd_run(self, args: list[str]) -> None:
-        from src.trading_cycle import run_trading_cycle
         from src.views import (
             run_analysis_summary, run_news_view, run_tech_view,
         )
 
         if not args:
-            self._write("[red]使い方: run news | tech | analyze | trade[/red]")
+            self._write("[red]使い方: run news | tech | analyze[/red]")
             return
 
         sub = args[0].lower()
@@ -295,20 +291,8 @@ class TuiApp(App):
             self._write("[cyan]総合分析を表示中...[/cyan]")
             output = self._capture_output(run_analysis_summary, self._config, self._store, self._analysis_store)
             self._write(output)
-        elif sub in ("trade", "tr"):
-            if self._price_store is None or self._hold_store is None:
-                self._write("[red]price_store / hold_store が利用できません[/red]")
-            else:
-                self._write("[cyan]取引判定ループを実行中 (LLMスロット取得待機)...[/cyan]")
-                self._llm_slot.run_user_blocking(
-                    run_trading_cycle,
-                    self._config, self._store, self._price_store,
-                    self._analysis_store, self._hold_store,
-                    price_provider=self._price_provider,
-                )
-                self._write("[green]取引判定完了[/green]")
         else:
-            self._write(f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | trade")
+            self._write(f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze")
 
     def _cmd_ask(self, args: list[str]) -> None:
         from src.views import run_ask

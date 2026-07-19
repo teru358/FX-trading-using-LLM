@@ -120,7 +120,6 @@ def _build_existing_features_section(config: AppConfig) -> str:
         "- circuit_breaker: 連続失敗 3 回で 300s OPEN、半開で再試行",
         "- TV consensus 矛盾検出: TV 方向と price 方向が逆なら conf ×0.7",
         "- drawdown_kill_switch: peak から閾値以上落ちたら新規 entry 停止",
-        "- vol_regime: ATR/EWMA に基づく risk_per_trade スケーリング",
         "- reflection cycle: クローズトレード振り返りを insights collection に保存",
     ]
     return "\n".join(items)
@@ -136,7 +135,6 @@ def _build_settings_section(config: AppConfig) -> str:
         f"- risk_per_trade: {t.risk_per_trade}",
         f"- min_rr_ratio: {t.min_rr_ratio}",
         f"- drawdown_kill_switch_enabled: {t.drawdown_kill_switch_enabled}",
-        f"- vol_regime_enabled: {t.vol_regime_enabled}",
     ]
     return "\n".join(lines)
 

@@ -96,7 +96,6 @@ def start_api_server(
     analysis_store: AnalysisStore,
     llm_slot: PriorityJobSlot,
     price_store: PriceStore,
-    hold_store,        # HoldDecisionStore
     orchestrator_store=None,  # OrchestratorStore (gate spec F-5)
     *,
     startup_timeout: float = _STARTUP_TIMEOUT_SEC,
@@ -125,7 +124,6 @@ def start_api_server(
     state.analysis_store = analysis_store
     state.llm_slot = llm_slot
     state.price_store = price_store
-    state.hold_store = hold_store
     state.orchestrator_store = orchestrator_store
     state.started_at = db_now()
 

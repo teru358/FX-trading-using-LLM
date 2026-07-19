@@ -28,7 +28,6 @@ logging:
 api:
   enabled: false             # true で REST API サーバーを起動
   port: 8811                 # リッスンポート
-  run_trade_soft_timeout_sec: 10   # POST /run/trade: この秒数内に完了したら同期返答、超過で非同期化+webhook
   ask_soft_timeout_sec: 60         # POST /ask: 同上
   # 認証: .env の API_SECRET_KEY を設定（X-API-Key ヘッダーで送信）
 
@@ -151,24 +150,7 @@ trading:
   giveback_close_r: 0.4
   giveback_close_min_mfe_r: 0.8
   remote_sl_sync_enabled: false
-  # RAG方向別スコア補正
-  rag_adjustment_enabled: true
-  rag_adjustment_max: 0.15
-  rag_adjustment_min_hits: 2
-  rag_adjustment_search_top_n: 5
-  rag_adjustment_same_weight: 0.10
-  rag_adjustment_opposite_weight: 0.10
-  rag_adjustment_trade_multiplier: 1.0
-  rag_adjustment_forecast_multiplier: 0.5
-  rag_adjustment_hold_multiplier: 0.3
   # ATRベースSL/TP (day horizon: 1h足ATR対応, spec 2026-07-05 §5.2 D-5)
-  atr_timeframe: "1h"                 # ATR計算用の足種 ("1h"/"4h"/"1d")。4h → 1h (day)。テクニカル分析の ohlcv_interval とは独立
-  sl_atr_mult_default: 2.0            # SL距離 = ATR(14, atr_timeframe) × この倍率。3.0 → 2.0 (day)
-  tp_atr_mult_default: 4.0            # TP距離 = ATR(14, atr_timeframe) × この倍率。6.0 → 4.0 (RR=2.0 不変, D-6)
-  sl_atr_mult_min: 1.0                # LLM動的更新の下限
-  sl_atr_mult_max: 5.0                # LLM動的更新の上限
-  tp_atr_mult_min: 2.0
-  tp_atr_mult_max: 10.0
   # ペアごとのポジション数上限 (1 ペアでの最大累積 open ポジ数)
   max_positions_per_pair: 2              # scale-in 含めて 1 ペアで最大 N ポジ
   # Scale-in (順張り増し玉): 既存ポジと同方向で強い signal が来た時に追加発注
@@ -179,13 +161,6 @@ trading:
   # 運用保険。新規運用時は false のままで OK、audit で DD 履歴を確認してから有効化を検討
   drawdown_kill_switch_enabled: false
   drawdown_kill_switch_max_pct: 0.10    # peak equity からこの割合以上落ちたら新規停止 (0.10 = 10%)
-  # ボラレジーム (EWMA ベース position sizing)
-  vol_regime_enabled: false
-  vol_regime_ewma_span: 20              # ATR(14) の EWMA 期間 (bar 数)
-  vol_regime_high_threshold: 1.3        # ATR/EWMA > 1.3 → high vol (risk 縮小)
-  vol_regime_low_threshold: 0.7         # ATR/EWMA < 0.7 → low vol
-  vol_regime_high_risk_scale: 0.5       # high vol 時の risk_per_trade 倍率
-  vol_regime_low_risk_scale: 1.0        # low vol 時 (= 通常と同じ。拡大はリスク増なので慎重に)
 
 price_monitor:
   enabled: true
@@ -197,9 +172,6 @@ price_monitor:
   # トレーリングストップ（段階型・利益保護）
 
 schedule:
-  run_times:
-    - "15:00"
-    - "21:30"
   timezone: "Asia/Tokyo"
   # technical 収集の間隔（時間）。trade/watch 別に調整可能（既定はどちらも 1h = 毎時）。
   # trade は将来 cadence resolver で boost される土台、watch は低頻度固定用。
@@ -321,11 +293,8 @@ rag:
 
 notification:
   enabled: false                   # true で Discord 通知を有効化（DISCORD_WEBHOOK_URL 必須）
-  notify_on_order_open: true       # 注文発注時に通知
   notify_on_order_close: true      # 決済時に通知（SL/TP到達・緊急損切り含む）
-  notify_on_signal_skipped: true   # スキップ（既存ポジション）/ 保留（hold）時に通知（判断理由付き）
   notify_on_price_alert: true      # 価格急変動（損失方向）を検知した場合
-  notify_on_cycle_summary: true    # 取引サイクル結果を1通に集約して通知 (false で旧 per-event 通知)
 
 # 経済指標カレンダー（TradingView非公式API経由）
 economic_calendar:

@@ -276,7 +276,7 @@ class TestStartupSequenceWithRealApi:
 
         def _start_api():
             order.append("api")
-            start_api_server(cfg, None, None, None, None, None)
+            start_api_server(cfg, None, None, None, None)
 
         try:
             with pytest.raises(OSError):

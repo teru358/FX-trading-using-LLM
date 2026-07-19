@@ -37,7 +37,7 @@ def _config(port: int) -> AppConfig:
 
 def _start(port: int):
     return api_server.start_api_server(
-        _config(port), None, None, None, None, None,
+        _config(port), None, None, None, None,
     )
 
 

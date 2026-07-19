@@ -46,55 +46,14 @@ def merge_and_rank_results(results: list[dict], max_results: int = 10) -> list[d
     return results[:max_results]
 
 
-def build_trade_summary(sessions: list, pairs: list[str]) -> str:
-    if not sessions:
-        return "=== Trade History ===\nNo trade history available."
-
-    if pairs:
-        filtered = [s for s in sessions if s.pair in pairs]
-    else:
-        filtered = list(sessions)
-
-    if not filtered:
-        return "=== Trade History ===\nNo trade history available."
-
-    lines = []
-    pair_groups: dict[str, list] = {}
-    for s in filtered:
-        pair_groups.setdefault(s.pair, []).append(s)
-
-    label = "Overall" if not pairs else None
-    for pair, group in pair_groups.items():
-        header = label or pair
-        wins = sum(1 for s in group if s.outcome == "win")
-        losses = len(group) - wins
-        total_pnl = sum(s.realized_pnl or 0 for s in group)
-        avg_pnl = total_pnl / len(group) if group else 0
-        win_rate = wins / len(group) * 100 if group else 0
-
-        best = max(group, key=lambda s: s.realized_pnl or 0)
-        worst = min(group, key=lambda s: s.realized_pnl or 0)
-        recent = [s.outcome for s in group[-5:]]
-
-        lines.append(f"=== Trade History: {header} ===")
-        lines.append(f"Total: {len(group)} trades | Win: {wins} ({win_rate:.0f}%) | Loss: {losses}")
-        lines.append(f"Total PnL: {total_pnl:+.2f} | Avg PnL: {avg_pnl:+.2f}")
-        lines.append(f"Last {len(recent)}: {', '.join(recent)}")
-        lines.append(f"Best: {best.realized_pnl:+.2f} ({best.close_reason}) | Worst: {worst.realized_pnl:+.2f} ({worst.close_reason})")
-
-    return "\n".join(lines)
-
-
 class AskContextBuilder:
     """askコマンド用のコンテキストを構築する。"""
 
-    def __init__(self, config, store, analysis_store, position_mgr,
-                 session_store=None) -> None:
+    def __init__(self, config, store, analysis_store, position_mgr) -> None:
         self._config = config
         self._store = store
         self._analysis_store = analysis_store
         self._position_mgr = position_mgr
-        self._session_store = session_store
 
     async def build(self, user_message: str) -> dict[str, str]:
         config = self._config
@@ -109,12 +68,10 @@ class AskContextBuilder:
         technical = self._build_technical_snapshots(pairs)
         news = self._build_news_context()
         positions = self._build_positions()
-        trade_summary = self._build_trade_summary(pairs)
 
         return {
             "open_positions": positions,
             "semantic_results": semantic_results,
-            "trade_summary": trade_summary,
             "technical_snapshots": technical,
             "news_context": news,
         }
@@ -274,18 +231,4 @@ class AskContextBuilder:
             lines.append("No open positions.")
         return "\n".join(lines)
 
-    def _build_trade_summary(self, pairs: list[str]) -> str:
-        if not self._session_store:
-            return ""
-        from sqlalchemy import select
-        from sqlalchemy.orm import Session as SASession
-        from src.data.session_store import _TradingSession
 
-        with SASession(self._session_store._engine) as sa_session:
-            stmt = select(_TradingSession).where(_TradingSession.outcome.isnot(None))
-            if pairs:
-                stmt = stmt.where(_TradingSession.pair.in_(pairs))
-            results = sa_session.execute(stmt).scalars().all()
-            for r in results:
-                sa_session.expunge(r)
-        return build_trade_summary(list(results), pairs)

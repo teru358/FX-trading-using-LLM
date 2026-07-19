@@ -38,7 +38,6 @@ def _state_setup(tmp_path, monkeypatch):
     cfg.providers.mt5 = None
     cfg.providers.oanda = None
     cfg.price_monitor.interval_minutes = 5
-    cfg.schedule.run_times = []
 
     # PositionManager は balance.json (balance_snapshot) を真実のソースとして
     # 読むため、テストで残高 ¥100,000 を期待する場合は事前に seed する。
