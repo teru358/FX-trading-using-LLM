@@ -50,13 +50,31 @@ def _is_due(state, now: datetime) -> bool:
     return state.next_retry_at is not None and state.next_retry_at <= now
 
 
+def _raw_closed_at(d: dict) -> datetime | None:
+    """raw 行の closed_at を datetime にする。欠落・不正なら None。"""
+    v = d.get("closed_at")
+    if not isinstance(v, str):
+        return None
+    try:
+        return datetime.fromisoformat(v)
+    except ValueError:
+        return None
+
+
 def _dedupe_raw_rows(raw: list) -> list:
-    """order_id ごとに候補を 1 件 (最終出現行) へ絞る。
+    """order_id ごとに候補を 1 件へ絞る。
 
     trades.json は append-only で order_id 一意性を保証しない (append_trade)。
-    正本は最終出現行 — クラッシュ復旧や再 reconciliation で追記された行の方が
-    正しい決済情報を持つため、先着を採ると古い close price / PnL で振り返る
-    ことになる (レビュー MEDIUM-2)。
+    採用するのは「実際の約定が新しい行」= closed_at が新しい方で、比較できない
+    ときのみ最終出現行に倒す。
+
+    append 順と closed_at は decoupled であることに注意 (レビュー HIGH-1)。
+    append 順 = bot が決済に気づいた時刻だが、closed_at は MT5 deal history の
+    実約定時刻 (mt5_bridge_broker.py が close_position_with_result へ渡し、
+    position_manager.py の `closed_at or db_now()` が書く)。サーバー側 SL/TP が
+    bot 停止中に発火し、locally observed close の後に reconcile されると
+    後着行の closed_at が先着より古くなる。最終出現規則だけだとこの経路で
+    古い約定情報を採ってしまうため、closed_at を正本にする。
 
     絞り込みを parse より前に置くのが要点 (レビュー MEDIUM)。parse 後に潰すと、
     後着が壊れているとき候補が先着 1 件だけになり、古い情報で done 確定して
@@ -64,20 +82,31 @@ def _dedupe_raw_rows(raw: list) -> list:
     いれば先着へフォールバックせず retry に留まる。1 order_id につき parse
     試行が 1 回になるため、壊れた重複行による attempt の多重進行も解消する。
 
-    order_id を持たない行は潰しようがないのでそのまま通す (parse 側で弾く)。
+    order_id が無い / 文字列でない行は潰しようがないのでそのまま通す
+    (parse 側が従来どおり行ごとに弾く)。ここで例外を出すと行ごとの try の外
+    なので trades.json 全体が処理不能になる (レビュー HIGH-2)。
     """
     chosen: dict[str, int] = {}     # order_id → raw 内の採用インデックス
     passthrough: list[int] = []
     for i, d in enumerate(raw):
         oid = d.get("order_id") if isinstance(d, dict) else None
-        if not oid:
+        # str 以外 (list 等) は hashable とは限らず dict キーにできない。
+        if not oid or not isinstance(oid, str):
             passthrough.append(i)
             continue
-        if oid in chosen:
-            logger.warning(
-                f"[REFLECT] duplicate order_id in trades.json: {oid} "
-                f"— keeping the last occurrence")
-        chosen[oid] = i
+        prev = chosen.get(oid)
+        if prev is None:
+            chosen[oid] = i
+            continue
+        logger.warning(
+            f"[REFLECT] duplicate order_id in trades.json: {oid} "
+            f"— keeping the row with the newest closed_at")
+        prev_ts = _raw_closed_at(raw[prev])
+        cur_ts = _raw_closed_at(d)
+        if prev_ts is None or cur_ts is None:
+            chosen[oid] = i         # 比較不能 — append-only の最終出現に倒す
+        elif cur_ts >= prev_ts:
+            chosen[oid] = i
     keep = sorted(set(chosen.values()) | set(passthrough))
     return [raw[i] for i in keep]
 
@@ -109,6 +138,16 @@ def _parse_closed_trades(raw, orch_store, now: datetime,
             logger.warning(f"[REFLECT] non-dict trade row skipped: {d!r:.80}")
             continue
         oid = d.get("order_id")
+        # str 以外は states の dict キーに使えない (unhashable もあり得る)。
+        # ここは行ごとの try の外なので、例外を出すと trades.json 全体が
+        # 処理不能になる (レビュー HIGH-2)。状態照会を諦めて parse へ回し、
+        # 従来どおり Order.from_dict の try で 1 行に封じ込める。
+        if not isinstance(oid, str):
+            oid = None
+        # dedupe → _is_due の順。_is_due は order_id だけをキーにするため
+        # 重複グループの全行を同一に扱う (グループを分割しない)。よって
+        # 逆順でも結果は同じで、この順序は候補を先に絞る分だけ安価という
+        # 理由で選んでいる — 正しさが依存しているわけではない。
         if oid and not _is_due(states.get(oid), now):
             continue    # 済み (done/dead) か backoff 期限前 — 走査対象外
         try:

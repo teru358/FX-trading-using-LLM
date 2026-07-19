@@ -137,12 +137,70 @@ class TestDedupeRawRows:
         assert [r["order_id"] for r in kept] == ["d1", "other"]
 
     def test_keeps_last_occurrence(self):
-        """append-only の正本は最終出現行 (レビュー MEDIUM-2)。"""
+        """closed_at が無い/同値なら append-only の正本は最終出現行。"""
         rows = [{"order_id": "d1", "realized_pnl": 100.0},
                 {"order_id": "d1", "realized_pnl": -200.0}]
         kept = _dedupe_raw_rows(rows)
         assert len(kept) == 1
         assert kept[0]["realized_pnl"] == -200.0
+
+    def test_duplicate_prefers_newer_closed_at_regardless_of_order(self):
+        """追記順が逆でも closed_at が新しい行を採る (レビュー HIGH-1)。
+
+        append 順 = bot が決済に気づいた時刻、closed_at = 実際の約定時刻で
+        両者は decoupled。サーバー側 SL/TP が bot 停止中に発火し、locally
+        observed close の後に reconcile されると後着の closed_at が先着より
+        古くなる (mt5_bridge_broker.py:632-647 が deal history の closed_at を
+        position_manager.py:474 経由で書く)。最終出現規則だけだと、この経路で
+        古い約定情報を採ってしまう。
+        """
+        newer = {"order_id": "d1", "realized_pnl": 999.0,
+                 "closed_at": (NOW + timedelta(hours=5)).isoformat()}
+        older = {"order_id": "d1", "realized_pnl": 1.0,
+                 "closed_at": NOW.isoformat()}
+        kept = _dedupe_raw_rows([newer, older])      # 追記順は newer → older
+        assert len(kept) == 1
+        assert kept[0]["realized_pnl"] == 999.0
+
+    def test_newer_closed_at_wins_when_appended_later(self):
+        """通常順 (後着が新しい約定) でも当然新しい方を採る。"""
+        older = {"order_id": "d1", "realized_pnl": 1.0,
+                 "closed_at": NOW.isoformat()}
+        newer = {"order_id": "d1", "realized_pnl": 999.0,
+                 "closed_at": (NOW + timedelta(hours=5)).isoformat()}
+        kept = _dedupe_raw_rows([older, newer])
+        assert kept[0]["realized_pnl"] == 999.0
+
+    def test_unparseable_closed_at_falls_back_to_file_order(self):
+        """closed_at が parse 不能なら比較せずファイル順 (最終出現) に倒す。"""
+        rows = [{"order_id": "d1", "realized_pnl": 1.0,
+                 "closed_at": "not-a-datetime"},
+                {"order_id": "d1", "realized_pnl": 999.0,
+                 "closed_at": "also-broken"}]
+        kept = _dedupe_raw_rows(rows)
+        assert len(kept) == 1
+        assert kept[0]["realized_pnl"] == 999.0
+
+    def test_missing_closed_at_falls_back_to_file_order(self):
+        """片方に closed_at が無いだけでも比較を諦めて最終出現行を採る。"""
+        rows = [{"order_id": "d1", "realized_pnl": 1.0,
+                 "closed_at": (NOW + timedelta(hours=5)).isoformat()},
+                {"order_id": "d1", "realized_pnl": 999.0}]
+        kept = _dedupe_raw_rows(rows)
+        assert len(kept) == 1
+        assert kept[0]["realized_pnl"] == 999.0
+
+    def test_unhashable_order_id_does_not_break_other_rows(self):
+        """hashable でない order_id でファイル全体を落とさない (レビュー HIGH-2)。
+
+        手動編集で到達可能。dedupe は行ごとの try の外にあるため、例外が出ると
+        _parse_closed_trades を貫通して controller まで届き、全 pending
+        reflection が停止する。
+        """
+        rows = [{"order_id": ["x"]}, {"order_id": "ok"}]
+        kept = _dedupe_raw_rows(rows)            # 例外を出さない
+        assert {r["order_id"] if isinstance(r["order_id"], str) else "?"
+                for r in kept} == {"?", "ok"}
 
     def test_preserves_file_order_of_kept_rows(self):
         """採用行は trades.json 内の出現順を保つ (選択側の安定ソート前提)。"""
@@ -558,6 +616,66 @@ class TestRunReflectionCycle:
         run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
                              slot=_FakeSlot())
         assert got == [-200.0]                   # 後着の補正 PnL で振り返る
+
+    def test_unhashable_order_id_does_not_halt_cycle(self, tmp_path, orch,
+                                                     monkeypatch):
+        """不正な order_id 1 行で全 pending reflection を止めない (レビュー HIGH-2)。
+
+        修正前は Order.from_dict の行ごと try に封じ込められていたが、dedupe を
+        parse 前に出したことで try の外に露出した。controller の try は
+        load_trades_raw しか守っていないため、例外は呼び出し元まで貫通する。
+        """
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        rows = [{"order_id": ["x"], "pair": "USDJPY=X"},
+                _closed_order("good-1").to_dict()]
+        (state / "trades.json").write_text(json.dumps(rows), encoding="utf-8")
+        seen = []
+
+        async def fake(config, store, orch_store, llm, embed_fn, order,
+                       entry_analysis):
+            seen.append(order.order_id)
+            return ("t", True)
+
+        monkeypatch.setattr("src.cycles.reflection._reflect_and_record", fake)
+        monkeypatch.setattr("src.cycles.reflection.create_llm_client",
+                            lambda config, role: object())
+        monkeypatch.setattr("src.cycles.reflection.make_embed_fn",
+                            lambda config: object())
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        assert seen == ["good-1"]                # 正常行は処理される
+        assert orch.get_reflection("good-1").status == "done"
+
+    def test_reconciled_duplicate_uses_actual_fill_time(self, tmp_path, orch,
+                                                        monkeypatch):
+        """後着が古い約定なら、先着 (新しい約定) の PnL で振り返る (HIGH-1)。"""
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        # 先着 = locally observed close (新しい約定時刻)
+        local = _closed_order("dup-5", closed_at=NOW + timedelta(hours=5))
+        local.realized_pnl = 999.0
+        # 後着 = 後から reconcile された古いサーバー側 SL/TP 決済
+        reconciled = _closed_order("dup-5", closed_at=NOW)
+        reconciled.realized_pnl = 1.0
+        (state / "trades.json").write_text(
+            json.dumps([local.to_dict(), reconciled.to_dict()]),
+            encoding="utf-8")
+        got = []
+
+        async def fake(config, store, orch_store, llm, embed_fn, order,
+                       entry_analysis):
+            got.append(order.realized_pnl)
+            return ("t", True)
+
+        monkeypatch.setattr("src.cycles.reflection._reflect_and_record", fake)
+        monkeypatch.setattr("src.cycles.reflection.create_llm_client",
+                            lambda config, role: object())
+        monkeypatch.setattr("src.cycles.reflection.make_embed_fn",
+                            lambda config: object())
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        assert got == [999.0]
 
     def test_trades_json_not_a_list_is_noop(self, tmp_path, orch, monkeypatch):
         state = tmp_path / "state"
