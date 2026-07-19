@@ -1,6 +1,6 @@
 """reflection job のテスト (spec §3.2/§3.2b/§3.3/§3.5/§3.6)。"""
 import json
-from datetime import timedelta
+from datetime import timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -169,6 +169,72 @@ class TestDedupeRawRows:
         newer = {"order_id": "d1", "realized_pnl": 999.0,
                  "closed_at": (NOW + timedelta(hours=5)).isoformat()}
         kept = _dedupe_raw_rows([older, newer])
+        assert kept[0]["realized_pnl"] == 999.0
+
+    def test_tz_aware_and_naive_closed_at_do_not_raise(self):
+        """tz-aware / naive 混在でファイル全体を落とさない (レビュー LOW-A)。
+
+        HIGH-2 と同じ failure mode — 比較式は行ごとの try の外にあるため、
+        TypeError が出ると trades.json 全体が処理不能になる。現状の write
+        経路は全て naive db_now() だが、その不変条件はこのファイルの外に
+        あり (mt5_bridge_broker.py:635 が bridge 供給テキストに無防備な
+        fromisoformat をかける)、offset 付き payload が来れば伝播する。
+        """
+        aware = {"order_id": "d1", "realized_pnl": 1.0,
+                 "closed_at": NOW.replace(tzinfo=timezone.utc).isoformat()}
+        naive = {"order_id": "d1", "realized_pnl": 999.0,
+                 "closed_at": (NOW + timedelta(hours=5)).isoformat()}
+        kept = _dedupe_raw_rows([aware, naive])      # 例外を出さない
+        assert len(kept) == 1
+        assert kept[0]["realized_pnl"] == 999.0      # naive 側が新しい
+
+    def test_tz_aware_offsets_compared_after_normalization(self):
+        """両方 offset 付きでも比較でき、新しい方を採る。"""
+        older = {"order_id": "d1", "realized_pnl": 1.0,
+                 "closed_at": NOW.replace(tzinfo=timezone.utc).isoformat()}
+        newer = {"order_id": "d1", "realized_pnl": 999.0,
+                 "closed_at": (NOW + timedelta(hours=5)).replace(
+                     tzinfo=timezone.utc).isoformat()}
+        kept = _dedupe_raw_rows([newer, older])      # 追記順は newer → older
+        assert len(kept) == 1
+        assert kept[0]["realized_pnl"] == 999.0
+
+    def test_offset_normalized_to_utc_not_just_stripped(self):
+        """offset は UTC に寄せてから naive 化する (単に捨てない)。
+
+        tzinfo を捨てるだけだと「+09:00 の 18:00」が naive 18:00 と同値に
+        なり、実際には UTC 09:00 = naive 規約より 9 時間早いのに「新しい」と
+        誤判定される。db_now() は naive machine-local (= 本番 JST) 規約。
+        """
+        # 壁時計は 18:00 > 12:00 だが、offset を効かせると
+        # 18:00+09:00 = UTC 09:00 < 12:00+00:00 = UTC 12:00 で大小が逆転する。
+        # マシン TZ に依存しないよう両方 offset 付きで組む。
+        base = NOW.replace(hour=18, minute=0, second=0, microsecond=0)
+        aware_old = {
+            "order_id": "d1", "realized_pnl": 1.0,
+            "closed_at": base.replace(
+                tzinfo=timezone(timedelta(hours=9))).isoformat()}
+        aware_new = {
+            "order_id": "d1", "realized_pnl": 999.0,
+            "closed_at": base.replace(
+                hour=12, tzinfo=timezone.utc).isoformat()}
+        # 追記順は aware_new → aware_old。UTC 正規化すれば aware_old の方が
+        # 古いので aware_new が残る。tzinfo を捨てるだけだと 18:00 > 12:00 で
+        # aware_old が勝ってしまう。
+        kept = _dedupe_raw_rows([aware_new, aware_old])
+        assert len(kept) == 1
+        assert kept[0]["realized_pnl"] == 999.0
+
+    def test_equal_closed_at_keeps_last_occurrence(self):
+        """同時刻 (同一秒での reconcile) の tie は最終出現行 (レビュー LOW-B)。
+
+        フォールバック方向 (比較不能なら最終出現) と整合させる。
+        """
+        ts = NOW.isoformat()
+        rows = [{"order_id": "d1", "realized_pnl": 1.0, "closed_at": ts},
+                {"order_id": "d1", "realized_pnl": 999.0, "closed_at": ts}]
+        kept = _dedupe_raw_rows(rows)
+        assert len(kept) == 1
         assert kept[0]["realized_pnl"] == 999.0
 
     def test_unparseable_closed_at_falls_back_to_file_order(self):

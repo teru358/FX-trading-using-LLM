@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from src.analysis.price_analyzer import load_user_notes   # 現行定義元 (price_analyzer.py:30)
@@ -51,14 +51,31 @@ def _is_due(state, now: datetime) -> bool:
 
 
 def _raw_closed_at(d: dict) -> datetime | None:
-    """raw 行の closed_at を datetime にする。欠落・不正なら None。"""
+    """raw 行の closed_at を naive datetime にする。欠落・不正なら None。
+
+    tzinfo は必ず落とす (レビュー LOW-A)。混在したまま比較すると
+    `can't compare offset-naive and offset-aware datetimes` が飛び、
+    この式は行ごとの try の外なので trades.json 全体が処理不能になる
+    (HIGH-2 と同じ failure mode)。現状の write 経路は全て naive db_now()
+    だが、その不変条件はこのファイルの外にある — mt5_bridge_broker.py が
+    bridge 供給テキストに無防備な fromisoformat をかけるため、offset 付き
+    payload が来れば伝播しうる。
+
+    offset 付きは UTC に寄せてから naive 化する。単に tzinfo を捨てると
+    「+09:00 の 10:00」と「naive の 10:00」が同値になり、db_now() 規約
+    (naive machine-local) と 9 時間ずれる。clock.py の db_utc_now() と
+    同じ正規化。
+    """
     v = d.get("closed_at")
     if not isinstance(v, str):
         return None
     try:
-        return datetime.fromisoformat(v)
+        ts = datetime.fromisoformat(v)
     except ValueError:
         return None
+    if ts.tzinfo is not None:
+        ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+    return ts
 
 
 def _dedupe_raw_rows(raw: list) -> list:
