@@ -5,6 +5,8 @@ main() を直接叩くのは重いので、判定 (ensure_orchestrator_or_exit) 
 """
 from __future__ import annotations
 
+import socket
+
 import pytest
 
 from src.startup import ensure_orchestrator_or_exit, run_startup_sequence
@@ -240,3 +242,56 @@ class TestStartupSequence:
         with pytest.raises(KeyboardInterrupt):
             run_startup_sequence(**fns)
         assert order[-1] == "stop"
+
+
+class TestStartupSequenceWithRealApi:
+    """Mock ではなく **実物の start_api_server** と結線した fail-fast 検証。
+
+    前回のレビュー指摘 (High): start_api を Mock にしていたため、実物が daemon
+    thread を起動して即 return する = bind 失敗を同期検出できない、という乖離を
+    テストが検出できなかった。ここでは実際にポートを占有して確かめる。
+    """
+
+    def test_api_bind_failure_stops_initialize_and_start(self):
+        from src.api._state import state
+        from src.api.server import start_api_server
+        from src.config.schema import AppConfig
+
+        saved = dict(state.__dict__)
+        occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        occupied.bind(("0.0.0.0", 0))
+        occupied.listen(5)
+        port = occupied.getsockname()[1]
+
+        cfg = AppConfig()
+        cfg.api.enabled = True
+        cfg.api.port = port
+
+        order = []
+        runtime = type("R", (), {
+            "start": lambda self: order.append("start"),
+            "stop": lambda self: order.append("stop"),
+        })()
+
+        def _start_api():
+            order.append("api")
+            start_api_server(cfg, None, None, None, None, None)
+
+        try:
+            with pytest.raises(OSError):
+                run_startup_sequence(
+                    build=lambda: (order.append("build"), runtime)[1],
+                    validate=lambda rt: order.append("validate"),
+                    initialize=lambda: order.append("init"),
+                    start_api=_start_api,
+                    start_scheduler=lambda: order.append("scheduler"),
+                )
+        finally:
+            occupied.close()
+            state.__dict__.clear()
+            state.__dict__.update(saved)
+
+        assert order == ["build", "validate", "api"]
+        assert "init" not in order
+        assert "start" not in order and "scheduler" not in order

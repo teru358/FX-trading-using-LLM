@@ -584,3 +584,64 @@ def test_shadow_pair_subset_warns_but_builds(tmp_path: Path, monkeypatch, caplog
     assert isinstance(rt, OrchestratorRuntime)
     assert any("GBPUSD=X" in r.getMessage() and "pair subset" in r.getMessage()
                for r in caplog.records)
+
+
+# ── 重複 pair の扱い (外部レビュー Medium) ────────────────────────
+
+
+def test_live_duplicate_pairs_raises(tmp_path: Path, monkeypatch) -> None:
+    """live で orchestrator.pairs に重複があれば起動中止。
+
+    set 比較の整合チェックは重複を素通りするが、runtime には重複 list のまま渡り
+    同一 pair が複数回 planning/watch される (LLM 計画の重複・plan の不要な
+    supersede)。config のミスなので live では気づかせる (H-2 の非 tradeable
+    symbol の扱いと同じ方針)。
+    """
+    _patch_heavy(monkeypatch, tmp_path)
+    cfg = _two_tradeable_config()
+    cfg.orchestrator.mode = "live"
+    cfg.orchestrator.pairs = ["USDJPY=X", "GBPUSD=X", "USDJPY=X"]
+    with pytest.raises(RuntimeError) as exc:
+        bs.build_orchestrator_runtime(
+            cfg, store=object(), price_store=object(),
+            analysis_store=_FakeAnalysisStore(), price_provider=_FakePriceProvider(),
+        )
+    assert "USDJPY=X" in str(exc.value)
+    assert "重複" in str(exc.value)
+
+
+def test_shadow_duplicate_pairs_deduped_preserving_order(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """非 live では warning + 順序維持 dedup で構築を続ける。"""
+    _patch_heavy(monkeypatch, tmp_path)
+    cfg = _two_tradeable_config()
+    cfg.orchestrator.mode = "shadow"
+    cfg.orchestrator.pairs = ["GBPUSD=X", "USDJPY=X", "GBPUSD=X"]
+    with caplog.at_level("WARNING"):
+        rt = bs.build_orchestrator_runtime(
+            cfg, store=object(), price_store=object(),
+            analysis_store=_FakeAnalysisStore(), price_provider=_FakePriceProvider(),
+        )
+    assert isinstance(rt, OrchestratorRuntime)
+    # 順序は config の初出順を維持する (dedup で並べ替えない)
+    assert rt._pairs == ["GBPUSD=X", "USDJPY=X"]
+    assert any("重複" in r.getMessage() for r in caplog.records)
+
+
+def test_duplicate_instruments_deduped_without_configured_pairs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """orchestrator.pairs 未指定でも instruments 側の重複を落とす。"""
+    _patch_heavy(monkeypatch, tmp_path)
+    trade1 = InstrumentConfig(symbol="USDJPY=X", display_name="USD/JPY", asset_type="fx",
+                              mode="trade", base_currency="USD", quote_currency="JPY")
+    dup = InstrumentConfig(symbol="USDJPY=X", display_name="USD/JPY", asset_type="fx",
+                           mode="trade", base_currency="USD", quote_currency="JPY")
+    cfg = AppConfig(instruments=[trade1, dup])
+    cfg.orchestrator.enabled = True
+    rt = bs.build_orchestrator_runtime(
+        cfg, store=object(), price_store=object(),
+        analysis_store=_FakeAnalysisStore(), price_provider=_FakePriceProvider(),
+    )
+    assert rt._pairs == ["USDJPY=X"]
