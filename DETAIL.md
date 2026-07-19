@@ -563,7 +563,6 @@ MarketStateTracker が市場の開閉状態を管理:
 | `[CLOSE]` | SL/TP 到達検出 |
 | `[TRADE]` | 注文実行・決済 |
 | `[REFLECT]` | 振り返り結果 |
-| `[FORECAST]` | 予測サイクル |
 | `[REVIEW]` | ポジション再評価 (Reversal Guard / Time Stop) 判定詳細 |
 | `[EXIT]` | exit_check サイクルの close 実行 |
 | `[MONITOR]` | 価格監視・急変動・トレーリング |
