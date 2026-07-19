@@ -479,9 +479,16 @@ def main() -> None:
         )
 
     # --- fail-fast 起動シーケンス (spec §1.5) ---------------------------------
-    # build → validate → initialize → start → API → scheduler。
-    # 発注経路 (orchestrator) の構築・検証を API / scheduler より前に置き、
-    # 発注経路ゼロのまま無音で運転を続ける事故を防ぐ。
+    # build → validate → start_api → initialize → runtime.start → start_scheduler。
+    # 実際の順序制御は src/startup.py:run_startup_sequence が持つ (順序の根拠も
+    # そちらの docstring に集約)。要点だけ再掲する:
+    #   - 発注経路 (orchestrator) の構築・検証が全ての起動より前。発注経路ゼロの
+    #     まま無音で運転を続ける事故を防ぐ。
+    #   - 制御面 (REST API) を発注ループ (runtime.start) より **前** に上げる。
+    #     API は halt/resume・承認ゲート・/status を担うので、EADDRINUSE 等で
+    #     API が上がらないときは発注ループが動き出す前に中止できなければならない。
+    #     この前後関係を入れ替えると「制御できない発注ループ」が生まれるため、
+    #     安全上の意図として動かさないこと。
 
     def _build_orchestrator():
         # 例外はそのまま落とす (fail-fast — 継続 guard は撤去済み)。

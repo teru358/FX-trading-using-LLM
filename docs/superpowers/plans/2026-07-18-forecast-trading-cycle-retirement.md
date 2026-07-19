@@ -1660,8 +1660,10 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commi
 
 **Files:**
 - Modify: `main.py` (起動順序: orchestrator 構築を API/scheduler より前へ、継続 guard 撤去)
-- Modify: `src/orchestrator/bootstrap.py` (pair 整合チェック)
-- Test: `tests/test_main_failfast.py` (新規) + bootstrap テスト追記
+- Modify: `src/orchestrator/bootstrap.py` (pair 整合チェック / 重複 pair)
+- Modify: `src/api/server.py` (bind を同期化して API 起動失敗を fail-fast に載せる)
+- Test: `tests/test_main_failfast.py` (新規) + `tests/test_api_server_startup.py` (新規)
+  + bootstrap テスト追記
 
 spec: §1.5。
 
@@ -1682,7 +1684,8 @@ def test_shadow_pair_subset_warns_but_builds(...):
 
 main 側 `tests/test_main_failfast.py` — main() を直接叩くのは重いので、
 判定と起動順序をそれぞれ関数に切り出してテストする (レビュー Medium-5:
-「build → validate → start → API → scheduler」の順序保証が中核):
+「build → validate → start_api → initialize → runtime.start → start_scheduler」の
+順序保証が中核。API を発注ループより前に上げる理由は下記 docstring 参照):
 
 ```python
 import pytest
@@ -1705,11 +1708,16 @@ class TestEnsureOrExit:
 
 
 class TestStartupSequence:
-    """build → validate → initialize → start → API → scheduler の順序保証。
+    """build → validate → start_api → initialize → runtime.start → start_scheduler
+    の順序保証。
 
-    initialize (初回 news/tech 収集) は runtime.start() より前 (plan レビュー High-1:
-    orchestrator の planning/watch loop は start() 直後から動くため、
-    初回収集前の古い snapshot で判断・発注させない)。
+    - initialize (初回 news/tech 収集) は runtime.start() より前 (plan レビュー High-1:
+      orchestrator の planning/watch loop は start() 直後から動くため、
+      初回収集前の古い snapshot で判断・発注させない)。
+    - start_api は runtime.start() より前 (実装後レビュー H-1)。API は制御面
+      (halt/resume・承認ゲート・/status) なので、EADDRINUSE 等で API が上がらない
+      ときは発注ループが動き出す前に中止できなければならない。副次的に初回収集
+      (数分) 中の API 無応答も解消する。
     """
 
     def _spies(self):
@@ -1726,7 +1734,7 @@ class TestStartupSequence:
     def test_happy_path_order(self):
         order, fns = self._spies()
         run_startup_sequence(**fns)
-        assert order == ["build", "validate", "init", "start", "api", "scheduler"]
+        assert order == ["build", "validate", "api", "init", "start", "scheduler"]
 
     def test_build_failure_stops_everything_after(self):
         order, fns = self._spies()
@@ -1753,7 +1761,7 @@ class TestStartupSequence:
         run_startup_sequence(**fns)
         assert order.index("init") < order.index("start")
 
-    def test_initialize_failure_stops_start_api_scheduler(self):
+    def test_initialize_failure_stops_start_and_scheduler(self):
         order, fns = self._spies()
         def boom():
             order.append("init")
@@ -1761,17 +1769,36 @@ class TestStartupSequence:
         fns["initialize"] = boom
         with pytest.raises(RuntimeError):
             run_startup_sequence(**fns)
-        assert order == ["build", "validate", "init"]   # start/api/scheduler なし
+        assert order == ["build", "validate", "api", "init"]  # start/scheduler なし
 
-    def test_start_failure_stops_before_api_and_scheduler(self):
+    def test_api_failure_stops_initialize_and_start(self):
+        # 制御 API が上がらなければ発注ループを一切起こさない (H-1)。
+        order, fns = self._spies()
+        def api_boom():
+            order.append("api")
+            raise RuntimeError("api failed")
+        fns["start_api"] = api_boom
+        with pytest.raises(RuntimeError):
+            run_startup_sequence(**fns)
+        assert order == ["build", "validate", "api"]
+
+    def test_start_failure_stops_scheduler(self):
         order, fns = self._spies()
         runtime = type("R", (), {"start": lambda self: (_ for _ in ()).throw(
             RuntimeError("start failed"))})()
         fns["build"] = lambda: (order.append("build"), runtime)[1]
         with pytest.raises(RuntimeError):
             run_startup_sequence(**fns)
-        assert "api" not in order and "scheduler" not in order
+        assert "scheduler" not in order
 ```
+
+> **外部レビュー High (Task 7 後)**: 上記は `start_api` を spy にしているため、
+> 実物の `start_api_server` が daemon thread を起動して即 return する
+> (= bind 失敗を同期検出できない) 乖離を検出できなかった。
+> `tests/test_api_server_startup.py` と
+> `TestStartupSequenceWithRealApi` で、**実際にポートを占有した状態で実物を
+> 呼ぶ** 統合テストを追加済み。`start_api_server` は bind を呼び出しスレッドで
+> 行い、EADDRINUSE をそのまま送出する。
 
 - [x] **Step 2: 実装**
 
@@ -1810,19 +1837,21 @@ def ensure_orchestrator_or_exit(runtime, *, enabled: bool, mode: str = "live") -
 
 
 def run_startup_sequence(*, build, validate, initialize, start_api, start_scheduler):
-    """build → validate → initialize → start → API → scheduler の順序を固定する
-    seam (spec §1.5 / plan レビュー Medium-5 / High-1)。
+    """build → validate → start_api → initialize → runtime.start → start_scheduler
+    の順序を固定する seam (spec §1.5 / plan レビュー Medium-5 / High-1)。
 
-    initialize は初回 news/tech 収集。orchestrator の planning/watch loop は
-    start() 直後から動くため、初回収集を start() より前に置き、古い snapshot で
-    判断・発注させない。どの段の失敗 (例外 / SystemExit) でも後段は実行されない。
+    start_api は発注ループより前。API は制御面 (halt/resume・承認ゲート・/status)
+    を担うので、EADDRINUSE 等で上がらないときは発注ループ開始前に中止できる
+    必要がある。initialize は初回 news/tech 収集。orchestrator の planning/watch
+    loop は start() 直後から動くため、初回収集を start() より前に置き、古い
+    snapshot で判断・発注させない。どの段の失敗 (例外 / SystemExit) でも後段は
+    実行されない。
     """
     runtime = build()
     validate(runtime)
-    initialize()
-    if runtime is not None:
-        runtime.start()
     start_api()
+    initialize()
+    runtime.start()
     start_scheduler()
     return runtime
 ```
@@ -1871,8 +1900,12 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 > - plan 例の `test_disabled_raises_system_exit` は `runtime=None` を渡すため、
 >   enabled チェックを消しても runtime-None チェックで拾われ mutation を殺せない。
 >   `test_disabled_raises_even_with_runtime` (runtime あり + enabled=False) を追加した。
-> - 起動順序の再編に伴い、REST API 起動は Initial collection の**前→後**に移った
->   (spec §1.5 の build → validate → initialize → start → API → scheduler に従う)。
+> - 最終的な起動順序は
+>   `build → validate → start_api → initialize → runtime.start → start_scheduler`
+>   (実装後レビュー H-1 で API を発注ループより前に戻した)。REST API 起動は
+>   Initial collection の**前**のまま。**この前後関係は安全上の意図** — 制御面
+>   (halt/resume・承認ゲート・/status) が上がらない状態で発注ループを動かさない
+>   ため。将来の修正で逆転させないこと。
 > - Schedule 表示に `Orchestrator` 行を追加 (live / `<mode> — 発注なし`)。
 > - mutation 9 種 (enabled/None/shadow警告/init位置/順序逆転/例外握り潰し/
 >   live raise/shadow warning/チェック削除) すべてテストが検出。
