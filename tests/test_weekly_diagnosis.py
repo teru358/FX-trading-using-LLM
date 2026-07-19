@@ -52,7 +52,6 @@ def test_settings_section_includes_key_params():
         risk_per_trade: float = 0.01
         min_rr_ratio: float = 1.5
         drawdown_kill_switch_enabled: bool = False
-        vol_regime_enabled: bool = False
 
     @dataclass
     class _C:
