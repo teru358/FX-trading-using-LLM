@@ -26,9 +26,11 @@
 │  テクニカル分析 (毎時 :00・LLM)                                │
 │  OHLCV → 指標 → ルールベーススコア → スナップショット蓄積       │
 ├─────────────────────────────────────────────────────────────┤
-│  取引判定 (1 日 N 回・schedule.run_times で指定)               │
-│  bridge gate → SL/TP 確認 → 振り返り → シグナル統合           │
-│  → ATR ベース SL/TP → ポートフォリオガード → broker 発注        │
+│  orchestrator (発注主体・常駐ループ)                           │
+│  planning → watch → 発注タイミング判断 → 承認ゲート → 発注     │
+├─────────────────────────────────────────────────────────────┤
+│  決済振り返り (毎時 :00・LLM)                                  │
+│  決済検知 → LLM 振り返り → reflections + directional RAG       │
 ├─────────────────────────────────────────────────────────────┤
 │  exit_check (毎時 :00・LLM なし)                              │
 │  SL/TP 確認 + reconciliation + Layer 1-3 再評価 (オプション)   │
@@ -109,7 +111,6 @@ config/
 | `run news` | `run n` | ニュース収集を即時実行 |
 | `run tech` | `run t` | テクニカル分析を即時実行 |
 | `run analyze` | `run a` | 総合シグナル表示 |
-| `run trade` | `run tr` | 取引判定を即時実行 |
 | `ask <質問>` | | セマンティック検索で回答 |
 | `close <pair>` | | ポジション手動決済 |
 | `halt soft\|hard <reason>` | | 取引停止 (soft = 新規停止 / hard = bridge 全 close) |
@@ -120,8 +121,6 @@ config/
 | `feeds` | | RSS フィード疎通確認 |
 | `tech` | | キャッシュ済みテクニカルスナップショット |
 | `hosts` / `use <name>` | | 接続先ホスト切替 |
-| `audit [days]` | | 過去トレードの統計診断レポート生成 |
-| `audit review [days]` | | audit + LLM 改善候補の対話選別 |
 
 ## REST API
 
@@ -139,7 +138,6 @@ config/
 | `GET` | `/analyze` | 総合シグナル |
 | `GET` | `/feeds` | RSS フィード疎通確認 |
 | `POST` | `/close/{pair}` | ポジション手動決済 |
-| `POST` | `/run/trade` | 取引判定ループ即時実行 |
 | `POST` | `/ask` | セマンティック検索質問 |
 | `POST` | `/admin/halt` | soft / hard halt 発動 (mt5_bridge プロキシ) |
 | `POST` | `/admin/resume` | soft halt 解除 (bridge accept 状態確認込み) |
@@ -187,7 +185,8 @@ close_reason ごとに明示的なラベル (Discord 通知):
 
 ## 注意事項
 
-- 土日 (FX 市場休場) は取引判定・価格監視を自動スキップ (ハートビートのみ)
+- 土日 (FX 市場休場) は価格監視・テクニカル分析を自動スキップ (ハートビートのみ)。
+  決済振り返りは休場中も動く (決済は休場を跨いで残るため)
 - yfinance の価格データには最大 15 分の遅延あり (live モードでは MT5 ティックを使用)
 - RAG の効果はデータ蓄積とともに向上。運用開始直後は振り返りコンテキストがない状態で動作
 

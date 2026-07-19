@@ -7,7 +7,7 @@
 - [運用モードとブローカー](#運用モードとブローカー)
 - [スケジューラと各サイクル](#スケジューラと各サイクル)
 - [情報収集ループ](#情報収集ループ)
-- [取引判定ループ](#取引判定ループ)
+- [決済振り返りサイクル](#決済振り返りサイクル)
 - [exit_check サイクル](#exit_check-サイクル)
 - [価格監視ループ](#価格監視ループ)
 - [ポジション管理 (5 層)](#ポジション管理-5-層)
@@ -48,9 +48,8 @@
 | ニュース収集 | `news_collection.interval_minutes` | あり | RSS/Feedly 取得 + センチメント分析 |
 | RAG クリーンアップ | 1 日 1 回 | なし | 古い記事の削除 |
 | テクニカル分析 | 毎時 :00 | あり | OHLCV + 指標 + LLM スコアリング |
-| 取引判定 | `schedule.run_times` で指定 | あり | bridge gate + シグナル統合 + 発注 |
+| 決済振り返り | 毎時 :00 | あり | 決済検知 + LLM 振り返り + directional RAG 書き込み |
 | 経済指標フェッチ | 1 日 1 回 | なし | calendar 取得 |
-| Performance audit | 週 1 (任意) | あり | 統計診断 + 改善提案 |
 
 ## 情報収集ループ
 
@@ -80,21 +79,18 @@
 - ルールベーススコアリング: SMA/RSI/MACD/Ichimoku/BB/Pattern の 6 カテゴリ重み付き合計 × ADX フィルター
 - スナップショット保存時に `collect_status` sentinel を記録 (`ok` / `stale_price` / `failed`)
 
-## 取引判定ループ
+## 決済振り返りサイクル
 
-1. **bridge_health_gate.probe**: `/health` 確認 (1 min retry 含む 2 回失敗で auto soft halt)
-2. **Phase 1**: SL/TP 到達確認・クローズ + reconciliation (MT5 と内部状態の整合性)
-3. **Phase 1.5**: 決済済みオーダーの振り返り生成 → マクロコンテキスト注入 → adaptive params 更新 → ChromaDB 蓄積
-4. **Phase 2.5**: 前回 HOLD の検証 (LLM なし)
-5. **Phase 3**: テクニカルスナップショットを指数減衰加重で集約 (直近 8h、最大 16 件)
-   - 重み: `exp(-0.693 × 経過時間[h] / 2.0)` — 半減期 2 時間
-   - 方向一致性 (consistency) を信頼度に反映
-6. **Phase 4**: ニュースセンチメント集約 (confidence 加重平均) + シグナル統合
-   - テクニカル × `price_weight` + ニュース × `news_weight`
-   - 方向対立時のスケーリングペナルティ
-   - RAG 方向別スコア補正 (bullish/bearish コレクションから類似パターン検索)
-7. **Phase 4a**: ポジション再評価 (Reversal Guard / Time Stop、`position_review_enabled` で有効化)
-8. **Phase 4b**: ポートフォリオガード → ATR ベース SL/TP 算出 → 注文執行 → 通知
+毎時 :00 に JobGuard 配下で同期実行され、決済済みトレードの LLM 振り返りを生成する
+(発注そのものは orchestrator が担う)。
+
+1. **決済検知**: `trades.json` と orchestrator の state から決済済みで未振り返りの
+   オーダーを列挙する (SL/TP・手動・reconciliation の全経路をカバー)
+2. **優先度付け**: retry 上限・待機を考慮して 1 件を選ぶ (飢餓防止)
+3. **LLM slot 逐次取得**: 1 件ごとに `try_run_scheduled` で slot を取得し、
+   slot busy / 待機ユーザージョブあり / planning 実行中のいずれかで残りを次回へ回す
+4. **書き込み**: `reflections` テーブルへ永続化 + directional RAG (`phase="complete"`)
+   へカード投入。失敗は strict に伝播させ retry 管理へ委ねる
 
 ## exit_check サイクル
 
@@ -125,8 +121,8 @@ reviewer の close 実行には [reviewer ガードと監視機構](#reviewer-�
 |---|---|---|---|
 | **Layer 0: Portfolio Guard** | 発注前 | 通貨グループ別ポジション集中・同一ペア上限 | 発注スキップ |
 | **Layer 1: Server SL/TP** | MT5 server-side | SL/TP 到達 | MT5が決済、financeはreconciliationで検知 |
-| **Layer 2: Reversal Guard** | exit_check :00 / 取引判定 | 反転シグナル + 信頼度 + 最小保有時間 | 原則closeせずpending protection SLを記録 |
-| **Layer 3: Time Stop** | exit_check :00 / 取引判定 | 最大保有時間 / no-progress MFE不足 | timeout close |
+| **Layer 2: Reversal Guard** | exit_check :00 | 反転シグナル + 信頼度 + 最小保有時間 | 原則closeせずpending protection SLを記録 |
+| **Layer 3: Time Stop** | exit_check :00 | 最大保有時間 / no-progress MFE不足 | timeout close |
 | **Layer 4: Profit Protection** | 価格監視 | MFE/R到達・giveback | SL引き上げ / remote SL sync |
 | **Layer 5: Emergency Guard** | 価格監視 | 損失方向の急変 | emergency close / degraded alert |
 
@@ -153,9 +149,6 @@ avg_score = Σ(score_i × conf_i) / Σ(conf_i)
 
 # ニュースとテクニカルが逆方向の場合: スケーリングペナルティ
 conflict_penalty = 1.0 - (0.3 × min(news.conf, price.conf))
-
-# RAG 方向別補正 (オプション)
-adjustment = 補正係数 × 同方向過去事例数 / 全事例数  (上限 ±rag_adjustment_max)
 
 # 判定
 score > +signal_deadband かつ confidence >= threshold → BUY
@@ -191,13 +184,6 @@ lot = max(lot, min_lot_size) / lot_unit  → 切り捨て
 | ローソク足 | ハンマー・シューティングスター・エンガルフィング・十字線・明星/宵星・三白兵/三黒兵・ピンバー・インサイドバー |
 | チャート形状 | ダブルトップ/ボトム・ヘッドアンドショルダー・三角保ち合い・レンジ |
 | ブレイクアウト | BB スクイーズ・ATR 収縮・サポレジ抜け |
-
-### ATR ベース SL/TP
-
-- SL = ATR(14) × `sl_atr_mult_default`
-- TP = ATR(14) × `tp_atr_mult_default`
-- ペア別 ATR 倍率の動的調整 (±0.5 delta 制限、min/max クランプ、履歴保持)
-- 振り返り時の `adaptive_params.yaml` フィードバックで自己更新
 
 ### 相関分析
 
@@ -265,7 +251,7 @@ S&P 500 (SPY)    r=+0.350 (weak positive)    prev=+0.380 Δ=-0.030
 
 ### bridge_health_gate
 
-取引判定・価格監視サイクルの起動時に bridge `/health` をプローブ。失敗 → 1 分後 retry → さらに失敗で auto soft halt 発動。
+テクニカル・価格監視サイクルおよび orchestrator の発注前に bridge `/health` をプローブ。失敗 → 1 分後 retry → さらに失敗で auto soft halt 発動。
 
 ### reconciliation
 
@@ -382,7 +368,6 @@ curl -H "X-API-Key: $KEY" $HOST/feeds
 
 # 取引系
 curl -X POST -H "X-API-Key: $KEY" "$HOST/close/USDJPY%3DX"
-curl -X POST -H "X-API-Key: $KEY" $HOST/run/trade
 curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
   -d '{"message":"ドル円の見通しは？"}' $HOST/ask
 
@@ -471,9 +456,9 @@ finance/
 ├── prompts/                        # LLM プロンプトテンプレート
 ├── src/
 │   ├── config/                     # 設定スキーマ + ローダー
-│   ├── cycles/                     # 取引/exit_check サイクル
+│   ├── cycles/                     # exit_check/reflection サイクル
 │   ├── llm/                        # LLM クライアント + サーキットブレーカー
-│   ├── analysis/                   # ニュース・テクニカル分析・振り返り・audit
+│   ├── analysis/                   # ニュース・テクニカル分析・振り返り
 │   ├── signals/                    # シグナル統合・RAG 補正
 │   ├── data/                       # OHLCV・指標・相関・スナップショット集約
 │   ├── jobs/                       # 収集ジョブ (ニュース/テクニカル/価格監視/経済指標)
@@ -487,7 +472,6 @@ finance/
 │   └── reporting/                  # Rich CLI レポート
 ├── tests/                          # pytest
 ├── docs/
-│   └── audit/                      # audit レポート出力先
 ├── data/
 │   ├── prices.db                   # SQLite (OHLCV + スナップショット + セッション + 経済指標)
 │   ├── state/
@@ -498,7 +482,6 @@ finance/
 │   │   ├── reconciliation.json     # bridge skip 連続カウンタ + stale_warned
 │   │   ├── mt5_heartbeat.jsonl     # bridge probe 履歴
 │   │   ├── shadow_trades.jsonl     # live_test の shadow 取引記録
-│   │   └── adaptive_params.yaml    # ペア別 ATR 倍率 (動的更新)
 │   ├── shadow_state/               # live_test の LiveTestObserver 別ストア
 │   └── rag/                        # ChromaDB (ニュース・振り返り・洞察・方向別・経済指標)
 ├── mt5_bridge/                     # Windows 側 bridge プロセス (別 venv)
@@ -518,9 +501,7 @@ finance/
 | `data/state/halt.json` | halt 状態 | halt_state.mutate (lock) |
 | `data/state/reconciliation.json` | bridge reconciliation skip カウンタ | reconciliation_state.mutate (lock) |
 | `data/state/mt5_heartbeat.jsonl` | bridge probe 履歴 (append-only) | bridge_health_gate |
-| `data/state/adaptive_params.yaml` | ペア別 ATR 倍率 | reflector.py |
 | `data/rag/` | ChromaDB | news_collector / reflector |
-| `config/audit_lessons.md` | audit で承認された改善ルール (LLM プロンプト注入) | audit_reviewer |
 
 `halt_state`、`balance_snapshot`、`reconciliation_state` は共通のロックレジストリ (`_get_state_lock`) を使い、`state_dir` 単位の read-modify-write を直列化する。
 
@@ -533,7 +514,7 @@ MarketStateTracker が市場の開閉状態を管理:
 | 開場→休場 | `Market CLOSED — pausing until market open` (1 回のみ) |
 | 休場→開場 | `Market OPEN — resuming normal operations` (1 回のみ) |
 | 休場継続 | 6 時間ごとのハートビート (`Scheduler alive, jobs paused`) |
-| 休場中 | 取引判定・価格監視は無音スキップ。ニュース収集は継続 |
+| 休場中 | 価格監視・テクニカルは無音スキップ。ニュース収集と決済振り返りは継続 |
 
 ## ログプレフィックス
 
@@ -554,7 +535,6 @@ MarketStateTracker が市場の開閉状態を管理:
 | `[CB/*]` | サーキットブレーカー状態遷移 |
 | `[RAG ADJ]` | 方向別 RAG スコア補正 |
 | `[ECON]` | 経済指標カレンダー・影響分析 |
-| `[AUDIT]` | Performance audit 実行・候補生成・教訓追記 |
 | `[BRIDGE_GATE]` | bridge probe / auto halt 発動 |
 | `[RECONCILE]` | reconciliation 結果・stale 警告 |
 | `[MT5_BRIDGE]` | MT5 bridge 通信 |
