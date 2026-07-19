@@ -2475,6 +2475,25 @@ test_insights」という記述の訂正も Task 6 Step 0 に含まれる。**
 §5 の実 config 削除キー一覧 + §4 のバックアップ手順を転記)。
 デプロイは本 plan のスコープ外 (ユーザー実施)。
 
+**削除対象キーは実測で確定済み — チェックリストとしてそのまま使える** (レビュー M-1)。
+`docs/deploy-stick-pc/settings.yaml` (gitignored、stick PC 実 config のローカルコピー) に
+削除済みキーが **20 個残存**している。内訳:
+
+```
+:18       run_trade_soft_timeout_sec                    (1)
+:108-116  rag_adjustment_*                              (9)
+:117-123  atr_timeframe, sl/tp_atr_mult_*               (7)
+:136      run_times                                     (1)
+:196,:198 notify_on_order_open, notify_on_signal_skipped (2)
+```
+
+**`vol_regime_*` はこのファイルに存在しない** (`.example` にのみあった)。
+したがって**実削除リストは 20 キーであって 22 ではない**。
+
+loader は未知キーを**黙殺**するため、残っていても起動は壊れない。しかしそれは
+「消し忘れに気づけない」ことと同義であり、§5 が警告しているのはまさにこの点。
+deploy ノートには上記 20 キーを行番号つきで転記し、消し込みチェックリストにすること。
+
 - [ ] **Step 2b: deploy ノートに「追加/必須化キー」の項を新設する** (Task 7 レビュー M-5)
 
 §5 は**削除**キーしか列挙していないが、Task 7 の fail-fast 化で**新規に必須化された
@@ -2507,6 +2526,26 @@ deploy ノートに以下を明記すること:
    `main.py` のリファクタを伴うため Task 7 では見送った。
 2. **README / DETAIL のドキュメント更新** (L-5) — 起動順序と
    orchestrator 必須化の記述を反映する。
+
+3. **`_pip_size_for` は一様に dead ではない — 消す方を間違えないこと** (レビュー E-18)。
+   同名関数が 2 箇所にあり、**dead なのは `src/notifications/notifier.py:61` の
+   コピーだけ**。`src/orchestrator/watch_evaluator.py:24` の定義は**現用**で、
+   実測で 6 箇所から使われている:
+
+   | 参照元 | 用途 |
+   |--------|------|
+   | `src/orchestrator/watch_evaluator.py:75` / `:158` | 自モジュール内 2 箇所 |
+   | `src/orchestrator/hindsight_evaluator.py:20` / `:94` | import + spread コスト換算 |
+   | `src/data/mt5_ohlcv_fetcher.py:161` / `:178` | import + pip 換算 |
+
+   将来の掃除で `watch_evaluator.py` 側を消すと上記 3 モジュールが壊れる。
+   (`src/orchestrator/risk_gate.py` の `_default_pip_size_for` / `self._pip_size_for` は
+   さらに別物 — DI 用の差し替え可能フックであり、これも現用。)
+
+4. **`notify_trade_complete` (`src/api/notifications.py:79`) は dead だが温存中** —
+   `/run/trade` 削除により呼び出し元が消え、実測で参照 0 件。
+   ただし本 plan の削除リスト外の関数のため、スコープを守って手を付けていない。
+   別途の dead code 掃除で処理すること。
 
 - [ ] **Step 3: ノートはローカル保存のみ**
 
