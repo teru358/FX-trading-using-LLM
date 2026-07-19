@@ -7,6 +7,13 @@ Usage:
 既定は **dry-run**。何が失われるかを表示するだけで、DB・ファイル・ChromaDB を
 一切変更しない。`--execute` を明示したときのみ破壊的操作を行う。
 
+dry-run の副作用ゼロ保証:
+  - DB は read-only URI (`file:...?mode=ro`) でのみ開く
+  - ChromaDB は **開かない**。chromadb 1.5.5 の `PersistentClient` は指定 path を
+    無条件に mkdir し `chroma.sqlite3` を作成するため、「読むだけ」の構築手段が
+    存在しない (`get_collection` を使っても client 構築時点で作られる)。
+    よって RAG 退役カード件数は dry-run では取得せず、`--execute` 時に判明する。
+
 前提: システム停止中に実行し、実行前に以下をバックアップ済みであること。
   - prices.db (DB)
   - data/ 配下の RAG 永続化先 (ChromaDB)
@@ -111,7 +118,11 @@ def render_dry_run(db_path, state_dir, rag_counts: dict[str, int] | None) -> str
     lines.append("")
     lines.append("[RAG 退役カード]")
     if rag_counts is None:
-        lines.append("  件数を取得できませんでした (ChromaDB 未接続) — 実行時に判明します")
+        # dry-run では ChromaDB を開かない (副作用ゼロ保証)。chromadb 1.5.5 の
+        # PersistentClient は path を無条件に mkdir し chroma.sqlite3 を作るため、
+        # 「読むだけ」の構築手段が存在しない (get_collection でも client 構築時点で作られる)。
+        lines.append("  - 件数は --execute 時に判明します "
+                     "(dry-run では ChromaDB を開かないため未取得)")
     else:
         total = sum(rag_counts.values())
         detail = ", ".join(f"{d}={n}" for d, n in rag_counts.items())
@@ -121,6 +132,17 @@ def render_dry_run(db_path, state_dir, rag_counts: dict[str, int] | None) -> str
     lines.append("実行するには `--execute` を付けてください。")
     lines.append("(バックアップは実行者の責任です — DB / data/ / state_dir)")
     return "\n".join(lines)
+
+
+def open_vector_store(rag_db_path):
+    """VectorStore を構築する (ChromaDB を実際に開く)。
+
+    **この関数を呼ぶと ChromaDB ディレクトリが作成される。** dry-run 経路からは
+    決して呼ばないこと。テストが差し替える継ぎ目でもある。
+    """
+    from src.rag.vector_store import VectorStore   # migrate_directional_rag.py と同パターン
+
+    return VectorStore(Path(rag_db_path))
 
 
 def drop_retired_tables(db_path) -> list[str]:
@@ -149,19 +171,13 @@ def delete_adaptive_params(state_dir) -> bool:
 
 def main(argv=None) -> None:
     from src.config import load_config
-    from src.rag.vector_store import VectorStore   # migrate_directional_rag.py と同パターン
 
     args = build_parser().parse_args(argv)
     config = load_config()
 
     if not args.execute:
-        try:
-            store = VectorStore(config.rag_db_path)   # main.py:212 と同構築
-            rag_counts = count_retired_cards(store)
-        except Exception as exc:   # ChromaDB 不在等 — dry-run を失敗させない
-            print(f"(RAG 件数の取得に失敗: {exc})", file=sys.stderr)
-            rag_counts = None
-        print(render_dry_run(config.prices_db_path, config.state_dir, rag_counts))
+        # dry-run は ChromaDB を開かないので RAG 件数は取得できない (rag_counts=None)。
+        print(render_dry_run(config.prices_db_path, config.state_dir, None))
         return
 
     print("== cycle retirement migration ==")
@@ -171,7 +187,7 @@ def main(argv=None) -> None:
         print("deleted adaptive_params.yaml")
     else:
         print("adaptive_params.yaml not present")
-    store = VectorStore(config.rag_db_path)
+    store = open_vector_store(config.rag_db_path)
     counts = store.directional.delete_retired_cards()
     print(f"deleted RAG cards: {counts}")
     print("done.")
