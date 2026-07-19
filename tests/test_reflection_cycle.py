@@ -128,6 +128,33 @@ class TestSelectTargets:
         assert ids.count("d1") == 1
         assert set(ids) == {"d1", "other"}
 
+    def test_duplicate_keeps_latest_row(self, orch):
+        """重複時は後着行 (= より新しい情報) を採用する (レビュー MEDIUM-2)。
+
+        trades.json は append-only なので、クラッシュ復旧や再 reconciliation で
+        後から追記された行の方が正しい決済情報を持つ。
+        """
+        old = _closed_order("d1", closed_at=NOW)
+        old.close_price = 151.0
+        old.realized_pnl = 100.0
+        new = _closed_order("d1", closed_at=NOW + timedelta(hours=1))
+        new.close_price = 148.0
+        new.realized_pnl = -200.0
+        targets = _select_targets([old, new], orch, NOW + timedelta(hours=2))
+        assert len(targets) == 1
+        assert targets[0].close_price == 148.0
+        assert targets[0].realized_pnl == -200.0
+
+    def test_duplicate_prefers_newer_closed_at_regardless_of_order(self, orch):
+        """closed_at が新しい行を採る (追記順が逆でも)。"""
+        newer = _closed_order("d1", closed_at=NOW + timedelta(hours=5))
+        newer.realized_pnl = 999.0
+        older = _closed_order("d1", closed_at=NOW)
+        older.realized_pnl = 1.0
+        targets = _select_targets([newer, older], orch, NOW + timedelta(days=1))
+        assert len(targets) == 1
+        assert targets[0].realized_pnl == 999.0
+
 
 class _FakeSlot:
     def __init__(self, busy_after=None, waiting=False):
@@ -341,6 +368,80 @@ class TestRunReflectionCycle:
                              slot=_FakeSlot())
         assert seen == ["fix-1"]
         assert orch.get_reflection("fix-1").status == "done"
+
+    def test_parse_error_respects_backoff_deadline(self, tmp_path, orch,
+                                                    monkeypatch):
+        """backoff 期限前の再走査で attempt を増やさない (レビュー MEDIUM-1)。
+
+        毎回無条件に retry を記録すると、毎時実行では 1/2/4/8h の backoff を
+        待たずに約 5 時間で dead に落ちる (本来は 15 時間かかる設計)。
+        """
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        broken = {"order_id": "bk-1", "pair": "USDJPY=X",
+                  "opened_at": "not-a-datetime"}
+        (state / "trades.json").write_text(json.dumps([broken]), encoding="utf-8")
+        monkeypatch.setattr("src.cycles.reflection.create_llm_client",
+                            lambda config, role: object())
+        monkeypatch.setattr("src.cycles.reflection.make_embed_fn",
+                            lambda config: object())
+        for _ in range(5):      # backoff 中に何度走査しても 1 回のまま
+            run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                                 slot=_FakeSlot())
+        r = orch.get_reflection("bk-1")
+        assert r.status == "retry"
+        assert r.attempt_count == 1
+        assert r.next_retry_at == r.created_at + timedelta(hours=1)
+
+    def test_parse_error_retries_after_deadline(self, tmp_path, orch,
+                                                monkeypatch):
+        """期限到来後の走査では attempt が進む。"""
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        broken = {"order_id": "bk-2", "pair": "USDJPY=X",
+                  "opened_at": "not-a-datetime"}
+        (state / "trades.json").write_text(json.dumps([broken]), encoding="utf-8")
+        monkeypatch.setattr("src.cycles.reflection.create_llm_client",
+                            lambda config, role: object())
+        monkeypatch.setattr("src.cycles.reflection.make_embed_fn",
+                            lambda config: object())
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        assert orch.get_reflection("bk-2").attempt_count == 1
+        import sqlalchemy as sa
+        with orch._engine.connect() as conn:
+            conn.execute(sa.text(
+                "UPDATE reflections SET next_retry_at = '2000-01-01 00:00:00' "
+                "WHERE order_id='bk-2'"))
+            conn.commit()
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        assert orch.get_reflection("bk-2").attempt_count == 2
+
+    def test_parse_error_skipped_for_terminal_rows(self, tmp_path, orch,
+                                                   monkeypatch):
+        """done / dead 行は parse 対象外 (retry 記録もしない)。"""
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        rows = [{"order_id": "done-1", "pair": "USDJPY=X",
+                 "opened_at": "not-a-datetime"},
+                {"order_id": "dead-1", "pair": "USDJPY=X",
+                 "opened_at": "not-a-datetime"}]
+        (state / "trades.json").write_text(json.dumps(rows), encoding="utf-8")
+        orch.mark_reflection_done("done-1", plan_id=None, pair="USDJPY=X",
+                                  close_reason="c", realized_pnl=0.0,
+                                  reflection_text="t",
+                                  was_directionally_correct=True, now=NOW)
+        orch.mark_reflection_dead("dead-1", pair="USDJPY=X", error="e", now=NOW)
+        monkeypatch.setattr("src.cycles.reflection.create_llm_client",
+                            lambda config, role: object())
+        monkeypatch.setattr("src.cycles.reflection.make_embed_fn",
+                            lambda config: object())
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        assert orch.get_reflection("done-1").status == "done"
+        assert orch.get_reflection("done-1").attempt_count == 0
+        assert orch.get_reflection("dead-1").attempt_count == 0
 
     def test_trades_json_not_a_list_is_noop(self, tmp_path, orch, monkeypatch):
         state = tmp_path / "state"

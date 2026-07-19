@@ -1043,7 +1043,7 @@ class OrchestratorStore:
     def _upsert_reflection(
         self, session: Session, order_id: str, *, pair: str, now: datetime,
         values: dict[str, Any], attempt_increment: bool = False,
-    ) -> None:
+    ) -> int | None:
         """reflections 行を原子的に INSERT-or-UPDATE する。
 
         `session.get()` → 無ければ `add` という read-modify-write は、engine が
@@ -1053,6 +1053,17 @@ class OrchestratorStore:
 
         attempt_increment=True のとき attempt_count の +1 は DB 側の式で行い、
         並行呼び出しでも増分が失われないようにする (spec §3.2b の 5 回上限)。
+
+        状態遷移は DB 条件として固定する (レビュー HIGH-2)。許される遷移は
+        missing → retry/done/dead (INSERT) と retry → retry/done/dead のみで、
+        done / dead は terminal。ON CONFLICT の `WHERE status='retry'` により
+        呼び出し側の規律や読み取りガード (TOCTOU) に依存せず巻き戻りを禁じる。
+
+        commit はしない — 呼び出し側が 1 トランザクションの終端で行う
+        (レビュー HIGH-1: 中間 commit は attempt 増分だけ確定した
+        next_retry_at=NULL の「永久に選ばれない行」を作る)。
+        `RETURNING attempt_count` で確定値を返し、呼び出し側が同一
+        トランザクション内で終端判定できるようにする。
         """
         insert_values = {
             "order_id": order_id,
@@ -1069,9 +1080,10 @@ class OrchestratorStore:
         stmt = sqlite_insert(_Reflection).values(**insert_values)
         stmt = stmt.on_conflict_do_update(
             index_elements=["order_id"], set_=update_values,
-        )
-        session.execute(stmt)
-        session.commit()
+            where=(_Reflection.status == "retry"),
+        ).returning(_Reflection.attempt_count)
+        # 条件不成立 (terminal 行) のとき RETURNING は 0 行 → None を返す。
+        return session.execute(stmt).scalar_one_or_none()
 
     def mark_reflection_done(
         self, order_id: str, *, plan_id: int | None, pair: str,
@@ -1083,6 +1095,8 @@ class OrchestratorStore:
 
         attempt_count は保持する ("何回失敗した末に成功したか" は
         reflection job の健全性指標として残す)。
+
+        既に dead の行には書かない (terminal、レビュー HIGH-2)。
         """
         with Session(self._engine) as session:
             self._upsert_reflection(
@@ -1098,33 +1112,33 @@ class OrchestratorStore:
                     "next_retry_at": None,
                 },
             )
+            session.commit()
 
     def mark_reflection_retry(
         self, order_id: str, *, pair: str, error: str, now: datetime,
     ) -> None:
         """失敗を記録し backoff を進める。5 回目で dead に落ちる。
 
-        dead は terminal。既に dead の行に対しては no-op で返す
+        done / dead は terminal。それらの行に対しては no-op で返す
         (呼び出し側の規律に依存せず、DB 状態として復活を禁じる)。
+
+        増分 → 終端判定 → 状態更新を 1 トランザクション (commit 1 回) に
+        閉じる (レビュー HIGH-1)。途中で落ちれば行ごと rollback され、
+        「status=retry / next_retry_at=NULL で永久に選ばれない行」は生じない。
         """
         with Session(self._engine) as session:
-            existing = session.get(_Reflection, order_id)
-            if existing is not None and existing.status == "dead":
-                logger.warning(
-                    f"[REFLECT] {order_id} は dead (terminal) のため retry を無視: {error}")
-                return
-
-            # 増分は DB 側で原子的に行い、確定値を読み直して終端判定する。
-            self._upsert_reflection(
+            # 増分は DB 側で原子的に行い、RETURNING の確定値で終端判定する。
+            # terminal 行なら upsert の WHERE が不成立で None が返る。
+            attempt = self._upsert_reflection(
                 session, order_id, pair=pair, now=now,
                 values={"status": "retry", "last_error": error},
                 attempt_increment=True,
             )
-            attempt = session.execute(
-                select(_Reflection.attempt_count)
-                .where(_Reflection.order_id == order_id)
-            ).scalar_one_or_none()
-            if attempt is None:   # 直前に別スレッドが削除した場合のみ (通常起きない)
+            if attempt is None:
+                # 状態条件で弾かれた (= done/dead)。診断価値があるのでログは残す。
+                session.rollback()
+                logger.warning(
+                    f"[REFLECT] {order_id} は terminal のため retry を無視: {error}")
                 return
 
             # 終端判定は attempt_count を含めない UPDATE で書く。ORM の属性代入
@@ -1142,13 +1156,12 @@ class OrchestratorStore:
             session.execute(
                 update(_Reflection)
                 .where(_Reflection.order_id == order_id)
-                # dead を追い越さない。状態条件が無いと、attempt=4 を読んでいた
-                # 遅れスレッドが dead 確定後に next_retry_at を書き戻し、
+                # terminal を追い越さない。状態条件が無いと、attempt=4 を読んで
+                # いた遅れスレッドが dead 確定後に next_retry_at を書き戻し、
                 # status='dead' なのに next_retry_at 非 NULL という不整合を作る。
                 # reflection job が due な retry を next_retry_at だけで拾うと
                 # dead 行を拾い続けるため、DB 状態として一貫させる。
-                # 冒頭の dead ガード (読み取り) との TOCTOU もここで閉じる。
-                .where(_Reflection.status != "dead")
+                .where(_Reflection.status == "retry")
                 .values(**terminal)
             )
             session.commit()
@@ -1156,7 +1169,10 @@ class OrchestratorStore:
     def mark_reflection_dead(
         self, order_id: str, *, pair: str, error: str, now: datetime,
     ) -> None:
-        """恒久不能 (instrument 不在等) を即 dead 記録する。"""
+        """恒久不能 (instrument 不在等) を即 dead 記録する。
+
+        既に done の行には書かない (terminal、レビュー HIGH-2)。
+        """
         with Session(self._engine) as session:
             self._upsert_reflection(
                 session, order_id, pair=pair, now=now,
@@ -1166,6 +1182,7 @@ class OrchestratorStore:
                     "next_retry_at": None,
                 },
             )
+            session.commit()
 
     # ── planning 実行中照会 (spec §3.6, best effort) ────────────
 

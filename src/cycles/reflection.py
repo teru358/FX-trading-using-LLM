@@ -32,7 +32,26 @@ _NEW_QUOTA = 2      # 未試行 (新しい順) の優先枠 (spec §3.2b)
 _TOTAL_QUOTA = 10   # 1 回の実行枠
 
 
-def _parse_closed_trades(raw, orch_store, now: datetime) -> list[Order]:
+def _load_states(orch_store) -> dict:
+    """reflections の状態マップを一括ロードする (order_id → 行)。
+
+    行ごとに問い合わせず 1 回で取り、parse と選択の両方で使い回す
+    (レビュー MEDIUM-1)。
+    """
+    return {r.order_id: r for r in orch_store.get_reflections()}
+
+
+def _is_due(state, now: datetime) -> bool:
+    """未試行 / 期限到来済み retry のみ True (done・dead・期限前 retry は False)。"""
+    if state is None:
+        return True
+    if state.status in ("done", "dead"):
+        return False
+    return state.next_retry_at is not None and state.next_retry_at <= now
+
+
+def _parse_closed_trades(raw, orch_store, now: datetime,
+                         states: dict) -> list[Order]:
     """trades.json の生 dict 群を行単位で Order に変換する。
 
     不正行が 1 つあっても他の行の処理を止めない (plan レビュー Medium-2)。
@@ -40,6 +59,10 @@ def _parse_closed_trades(raw, orch_store, now: datetime) -> list[Order]:
     (新フィールド追従漏れ等) は parser 修正で直り得るため即 dead にしない
     (即 dead は spec 上 instrument 不在のみ)。恒久的に壊れた行は backoff の末
     5 回で自然に dead へ落ちる。
+
+    parse error の retry 記録も backoff 期限に従う (レビュー MEDIUM-1)。
+    無条件に記録すると、毎時実行で 1/2/4/8h の backoff を待たず約 5 時間で
+    dead に落ち、本来 15 時間ある修正猶予が失われる。
     """
     if not isinstance(raw, list):
         logger.warning(f"[REFLECT] trades.json is not a list "
@@ -51,6 +74,8 @@ def _parse_closed_trades(raw, orch_store, now: datetime) -> list[Order]:
             logger.warning(f"[REFLECT] non-dict trade row skipped: {d!r:.80}")
             continue
         oid = d.get("order_id")
+        if oid and not _is_due(states.get(oid), now):
+            continue    # 済み (done/dead) か backoff 期限前 — 走査対象外
         try:
             order = Order.from_dict(dict(d))
         except Exception as e:
@@ -72,40 +97,42 @@ def _parse_closed_trades(raw, orch_store, now: datetime) -> list[Order]:
 
 def _select_targets(
     closed: list[Order], orch_store: "OrchestratorStore", now: datetime,
+    states: dict | None = None,
 ) -> list[Order]:
     """処理対象を枠規則で選ぶ (spec §3.2b)。
 
     eligible = 未試行 ∪ next_retry_at 到来済み retry。
     枠 10 = 未試行の新しい順 2 + 残り eligible の古い順 8 (融通あり)。
-    """
-    states = {r.order_id: r for r in orch_store.get_reflections()}
 
-    def _eligible(o: Order) -> bool:
-        r = states.get(o.order_id)
-        if r is None:
-            return True
-        if r.status in ("done", "dead"):
-            return False
-        return r.next_retry_at is not None and r.next_retry_at <= now
+    states は controller が一括ロードしたものを受け取る (レビュー MEDIUM-1)。
+    None なら自前でロードする (テスト・単体利用向け)。
+    """
+    if states is None:
+        states = _load_states(orch_store)
 
     def _ts(o: Order) -> datetime:
         return o.closed_at or o.opened_at
 
     # trades.json は append-only で order_id 一意性を保証しない (append_trade)。
-    # 重複行をそのまま通すと同一 order に LLM/RAG が 2 回走るため、最初の出現だけ
-    # 残して eligibility 判定前に排除する (レビュー MEDIUM-3)。
-    seen_ids: set[str] = set()
-    unique: list[Order] = []
+    # 重複行をそのまま通すと同一 order に LLM/RAG が 2 回走るため 1 件に潰す
+    # (レビュー MEDIUM-3)。採用するのは「より新しい情報を持つ行」= closed_at が
+    # 新しい方、同時刻なら後着行 (レビュー MEDIUM-2)。クラッシュ復旧や再
+    # reconciliation で追記された行の方が正しい決済情報を持つため、先着を
+    # 優先すると古い close price / PnL で振り返ることになる。
+    chosen: dict[str, Order] = {}
     for o in closed:
-        if o.order_id in seen_ids:
-            logger.warning(
-                f"[REFLECT] duplicate order_id in trades.json: {o.order_id} "
-                f"— later row ignored")
+        prev = chosen.get(o.order_id)
+        if prev is None:
+            chosen[o.order_id] = o
             continue
-        seen_ids.add(o.order_id)
-        unique.append(o)
+        logger.warning(
+            f"[REFLECT] duplicate order_id in trades.json: {o.order_id} "
+            f"— keeping the newest row")
+        if _ts(o) >= _ts(prev):
+            chosen[o.order_id] = o
+    unique = list(chosen.values())
 
-    eligible = [o for o in unique if _eligible(o)]
+    eligible = [o for o in unique if _is_due(states.get(o.order_id), now)]
     untried = sorted(
         (o for o in eligible if o.order_id not in states),
         key=_ts, reverse=True,
@@ -210,8 +237,12 @@ def run_reflection_cycle(config, store, orch_store, *, slot) -> None:
         logger.warning("[REFLECT] trades.json read failed — skipped",
                        exc_info=True)
         return
-    closed = _parse_closed_trades(raw, orch_store, now)
-    targets = _select_targets(closed, orch_store, now)
+    # 状態マップは 1 回だけ取り、parse と選択で共有する (レビュー MEDIUM-1)。
+    # parse 中の retry 記録はこのマップに反映されないが、その行はこの回の
+    # 選択対象から外れる (parse 失敗行は closed に入らない) ため影響はない。
+    states = _load_states(orch_store)
+    closed = _parse_closed_trades(raw, orch_store, now, states)
+    targets = _select_targets(closed, orch_store, now, states)
     if not targets:
         return
     llm = None

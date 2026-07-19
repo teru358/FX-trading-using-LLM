@@ -137,6 +137,76 @@ class TestReflectionCrud:
         assert r.status == "done"
         assert r.attempt_count == 0
 
+    def test_done_is_terminal_retry_does_not_revert(self, store):
+        """done は terminal。後着 retry で巻き戻ってはならない (HIGH-2)。"""
+        store.mark_reflection_done(
+            "ord-d1", plan_id=1, pair="P", close_reason="take_profit",
+            realized_pnl=1.0, reflection_text="t",
+            was_directionally_correct=True, now=NOW)
+        store.mark_reflection_retry("ord-d1", pair="P", error="late", now=NOW)
+        r = store.get_reflection("ord-d1")
+        assert r.status == "done"
+        assert r.attempt_count == 0
+        assert r.last_error is None
+        assert r.reflection_text == "t"
+
+    def test_done_is_terminal_dead_does_not_revert(self, store):
+        store.mark_reflection_done(
+            "ord-d2", plan_id=1, pair="P", close_reason="take_profit",
+            realized_pnl=1.0, reflection_text="t",
+            was_directionally_correct=True, now=NOW)
+        store.mark_reflection_dead("ord-d2", pair="P", error="late", now=NOW)
+        r = store.get_reflection("ord-d2")
+        assert r.status == "done"
+        assert r.last_error is None
+
+    def test_dead_is_terminal_done_does_not_revert(self, store):
+        """dead → done も禁じる (HIGH-2)。dead は恒久不能の記録。"""
+        store.mark_reflection_dead("ord-d3", pair="P", error="gone", now=NOW)
+        store.mark_reflection_done(
+            "ord-d3", plan_id=1, pair="P", close_reason="take_profit",
+            realized_pnl=1.0, reflection_text="t",
+            was_directionally_correct=True, now=NOW)
+        r = store.get_reflection("ord-d3")
+        assert r.status == "dead"
+        assert "gone" in r.last_error
+        assert r.reflection_text is None
+
+    def test_retry_can_transition_to_done_and_dead(self, store):
+        """retry からは 3 状態すべてへ遷移できる (回帰ガード)。"""
+        store.mark_reflection_retry("ord-t1", pair="P", error="e", now=NOW)
+        store.mark_reflection_dead("ord-t1", pair="P", error="gone", now=NOW)
+        assert store.get_reflection("ord-t1").status == "dead"
+        store.mark_reflection_retry("ord-t2", pair="P", error="e", now=NOW)
+        store.mark_reflection_done(
+            "ord-t2", plan_id=None, pair="P", close_reason="c",
+            realized_pnl=0.0, reflection_text="t",
+            was_directionally_correct=True, now=NOW)
+        assert store.get_reflection("ord-t2").status == "done"
+
+    def test_retry_rolls_back_entirely_when_terminal_update_fails(
+            self, store, monkeypatch):
+        """中間 UPDATE 失敗で attempt 増分ごと rollback されること (HIGH-1)。
+
+        commit が 2 回に分かれていると status=retry / next_retry_at=NULL の
+        「永久に選ばれない行」が残る。1 トランザクションなら行自体が残らない。
+        """
+        import src.data.orchestrator_store as mod
+
+        orig = mod.update
+        calls = {"n": 0}
+
+        def boom(*args, **kwargs):
+            calls["n"] += 1
+            raise RuntimeError("db exploded")
+
+        monkeypatch.setattr(mod, "update", boom)
+        with pytest.raises(RuntimeError):
+            store.mark_reflection_retry("ord-rb", pair="P", error="e", now=NOW)
+        monkeypatch.setattr(mod, "update", orig)
+        assert calls["n"] == 1
+        assert store.get_reflection("ord-rb") is None   # 行ごと巻き戻る
+
     def test_get_reflections_lists_all(self, store):
         store.mark_reflection_retry("a", pair="P", error="e", now=NOW)
         store.mark_reflection_dead("b", pair="P", error="e", now=NOW)
@@ -225,9 +295,12 @@ class TestReflectionConcurrency:
     def test_concurrent_increment_loses_nothing(self, store):
         """増分パス単体では 1 件も失われないこと (HIGH-1 の本丸)。
 
-        mark_reflection_retry 経由だと dead terminal ガードの no-op が混ざり
+        mark_reflection_retry 経由だと terminal ガードの no-op が混ざり
         最終値が interleaving 依存になるため、増分だけを 8 並行で叩いて
         lost update が無いことを厳密に (== 8) 押さえる。
+
+        _upsert_reflection は commit しない契約になった (HIGH-1) ため、
+        呼び出し側と同様にここで commit する。
         """
         from sqlalchemy.orm import Session
 
@@ -238,6 +311,7 @@ class TestReflectionConcurrency:
                     values={"status": "retry", "last_error": "e"},
                     attempt_increment=True,
                 )
+                session.commit()
 
         errors = self._run_parallel(bump, 8)
         assert errors == [], f"並行増分で例外: {errors!r}"
@@ -252,6 +326,100 @@ class TestReflectionConcurrency:
         )
         assert errors == [], f"初回 INSERT 競合で例外: {errors!r}"
         assert len(store.get_reflections()) == 1
+
+    def _race_pair(self, tmp_path, first, second, trials=20):
+        """2 種の marker を同時に叩き、監視スレッドで状態遷移列を採る。
+
+        最終スナップショットだけでは「一度 done になった後 retry へ落ちて
+        また done に戻る」巻き戻りを検出できないため、レース中の status を
+        観測して terminal 状態からの離脱を直接見る。
+        """
+        observations = []
+        for trial in range(trials):
+            store = OrchestratorStore(tmp_path / f"pair-{trial}.db")
+            oid = "ord-pair-race"
+            fns = [lambda s=store, o=oid: first(s, o),
+                   lambda s=store, o=oid: second(s, o)] * 4
+            errors: list[BaseException] = []
+            seen: list[str] = []
+            stop = threading.Event()
+            barrier = threading.Barrier(len(fns) + 1)
+
+            def worker(fn):
+                try:
+                    barrier.wait()
+                    fn()
+                except BaseException as exc:  # noqa: BLE001
+                    errors.append(exc)
+
+            def monitor():
+                barrier.wait()
+                while not stop.is_set():
+                    try:
+                        r = store.get_reflection(oid)
+                    except Exception:       # noqa: BLE001 — SQLite busy は無視
+                        continue
+                    if r is not None and (not seen or seen[-1] != r.status):
+                        seen.append(r.status)
+
+            threads = [threading.Thread(target=worker, args=(f,)) for f in fns]
+            mon = threading.Thread(target=monitor, daemon=True)
+            mon.start()
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+            stop.set()
+            mon.join(timeout=5)
+            assert errors == [], f"並行 marker で例外: {errors!r}"
+            final = store.get_reflection(oid)
+            if not seen or seen[-1] != final.status:
+                seen.append(final.status)
+            # terminal (done/dead) に一度入ったら、以後 status は変わらない
+            for i, st in enumerate(seen):
+                if st in ("done", "dead"):
+                    assert set(seen[i:]) == {st}, (
+                        f"terminal 状態が巻き戻った: {seen}")
+                    break
+            observations.append(final)
+        return observations
+
+    @staticmethod
+    def _mark_done(s, o):
+        s.mark_reflection_done(
+            o, plan_id=1, pair="P", close_reason="take_profit",
+            realized_pnl=1.0, reflection_text="t",
+            was_directionally_correct=True, now=NOW)
+
+    @staticmethod
+    def _mark_retry(s, o):
+        s.mark_reflection_retry(o, pair="P", error="e", now=NOW)
+
+    @staticmethod
+    def _mark_dead(s, o):
+        s.mark_reflection_dead(o, pair="P", error="gone", now=NOW)
+
+    def test_concurrent_done_vs_retry_never_reverts_done(self, tmp_path):
+        """done が確定したら以後 retry は上書きできない (HIGH-2 並行版)。"""
+        finals = self._race_pair(tmp_path, self._mark_done, self._mark_retry)
+        for r in finals:
+            if r.status == "done":
+                assert r.reflection_text == "t"
+                assert r.next_retry_at is None
+
+    def test_concurrent_done_vs_dead_is_stable(self, tmp_path):
+        finals = self._race_pair(tmp_path, self._mark_done, self._mark_dead)
+        for r in finals:
+            assert r.status in ("done", "dead")
+            if r.status == "done":
+                assert r.reflection_text == "t"
+            else:
+                assert r.reflection_text is None
+
+    def test_concurrent_dead_vs_done_is_stable(self, tmp_path):
+        finals = self._race_pair(tmp_path, self._mark_dead, self._mark_done)
+        for r in finals:
+            assert r.status in ("done", "dead")
 
     def test_concurrent_done_does_not_raise(self, store):
         errors = self._run_parallel(
