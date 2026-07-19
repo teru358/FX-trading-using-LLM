@@ -4,6 +4,7 @@ import concurrent.futures
 import logging
 import os
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from rich import box
 from rich.console import Console, Group
@@ -12,6 +13,11 @@ from rich.table import Table
 from rich.text import Text
 
 from src.config import AppConfig, InstrumentConfig
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from src.orchestrator.runtime import OrchestratorRuntime
 
 _logger = logging.getLogger(__name__)
 
@@ -321,7 +327,7 @@ def startup_checks(config: AppConfig) -> bool:
     if gate_err:
         body_items.append(Text(""))  # spacer
         body_items.append(Text(f"✗ Approval gate: {gate_err}", style="bold red"))
-        _logger.error(f"[STARTUP] approval gate 設定エラー: {gate_err}")
+        _logger.error("[STARTUP] approval gate 設定エラー: %s", gate_err)
     body = Group(*body_items)
 
     overall = "[bold green]READY[/bold green]" if ok else "[bold red]FAILED[/bold red]"
@@ -335,33 +341,78 @@ def startup_checks(config: AppConfig) -> bool:
     return ok
 
 
-def ensure_orchestrator_or_exit(runtime, *, enabled: bool, mode: str = "live") -> None:
-    """発注経路の存在を保証する (spec §1.5)。無ければ起動中止。"""
+def ensure_orchestrator_or_exit(
+    runtime: "OrchestratorRuntime | None", *, enabled: bool, mode: str = "live",
+) -> None:
+    """発注経路の存在を保証する (spec §1.5)。無ければ起動中止。
+
+    FATAL 理由は console と logger の両方に出す。logging_setup は
+    RotatingFileHandler / TimedRotatingFileHandler しか登録せず StreamHandler が
+    無いため、console 出力はログファイルにも API /logs にも残らない。tmux/nohup
+    越しで stdout を見ていない運用者が「なぜか起動していない」状態に陥るのを防ぐ
+    (レビュー M-2)。
+    """
     if not enabled:
-        _console.print("[red][FATAL] orchestrator.enabled=false — "
-                       "発注経路がありません。起動を中止します[/red]")
+        msg = ("orchestrator.enabled=false — 発注経路がありません。起動を中止します")
+        _console.print(f"[red][FATAL] {msg}[/red]")
+        _logger.critical("[STARTUP] %s", msg)
         raise SystemExit(1)
     if runtime is None:
-        _console.print("[red][FATAL] orchestrator の構築に失敗しました。"
-                       "起動を中止します[/red]")
+        msg = "orchestrator の構築に失敗しました。起動を中止します"
+        _console.print(f"[red][FATAL] {msg}[/red]")
+        _logger.critical("[STARTUP] %s", msg)
         raise SystemExit(1)
     if mode != "live":
-        _logger.warning(f"[ORCH] mode={mode} — 発注は行われません (検証運転)")
+        _logger.warning("[ORCH] mode=%s — 発注は行われません (検証運転)", mode)
 
 
-def run_startup_sequence(*, build, validate, initialize, start_api, start_scheduler):
-    """build → validate → initialize → start → API → scheduler の順序を固定する
-    seam (spec §1.5 / plan レビュー Medium-5 / High-1)。
+def run_startup_sequence(
+    *,
+    build: "Callable[[], OrchestratorRuntime | None]",
+    validate: "Callable[[OrchestratorRuntime | None], None]",
+    initialize: "Callable[[], None]",
+    start_api: "Callable[[], None]",
+    start_scheduler: "Callable[[], None]",
+) -> "OrchestratorRuntime":
+    """build → validate → API → initialize → start → scheduler の順序を固定する
+    seam (spec §1.5 / plan レビュー Medium-5 / High-1 / 実装後レビュー H-1)。
 
-    initialize は初回 news/tech 収集。orchestrator の planning/watch loop は
-    start() 直後から動くため、初回収集を start() より前に置き、古い snapshot で
-    判断・発注させない。どの段の失敗 (例外 / SystemExit) でも後段は実行されない。
+    順序の根拠:
+
+    - **build + validate が最初** — orchestrator の構築と起動可能性の検証を
+      API・scheduler より前に済ませる (spec §1.5)。発注経路が無いまま他を
+      起動しない。
+    - **API が発注ループより前** — API は制御面 (halt/resume・承認ゲート・
+      /status) を担う。EADDRINUSE で旧プロセスと競合する等で API が落ちたとき、
+      発注ループがまだ動いていない状態で中止できる。副次的に、初回収集
+      (LLM 込みで数分) の間 REST API が無応答になる問題も解消する。
+    - **initialize が runtime.start() より前** — initialize は初回 news/tech
+      収集。orchestrator の planning/watch loop は start() 直後から動くため、
+      古い snapshot で判断・発注させない (plan レビュー High-1)。
+    - **scheduler が最後**。
+
+    どの段の失敗 (例外 / SystemExit) でも後段は実行されない。さらに
+    runtime.start() 以降で失敗したら runtime.stop() で graceful に畳んでから
+    再送出する — main.py の try/finally は run_startup_sequence より後ろにあり、
+    ここで stop() しないと通知 worker drain / quote producer 停止 / plan finalize
+    が走らないまま部分起動状態で例外が抜ける。
     """
     runtime = build()
     validate(runtime)
-    initialize()
-    if runtime is not None:
-        runtime.start()
+    # validate 通過後は非 None が契約。将来 validate を差し替えて None を通した
+    # 場合、start() を黙ってスキップすると fail-fast が無音で無効化されるため、
+    # 契約違反はここで顕在化させる (レビュー L-2)。
+    assert runtime is not None, "validate() must reject a None runtime"
     start_api()
-    start_scheduler()
+    initialize()
+    try:
+        runtime.start()
+        start_scheduler()
+    except BaseException:
+        try:
+            runtime.stop()
+        except Exception:
+            # stop() の失敗で元の起動失敗理由を握り潰さない。
+            _logger.exception("[STARTUP] 起動中止中の runtime.stop() が失敗")
+        raise
     return runtime
