@@ -13,6 +13,8 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from src.config.schema import AppConfig, InstrumentConfig
 from src.orchestrator import bootstrap as bs
 from src.orchestrator.runtime import OrchestratorRuntime
@@ -456,3 +458,69 @@ def test_bootstrap_recovers_dangling_runs(tmp_path: Path, monkeypatch) -> None:
     fresh = seed_store.get_run(fresh_id)
     assert fresh.status == "ok"
     assert fresh.finished_at is None
+
+
+# --- pair 整合チェック (spec §1.5 / plan Task 7) -------------------------------
+
+def _two_tradeable_config() -> AppConfig:
+    trade1 = InstrumentConfig(symbol="USDJPY=X", display_name="USD/JPY", asset_type="fx",
+                              mode="trade", base_currency="USD", quote_currency="JPY")
+    trade2 = InstrumentConfig(symbol="GBPUSD=X", display_name="GBP/USD", asset_type="fx",
+                              mode="trade", base_currency="GBP", quote_currency="USD")
+    cfg = AppConfig(instruments=[trade1, trade2])
+    cfg.orchestrator.enabled = True
+    return cfg
+
+
+def test_disabled_returns_none_unchanged(tmp_path: Path, monkeypatch) -> None:
+    """enabled=False は従来通り None (exit 判断は main 側 / spec 1.5)。"""
+    cfg = _two_tradeable_config()
+    cfg.orchestrator.enabled = False
+    rt = bs.build_orchestrator_runtime(
+        cfg, store=None, price_store=None, analysis_store=None,
+        price_provider=_FakePriceProvider(),
+    )
+    assert rt is None
+
+
+def test_live_pair_subset_raises(tmp_path: Path, monkeypatch) -> None:
+    """mode=live で orchestrator pairs が tradeable の真部分集合 → RuntimeError。"""
+    _patch_heavy(monkeypatch, tmp_path)
+    cfg = _two_tradeable_config()
+    cfg.orchestrator.mode = "live"
+    cfg.orchestrator.pairs = ["USDJPY=X"]  # GBPUSD=X の発注経路が無い
+    with pytest.raises(RuntimeError) as exc:
+        bs.build_orchestrator_runtime(
+            cfg, store=object(), price_store=object(),
+            analysis_store=_FakeAnalysisStore(), price_provider=_FakePriceProvider(),
+        )
+    assert "GBPUSD=X" in str(exc.value)
+
+
+def test_live_full_coverage_builds(tmp_path: Path, monkeypatch) -> None:
+    """mode=live でも pairs が tradeable 全体を覆っていれば構築される。"""
+    _patch_heavy(monkeypatch, tmp_path)
+    cfg = _two_tradeable_config()
+    cfg.orchestrator.mode = "live"
+    cfg.orchestrator.pairs = ["USDJPY=X", "GBPUSD=X"]
+    rt = bs.build_orchestrator_runtime(
+        cfg, store=object(), price_store=object(),
+        analysis_store=_FakeAnalysisStore(), price_provider=_FakePriceProvider(),
+    )
+    assert isinstance(rt, OrchestratorRuntime)
+
+
+def test_shadow_pair_subset_warns_but_builds(tmp_path: Path, monkeypatch, caplog) -> None:
+    """mode=shadow なら同条件でも構築成功 (warning のみ)。"""
+    _patch_heavy(monkeypatch, tmp_path)
+    cfg = _two_tradeable_config()
+    cfg.orchestrator.mode = "shadow"
+    cfg.orchestrator.pairs = ["USDJPY=X"]
+    with caplog.at_level("WARNING"):
+        rt = bs.build_orchestrator_runtime(
+            cfg, store=object(), price_store=object(),
+            analysis_store=_FakeAnalysisStore(), price_provider=_FakePriceProvider(),
+        )
+    assert isinstance(rt, OrchestratorRuntime)
+    assert any("GBPUSD=X" in r.getMessage() and "pair subset" in r.getMessage()
+               for r in caplog.records)
