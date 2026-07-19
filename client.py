@@ -549,40 +549,6 @@ def _cmd_analyze() -> None:
     _console.print(tbl)
 
 
-def _cmd_forecast(pair_filter: str | None = None) -> None:
-    params = {"hours": 24}
-    if pair_filter:
-        params["pair"] = pair_filter
-    data = _get("/forecast", params=params)
-    if data is None:
-        return
-    forecasts = data.get("forecasts", {})
-    for symbol, records in forecasts.items():
-        _console.print(f"\n[bold]{symbol}[/bold]")
-        if not records:
-            _console.print("  [dim]データなし[/dim]")
-            continue
-        tbl = Table(box=box.SIMPLE, show_header=True, padding=(0, 1))
-        tbl.add_column("予測日時")
-        tbl.add_column("方向", justify="center")
-        tbl.add_column("スコア", justify="right")
-        tbl.add_column("信頼度", justify="right")
-        tbl.add_column("レビュー済", justify="center")
-        for r in records[:10]:
-            direction = r.get("predicted_direction", "—") or "—"
-            score = r.get("combined_score", 0) or 0
-            score_color = "green" if score > 0 else ("red" if score < 0 else "white")
-            reviewed = "✓" if r.get("reviewed") else "—"
-            tbl.add_row(
-                (r.get("forecast_ts") or "—")[:16],
-                direction.upper(),
-                f"[{score_color}]{score:+.4f}[/{score_color}]",
-                f"{r.get('confidence', 0):.4f}",
-                reviewed,
-            )
-        _console.print(tbl)
-
-
 def _cmd_run_trade() -> None:
     """取引判定ループを実行。
 
@@ -995,14 +961,13 @@ _HELP = """\
   [cyan]run news[/cyan]             — 最新ニュースセンチメント
   [cyan]run tech[/cyan]             — 最新テクニカルスナップショット
   [cyan]run analyze[/cyan]          — 総合分析シグナル
-  [cyan]run forecast[/cyan] (pair)  — 予測サイクルデータ  例: run forecast USDJPY=X
   [cyan]run trade[/cyan]            — 取引判定ループを今すぐ実行
   [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問  例: ask USDJPYの見通しは？
   [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
   [cyan]logs[/cyan] (N)             — activity.log の末尾N行（デフォルト50）
   [cyan]feeds[/cyan]                — RSSフィード疎通確認
   [cyan]usage[/cyan]                — LLM使用量 / CB状態 / usage_limit集計
-  [cyan]schedule[/cyan]             — スケジュール (取引/予測/ニュース/技術/exit_check)
+  [cyan]schedule[/cyan]             — スケジュール (取引/ニュース/技術/exit_check)
   [cyan]hosts[/cyan]                — ホストプロファイル一覧
   [cyan]use[/cyan] <name>           — 接続先ホスト切替  例: use remote
   [cyan]halt[/cyan] soft|hard       — 取引停止 (soft=新規のみ停止 / hard=全決済 / 理由 任意)
@@ -1035,7 +1000,7 @@ def _dispatch(raw: str) -> bool:
         _cmd_schedule()
     elif cmd == "run":
         if not args:
-            _console.print("[red]使い方: run news | tech | analyze | forecast [pair] | trade[/red]")
+            _console.print("[red]使い方: run news | tech | analyze | trade[/red]")
         else:
             sub = args[0].lower()
             if sub in ("news", "n"):
@@ -1044,12 +1009,10 @@ def _dispatch(raw: str) -> bool:
                 _cmd_tech()
             elif sub in ("analyze", "a", "analysis"):
                 _cmd_analyze()
-            elif sub in ("forecast", "f"):
-                _cmd_forecast(args[1] if len(args) > 1 else None)
             elif sub in ("trade", "tr"):
                 _cmd_run_trade()
             else:
-                _console.print(f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | forecast | trade")
+                _console.print(f"[red]不明: {sub!r}[/red]  使い方: run news | tech | analyze | trade")
     elif cmd == "ask":
         if not args:
             _console.print("[red]使い方: ask <メッセージ>[/red]")
