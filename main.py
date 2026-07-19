@@ -58,6 +58,8 @@ _guards: dict[str, JobGuard] = {
     "econ": JobGuard("econ_calendar"),
     "weekly_diagnosis": JobGuard("weekly_diagnosis"),
     "data_backup": JobGuard("data_backup"),
+    # skip_predicate なし: 決済は休場中も残るため市場休場でも回す (spec §3.6)。
+    "reflection": JobGuard("reflection"),
 }
 
 
@@ -307,7 +309,7 @@ def main() -> None:
         "Exit check",
         "every :00  (SL/TP + position review, no LLM)",
     )
-    sched_table.add_row("Trading cycles",  f"[cyan]{' / '.join(run_times)}[/cyan]  ({tz})")
+    sched_table.add_row("Reflection", "every :00  (close reflection, 1-per-slot)")
     monitor_status = (
         f"every [cyan]{config.price_monitor.interval_minutes}[/cyan] min  :00 aligned  "
         f"(alert≥{config.price_monitor.alert_threshold_pct:.1%}"
@@ -369,6 +371,16 @@ def main() -> None:
         schedule.every().day.at(t, news_tz).do(
             _run_with_guard, _guards["exit_check"],
             run_exit_check_cycle, config, store, analysis_store, price_provider=price_provider
+        )
+
+    # 決済振り返り (毎時・LLM slot 1件ずつ・spec §3.6)
+    from src.data.orchestrator_store import OrchestratorStore as _OrchStoreForReflect
+    _reflect_store = _OrchStoreForReflect(config.prices_db_path)
+    from src.cycles.reflection import run_reflection_cycle
+    for t in technical_times:
+        schedule.every().day.at(t, news_tz).do(
+            _run_with_guard, _guards["reflection"],
+            run_reflection_cycle, config, store, _reflect_store, slot=_llm_slot,
         )
 
     # 3. ニュース収集（LLMあり・時間がかかる）

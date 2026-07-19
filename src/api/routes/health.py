@@ -271,8 +271,7 @@ def usage() -> dict[str, Any]:
 def schedule_info() -> dict[str, Any]:
     """スケジュール情報を返す。
 
-    - 取引サイクルの次回実行時刻
-    - 各サイクルの全スケジュール
+    - 各サイクルの次回実行時刻と全スケジュール
     - ニュース取得間隔
     - price_monitor (5分間隔) は除外
     """
@@ -280,10 +279,10 @@ def schedule_info() -> dict[str, Any]:
 
     # ジョブ名 → カテゴリ分類
     _CATEGORY = {
-        "run_trading_cycle":      "trading",
         "run_news_collection":    "news",
         "run_technical_collection": "technical",
         "run_exit_check_cycle":   "exit_check",
+        "run_reflection_cycle":   "reflection",
     }
     _HIDDEN = {"run_price_monitor", "_run_rag_cleanup"}
 
@@ -333,10 +332,6 @@ def schedule_info() -> dict[str, Any]:
         return sorted({e["time"] for e in entries if e["time"]})
 
     return {
-        "trading": {
-            "next_run": _next_for("trading"),
-            "schedule": _all_times("trading"),
-        },
         "news": {
             "next_run": _next_for("news"),
             "schedule": _all_times("news"),
@@ -348,5 +343,9 @@ def schedule_info() -> dict[str, Any]:
         "exit_check": {
             "next_run": _next_for("exit_check"),
             "schedule": _all_times("exit_check"),
+        },
+        "reflection": {
+            "next_run": _next_for("reflection"),
+            "schedule": _all_times("reflection"),
         },
     }

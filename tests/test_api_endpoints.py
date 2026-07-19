@@ -1053,3 +1053,59 @@ def test_status_reconciliation_field_zero_when_counter_unused(_state_setup, tmp_
     assert resp.status_code == 200
     mt5b = resp.json()["mt5_bridge"]
     assert mt5b["reconciliation_skipped_consecutive"] == 0
+
+
+# ── /schedule カテゴリ (取引サイクル退役後の固定) ──────────────────────
+
+
+@pytest.fixture
+def _clean_schedule():
+    """schedule のモジュールグローバル job レジストリを前後で掃除する。
+
+    schedule はプロセス全体で 1 個の job リストを持つため、掃除しないと
+    他テストへ漏れる (plan Task 8 の指示)。
+    """
+    import schedule as sched_mod
+
+    saved = list(sched_mod.jobs)
+    sched_mod.clear()
+    yield sched_mod
+    sched_mod.clear()
+    sched_mod.jobs.extend(saved)
+
+
+def _run_with_guard_stub(fn, *args, **kwargs):  # pragma: no cover - 登録形の再現のみ
+    return fn(*args, **kwargs)
+
+
+def run_reflection_cycle():  # pragma: no cover - 名前解決用ダミー (実行しない)
+    """`_CATEGORY` のキー名と一致させるためのダミー。"""
+
+
+def _register_reflection_job(sched_mod):
+    """main.py と同じ partial 形 (guard ラッパー経由) で登録する。"""
+    import functools
+
+    sched_mod.every().day.at("00:00").do(
+        functools.partial(_run_with_guard_stub, run_reflection_cycle)
+    )
+
+
+def test_schedule_categories_include_reflection(_state_setup, _clean_schedule):
+    """reflection ジョブが /schedule のカテゴリとして公開されること。"""
+    _register_reflection_job(_clean_schedule)
+
+    data = _client_get("/schedule").json()
+
+    assert "reflection" in data
+    assert data["reflection"]["schedule"] == ["00:00"]
+
+
+def test_schedule_categories_exclude_retired_cycles(_state_setup, _clean_schedule):
+    """退役した trading / forecast カテゴリは /schedule に現れないこと。"""
+    _register_reflection_job(_clean_schedule)
+
+    data = _client_get("/schedule").json()
+
+    assert "trading" not in data
+    assert "forecast" not in data
