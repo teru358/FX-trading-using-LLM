@@ -26,7 +26,10 @@
   (spec/plan コミットを含む最新ブランチ。main には未マージの前提)。
 - コミットメッセージは conventional commits (日本語可)。attribution なし。
 - 回帰基準: 作業中は per-file green、**最終合格基準は full suite `uv run pytest` で
-  既知失敗のみ** (`tests/test_insights.py` ChromaDB 系 2 件 — CLAUDE.md 基準)。
+  既知失敗のみ** = **`tests/test_analysis_store_write.py` の 2 件** (固定日時
+  `datetime(2026, 7, 11, ...)` + 48h prune 窓の時限崩壊。本ブランチと無関係 — 実測)。
+  ⚠️ CLAUDE.md には「既知 2 件 = `test_insights.py`」とあるが**実測では
+  `test_insights.py` は 3 passed**。CLAUDE.md の記述が古い。詳細と扱いの判断は Task 10。
 - 実行順序は Task 番号順 (0→1→…→11)。fail-fast (Task 7) が削除 (Task 8) より
   先なのは意図的 (中間コミットの起動安全性)。
 
@@ -1549,8 +1552,13 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 - [ ] **Step 2: 参照残りゼロ確認**
 
 ```bash
-wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && grep -rn 'ForecastStore\|run_forecast_cycle\|forecast_cycle\|accuracy_tracker\|compute_recent_accuracy\|ForecastAccuracyFeedbackConfig\|forecast_accuracy_feedback\|record_forecast_entry\|record_forecast_review\|build_forecast_accuracy\|forecast_review_interval\|forecast_start_hour\|forecast_min_combined\|forecast_significance' src/ main.py prompts/ config/settings.yaml.example --include='*' | grep -v Binary"
+wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && grep -rn 'ForecastStore\|run_forecast_cycle\|forecast_cycle\|accuracy_tracker\|compute_recent_accuracy\|ForecastAccuracyFeedbackConfig\|forecast_accuracy_feedback\|record_forecast_entry\|record_forecast_review\|build_forecast_accuracy\|forecast_review_interval\|forecast_start_hour\|forecast_min_combined\|forecast_significance' src/ scripts/ main.py prompts/ config/settings.yaml.example --include='*' | grep -v Binary"
 ```
+
+**`scripts/` を必ず含めること (再レビュー Medium-2 の根本原因)** — 旧 plan の grep は
+`src/ main.py config/settings.yaml.example` しか見ていなかったため、`scripts/` 配下の
+削除対象 import (例: `scripts/migrate_directional_rag.py` の `SessionStore`) を
+検出できなかった。Task 6 / Task 8 の両方で `scripts/` を対象に含める。
 
 Expected: ヒット 0 件。
 
@@ -1560,7 +1568,8 @@ Expected: ヒット 0 件。
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_signal_combiner.py tests/test_weekly_diagnosis.py tests/test_ask_context_builder.py tests/test_config_loader.py tests/test_config_example_sync.py tests/test_main_wiring.py tests/test_directional_writer_horizon.py tests/test_integration_directional.py -q 2>&1 | tail -3"
 ```
 
-(存在しないファイル名は実在に合わせ調整。)
+**再レビュー Medium-4 で実在確認済み** — 上記 8 ファイルはすべて `tests/` に実在する
+(`ls tests/` で確認)。Task 8 側のコマンドと違いこちらは修正不要だった。
 
 - [ ] **Step 4: 削除後の不変条件確認**
 
@@ -1839,7 +1848,15 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
    を `_CATEGORY` に加え、health レスポンスの返り値 dict にも `reflection` が
    出るようにする。これをしないと新ジョブが健全性監視から完全に見えなくなる
    (main.py の Schedule 表示行だけでは監視にならない)。
-   health テストがあれば新カテゴリの検証を追記する。
+6. **`_CATEGORY` の内容を固定するテストを新設する (必須。再レビュー Low-6)** —
+   旧 plan の「health テストがあれば追記する」は誤り。**実測で `/schedule` の
+   カテゴリを検証するテストは現在存在しない**ため、「あれば」では実質何も担保されない。
+   → **新規テストを必ず書く**。検証内容:
+   - `_CATEGORY` から `trading` / `forecast` が**消えている**こと
+   - `_CATEGORY` に `reflection` (`"run_reflection_cycle": "reflection"`) が
+     **入っている**こと
+   - `/schedule` (health) レスポンスのカテゴリ集合に `reflection` が現れ、
+     `trading` / `forecast` が現れないこと
 
 **Files (削除):**
 - Delete: `src/cycles/trading.py`、`src/data/session_store.py`、
@@ -1847,7 +1864,10 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
   `src/analysis/audit_post_hoc.py`、`src/analysis/audit_report.py`、
   `src/signals/rag_adjustment.py`、`src/trading/atr_calculator.py`、
   `src/trading/entry_context_builder.py` (SLTPResult を import する唯一の同伴者。
-  consumer は trading.py:54 のみ — orchestrator/context_builder.py:103 はコメント言及のみ)
+  consumer は trading.py:54 のみ — orchestrator/context_builder.py:103 はコメント言及のみ)、
+  **`src/signals/vol_regime.py`** (再レビューで削除確定。`compute_vol_regime` の
+  production caller は削除対象の `src/cycles/trading.py:236,245` **のみ** — 実測済み。
+  温存する根拠がないので判断の余地なく削除する)
 - Delete: `prompts/audit_lesson_system.txt`、`prompts/audit_lesson_user.j2`
   (src 参照ゼロ。audit 系 (`performance_audit`/`audit_post_hoc`/`audit_report`) 削除で
   確実に dead になる)
@@ -1898,6 +1918,14 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
   **`api.run_trade_soft_timeout_sec`**)、
   `config/settings.yaml.example` (:155-163/:165-171/:213-215/:343/:345/:347)
 
+  **vol_regime 6 キーを削除リストに追加 (再レビュー Medium-1)** — `schema.py:172-177` の
+  `vol_regime_enabled` / `vol_regime_ewma_span` / `vol_regime_high_threshold` /
+  `vol_regime_low_threshold` / `vol_regime_high_risk_scale` / `vol_regime_low_risk_scale`。
+  これら 6 キーの読み出しも削除対象の `trading.py` **だけ** (実測)。
+  **schema.py / `config/settings.yaml` (実ファイル) / `config/settings.yaml.example` の
+  3 箇所から消す** (loader に該当があれば併せて)。
+  あわせて `src/jobs/weekly_diagnosis.py` の vol_regime 関連の既存機能表示・設定表示行も削除する。
+
   **`api.run_trade_soft_timeout_sec` を削除リストに追加** — consumer は
   `src/api/routes/trading.py:67` の `/run/trade` のみ (実測)。`/run/trade` 削除で完全 dead。
   schema / loader / `.example` / 実 config の 4 箇所から消す。
@@ -1917,6 +1945,9 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
   - `:161` `run_times`
   - `:258/:260` notify 2 キー (残り 1 キーは Task 6 側)
   - `api.run_trade_soft_timeout_sec`
+  - **`vol_regime_*` 6 キー** (`vol_regime_enabled` / `vol_regime_ewma_span` /
+    `vol_regime_high_threshold` / `vol_regime_low_threshold` /
+    `vol_regime_high_risk_scale` / `vol_regime_low_risk_scale`)
   ※ 行番号は目印。実際は**キー名で探す**こと。
 - Modify: `src/data/price_provider.py` (:195 run_times 加算削除)
 - Tests 削除: `tests/test_trading_cycle_summary.py`、`tests/test_trading_cycle_halt.py`、
@@ -1942,11 +1973,12 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
     「内容確認の上判断」は解決済み)** — docstring が「旧 trading cycle の
     `_phase_execute_signals` が execute_signal を呼ばない」で、`:15 from src.cycles
     import trading` の module-top import。orchestrator 側の検証ではないため温存不可。
-  - **`tests/test_atr_base_interval.py` — 全削除する前に内容確認**:
-    `config.trading.atr_timeframe` を monkeypatch しているが、**検証対象は `vol_regime`
-    経路**。vol_regime は温存対象なので、丸ごと消すとカバレッジが道連れで失われる。
-    → 「vol_regime 部分を atr_timeframe 非依存に書き直して残す」か「割り切って削除する」
-    かをこのタスク内で判断し、判断結果をコミットメッセージに残す。
+  - **`tests/test_atr_base_interval.py` (全削除で確定。再レビュー Medium-1 で
+    「判断する」保留は解消)** — 検証対象の `vol_regime` 経路そのものが本タスクで
+    削除される (`src/signals/vol_regime.py` 削除) ため、残すべきカバレッジが無い。
+    判断の余地なく全削除する。
+  - **`tests/test_vol_regime.py` (全削除)** — `src/signals/vol_regime.py` 削除に伴い
+    collection error になるため。
   - ~~`tests/test_reflector.py` (旧版)~~ — **Task 2 Step 4 で削除済み。存在しないので
     このリストからは対象外** (残骸記述)。
 - Tests 修正:
@@ -1963,6 +1995,26 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
       **確実に不整合**になるので必ず追従修正)
     - `tests/test_close_paths.py` (`:69`)
     - `tests/test_api_endpoints.py` (`:41`)
+  - **`tests/test_execution_result.py` (部分削除。再レビュー Medium-3 で追加)** —
+    `:11 from src.notifications.notifier import NotifierAdapter, SignalSkippedEvent` が
+    module-top import のため、`SignalSkippedEvent` 削除で **collection error** になる。
+    ただし**ファイル全削除は誤り**: 前半の `ExecutionResult` factory テストは
+    orchestrator でも有効なので残す。
+    → **通知テスト部分だけ削除する**: `:25` の `_notify` ヘルパと、`SignalSkippedEvent` を
+    使う 4 テスト (`:59` / `:72` / `:84` / `:95` 付近) を削除し、import 行から
+    `SignalSkippedEvent` (および不要になれば `NotifierAdapter`) を外す。
+    **`ExecutionResult` 型テストは温存する。**
+
+- **`scripts/` の追従 (再レビュー Medium-2)**:
+  - [ ] **`scripts/migrate_directional_rag.py` の扱いを決める** — `:24` で
+    `from src.data.session_store import SessionStore`、`:46` で
+    `SessionStore(config.prices_db_path)` を生成しており、`SessionStore` 削除で壊れる。
+    (旧 plan の grep 検証が `src/ main.py config/settings.yaml.example` しか見ておらず
+    `scripts/` を含まなかったため未検出だった。)
+    選択肢は以下のいずれか。**どちらを選んだかをコミットメッセージに記録し、報告する**:
+    1. **旧 migration ごと削除** — 既に適用済みなら不要なので `scripts/migrate_directional_rag.py`
+       を削除する
+    2. **`SessionStore` 非依存に書き換える** — 旧 migration を将来も再実行し得る場合
 
 - [ ] **Step 1: 上記リストを順に削除・修正する**
 
@@ -1984,18 +2036,28 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 - [ ] **Step 2: 参照残りゼロ確認**
 
 ```bash
-wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && grep -rn 'run_trading_cycle\|trading_cycle\|HoldDecisionStore\|AdaptiveParamsStore\|SessionStore\|rag_adjustment\|record_trade_entry\|record_hold_review\|performance_audit\|audit_post_hoc\|audit_report\|CycleSummaryEvent\|SignalSkippedEvent\|OrderOpenedEvent\|notify_cycle_summary\|notify_order_opened\|notify_signal_skipped\|run_times\|atr_timeframe\|sl_atr_mult\|tp_atr_mult\|calculate_sl_tp\|SLTPResult\|entry_context_builder\|build_entry_context\|_compute_atr_from_price_data\|_fetch_and_compute_atr\|_build_macro_context' src/ main.py config/settings.yaml.example --include='*.py' --include='*.example' | grep -v Binary"
+wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && grep -rn 'run_trading_cycle\|trading_cycle\|HoldDecisionStore\|AdaptiveParamsStore\|SessionStore\|rag_adjustment\|record_trade_entry\|record_hold_review\|performance_audit\|audit_post_hoc\|audit_report\|CycleSummaryEvent\|SignalSkippedEvent\|OrderOpenedEvent\|notify_cycle_summary\|notify_order_opened\|notify_signal_skipped\|run_times\|atr_timeframe\|sl_atr_mult\|tp_atr_mult\|calculate_sl_tp\|SLTPResult\|entry_context_builder\|build_entry_context\|_compute_atr_from_price_data\|_fetch_and_compute_atr\|_build_macro_context\|vol_regime\|compute_vol_regime\|run_trade_soft_timeout_sec' src/ scripts/ main.py config/settings.yaml config/settings.yaml.example --include='*.py' --include='*.yaml' --include='*.example' | grep -v Binary"
 ```
+
+**`scripts/` を必ず含めること (再レビュー Medium-2 の根本原因)** — 旧 plan の grep は
+`src/ main.py config/settings.yaml.example` しか見ておらず、
+`scripts/migrate_directional_rag.py:24` の `from src.data.session_store import SessionStore`
+を検出できなかった。実 config (`config/settings.yaml`) も対象に含める。
 
 Expected: ヒット 0 件 (`src/trading_cycle.py` 自体も削除済み)。
 
 - [ ] **Step 3: 影響 per-file テスト green 確認**
 
 ```bash
-wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_exit_check.py tests/test_trading_cycle_helpers.py tests/test_signal_combiner.py tests/test_main_wiring.py tests/test_api_server.py tests/test_notifier_close_labels.py tests/test_config_loader.py tests/test_config_example_sync.py -q 2>&1 | tail -3"
+wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_exit_check_review_gate.py tests/test_signal_combiner.py tests/test_main_wiring.py tests/test_api_endpoints.py tests/test_close_paths.py tests/test_execution_result.py tests/test_notifier_close_labels.py tests/test_config_loader.py tests/test_config_example_sync.py -q 2>&1 | tail -3"
 ```
 
-(ファイル名は実在に合わせ調整。exit_check テストの実名を確認して実行。)
+**再レビュー Medium-4 で実在ファイル名に修正済み** (旧 plan のコマンドは実行不能だった):
+- `tests/test_trading_cycle_helpers.py` → **除外** (同じ Task 8 で全削除するため)
+- `tests/test_exit_check.py` → **存在しない**。実在は `tests/test_exit_check_review_gate.py`
+- `tests/test_api_server.py` → **存在しない**。実在は `tests/test_api_endpoints.py`
+- `tests/test_close_paths.py` / `tests/test_execution_result.py` を追加
+  (それぞれ run_times 参照 / `SignalSkippedEvent` 参照の追従対象)
 
 - [ ] **Step 4: 削除後の不変条件確認**
 
@@ -2179,8 +2241,30 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest -q 2>&1 | tail -10"
 ```
 
-Expected: **失敗は既知のみ** (`tests/test_insights.py` ChromaDB 系 2 件、CLAUDE.md 基準)。
+Expected: **失敗は既知のみ** = **`tests/test_analysis_store_write.py` の 2 件**
+(`test_add_snapshot_persists_json_columns` / `test_add_snapshot_single_tf_nulls_mtf`)。
 それ以外の失敗はすべて解消してから次へ。
+
+**再レビュー Low-5 で合格基準を訂正** — 旧 plan は「既知失敗 = `tests/test_insights.py`
+ChromaDB 系 2 件」としていたが、**実測では `test_insights.py` は 3 passed** で失敗しない。
+代わりに `tests/test_analysis_store_write.py` の 2 件が失敗する。原因は `:13` の固定日時
+`datetime(2026, 7, 11, ...)` が `AnalysisStore` の 48 時間 prune 窓を外れたことによる
+**時限崩壊で、本ブランチとは無関係**。
+**CLAUDE.md の「既知 2 件 = test_insights」という記述とも食い違っている**ので、
+CLAUDE.md 側も併せて訂正が必要 (本 plan のスコープ外だが要認識)。
+
+- [ ] **Step 1b: 実装着手前に既知失敗 2 件の扱いを決める**
+
+Task 6 以降に着手する**前**に、以下のどちらかを選ぶ。選択結果を記録し報告する:
+
+1. **`db_now()` 相対 seed に直す** — `tests/test_analysis_store_write.py:13` の固定日時を
+   `db_now()` 相対に変更して green にする (memory の
+   `finance_test_db_now_relative_seed` 方針に沿う。再発防止として本命)
+2. **baseline として明記する** — 直さず「本ブランチ着手時点の既知失敗」として
+   記録し、Task 10 の合格基準にそのまま据える
+
+いずれにせよ、**着手前に一度 `uv run pytest -q` を流して baseline を確定**させ、
+本ブランチ由来の新規失敗と時限崩壊由来の失敗を区別できるようにしておくこと。
 
 - [ ] **Step 2: 実 config 掃除の TODO を deploy ノートに残す**
 
@@ -2250,7 +2334,8 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/discord_bot && git add -A && git c
 
 ## 完了条件
 
-1. finance full suite: 既知失敗 (`test_insights.py` 2 件) のみ
+1. finance full suite: 既知失敗 (`tests/test_analysis_store_write.py` 2 件 — Task 10
+   Step 1b で「修正」を選んだ場合は 0 件) のみ
 2. discord_bot full suite: 全 PASS
 3. grep 検証 (Task 6/8 の grep 検証 Step) ヒット 0 件
 4. spec §1.5 fail-fast がテストで担保されている
