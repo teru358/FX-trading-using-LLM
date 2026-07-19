@@ -906,3 +906,105 @@ class TestRunReflectionCycle:
         assert calls["n"] == 1
         r = orch.get_reflection("o1")
         assert r.status == "retry"      # 処理済みにはならない → 次回再処理
+
+
+class TestTimeBudget:
+    """1 回あたりの実行時間上限 (外部レビュー High)。
+
+    件数上限 10 だけだとローカル LLM が遅いときに後続の news / econ ジョブを
+    圧迫する。経過時間が上限を超えたら残りを次回へ持ち越して終了する。
+    """
+
+    def _patch_common(self, monkeypatch):
+        monkeypatch.setattr("src.cycles.reflection.create_llm_client",
+                            lambda config, role: object())
+        monkeypatch.setattr("src.cycles.reflection.make_embed_fn",
+                            lambda config: object())
+
+    def test_budget_constant_is_reasonable(self):
+        from src.cycles import reflection as R
+        # 毎時実行なので 1 時間より十分短く、1 件も処理できない値でもないこと
+        assert 0 < R._TIME_BUDGET_SECONDS <= 900
+
+    def test_stops_when_budget_exhausted(self, tmp_path, orch, monkeypatch):
+        from src.cycles import reflection as R
+
+        orders = [_closed_order(f"o{i}", closed_at=NOW + timedelta(hours=i))
+                  for i in range(4)]
+        _write_trades(tmp_path, orders)
+        seen = []
+        clock = {"t": 0.0}
+
+        async def fake(config, store, orch_store, llm, embed_fn, order,
+                       entry_analysis):
+            seen.append(order.order_id)
+            clock["t"] += R._TIME_BUDGET_SECONDS  # 1 件で予算を使い切る
+            return ("t", True)
+
+        monkeypatch.setattr("src.cycles.reflection._reflect_and_record", fake)
+        monkeypatch.setattr("src.cycles.reflection.time.monotonic",
+                            lambda: clock["t"])
+        self._patch_common(monkeypatch)
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        assert len(seen) == 1, f"budget 超過後も継続した: {seen}"
+
+    def test_carryover_leaves_state_untouched(self, tmp_path, orch, monkeypatch):
+        """持ち越し分は done にも retry にもならず、次回そのまま処理される。"""
+        from src.cycles import reflection as R
+
+        orders = [_closed_order(f"o{i}", closed_at=NOW + timedelta(hours=i))
+                  for i in range(3)]
+        _write_trades(tmp_path, orders)
+        seen = []
+        clock = {"t": 0.0}
+        over = {"on": True}
+
+        async def fake(config, store, orch_store, llm, embed_fn, order,
+                       entry_analysis):
+            seen.append(order.order_id)
+            if over["on"]:
+                clock["t"] += R._TIME_BUDGET_SECONDS
+            return ("t", True)
+
+        monkeypatch.setattr("src.cycles.reflection._reflect_and_record", fake)
+        monkeypatch.setattr("src.cycles.reflection.time.monotonic",
+                            lambda: clock["t"])
+        self._patch_common(monkeypatch)
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        assert len(seen) == 1
+        done_id = seen[0]
+        for o in orders:
+            r = orch.get_reflection(o.order_id)
+            if o.order_id == done_id:
+                assert r.status == "done"
+            else:
+                # 未着手 — retry 行が作られない (attempt_count 不正増加なし)
+                assert r is None, f"{o.order_id}: 持ち越しなのに {r.status} が記録された"
+
+        # 次回: 残り 2 件が処理され、済んだ 1 件は再処理されない
+        over["on"] = False
+        clock["t"] = 0.0
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        assert sorted(seen) == ["o0", "o1", "o2"]
+        assert len(seen) == len(set(seen))
+        for o in orders:
+            assert orch.get_reflection(o.order_id).status == "done"
+
+    def test_budget_checked_before_first_item(self, tmp_path, orch, monkeypatch):
+        """予算内なら 1 件目は必ず処理される (常時 0 件になる実装を弾く)。"""
+        _write_trades(tmp_path, [_closed_order("o1")])
+        seen = []
+
+        async def fake(config, store, orch_store, llm, embed_fn, order,
+                       entry_analysis):
+            seen.append(order.order_id)
+            return ("t", True)
+
+        monkeypatch.setattr("src.cycles.reflection._reflect_and_record", fake)
+        self._patch_common(monkeypatch)
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        assert seen == ["o1"]
