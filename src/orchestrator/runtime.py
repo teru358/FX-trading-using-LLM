@@ -957,7 +957,12 @@ class OrchestratorRuntime:
         # ok のときだけ通知 (失敗 trigger は通知しない)。
         if not ok:
             return False
-        self._notify_shadow_trigger(plan, pair, quote, action)
+        # shadow trigger 通知は shadow モード限定 (外部レビュー Medium)。live で
+        # "Shadow trigger" だけが飛ぶと、発注が拒否されていても運用者は発注された
+        # と誤認する。live の結果通知は _execute_live_trigger 内で結果確定と同時に
+        # fire する (outcome ごとに文面が異なるため、ここでは出せない)。
+        if self._mode != "live":
+            self._notify_shadow_trigger(plan, pair, quote, action)
         return True
 
     # ── Task F: 本番発注 執行段 (F-1 / F-3) ─────────────────────
@@ -1023,6 +1028,10 @@ class OrchestratorRuntime:
                 logger.warning(
                     f"[ORCH] live gate reject plan {plan.plan_id}: draft unbuildable"
                 )
+                self._notify_live_execution(
+                    plan, pair, "rejected",
+                    reason="live gate: draft reconstruction failed",
+                )
                 return
             # final gate は trigger 時の context を再利用する (codex Medium): 別途
             # assemble(now) で組み直すと gate 判断が保存 snapshot で再現できなくなる。
@@ -1043,6 +1052,11 @@ class OrchestratorRuntime:
                 )
                 logger.warning(
                     f"[ORCH] live gate reject plan {plan.plan_id}: {gate.issues}"
+                )
+                self._notify_live_execution(
+                    plan, pair, "rejected",
+                    reason=f"live gate reject ({gate.reject_class}): "
+                           f"{'; '.join(str(i) for i in (gate.issues or []))}",
                 )
                 return
 
@@ -1099,12 +1113,28 @@ class OrchestratorRuntime:
                     f"[ORCH] live execute {result.outcome} plan {plan.plan_id}: "
                     f"{result.reason}"
                 )
-        except Exception:
+            # 結果保存の直後に通知する (外部レビュー Medium)。DB 反映済みなので、
+            # 通知が失敗しても記録は残る (逆順だと通知だけ届いて記録が無い窓が出る)。
+            self._notify_live_execution(
+                plan, pair, result.outcome, order_id=order_id,
+                reason=result.reason or "",
+            )
+        except Exception as e:
             logger.exception(f"[ORCH] live execute failed for plan {plan.plan_id}")
             # codex High: フェーズ別に即時記録し、daemon 生存中も plan が triggered のまま
             # 放置されない (recovery は bootstrap 1 回のみ)。記録自体が失敗しても watch loop は
             # 止めない (二重 except)。
             self._record_execution_failure(plan, run_id, snapshot_id, claimed, submitted)
+            # submit 後の例外は建玉不明 (needs_reconcile)。「発注されていません」と
+            # 断言できないので理由でそれを明示する (外部レビュー Medium)。
+            detail = (
+                "submit 後に例外 — 建玉不明・要手動確認 (needs_reconcile)"
+                if submitted else "submit 前に例外 — 未発注"
+            )
+            self._notify_live_execution(
+                plan, pair, "failed",
+                reason=f"{detail}: {type(e).__name__}: {e}",
+            )
 
     def _record_execution_failure(
         self, plan, run_id, snapshot_id, claimed: bool, submitted: bool,
@@ -1305,6 +1335,28 @@ class OrchestratorRuntime:
             reason=(action.get("comment") or ""),
         )
         self._run_notify(lambda: n.notify_shadow_trigger(info))
+
+    def _notify_live_execution(
+        self, plan, pair: str, outcome: str, *,
+        order_id: str | None = None, reason: str = "",
+    ) -> None:
+        """live 発注の結果を通知する (外部レビュー Medium)。
+
+        約定・拒否・失敗・order_id・broker 理由を運用者へ届ける唯一の経路。
+        Task 8 で旧 notify_order_opened / notify_signal_skipped を削除して以降、
+        これが無いと live の発注結果が Discord から一切見えない。
+        """
+        if self._notifier is None:
+            return
+        from src.orchestrator.shadow_notifier import LiveExecutionInfo
+
+        n = self._notifier
+        info = LiveExecutionInfo(
+            pair=pair, action=_side_of(plan.direction) or "?",
+            plan_id=plan.plan_id, outcome=outcome,
+            order_id=order_id, reason=reason,
+        )
+        self._run_notify(lambda: n.notify_live_execution(info))
 
     def _notify_hindsight(self, trig, result) -> None:
         if self._notifier is None:
