@@ -2314,6 +2314,17 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commi
 
 spec: §4。雛形は `scripts/migrate_directional_rag.py` (sys.path + load_config パターン)。
 
+> **plan からの意図的逸脱 (ユーザー判断, 2026-07-19): dry-run を既定にした。**
+> 当初 plan には dry-run の指定が無く、引数なしで実行すると即 drop する実装だった。
+> 破壊的かつ不可逆な操作なので、**引数なし = dry-run (何が失われるかを表示するだけで
+> DB・ファイル・ChromaDB を一切変更しない)、`--execute` を明示したときのみ実行**に変更。
+> dry-run は read-only URI (`file:...?mode=ro`) で DB に接続し、RAG は
+> `delete_retired_cards` と同じ where 条件で `get` するだけ (削除しない) ため、
+> 副作用が無いことが実装レベルで保証される。
+> **バックアップ強制は入れない** — リスク管理はユーザー責任という方針に従い、
+> 出力で注意喚起するに留める (重ねた安全装置は設けない)。
+> 下記コードは逸脱反映後の実装。正本は `scripts/migrate_cycle_retirement.py`。
+
 - [x] **Step 1: failing test を書く**
 
 `tests/test_migrate_cycle_retirement.py` — スクリプトの中核関数を import してテスト:
@@ -2367,6 +2378,17 @@ def test_delete_adaptive_params(tmp_path):
     assert delete_adaptive_params(tmp_path) is False   # 冪等
 ```
 
+dry-run 既定の追加に伴い、以下も同ファイルに追加済み (正本は
+`tests/test_migrate_cycle_retirement.py`):
+
+- `inspect_retired_tables` が行数を報告し、DB を変更しないこと
+- drop 済みテーブルを「なし (移行済み)」として報告すること
+- read-only URI 接続では書き込みが `sqlite3.OperationalError` になること
+- dry-run で DB の全行と `adaptive_params.yaml` が不変であること
+- dry-run 出力に drop 対象テーブル名・行数・温存テーブル・`--execute` 案内が載ること
+- RAG 件数が取れる場合は件数、取れない場合は「実行時に判明」を出すこと
+- 引数解析: 引数なし = dry-run、`--execute` = 実行
+
 - [x] **Step 2: 実装**
 
 `scripts/migrate_cycle_retirement.py`:
@@ -2375,7 +2397,11 @@ def test_delete_adaptive_params(tmp_path):
 """forecast/取引サイクル退役 migration (spec §4)。
 
 Usage:
-    uv run python scripts/migrate_cycle_retirement.py
+    uv run python scripts/migrate_cycle_retirement.py            # dry-run (既定)
+    uv run python scripts/migrate_cycle_retirement.py --execute  # 実際に実行
+
+既定は **dry-run**。何が失われるかを表示するだけで、DB・ファイル・ChromaDB を
+一切変更しない。`--execute` を明示したときのみ破壊的操作を行う。
 
 前提: システム停止中に実行し、実行前に以下をバックアップ済みであること。
   - prices.db (DB)
@@ -2384,6 +2410,7 @@ Usage:
 
 冪等: 再実行しても安全 (DROP IF EXISTS / where 削除 / 存在チェック)。
 """
+import argparse
 import sqlite3
 import sys
 from pathlib import Path
@@ -2392,6 +2419,104 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 _RETIRED_TABLES = ["forecasts", "hold_decisions", "trading_sessions"]
 _ADAPTIVE_FILENAME = "adaptive_params.yaml"   # adaptive_params_store.py:11 の実値
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="forecast/取引サイクル退役 migration (既定は dry-run)")
+    parser.add_argument(
+        "--execute",
+        action="store_true",
+        help="実際に drop/削除を実行する (未指定なら dry-run)",
+    )
+    return parser
+
+
+def inspect_retired_tables(db_path) -> dict:
+    """drop 対象・温存対象の状況を **読み取り専用** で調べる。
+
+    read-only URI (`file:...?mode=ro`) で接続するため、実装ミスがあっても
+    dry-run 経路から DB を変更することは原理的に不可能。
+
+    Returns:
+        {"present": {table: 行数}, "missing": [drop 済 table], "preserved": {table: 行数}}
+    """
+    conn = sqlite3.connect(f"file:{Path(db_path)}?mode=ro", uri=True)
+    try:
+        existing = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        present, missing = {}, []
+        for table in _RETIRED_TABLES:
+            if table in existing:
+                present[table] = conn.execute(
+                    f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            else:
+                missing.append(table)
+        preserved = {
+            t: conn.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0]
+            for t in sorted(existing - set(_RETIRED_TABLES))
+            if not t.startswith("sqlite_")
+        }
+        return {"present": present, "missing": missing, "preserved": preserved}
+    finally:
+        conn.close()
+
+
+def count_retired_cards(store) -> dict[str, int]:
+    """RAG 退役カードの削除**予定**件数を数える (削除はしない)。
+
+    `delete_retired_cards` と同じ where 条件で `get` するだけ。
+    """
+    from src.rag.directional_store import RETIRED_CARDS_WHERE
+
+    return {
+        d: len(store.directional._collection(d).get(
+            where=RETIRED_CARDS_WHERE, include=[])["ids"])
+        for d in ("bullish", "bearish")
+    }
+
+
+def render_dry_run(db_path, state_dir, rag_counts: dict[str, int] | None) -> str:
+    """dry-run のレポート文字列を組み立てる (副作用なし)。"""
+    report = inspect_retired_tables(db_path)
+    lines = ["== cycle retirement migration (DRY-RUN — 何も変更しません) =="]
+
+    lines.append("")
+    lines.append("[drop 対象テーブル]")
+    if report["present"]:
+        for table, rows in report["present"].items():
+            lines.append(f"  - {table}: {rows} 行が失われます")
+    else:
+        lines.append("  (なし — 移行済み)")
+    for table in report["missing"]:
+        lines.append(f"  - {table}: なし (移行済み)")
+
+    lines.append("")
+    preserved = report["preserved"]
+    lines.append(f"[温存テーブル] {len(preserved)} テーブルは無傷")
+    for table, rows in preserved.items():
+        lines.append(f"  - {table}: {rows} 行")
+
+    lines.append("")
+    lines.append("[adaptive_params.yaml]")
+    if (Path(state_dir) / _ADAPTIVE_FILENAME).exists():
+        lines.append(f"  - {Path(state_dir) / _ADAPTIVE_FILENAME} を削除します")
+    else:
+        lines.append("  (なし — 移行済み or 未生成)")
+
+    lines.append("")
+    lines.append("[RAG 退役カード]")
+    if rag_counts is None:
+        lines.append("  件数を取得できませんでした (ChromaDB 未接続) — 実行時に判明します")
+    else:
+        total = sum(rag_counts.values())
+        detail = ", ".join(f"{d}={n}" for d, n in rag_counts.items())
+        lines.append(f"  - 削除予定 {total} 件 ({detail})")
+
+    lines.append("")
+    lines.append("実行するには `--execute` を付けてください。")
+    lines.append("(バックアップは実行者の責任です — DB / data/ / state_dir)")
+    return "\n".join(lines)
 
 
 def drop_retired_tables(db_path) -> list[str]:
@@ -2418,11 +2543,23 @@ def delete_adaptive_params(state_dir) -> bool:
     return False
 
 
-def main() -> None:
+def main(argv=None) -> None:
     from src.config import load_config
     from src.rag.vector_store import VectorStore   # migrate_directional_rag.py と同パターン
 
+    args = build_parser().parse_args(argv)
     config = load_config()
+
+    if not args.execute:
+        try:
+            store = VectorStore(config.rag_db_path)   # main.py:212 と同構築
+            rag_counts = count_retired_cards(store)
+        except Exception as exc:   # ChromaDB 不在等 — dry-run を失敗させない
+            print(f"(RAG 件数の取得に失敗: {exc})", file=sys.stderr)
+            rag_counts = None
+        print(render_dry_run(config.prices_db_path, config.state_dir, rag_counts))
+        return
+
     print("== cycle retirement migration ==")
     dropped = drop_retired_tables(config.prices_db_path)
     print(f"dropped tables: {dropped or '(none — already migrated)'}")
@@ -2430,7 +2567,7 @@ def main() -> None:
         print("deleted adaptive_params.yaml")
     else:
         print("adaptive_params.yaml not present")
-    store = VectorStore(config.rag_db_path)   # main.py:212 と同構築
+    store = VectorStore(config.rag_db_path)
     counts = store.directional.delete_retired_cards()
     print(f"deleted RAG cards: {counts}")
     print("done.")

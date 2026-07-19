@@ -372,6 +372,17 @@ technical-llm-omit のデプロイと同梱可能な手順として:
 - CREATE: `reflections` (ORM model 追加により起動時 `metadata.create_all()` で
   自動作成。手動手順は不要)
 
+**実行モード: 既定は dry-run。** 引数なしで実行すると、drop 対象テーブルと各テーブルの
+行数・温存テーブル・`adaptive_params.yaml` の有無・RAG 退役カードの削除予定件数を
+表示するだけで、DB・ファイル・ChromaDB を一切変更しない (DB は read-only URI
+`file:...?mode=ro` で開き、RAG は削除と同じ where で `get` するのみ)。
+実際の破壊的操作は `--execute` を明示したときのみ行う。
+
+```bash
+uv run python scripts/migrate_cycle_retirement.py            # dry-run (既定)
+uv run python scripts/migrate_cycle_retirement.py --execute  # 実行
+```
+
 migration スクリプトは冪等 (`DROP TABLE IF EXISTS`、ChromaDB 削除も再実行安全) とし、
 実行前に **DB・ChromaDB データディレクトリ (directional collections を含む
 `data/` 配下の RAG 永続化先)・state_dir (削除対象の adaptive params YAML (adaptive_params.yaml) を含む)
