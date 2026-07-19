@@ -2318,22 +2318,48 @@ spec: §4。雛形は `scripts/migrate_directional_rag.py` (sys.path + load_conf
 > 当初 plan には dry-run の指定が無く、引数なしで実行すると即 drop する実装だった。
 > 破壊的かつ不可逆な操作なので、**引数なし = dry-run (何が失われるかを表示するだけで
 > DB・ファイル・ChromaDB を一切変更しない)、`--execute` を明示したときのみ実行**に変更。
-> dry-run は read-only URI (`file:...?mode=ro`) で DB に接続し、RAG は
-> `delete_retired_cards` と同じ where 条件で `get` するだけ (削除しない) ため、
-> 副作用が無いことが実装レベルで保証される。
+> dry-run は read-only URI (`file:...?mode=ro`) で DB に接続する。
 > **バックアップ強制は入れない** — リスク管理はユーザー責任という方針に従い、
 > 出力で注意喚起するに留める (重ねた安全装置は設けない)。
 > 下記コードは逸脱反映後の実装。正本は `scripts/migrate_cycle_retirement.py`。
+
+> **外部レビュー対応 (2026-07-19): dry-run で ChromaDB を開かない + preflight 追加。**
+> 当初は dry-run でも RAG 件数を出すため `VectorStore` を構築していたが、
+> chromadb 1.5.5 の `PersistentClient` は指定 path を無条件に `mkdir` し
+> `chroma.sqlite3` を作成するため、これ自体が副作用だった (実測で確認。
+> `get_collection` に替えても client 構築時点で作られ、`Settings` にも read-only
+> 相当の項目は無い)。よって **dry-run では ChromaDB を開かず**、件数は
+> `--execute` 時に判明する旨を理由付きで表示する。
+> 併せて **preflight** を追加し、破壊的操作の前に DB 実在・prices.db 妥当性
+> (`ohlcv`/`trade_plans`/`technical_snapshots` のいずれか)・`integrity_check`・
+> `state_dir`・RAG 疎通 (`--execute` 時のみ) をまとめて検証する。1つでも失敗すれば
+> 何も変更せず終了コード 1 で中止するため、「SQLite だけ drop されて RAG が残る」
+> 部分適用と「不在 DB を新規作成して移行済みと誤認」が起きない。詳細は spec §4。
 
 - [x] **Step 1: failing test を書く**
 
 `tests/test_migrate_cycle_retirement.py` — スクリプトの中核関数を import してテスト:
 
 ```python
-"""migration の冪等性テスト (spec §4)。"""
+"""migration の冪等性 + dry-run 既定テスト (spec §4)。"""
 import sqlite3
+import sys
+import types
+from dataclasses import dataclass
+from pathlib import Path
 
-from scripts.migrate_cycle_retirement import delete_adaptive_params, drop_retired_tables
+import pytest
+
+from scripts.migrate_cycle_retirement import (
+    PreflightError,
+    build_parser,
+    delete_adaptive_params,
+    drop_retired_tables,
+    inspect_retired_tables,
+    main,
+    preflight,
+    render_dry_run,
+)
 
 
 def _make_db(tmp_path):
@@ -2343,6 +2369,9 @@ def _make_db(tmp_path):
     conn.execute("CREATE TABLE hold_decisions (id INTEGER PRIMARY KEY)")
     conn.execute("CREATE TABLE trading_sessions (id INTEGER PRIMARY KEY)")
     conn.execute("CREATE TABLE technical_snapshots (id INTEGER PRIMARY KEY)")
+    conn.executemany("INSERT INTO forecasts (id) VALUES (?)", [(1,), (2,), (3,)])
+    conn.executemany("INSERT INTO hold_decisions (id) VALUES (?)", [(1,), (2,)])
+    conn.execute("INSERT INTO technical_snapshots (id) VALUES (9)")
     conn.commit()
     conn.close()
     return db
@@ -2376,6 +2405,269 @@ def test_delete_adaptive_params(tmp_path):
     assert delete_adaptive_params(tmp_path) is True
     assert not f.exists()
     assert delete_adaptive_params(tmp_path) is False   # 冪等
+
+
+# --- dry-run 既定 (plan からの意図的逸脱: 破壊的操作の可視化) ---
+
+
+def _snapshot(db):
+    """テーブル集合 + 各テーブル全行を取る (副作用検知用)。"""
+    conn = sqlite3.connect(db)
+    try:
+        names = sorted(r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"))
+        return {n: conn.execute(f"SELECT * FROM {n}").fetchall() for n in names}
+    finally:
+        conn.close()
+
+
+def test_inspect_reports_row_counts_without_dropping(tmp_path):
+    db = _make_db(tmp_path)
+    before = _snapshot(db)
+
+    report = inspect_retired_tables(db)
+
+    assert report["present"] == {
+        "forecasts": 3, "hold_decisions": 2, "trading_sessions": 0}
+    assert report["missing"] == []
+    assert report["preserved"] == {"technical_snapshots": 1}
+    assert _snapshot(db) == before   # 一切の副作用なし
+
+
+def test_inspect_reports_already_migrated_tables(tmp_path):
+    db = _make_db(tmp_path)
+    drop_retired_tables(db)
+
+    report = inspect_retired_tables(db)
+
+    assert report["present"] == {}
+    assert report["missing"] == ["forecasts", "hold_decisions", "trading_sessions"]
+
+
+def test_inspect_uses_readonly_connection(tmp_path):
+    """read-only URI 接続なので、書き込みを試みても DB は変更できない。"""
+    db = _make_db(tmp_path)
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("DROP TABLE forecasts")
+    finally:
+        conn.close()
+    assert "forecasts" in _tables(db)
+
+
+def test_dry_run_does_not_modify_db_or_files(tmp_path):
+    db = _make_db(tmp_path)
+    params = tmp_path / "adaptive_params.yaml"
+    params.write_text("{}")
+    before = _snapshot(db)
+
+    render_dry_run(db_path=db, state_dir=tmp_path, rag_counts=None)
+
+    assert _snapshot(db) == before
+    assert params.exists()
+
+
+def test_dry_run_output_lists_tables_with_row_counts(tmp_path):
+    db = _make_db(tmp_path)
+    (tmp_path / "adaptive_params.yaml").write_text("{}")
+
+    out = render_dry_run(db_path=db, state_dir=tmp_path, rag_counts=None)
+
+    assert "forecasts" in out and "3" in out
+    assert "hold_decisions" in out and "2" in out
+    assert "trading_sessions" in out
+    assert "technical_snapshots" in out          # 温存テーブルの提示
+    assert "adaptive_params.yaml" in out
+    assert "--execute" in out                    # 実行方法の案内
+
+
+def test_dry_run_output_reports_rag_counts_when_available(tmp_path):
+    db = _make_db(tmp_path)
+    out = render_dry_run(
+        db_path=db, state_dir=tmp_path, rag_counts={"bullish": 7, "bearish": 4})
+    assert "7" in out and "4" in out
+
+
+def test_dry_run_output_notes_rag_deferred(tmp_path):
+    """dry-run は ChromaDB を開かないので、件数が未取得である理由を明示する。"""
+    db = _make_db(tmp_path)
+    out = render_dry_run(db_path=db, state_dir=tmp_path, rag_counts=None)
+    assert "--execute 時に判明" in out
+    assert "ChromaDB" in out
+
+
+def test_parser_defaults_to_dry_run():
+    assert build_parser().parse_args([]).execute is False
+
+
+def test_parser_execute_flag():
+    assert build_parser().parse_args(["--execute"]).execute is True
+
+
+# --- 外部レビュー対応: main() 経由の副作用ゼロ + preflight ---------------------
+#
+# これまでのテストは render_dry_run() だけを叩いており、main() が dry-run 経路で
+# VectorStore を構築して ChromaDB (chroma.sqlite3) を作ってしまう乖離を見逃した。
+# 以下は必ず main() を通す。
+
+
+@dataclass
+class _StubConfig:
+    prices_db_path: Path
+    state_dir: Path
+    rag_db_path: Path
+
+
+@pytest.fixture
+def stub_config(tmp_path, monkeypatch):
+    """load_config() を差し替え、main() 全体を tmp_path 内に閉じ込める。"""
+    def _make(*, db=None, state_dir=None, rag=None):
+        cfg = _StubConfig(
+            prices_db_path=db if db is not None else _make_db(tmp_path),
+            state_dir=state_dir if state_dir is not None else tmp_path,
+            rag_db_path=rag if rag is not None else tmp_path / "rag",
+        )
+        module = types.ModuleType("src.config")
+        module.load_config = lambda: cfg
+        monkeypatch.setitem(sys.modules, "src.config", module)
+        return cfg
+
+    return _make
+
+
+def _tree(root: Path) -> set:
+    """root 配下の全エントリ (相対パス)。存在しなければ空集合。"""
+    if not root.exists():
+        return set()
+    return {p.relative_to(root).as_posix() for p in root.rglob("*")}
+
+
+def test_main_dry_run_creates_nothing_under_rag_path(stub_config, tmp_path, capsys):
+    """存在しない RAG パスに対する dry-run が、そのパスに一切書き込まないこと。
+
+    VectorStore を構築する実装に戻すと chroma.sqlite3 が生えてここが落ちる
+    (chromadb 1.5.5 の PersistentClient は path を無条件に mkdir + 作成する)。
+    """
+    rag = tmp_path / "never_created"
+    stub_config(rag=rag)
+
+    main([])
+
+    assert not rag.exists(), f"dry-run が RAG パスを作成した: {_tree(rag)}"
+    assert "--execute" in capsys.readouterr().out
+
+
+def test_main_dry_run_does_not_touch_db_or_state(stub_config, tmp_path):
+    db = _make_db(tmp_path)
+    params = tmp_path / "adaptive_params.yaml"
+    params.write_text("{}")
+    stub_config(db=db, rag=tmp_path / "never_created")
+    before = _snapshot(db)
+
+    main([])
+
+    assert _snapshot(db) == before
+    assert params.exists()
+
+
+def test_main_dry_run_explains_rag_counts_are_deferred(stub_config, tmp_path, capsys):
+    """ChromaDB を開かない以上、件数不明の理由が出力から読み取れること。"""
+    stub_config(rag=tmp_path / "never_created")
+
+    main([])
+    out = capsys.readouterr().out
+
+    assert "--execute" in out
+    assert "ChromaDB" in out
+
+
+# --- 修正3: DB 不在で空 DB を作らない --------------------------------------
+
+
+def test_main_execute_aborts_when_db_missing(stub_config, tmp_path):
+    missing = tmp_path / "absent" / "prices.db"
+    stub_config(db=missing)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--execute"])
+
+    assert exc.value.code != 0
+    assert not missing.exists(), "存在しない DB が新規作成された"
+
+
+def test_preflight_rejects_missing_db(tmp_path):
+    with pytest.raises(PreflightError, match="DB"):
+        preflight(
+            db_path=tmp_path / "nope.db",
+            state_dir=tmp_path,
+            rag_db_path=tmp_path / "rag",
+            check_rag=False,
+        )
+    assert not (tmp_path / "nope.db").exists()
+
+
+def test_preflight_rejects_db_without_preserved_tables(tmp_path):
+    """温存テーブルが1つも無い = finance の prices.db ではない可能性。"""
+    db = tmp_path / "other.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE unrelated (id INTEGER)")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(PreflightError):
+        preflight(db_path=db, state_dir=tmp_path,
+                  rag_db_path=tmp_path / "rag", check_rag=False)
+
+
+def test_preflight_accepts_valid_db(tmp_path):
+    db = _make_db(tmp_path)
+    preflight(db_path=db, state_dir=tmp_path,
+              rag_db_path=tmp_path / "rag", check_rag=False)   # 例外なし
+
+
+def test_preflight_rejects_missing_state_dir(tmp_path):
+    db = _make_db(tmp_path)
+    with pytest.raises(PreflightError, match="state_dir"):
+        preflight(db_path=db, state_dir=tmp_path / "absent",
+                  rag_db_path=tmp_path / "rag", check_rag=False)
+
+
+def test_preflight_does_not_open_rag_when_check_rag_false(tmp_path):
+    db = _make_db(tmp_path)
+    rag = tmp_path / "never_created"
+
+    preflight(db_path=db, state_dir=tmp_path, rag_db_path=rag, check_rag=False)
+
+    assert not rag.exists()
+
+
+# --- 修正2: RAG 不通なら破壊的操作へ進まない ---------------------------------
+
+
+def test_main_execute_aborts_before_destructive_ops_when_rag_fails(
+    stub_config, tmp_path, monkeypatch
+):
+    """RAG が開けないとき、SQLite も adaptive ファイルも変更されないこと。"""
+    db = _make_db(tmp_path)
+    params = tmp_path / "adaptive_params.yaml"
+    params.write_text("{}")
+    stub_config(db=db, rag=tmp_path / "rag")
+    before = _snapshot(db)
+
+    import scripts.migrate_cycle_retirement as mod
+
+    def _boom(rag_db_path):
+        raise RuntimeError("chroma unavailable")
+
+    monkeypatch.setattr(mod, "open_vector_store", _boom)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--execute"])
+
+    assert exc.value.code != 0
+    assert _snapshot(db) == before, "RAG 失敗後に SQLite が変更された"
+    assert params.exists(), "RAG 失敗後に adaptive_params.yaml が削除された"
 ```
 
 dry-run 既定の追加に伴い、以下も同ファイルに追加済み (正本は
@@ -2386,8 +2678,19 @@ dry-run 既定の追加に伴い、以下も同ファイルに追加済み (正�
 - read-only URI 接続では書き込みが `sqlite3.OperationalError` になること
 - dry-run で DB の全行と `adaptive_params.yaml` が不変であること
 - dry-run 出力に drop 対象テーブル名・行数・温存テーブル・`--execute` 案内が載ること
-- RAG 件数が取れる場合は件数、取れない場合は「実行時に判明」を出すこと
+- RAG 件数が取れる場合は件数、取れない場合は理由付きで「`--execute` 時に判明」を出すこと
 - 引数解析: 引数なし = dry-run、`--execute` = 実行
+
+外部レビュー対応で追加したテスト (いずれも **`main([])` を実際に通す**。従来は
+`render_dry_run()` だけを叩いていたため、`main()` が dry-run 経路で ChromaDB を
+作る乖離を検出できなかった):
+
+- 存在しない RAG パスに対する dry-run 後、そのパスに何も作られていないこと
+- dry-run で DB・`adaptive_params.yaml` が不変であること (main 経由)
+- dry-run 出力が RAG 件数未取得の理由を示すこと
+- preflight: DB 不在 / prices.db でない / `state_dir` 不在 を弾くこと
+- 不在 DB を指した `--execute` がエラー中止し、**DB を新規作成しない**こと
+- RAG が開けない `--execute` で **SQLite も adaptive ファイルも変更されない**こと
 
 - [x] **Step 2: 実装**
 
@@ -2402,6 +2705,17 @@ Usage:
 
 既定は **dry-run**。何が失われるかを表示するだけで、DB・ファイル・ChromaDB を
 一切変更しない。`--execute` を明示したときのみ破壊的操作を行う。
+
+dry-run の副作用ゼロ保証:
+  - DB は read-only URI (`file:...?mode=ro`) でのみ開く
+  - ChromaDB は **開かない**。chromadb 1.5.5 の `PersistentClient` は指定 path を
+    無条件に mkdir し `chroma.sqlite3` を作成するため、「読むだけ」の構築手段が
+    存在しない (`get_collection` を使っても client 構築時点で作られる)。
+    よって RAG 退役カード件数は dry-run では取得せず、`--execute` 時に判明する。
+
+preflight: 破壊的操作の前に DB 実在・温存テーブル・integrity_check・state_dir・
+RAG 疎通をまとめて検証する。1つでも失敗すれば何も変更せず終了コード 1 で中止する
+(SQLite だけ drop されて RAG が残る部分適用を防ぐ)。
 
 前提: システム停止中に実行し、実行前に以下をバックアップ済みであること。
   - prices.db (DB)
@@ -2419,6 +2733,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 _RETIRED_TABLES = ["forecasts", "hold_decisions", "trading_sessions"]
 _ADAPTIVE_FILENAME = "adaptive_params.yaml"   # adaptive_params_store.py:11 の実値
+
+# 対象 DB が本当に finance の prices.db かを判定する目印。退役対象と無関係で、
+# かつ長命なテーブルを選ぶ (1つでもあれば OK)。
+_SENTINEL_TABLES = {"ohlcv", "trade_plans", "technical_snapshots"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2507,7 +2825,11 @@ def render_dry_run(db_path, state_dir, rag_counts: dict[str, int] | None) -> str
     lines.append("")
     lines.append("[RAG 退役カード]")
     if rag_counts is None:
-        lines.append("  件数を取得できませんでした (ChromaDB 未接続) — 実行時に判明します")
+        # dry-run では ChromaDB を開かない (副作用ゼロ保証)。chromadb 1.5.5 の
+        # PersistentClient は path を無条件に mkdir し chroma.sqlite3 を作るため、
+        # 「読むだけ」の構築手段が存在しない (get_collection でも client 構築時点で作られる)。
+        lines.append("  - 件数は --execute 時に判明します "
+                     "(dry-run では ChromaDB を開かないため未取得)")
     else:
         total = sum(rag_counts.values())
         detail = ", ".join(f"{d}={n}" for d, n in rag_counts.items())
@@ -2517,6 +2839,83 @@ def render_dry_run(db_path, state_dir, rag_counts: dict[str, int] | None) -> str
     lines.append("実行するには `--execute` を付けてください。")
     lines.append("(バックアップは実行者の責任です — DB / data/ / state_dir)")
     return "\n".join(lines)
+
+
+class PreflightError(RuntimeError):
+    """破壊的操作に入る前の検査で不備が見つかった (何も変更していない)。"""
+
+
+def _check_db(db_path) -> None:
+    """DB が実在し、finance の prices.db として妥当かを read-only で検証する。"""
+    db_path = Path(db_path)
+    if not db_path.is_file():
+        # 通常の sqlite3.connect は不在 DB を新規作成してしまい、「drop 対象なし =
+        # 移行済み」と誤認させる。ここで明示的に止める。
+        raise PreflightError(
+            f"DB が存在しません: {db_path} "
+            "(設定ミス / 未同期の可能性。空 DB は作成しません)")
+
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        existing = {r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")
+            if not r[0].startswith("sqlite_")}
+        if not (existing & _SENTINEL_TABLES):
+            # 「退役対象以外のテーブルがある」だけでは不十分 (無関係な DB でも通る)。
+            # finance 固有の長命テーブルが1つも無ければ別の DB を指している。
+            raise PreflightError(
+                f"finance の prices.db ではない可能性があります: {db_path} "
+                f"(既知テーブル {sorted(_SENTINEL_TABLES)} がいずれも無い。"
+                f"検出テーブル={sorted(existing) or 'なし'})")
+        result = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        if result != "ok":
+            raise PreflightError(f"integrity_check 失敗: {db_path}: {result}")
+    except sqlite3.DatabaseError as exc:
+        raise PreflightError(f"DB を読めません: {db_path}: {exc}") from exc
+    finally:
+        conn.close()
+
+
+def open_vector_store(rag_db_path):
+    """VectorStore を構築する (ChromaDB を実際に開く)。
+
+    **この関数を呼ぶと ChromaDB ディレクトリが作成される。** dry-run 経路からは
+    決して呼ばないこと。テストが差し替える継ぎ目でもある。
+    """
+    from src.rag.vector_store import VectorStore   # migrate_directional_rag.py と同パターン
+
+    return VectorStore(Path(rag_db_path))
+
+
+def preflight(*, db_path, state_dir, rag_db_path, check_rag: bool):
+    """破壊的操作の前に全ての前提を検証する (spec §4)。
+
+    ここを通過するまで DB・ファイル・ChromaDB のいずれにも触れない。RAG の検証を
+    最後に回すと「SQLite とファイルだけ削除された」部分適用が起きるため、
+    破壊的操作より前にまとめて確認する。
+
+    Args:
+        check_rag: True なら ChromaDB を実際に開いて疎通確認する (=副作用あり)。
+            dry-run では必ず False。dry-run の副作用ゼロ保証と、`--execute` の
+            部分適用防止を両立させるための分岐。
+
+    Returns:
+        check_rag=True なら構築済み VectorStore、False なら None。
+
+    Raises:
+        PreflightError: 何も変更せずに中止すべき不備。
+    """
+    _check_db(db_path)
+
+    if not Path(state_dir).is_dir():
+        raise PreflightError(f"state_dir が存在しません: {state_dir}")
+
+    if not check_rag:
+        return None
+    try:
+        return open_vector_store(rag_db_path)
+    except Exception as exc:
+        raise PreflightError(f"RAG (ChromaDB) を開けません: {rag_db_path}: {exc}") from exc
 
 
 def drop_retired_tables(db_path) -> list[str]:
@@ -2545,21 +2944,29 @@ def delete_adaptive_params(state_dir) -> bool:
 
 def main(argv=None) -> None:
     from src.config import load_config
-    from src.rag.vector_store import VectorStore   # migrate_directional_rag.py と同パターン
 
     args = build_parser().parse_args(argv)
     config = load_config()
 
+    # preflight は dry-run / --execute の両方で走らせる (実行前に不備が分かる)。
+    # ただし RAG 疎通確認は ChromaDB を開く = 副作用があるため --execute 時のみ。
+    try:
+        store = preflight(
+            db_path=config.prices_db_path,
+            state_dir=config.state_dir,
+            rag_db_path=config.rag_db_path,
+            check_rag=args.execute,
+        )
+    except PreflightError as exc:
+        print(f"preflight 失敗 — 何も変更していません: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+
     if not args.execute:
-        try:
-            store = VectorStore(config.rag_db_path)   # main.py:212 と同構築
-            rag_counts = count_retired_cards(store)
-        except Exception as exc:   # ChromaDB 不在等 — dry-run を失敗させない
-            print(f"(RAG 件数の取得に失敗: {exc})", file=sys.stderr)
-            rag_counts = None
-        print(render_dry_run(config.prices_db_path, config.state_dir, rag_counts))
+        # dry-run は ChromaDB を開かないので RAG 件数は取得できない (rag_counts=None)。
+        print(render_dry_run(config.prices_db_path, config.state_dir, None))
         return
 
+    # ここから破壊的操作。preflight を通っているので RAG 不通による部分適用はない。
     print("== cycle retirement migration ==")
     dropped = drop_retired_tables(config.prices_db_path)
     print(f"dropped tables: {dropped or '(none — already migrated)'}")
@@ -2567,7 +2974,6 @@ def main(argv=None) -> None:
         print("deleted adaptive_params.yaml")
     else:
         print("adaptive_params.yaml not present")
-    store = VectorStore(config.rag_db_path)
     counts = store.directional.delete_retired_cards()
     print(f"deleted RAG cards: {counts}")
     print("done.")

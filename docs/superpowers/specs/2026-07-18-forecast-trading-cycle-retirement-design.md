@@ -373,10 +373,34 @@ technical-llm-omit のデプロイと同梱可能な手順として:
   自動作成。手動手順は不要)
 
 **実行モード: 既定は dry-run。** 引数なしで実行すると、drop 対象テーブルと各テーブルの
-行数・温存テーブル・`adaptive_params.yaml` の有無・RAG 退役カードの削除予定件数を
-表示するだけで、DB・ファイル・ChromaDB を一切変更しない (DB は read-only URI
-`file:...?mode=ro` で開き、RAG は削除と同じ where で `get` するのみ)。
-実際の破壊的操作は `--execute` を明示したときのみ行う。
+行数・温存テーブル・`adaptive_params.yaml` の有無を表示するだけで、
+DB・ファイル・ChromaDB を一切変更しない。実際の破壊的操作は `--execute` を
+明示したときのみ行う。
+
+**dry-run の副作用ゼロ保証** (外部レビュー High 対応):
+
+- DB は read-only URI (`file:...?mode=ro`) でのみ開く。
+- **ChromaDB は開かない。** chromadb 1.5.5 の `PersistentClient` は指定 path を
+  無条件に `mkdir` し `chroma.sqlite3` を作成するため、「読むだけ」で構築する手段が
+  存在しない (`get_or_create_collection` を `get_collection` に替えても、client
+  構築の時点で既にディレクトリとファイルが作られる。`Settings` にも read-only 相当の
+  項目はない)。よって dry-run では RAG 退役カード件数を取得せず、出力には
+  「件数は `--execute` 時に判明します (dry-run では ChromaDB を開かないため未取得)」
+  と理由を明示する。
+
+**preflight** (外部レビュー Medium 2件対応): 破壊的操作に入る前に前提をまとめて
+検証し、1つでも失敗すれば**何も変更せず**終了コード 1 で中止する。
+
+- DB ファイルが実在するか (不在なら中止。通常の `sqlite3.connect` は空 DB を
+  新規作成してしまい、「drop 対象なし = 移行済み」と誤認させるため)
+- finance の `prices.db` か (`ohlcv` / `trade_plans` / `technical_snapshots` の
+  いずれかが存在するか — 全く別の DB を指していないかの検査)
+- `PRAGMA integrity_check` が通るか
+- `state_dir` にアクセスできるか
+- RAG (ChromaDB) が開けるか — **`--execute` 時のみ**。dry-run の副作用ゼロ保証と
+  両立させるための分岐。RAG 検証を破壊的操作の後に回すと「SQLite と adaptive
+  ファイルだけ削除されて RAG が残る」部分適用が起きるため、preflight で先に開いて
+  取得済みの `VectorStore` をそのまま削除処理に使う。
 
 ```bash
 uv run python scripts/migrate_cycle_retirement.py            # dry-run (既定)
