@@ -1665,7 +1665,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commi
 
 spec: §1.5。
 
-- [ ] **Step 1: failing tests を書く**
+- [x] **Step 1: failing tests を書く**
 
 bootstrap 側 (`tests/test_orchestrator_bootstrap*.py` 既存に追記 or 新規):
 
@@ -1773,7 +1773,7 @@ class TestStartupSequence:
         assert "api" not in order and "scheduler" not in order
 ```
 
-- [ ] **Step 2: 実装**
+- [x] **Step 2: 実装**
 
 `src/orchestrator/bootstrap.py` — pairs 解決 (`:183-201`) の後に:
 
@@ -1859,11 +1859,23 @@ def run_startup_sequence(*, build, validate, initialize, start_api, start_schedu
    `sched_table.add_row("Orchestrator", "[yellow]shadow — 発注なし[/yellow]")` を追加。
    live のときは `"live"` を表示。
 
-- [ ] **Step 3: green 確認 + commit**
+- [x] **Step 3: green 確認 + commit**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_main_failfast.py tests/test_orchestrator_bootstrap*.py tests/test_main_wiring.py -q 2>&1 | tail -3 && git add -A && git commit -m 'feat(main): fail-fast起動 (orchestrator必須/構築前倒し/live pair整合/shadow警告)'"
 ```
+
+> **実施メモ (Task 7 完了)**:
+> - `src/startup.py` のモジュールロガーは `_logger` のため、plan 例の `logger.warning`
+>   は `_logger.warning` として実装した (`logger` だと NameError)。
+> - plan 例の `test_disabled_raises_system_exit` は `runtime=None` を渡すため、
+>   enabled チェックを消しても runtime-None チェックで拾われ mutation を殺せない。
+>   `test_disabled_raises_even_with_runtime` (runtime あり + enabled=False) を追加した。
+> - 起動順序の再編に伴い、REST API 起動は Initial collection の**前→後**に移った
+>   (spec §1.5 の build → validate → initialize → start → API → scheduler に従う)。
+> - Schedule 表示に `Orchestrator` 行を追加 (live / `<mode> — 発注なし`)。
+> - mutation 9 種 (enabled/None/shadow警告/init位置/順序逆転/例外握り潰し/
+>   live raise/shadow warning/チェック削除) すべてテストが検出。
 
 ---
 
