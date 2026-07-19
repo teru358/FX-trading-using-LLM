@@ -14,6 +14,10 @@
 
 ## 実行環境の注意 (全タスク共通)
 
+- **⚠️ 行番号は 2026-07-18 時点のもの。実行時は行番号でなくキー名 / シンボル名で探すこと。**
+  Task 1〜5 の実装で既に多くのファイルがずれている (実測で数行〜十数行の差を確認済み)。
+  plan 中の `:NNN` は「そのあたりにある」という目印であり、正は実コード。
+- **Task 1〜5 は実装済み**。今回の実行対象は Task 6 以降。
 - **finance の uv/pytest は必ず WSL 内で実行する**。Windows 側 UNC 経由の `uv run` は `.venv` を破壊する:
   ```bash
   wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_xxx.py -x -q"
@@ -842,6 +846,10 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add src/rag/directi
 
 ### Task 4: reflection job 本体 (`src/cycles/reflection.py`)
 
+> **実装済み。このセクションのテストコード / 実装コードは実装当時のもので、現行シグネチャと
+> 一部異なる (例: `_reflect_and_record` は `plan_id` を受け取らない — `_process_one` が
+> ローカル保持する)。plan ではなく実コードを正とせよ。**
+
 **Files:**
 - Create: `src/cycles/reflection.py`
 - Test: `tests/test_reflection_cycle.py` (新規)
@@ -1487,6 +1495,13 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 
 **Files (削除):**
 - Delete: `src/cycles/forecast.py`、`src/analysis/forecaster.py`、`src/signals/accuracy_tracker.py`
+- **Modify: `src/cycles/__init__.py` — 【最重要】このタスクで必ず一緒に直す**
+  (`:13` `from src.cycles.forecast import forecast_cycle, run_forecast_cycle` 削除、
+  `__all__` (`:16-23`) から `forecast_cycle` / `run_forecast_cycle` 削除、
+  モジュール docstring (`:1-11`) の forecast 説明行も削除)。
+  **これを忘れると `src/cycles/forecast.py` 削除の時点で `import src.cycles` が全滅し、
+  exit_check / reflection を含む全 consumer が起動不能になる** (Task 6 コミット単体で
+  suite が壊れる)。trading import (`:14`) の削除は Task 8。
 - Modify: `src/data/analysis_store.py` (318-443 の `_ForecastRecord`/`ForecastStore` 削除)
 - Modify: `src/signals/signal_combiner.py` (accuracy 分岐 101-144 / import :10-11 / 型 :16-17 / 引数 :52-53 / :190-191)
 - Modify: `src/rag/directional_writer.py` (`record_forecast_entry` :119-156、`record_forecast_review` :159-194)
@@ -1502,6 +1517,17 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 - Modify: `src/trading_cycle.py` (:15 forecast re-export)
 - Modify: `src/notifications/notifier.py` (:106 `_SOURCE_LABELS["forecast"]`)
 - Config: `src/config/schema.py` (:179-182/:185-199/:454-457)、`src/config/loader.py` (:47/:504-510/:608-611)、`config/settings.yaml.example` (:190-201/:303-306)
+- **Config (実ファイル): `config/settings.yaml` — 【最重要】`.example` と同時に消す**
+  `tests/test_config_example_sync.py` が `config/settings.yaml` ⇔ `config/settings.yaml.example`
+  の**キー集合一致**を検証するため、`.example` だけ消すと**確実に FAIL** する。
+  spec §5 は「デプロイ手順に明記」としているが、テスト green のためにはリポジトリ内の
+  実 config も同一コミットで消す必要がある。このタスクで消す forecast 系キー (実測):
+  - `:143` `forecast_accuracy_feedback` (以下のブロック一式)
+  - `:216-219` forecast 4 キー (`forecast_review_interval` / `forecast_start_hour` /
+    `forecast_min_combined` / `forecast_significance` 相当)
+  - `:256` notify の forecast 関連キー (残り 2 キーは Task 8)
+  ※ 行番号は目印。実際は**キー名で探す**こと。
+  ※ `run_times` (`:161`)・`atr_timeframe` (`:128`)・`rag_adjustment_*` (`:118`) は Task 8 側。
 - Tests: `tests/test_accuracy_feedback.py` 削除。`tests/test_forecast*.py` があれば削除。
   `tests/test_ask_context_builder.py`/`tests/test_weekly_diagnosis.py`/
   `tests/test_directional_writer_horizon.py`/`tests/test_integration_directional.py`/
@@ -1536,7 +1562,27 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 
 (存在しないファイル名は実在に合わせ調整。)
 
-- [ ] **Step 4: commit**
+- [ ] **Step 4: 削除後の不変条件確認**
+
+削除で壊れていないことを確認する (特に `src/cycles/__init__.py` の修正漏れ検出):
+
+```bash
+wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && \
+  uv run python -c 'import src.cycles' && \
+  uv run python -c 'import main' && \
+  uv run pytest tests/test_reflection_cycle.py -q 2>&1 | tail -3 && \
+  uv run pytest tests/test_exit_check*.py -q 2>&1 | tail -3 && \
+  uv run pytest tests/test_orchestrator_*.py -q 2>&1 | tail -3"
+```
+
+1. `import src.cycles` が通る (パッケージ import が生きている = 上記 `__init__.py` 修正済み)
+2. `import main` が通る
+3. reflection job が動く
+4. exit_check が動く (テストファイル名は実在に合わせる)
+5. orchestrator が動く
+6. Step 2 の grep 検証がヒット 0
+
+- [ ] **Step 5: commit**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commit -m 'feat!: forecastサイクル完全削除 (cycle/store/accuracy/表示/API/config)'"
@@ -1785,6 +1831,15 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
    ```
 4. `tests/test_main_wiring.py` に reflection ジョブ登録の検証を追記
    (schedule のジョブ一覧に reflection guard 経由の登録が 24 件あること)。
+5. **health への登録 (追加)**: `src/api/routes/health.py` の `_CATEGORY` から
+   `trading`/`forecast` を消すだけでなく、**新ジョブを追加する**:
+   ```python
+   "run_reflection_cycle": "reflection",
+   ```
+   を `_CATEGORY` に加え、health レスポンスの返り値 dict にも `reflection` が
+   出るようにする。これをしないと新ジョブが健全性監視から完全に見えなくなる
+   (main.py の Schedule 表示行だけでは監視にならない)。
+   health テストがあれば新カテゴリの検証を追記する。
 
 **Files (削除):**
 - Delete: `src/cycles/trading.py`、`src/data/session_store.py`、
@@ -1793,7 +1848,14 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
   `src/signals/rag_adjustment.py`、`src/trading/atr_calculator.py`、
   `src/trading/entry_context_builder.py` (SLTPResult を import する唯一の同伴者。
   consumer は trading.py:54 のみ — orchestrator/context_builder.py:103 はコメント言及のみ)
-- Modify: `src/cycles/__init__.py` (:14 trading import 削除)
+- Delete: `prompts/audit_lesson_system.txt`、`prompts/audit_lesson_user.j2`
+  (src 参照ゼロ。audit 系 (`performance_audit`/`audit_post_hoc`/`audit_report`) 削除で
+  確実に dead になる)
+  ※ スコープ外: `prompts/pine_signal.j2` / `prompts/pine_multi_signal.j2` も src 参照ゼロ
+  だが、**今回の変更とは無関係に既に dead** なので本 plan では触らない。
+- Modify: `src/cycles/__init__.py` (:14 trading import 削除 + `__all__` から
+  `trading_cycle`/`run_trading_cycle` 削除 + docstring の trading 説明行削除)。
+  forecast import (`:13`) の削除は Task 6 側で実施済みのはず — **未実施なら Task 6 に戻る**。
 - Modify: `src/trading_cycle.py` — **shim 全削除**し、参照元を直 import に更新:
   - `main.py:39` → `from src.cycles.exit_check import run_exit_check_cycle`
   - `src/views.py:72` → `from src.cycles._helpers import _summarize_pair`
@@ -1809,7 +1871,10 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
   `classify_hold_reasons` (:229-262, accuracy_gate 含む)、`format_decision_line`、
   `format_health_line`、`_format_signal_block`、`_format_cycle_summary`、
   `notify_order_opened` (:354-373)、`notify_signal_skipped` (:437-458)、
-  `notify_cycle_summary` (:460-462)、`_SOURCE_LABELS["trading"]` 削除。
+  `notify_cycle_summary` (:460-462)、`_SOURCE_LABELS["trading"]`、
+  **`SignalOutcome` dataclass (:77)** 削除。
+  (`SignalOutcome` の src consumer は `trading.py` (削除対象) と上記削除対象の
+  notifier 関数群のみ — 全て消えると完全 dead。実測済み。)
   **温存**: `OrderClosedEvent`/`notify_order_closed` (exit_check 使用)、
   `PriceAlertEvent`/`notify_price_alert` (price_monitor 使用)。
 - Modify: `src/api/routes/trading.py` (:48-116 `/run/trade` 削除、`/close/{pair}` 温存)、
@@ -1820,14 +1885,39 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
   trade_summary 変数
 - Modify: `src/cli.py` (:23/:35-36/:38/:209-236/:409-416/:446-447、
   `run_commands` の hold_store 引数)
-- Modify: `src/tui.py` (:279/:310-321)
-- Modify: `src/api/routes/health.py` (:283/:337-340)
+- Modify: `src/tui.py` (:279/:310-321 run trade 導線、および
+  **`hold_store` 引数・代入の削除: `:61 hold_store=None` / `:77 self._hold_store = hold_store`**)。
+  Task 6 で消す `forecast_store` (`:59`/`:75`) と対になる同型の削除。
+- Modify: `src/api/routes/health.py` (:283/:337-340 の trading/forecast カテゴリ削除 +
+  上記「reflection job 登録」5. の `reflection` カテゴリ追加)
 - Modify: `main.py` (:36 HoldDecisionStore、:39、:53-54 相当 guard 整理、
   :68-85 `_market_aware` 分岐、:215-216、:243 run_times、:323、:418-426 登録、
   :589、`_llm_slot` 系で trading 専用部)
 - Config: `src/config/schema.py` (:145-153 rag_adjustment 9 キー、:155 atr_timeframe、
-  :156-161 sl/tp_atr_mult 6 キー、:315 run_times、:373/:375/:377 notify 3 キー)、
+  :156-161 sl/tp_atr_mult 6 キー、:315 run_times、:373/:375/:377 notify 3 キー、
+  **`api.run_trade_soft_timeout_sec`**)、
   `config/settings.yaml.example` (:155-163/:165-171/:213-215/:343/:345/:347)
+
+  **`api.run_trade_soft_timeout_sec` を削除リストに追加** — consumer は
+  `src/api/routes/trading.py:67` の `/run/trade` のみ (実測)。`/run/trade` 削除で完全 dead。
+  schema / loader / `.example` / 実 config の 4 箇所から消す。
+
+  **caller sweep 実測済み (条件付き記述は不要 — 全て無条件に削除して安全):**
+  - `atr_timeframe`: consumer は `forecast.py:68` と `trading.py:193/241/372` の 4 箇所のみ。
+    **`exit_check.py` に ATR 参照はゼロ、orchestrator も config 参照なし。**
+  - `sl_atr_mult_*` / `tp_atr_mult_*`: `config.trading.` 経由の読み出しは
+    `trading.py:965-972` のみ。
+  - `rag_adjustment_*` 9 キー: `trading.py` の `_adjust_signal_with_rag` のみ。
+
+- **Config (実ファイル): `config/settings.yaml` — 【最重要】`.example` と同時に消す**
+  `tests/test_config_example_sync.py` がキー集合一致を検証するため、`.example` だけ
+  消すと**確実に FAIL** する。このタスクで消す実 config のキー (実測):
+  - `:118` `rag_adjustment_enabled` 以下 9 キー
+  - `:128` `atr_timeframe` 以下 sl/tp_atr_mult 6 キー
+  - `:161` `run_times`
+  - `:258/:260` notify 2 キー (残り 1 キーは Task 6 側)
+  - `api.run_trade_soft_timeout_sec`
+  ※ 行番号は目印。実際は**キー名で探す**こと。
 - Modify: `src/data/price_provider.py` (:195 run_times 加算削除)
 - Tests 削除: `tests/test_trading_cycle_summary.py`、`tests/test_trading_cycle_halt.py`、
   `tests/test_cycle_summary.py`、`tests/test_rag_adjustment.py`、
@@ -1835,14 +1925,44 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
   `tests/test_adaptive_params_store.py`、`tests/test_audit_post_hoc.py`、
   `tests/test_audit_report.py`、`tests/test_audit_integration.py`、
   `tests/test_audit_real_config_integration.py`、`tests/test_audit_no_review.py`、
-  `tests/fixtures/audit/`、`tests/test_reflector.py` (旧版)、
-  `tests/test_atr_calculator.py`、`tests/test_atr_base_interval.py`、
-  `tests/test_entry_context_builder.py` (存在すれば — atr/entry_context 退役分)
-- Tests 修正: `tests/test_trading_cycle_helpers.py` (削除関数分を除去、
-  `_summarize_pair`/`_get_price` 分は温存)、`tests/test_taskf_single_writer_guard.py`
-  (trading cycle 依存部の扱いは内容確認の上判断 — orchestrator 側検証なら温存)、
+  `tests/fixtures/audit/`、
+  `tests/test_atr_calculator.py`、
+  `tests/test_entry_context_builder.py` (存在すれば — atr/entry_context 退役分)、
+  - **`tests/test_trading_cycle_helpers.py` (全削除。旧 plan の「修正」は誤り)** —
+    実測でファイル構成は全て削除対象:
+    `_fetch_and_compute_atr` 2 件 / `_apply_atr_sltp_to_signal` 1 件 /
+    `_adjust_signal_with_rag` 6 件 / `_phase_close_sl_tp` 2 件 / `_finalize_closed_orders` 群。
+    **`_summarize_pair` のテストは 0 件** (grep count = 0)、`_get_price` のヒット 3 件は
+    `_phase_close_sl_tp` テスト内の monkeypatch。→ 残すべきものが無い。
+  - **`tests/test_trading_fallback_skip.py` (全削除。旧 plan に完全欠落していた)** —
+    `from src.cycles import trading, _helpers` が module-top import のため
+    `trading.py` 削除で **collection error** になる。全 4 テストが
+    `inspect.getsource(trading)` によるソース検査なので、修正でなく全削除が妥当。
+  - **`tests/test_taskf_single_writer_guard.py` (全削除で確定。旧 plan の
+    「内容確認の上判断」は解決済み)** — docstring が「旧 trading cycle の
+    `_phase_execute_signals` が execute_signal を呼ばない」で、`:15 from src.cycles
+    import trading` の module-top import。orchestrator 側の検証ではないため温存不可。
+  - **`tests/test_atr_base_interval.py` — 全削除する前に内容確認**:
+    `config.trading.atr_timeframe` を monkeypatch しているが、**検証対象は `vol_regime`
+    経路**。vol_regime は温存対象なので、丸ごと消すとカバレッジが道連れで失われる。
+    → 「vol_regime 部分を atr_timeframe 非依存に書き直して残す」か「割り切って削除する」
+    かをこのタスク内で判断し、判断結果をコミットメッセージに残す。
+  - ~~`tests/test_reflector.py` (旧版)~~ — **Task 2 Step 4 で削除済み。存在しないので
+    このリストからは対象外** (残骸記述)。
+- Tests 修正:
   `tests/test_main_wiring.py`、`tests/test_config_loader.py`、
-  `tests/test_config_example_sync.py`、`tests/test_notifier_close_labels.py` (要確認)
+  `tests/test_config_example_sync.py`、`tests/test_notifier_close_labels.py` (要確認)、
+  - **`tests/test_integration_directional.py`** — 「修正」では足りない。
+    `:10 from src.data.session_store import SessionStore` と
+    `:12 from src.signals.rag_adjustment import ...` が module-top import のため、
+    **`test_full_trade_lifecycle` と `test_rag_adjustment_with_real_data` の 2 テストは
+    削除**し、あわせて当該 import 行も削除する (残さないと collection error)。
+  - **`run_times` を参照する 3 ファイル (旧 plan の修正リストに欠落)**:
+    - `tests/test_price_provider.py` (`:33`/`:78` で `cfg.schedule.run_times` を設定し
+      `estimate_daily_requests()` を検証。`price_provider.py:195` の run_times 加算削除と
+      **確実に不整合**になるので必ず追従修正)
+    - `tests/test_close_paths.py` (`:69`)
+    - `tests/test_api_endpoints.py` (`:41`)
 
 - [ ] **Step 1: 上記リストを順に削除・修正する**
 
@@ -1853,6 +1973,13 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 - `Order` dataclass / `PositionManager` / `StateStore` / halt_state は温存
   (exit_check・orchestrator・reflection job が使用)。
 - `TradeSignal` / `_calculate_position_size` / `combine_signals` は温存。
+- **共有ヘルパのテスト空白を判断する**: `tests/test_trading_cycle_helpers.py` を全削除
+  すると、温存する `_summarize_pair` / `_get_price` を**直接テストするものが無くなる**
+  (元々 `_summarize_pair` の直接テストは 0 件、`_get_price` も間接のみ)。
+  このタスク内で以下のどちらかを選び、結果をコミットメッセージに記録する:
+  1. `tests/test_cycle_helpers.py` (新規) に `_summarize_pair` / `_get_price` の
+     最小テストを書く
+  2. `views.py` 経由の間接カバレッジで妥協する (理由を明記)
 
 - [ ] **Step 2: 参照残りゼロ確認**
 
@@ -1870,7 +1997,31 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 
 (ファイル名は実在に合わせ調整。exit_check テストの実名を確認して実行。)
 
-- [ ] **Step 4: commit**
+- [ ] **Step 4: 削除後の不変条件確認**
+
+削除で壊れていないことを確認する:
+
+```bash
+wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && \
+  uv run python -c 'import src.cycles' && \
+  uv run python -c 'import main' && \
+  uv run pytest tests/test_reflection_cycle.py -q 2>&1 | tail -3 && \
+  uv run pytest tests/test_exit_check*.py -q 2>&1 | tail -3 && \
+  uv run pytest tests/test_orchestrator_*.py -q 2>&1 | tail -3"
+```
+
+1. `import src.cycles` が通る (`__init__.py` から trading import を消し忘れていない)
+2. `import main` が通る
+3. reflection job が動く
+4. exit_check が動く (テストファイル名は実在に合わせる)
+5. orchestrator が動く
+6. Step 2 の grep 検証がヒット 0
+7. **collection error がゼロ**: `uv run pytest --collect-only -q 2>&1 | tail -5`
+   (module-top import が残った削除済みモジュールを検出する — 上記
+   `test_trading_fallback_skip.py` / `test_taskf_single_writer_guard.py` /
+   `test_integration_directional.py` の取りこぼし検出用)
+
+- [ ] **Step 5: commit**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commit -m 'feat!: 取引サイクル完全削除 + reflection job登録 (旧新経路の重複なし切替)'"
@@ -2053,6 +2204,23 @@ deploy note は commit しない (docs/ は gitignore 運用 — plan レビュ�
   :243/:246 `TOOL_METHODS`、:260 `ADMIN_TOOLS`、:513-557 `_forecast_embeds`、
   :719-756 `_run_trade_embed`、:1256-1266 `forecast` コマンド、
   :1290-1302 `run` コマンド)
+
+**旧 plan に欠落していた 4 件 (実測で追加):**
+- `finance_cog.py:719` `_run_trade_embed(data)` — 旧 plan は `_forecast_embeds` のみ
+  記載していた。embed ビルダは 2 つある。
+- `finance_cog.py:1256-1264` `@commands.command(name='forecast')` の **prefix コマンド本体**
+  (slash 側とは別実体)
+- `finance_cog.py:1291-1302` `run_trade` の **prefix コマンド本体**
+- `finance_cog.py:260` の `"finance_run_trade"` — `:243`/`:246` の `TOOL_METHODS`
+  対応表とは**別のリスト** (`ADMIN_TOOLS`)。両方から消す必要がある。
+
+**health レスポンス変更への追従確認 (追加):**
+finance 側 Task 8 で `src/api/routes/health.py` の返り値から `trading`/`forecast`
+カテゴリが消え、`reflection` が増える。discord_bot 側で health レスポンスを
+キー直参照している箇所があると **KeyError または欠損表示**になる。
+`cogs/finance/` 内の health 表示コードを確認し、
+(a) 消えるキーへの直参照がないこと、(b) 新カテゴリ `reflection` が表示されること
+を確認・追従する。
 
 - [ ] **Step 1: discord_bot に作業ブランチを切る**
 
