@@ -32,7 +32,11 @@ from src.jobs.technical_schedule import (
 )
 from src.logging_setup import setup_logging
 from src.rag.vector_store import VectorStore
-from src.startup import startup_checks
+from src.startup import (
+    ensure_orchestrator_or_exit,
+    run_startup_sequence,
+    startup_checks,
+)
 from src.data.analysis_store import HoldDecisionStore
 from src.data.price_provider import PriceProvider
 from src.trading.market_state import market_skip_check
@@ -325,6 +329,13 @@ def main() -> None:
             _console.print(f"[dim][RAG] cleanup: {deleted} entries deleted[/dim]")
 
     sched_table.add_row("Price provider", price_provider.status_line())
+    # 発注経路の状態を明示する (spec §1.5 — shadow だと発注が起きないことを見落とさない)
+    _orch_mode = config.orchestrator.mode
+    sched_table.add_row(
+        "Orchestrator",
+        "live" if _orch_mode == "live"
+        else f"[yellow]{_orch_mode} — 発注なし[/yellow]",
+    )
     _console.print(Panel(sched_table, title="[bold cyan]Schedule[/bold cyan]", border_style="cyan", padding=(0, 1)))
 
     # ジョブ登録（実行優先順: 軽量ジョブを先に登録 → 同時刻では先に実行される）
@@ -467,8 +478,67 @@ def main() -> None:
             f"keep {_bk_cfg.retention_count} archives in {_bk_cfg.output_dir}"
         )
 
-    # REST API サーバー（有効時のみ — Initial collection 前に起動）
-    if config.api.enabled:
+    # --- fail-fast 起動シーケンス (spec §1.5) ---------------------------------
+    # build → validate → initialize → start → API → scheduler。
+    # 発注経路 (orchestrator) の構築・検証を API / scheduler より前に置き、
+    # 発注経路ゼロのまま無音で運転を続ける事故を防ぐ。
+
+    def _build_orchestrator():
+        # 例外はそのまま落とす (fail-fast — 継続 guard は撤去済み)。
+        from src.orchestrator.bootstrap import build_orchestrator_runtime
+        return build_orchestrator_runtime(
+            config, store=store, price_store=price_store,
+            analysis_store=analysis_store, price_provider=price_provider,
+            # cadence_enabled 時は同じ resolver を共有し、market state boost (経路②) を
+            # 実収集 interval に反映させる (code review High#2)。None なら縮退 (regime のみ)。
+            cadence_resolver=_cadence_resolver,
+        )
+
+    def _validate_orchestrator(runtime):
+        ensure_orchestrator_or_exit(
+            runtime, enabled=config.orchestrator.enabled,
+            mode=config.orchestrator.mode,
+        )
+
+    def _initial_collection():
+        # 起動直後にニュース収集+テクニカル分析を1回実行
+        # prices.db が存在しない場合（初回起動）は市場時間を無視して強制実行
+        _console.print(Rule("[dim]Initial collection[/dim]", style="dim"))
+
+        # 休場中起動の明示表示 (同時に MarketStateTracker の初期状態ログも発行される)
+        if market_skip_check():
+            _console.print(
+                "[yellow]Market is currently closed.[/yellow] "
+                "[dim]Price-dependent jobs (price_monitor / exit_check / "
+                "technical / trading) will stay paused until market open.[/dim]"
+            )
+
+        if args.skip_news:
+            _console.print("[dim]--skip-news: 初回ニュース取得をスキップ[/dim]")
+        else:
+            run_news_collection(config, store)
+        if args.skip_tech:
+            _console.print("[dim]--skip-tech: 初回テクニカル収集をスキップ[/dim]")
+        else:
+            # cold start の相関欠損を避けるため watch → trade の順で逐次実行
+            run_watch_technical_collection(
+                config, store, price_store, analysis_store,
+                force=is_fresh_start, price_provider=price_provider,
+            )
+            run_trade_technical_collection(
+                config, store, price_store, analysis_store,
+                force=is_fresh_start, price_provider=price_provider, gate=bridge_gate,
+            )
+
+        # econ impact 起動時 1 回 (spec §2.K — 旧 trade collect 内実行との空白を作らない)
+        if config.economic_calendar.enabled:
+            from src.jobs.econ_impact_job import run_econ_impact_collection
+            run_econ_impact_collection(config, store, price_store, analysis_store)
+
+    def _start_api():
+        # REST API サーバー（有効時のみ）
+        if not config.api.enabled:
+            return
         from src.api.server import start_api_server
         # gate spec F-5: API から plan gate を操作する store。orchestrator 有効時のみ
         # 生成 (無効時に不要な DB を作らない — 実装後レビュー Low-Med)。engine は
@@ -477,72 +547,22 @@ def main() -> None:
                          price_store, hold_store,
                          _api_orchestrator_store(config))
 
-    # 起動直後にニュース収集+テクニカル分析を1回実行
-    # prices.db が存在しない場合（初回起動）は市場時間を無視して強制実行
-    _console.print(Rule("[dim]Initial collection[/dim]", style="dim"))
+    def _start_scheduler():
+        # スケジューラをバックグラウンドスレッドで起動
+        thread = threading.Thread(target=_scheduler_loop, daemon=True, name="scheduler")
+        thread.start()
 
-    # 休場中起動の明示表示 (同時に MarketStateTracker の初期状態ログも発行される)
-    if market_skip_check():
-        _console.print(
-            "[yellow]Market is currently closed.[/yellow] "
-            "[dim]Price-dependent jobs (price_monitor / exit_check / "
-            "technical / trading) will stay paused until market open.[/dim]"
-        )
-
-    if args.skip_news:
-        _console.print("[dim]--skip-news: 初回ニュース取得をスキップ[/dim]")
-    else:
-        run_news_collection(config, store)
-    if args.skip_tech:
-        _console.print("[dim]--skip-tech: 初回テクニカル収集をスキップ[/dim]")
-    else:
-        # cold start の相関欠損を避けるため watch → trade の順で逐次実行
-        run_watch_technical_collection(
-            config, store, price_store, analysis_store,
-            force=is_fresh_start, price_provider=price_provider,
-        )
-        run_trade_technical_collection(
-            config, store, price_store, analysis_store,
-            force=is_fresh_start, price_provider=price_provider, gate=bridge_gate,
-        )
-
-    # econ impact 起動時 1 回 (spec §2.K — 旧 trade collect 内実行との空白を作らない)
-    if config.economic_calendar.enabled:
-        from src.jobs.econ_impact_job import run_econ_impact_collection
-        run_econ_impact_collection(config, store, price_store, analysis_store)
-
-    # スケジューラをバックグラウンドスレッドで起動
-    scheduler_thread = threading.Thread(target=_scheduler_loop, daemon=True, name="scheduler")
-    scheduler_thread.start()
-
-    # Orchestrator agent loop (shadow)。enabled 時のみ planning/watch/hindsight ループ +
-    # shadow 通知 worker を起動する。既存 trading cycle とは並走 (Phase 2〜6 は停止しない)。
-    # broker adapter は渡さない (shadow 境界)。disabled なら None で no-op。
-    # shadow 機能の結線/起動失敗で既存 scheduler/trading/API まで巻き込まないよう guard。
-    # 段階導入: orchestrator が立ち上がらなくても本体は継続する (Codex Medium)。
-    orchestrator = None
-    try:
-        from src.orchestrator.bootstrap import build_orchestrator_runtime
-        orchestrator = build_orchestrator_runtime(
-            config, store=store, price_store=price_store,
-            analysis_store=analysis_store, price_provider=price_provider,
-            # cadence_enabled 時は同じ resolver を共有し、market state boost (経路②) を
-            # 実収集 interval に反映させる (code review High#2)。None なら縮退 (regime のみ)。
-            cadence_resolver=_cadence_resolver,
-        )
-        if orchestrator is not None:
-            orchestrator.start()
-            _console.print(
-                f"[green][OK][/green]  Orchestrator (shadow) running — "
-                f"mode={config.orchestrator.mode}"
-            )
-    except Exception:
-        _logger.exception("[ORCH] bootstrap failed — orchestrator disabled, app continues")
-        _console.print(
-            "[yellow][WARN][/yellow] Orchestrator bootstrap failed — disabled "
-            "(既存 trading cycle は継続)"
-        )
-        orchestrator = None
+    orchestrator = run_startup_sequence(
+        build=_build_orchestrator,
+        validate=_validate_orchestrator,
+        initialize=_initial_collection,
+        start_api=_start_api,
+        start_scheduler=_start_scheduler,
+    )
+    _console.print(
+        f"[green][OK][/green]  Orchestrator running — "
+        f"mode={config.orchestrator.mode}"
+    )
 
     _console.print(Rule("[dim cyan]Scheduler running[/dim cyan]", style="dim cyan"))
 

@@ -333,3 +333,35 @@ def startup_checks(config: AppConfig) -> bool:
         box=box.ROUNDED,
     ))
     return ok
+
+
+def ensure_orchestrator_or_exit(runtime, *, enabled: bool, mode: str = "live") -> None:
+    """発注経路の存在を保証する (spec §1.5)。無ければ起動中止。"""
+    if not enabled:
+        _console.print("[red][FATAL] orchestrator.enabled=false — "
+                       "発注経路がありません。起動を中止します[/red]")
+        raise SystemExit(1)
+    if runtime is None:
+        _console.print("[red][FATAL] orchestrator の構築に失敗しました。"
+                       "起動を中止します[/red]")
+        raise SystemExit(1)
+    if mode != "live":
+        _logger.warning(f"[ORCH] mode={mode} — 発注は行われません (検証運転)")
+
+
+def run_startup_sequence(*, build, validate, initialize, start_api, start_scheduler):
+    """build → validate → initialize → start → API → scheduler の順序を固定する
+    seam (spec §1.5 / plan レビュー Medium-5 / High-1)。
+
+    initialize は初回 news/tech 収集。orchestrator の planning/watch loop は
+    start() 直後から動くため、初回収集を start() より前に置き、古い snapshot で
+    判断・発注させない。どの段の失敗 (例外 / SystemExit) でも後段は実行されない。
+    """
+    runtime = build()
+    validate(runtime)
+    initialize()
+    if runtime is not None:
+        runtime.start()
+    start_api()
+    start_scheduler()
+    return runtime

@@ -208,6 +208,24 @@ def build_orchestrator_runtime(
         )
         return None
 
+    # pair 集合の整合 (spec §1.5): orchestrator 対象 pair が tradeable 全体と一致
+    # しない場合、mode=live では対象外 pair の発注経路が存在しない状態になるため
+    # 起動中止する。subset 運用は tradeable 側の設定で表現する (許可フラグは設けない)。
+    tradeable_all = set(tradeable)
+    selected = set(pairs)
+    if selected != tradeable_all:
+        missing = sorted(tradeable_all - selected)
+        if orch_cfg.mode == "live":
+            raise RuntimeError(
+                f"[ORCH] pair set mismatch in live mode: {missing} have no "
+                f"ordering path (spec §1.5). Fix orchestrator.pairs or "
+                f"instruments config."
+            )
+        logger.warning(
+            "[ORCH] pair subset in %s mode: %s not covered (allowed outside live)",
+            orch_cfg.mode, missing,
+        )
+
     # protection_pairs は planning scope (pairs) と分離する (Codex High)。pairs は
     # orchestrator.pairs で subset に絞れる「能動的に plan/trigger する」スコープだが、
     # protect_live では price_monitor の利益保護がペア無関係に OFF になるため
