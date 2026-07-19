@@ -50,6 +50,38 @@ def _is_due(state, now: datetime) -> bool:
     return state.next_retry_at is not None and state.next_retry_at <= now
 
 
+def _dedupe_raw_rows(raw: list) -> list:
+    """order_id ごとに候補を 1 件 (最終出現行) へ絞る。
+
+    trades.json は append-only で order_id 一意性を保証しない (append_trade)。
+    正本は最終出現行 — クラッシュ復旧や再 reconciliation で追記された行の方が
+    正しい決済情報を持つため、先着を採ると古い close price / PnL で振り返る
+    ことになる (レビュー MEDIUM-2)。
+
+    絞り込みを parse より前に置くのが要点 (レビュー MEDIUM)。parse 後に潰すと、
+    後着が壊れているとき候補が先着 1 件だけになり、古い情報で done 確定して
+    後着の補正内容が永久に失われる。raw 段階で 1 件にすれば、後着が壊れて
+    いれば先着へフォールバックせず retry に留まる。1 order_id につき parse
+    試行が 1 回になるため、壊れた重複行による attempt の多重進行も解消する。
+
+    order_id を持たない行は潰しようがないのでそのまま通す (parse 側で弾く)。
+    """
+    chosen: dict[str, int] = {}     # order_id → raw 内の採用インデックス
+    passthrough: list[int] = []
+    for i, d in enumerate(raw):
+        oid = d.get("order_id") if isinstance(d, dict) else None
+        if not oid:
+            passthrough.append(i)
+            continue
+        if oid in chosen:
+            logger.warning(
+                f"[REFLECT] duplicate order_id in trades.json: {oid} "
+                f"— keeping the last occurrence")
+        chosen[oid] = i
+    keep = sorted(set(chosen.values()) | set(passthrough))
+    return [raw[i] for i in keep]
+
+
 def _parse_closed_trades(raw, orch_store, now: datetime,
                          states: dict) -> list[Order]:
     """trades.json の生 dict 群を行単位で Order に変換する。
@@ -63,13 +95,16 @@ def _parse_closed_trades(raw, orch_store, now: datetime,
     parse error の retry 記録も backoff 期限に従う (レビュー MEDIUM-1)。
     無条件に記録すると、毎時実行で 1/2/4/8h の backoff を待たず約 5 時間で
     dead に落ち、本来 15 時間ある修正猶予が失われる。
+
+    重複 order_id は parse 前に最終出現行へ絞る (レビュー MEDIUM、
+    _dedupe_raw_rows)。ここが重複排除の正本で、_select_targets 側では行わない。
     """
     if not isinstance(raw, list):
         logger.warning(f"[REFLECT] trades.json is not a list "
                        f"({type(raw).__name__}) — skipped")
         return []
     orders: list[Order] = []
-    for d in raw:
+    for d in _dedupe_raw_rows(raw):
         if not isinstance(d, dict):
             logger.warning(f"[REFLECT] non-dict trade row skipped: {d!r:.80}")
             continue
@@ -106,6 +141,10 @@ def _select_targets(
 
     states は controller が一括ロードしたものを受け取る (レビュー MEDIUM-1)。
     None なら自前でロードする (テスト・単体利用向け)。
+
+    重複 order_id の排除はここでは行わない — 正本は parse 前の
+    _dedupe_raw_rows (レビュー MEDIUM)。両段で潰すとどちらが正本か不明瞭に
+    なるうえ、parse 後に潰しても壊れた後着行は既に候補から消えている。
     """
     if states is None:
         states = _load_states(orch_store)
@@ -113,26 +152,7 @@ def _select_targets(
     def _ts(o: Order) -> datetime:
         return o.closed_at or o.opened_at
 
-    # trades.json は append-only で order_id 一意性を保証しない (append_trade)。
-    # 重複行をそのまま通すと同一 order に LLM/RAG が 2 回走るため 1 件に潰す
-    # (レビュー MEDIUM-3)。採用するのは「より新しい情報を持つ行」= closed_at が
-    # 新しい方、同時刻なら後着行 (レビュー MEDIUM-2)。クラッシュ復旧や再
-    # reconciliation で追記された行の方が正しい決済情報を持つため、先着を
-    # 優先すると古い close price / PnL で振り返ることになる。
-    chosen: dict[str, Order] = {}
-    for o in closed:
-        prev = chosen.get(o.order_id)
-        if prev is None:
-            chosen[o.order_id] = o
-            continue
-        logger.warning(
-            f"[REFLECT] duplicate order_id in trades.json: {o.order_id} "
-            f"— keeping the newest row")
-        if _ts(o) >= _ts(prev):
-            chosen[o.order_id] = o
-    unique = list(chosen.values())
-
-    eligible = [o for o in unique if _is_due(states.get(o.order_id), now)]
+    eligible = [o for o in closed if _is_due(states.get(o.order_id), now)]
     untried = sorted(
         (o for o in eligible if o.order_id not in states),
         key=_ts, reverse=True,

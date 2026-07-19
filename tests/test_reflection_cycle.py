@@ -5,7 +5,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.cycles.reflection import _select_targets, run_reflection_cycle
+from src.cycles.reflection import (
+    _dedupe_raw_rows,
+    _select_targets,
+    run_reflection_cycle,
+)
 from src.data.orchestrator_store import OrchestratorStore
 from src.trading.position_manager import Order
 from src.utils.clock import db_now
@@ -117,43 +121,43 @@ class TestSelectTargets:
         far_future = NOW + timedelta(days=365)
         assert _select_targets(orders, orch, far_future) == []
 
-    def test_duplicate_order_ids_deduplicated(self, orch):
-        """trades.json に同 order_id が複数あっても 1 回だけ処理する。
 
-        append_trade は append-only で一意性チェックがないため、重複行は
-        LLM/RAG の二重支出に直結する (レビュー MEDIUM-3)。
-        """
-        dup = [_closed_order("d1"), _closed_order("d1"), _closed_order("other")]
-        ids = [t.order_id for t in _select_targets(dup, orch, NOW)]
-        assert ids.count("d1") == 1
-        assert set(ids) == {"d1", "other"}
+class TestDedupeRawRows:
+    """重複 order_id の排除は parse 前 (raw 段階) が正本 (レビュー MEDIUM)。
 
-    def test_duplicate_keeps_latest_row(self, orch):
-        """重複時は後着行 (= より新しい情報) を採用する (レビュー MEDIUM-2)。
+    以前は _select_targets が parse 済み Order を潰していたが、後着行が
+    壊れていると候補が先着 1 件になり古い決済情報で done 確定してしまう。
+    """
 
-        trades.json は append-only なので、クラッシュ復旧や再 reconciliation で
-        後から追記された行の方が正しい決済情報を持つ。
-        """
-        old = _closed_order("d1", closed_at=NOW)
-        old.close_price = 151.0
-        old.realized_pnl = 100.0
-        new = _closed_order("d1", closed_at=NOW + timedelta(hours=1))
-        new.close_price = 148.0
-        new.realized_pnl = -200.0
-        targets = _select_targets([old, new], orch, NOW + timedelta(hours=2))
-        assert len(targets) == 1
-        assert targets[0].close_price == 148.0
-        assert targets[0].realized_pnl == -200.0
+    def test_duplicate_order_ids_deduplicated(self):
+        """同 order_id が複数あっても候補は 1 件 (LLM/RAG の二重支出防止)。"""
+        rows = [{"order_id": "d1", "n": 1}, {"order_id": "d1", "n": 2},
+                {"order_id": "other", "n": 3}]
+        kept = _dedupe_raw_rows(rows)
+        assert [r["order_id"] for r in kept] == ["d1", "other"]
 
-    def test_duplicate_prefers_newer_closed_at_regardless_of_order(self, orch):
-        """closed_at が新しい行を採る (追記順が逆でも)。"""
-        newer = _closed_order("d1", closed_at=NOW + timedelta(hours=5))
-        newer.realized_pnl = 999.0
-        older = _closed_order("d1", closed_at=NOW)
-        older.realized_pnl = 1.0
-        targets = _select_targets([newer, older], orch, NOW + timedelta(days=1))
-        assert len(targets) == 1
-        assert targets[0].realized_pnl == 999.0
+    def test_keeps_last_occurrence(self):
+        """append-only の正本は最終出現行 (レビュー MEDIUM-2)。"""
+        rows = [{"order_id": "d1", "realized_pnl": 100.0},
+                {"order_id": "d1", "realized_pnl": -200.0}]
+        kept = _dedupe_raw_rows(rows)
+        assert len(kept) == 1
+        assert kept[0]["realized_pnl"] == -200.0
+
+    def test_preserves_file_order_of_kept_rows(self):
+        """採用行は trades.json 内の出現順を保つ (選択側の安定ソート前提)。"""
+        rows = [{"order_id": "a"}, {"order_id": "b"},
+                {"order_id": "a", "later": True}, {"order_id": "c"}]
+        kept = _dedupe_raw_rows(rows)
+        # a は最終出現位置 (index 2) で残るため b の後ろに来る
+        assert [r["order_id"] for r in kept] == ["b", "a", "c"]
+        assert kept[1]["later"] is True
+
+    def test_rows_without_order_id_pass_through(self):
+        """order_id 無し行は潰しようがないので通す (parse 側で弾く)。"""
+        rows = [{"pair": "USDJPY=X"}, {"order_id": "a"}, "not-a-dict"]
+        kept = _dedupe_raw_rows(rows)
+        assert len(kept) == 3
 
 
 class _FakeSlot:
@@ -442,6 +446,118 @@ class TestRunReflectionCycle:
         assert orch.get_reflection("done-1").status == "done"
         assert orch.get_reflection("done-1").attempt_count == 0
         assert orch.get_reflection("dead-1").attempt_count == 0
+
+    def test_broken_later_duplicate_does_not_confirm_earlier_row(
+            self, tmp_path, orch, monkeypatch):
+        """後着が壊れているとき、先着の古い決済情報で done にしない (レビュー MEDIUM)。
+
+        append-only の正本は最終出現行。後着 = 補正行が parse できない場合に
+        先着へフォールバックすると、古い PnL で振り返って done 確定し、
+        補正情報が永久に失われる。候補を raw 段階で 1 件へ絞ることで、
+        壊れた後着は retry に留まり先着は採用されない。
+        """
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        good = _closed_order("dup-1").to_dict()          # 先着 = 正常 (PnL +100)
+        broken = {"order_id": "dup-1", "pair": "USDJPY=X",
+                  "realized_pnl": -200.0,
+                  "opened_at": "not-a-datetime"}         # 後着 = 壊れた補正行
+        (state / "trades.json").write_text(
+            json.dumps([good, broken]), encoding="utf-8")
+        seen = []
+
+        async def fake(config, store, orch_store, llm, embed_fn, order,
+                       entry_analysis):
+            seen.append(order.order_id)
+            return ("t", True)
+
+        monkeypatch.setattr("src.cycles.reflection._reflect_and_record", fake)
+        monkeypatch.setattr("src.cycles.reflection.create_llm_client",
+                            lambda config, role: object())
+        monkeypatch.setattr("src.cycles.reflection.make_embed_fn",
+                            lambda config: object())
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        assert seen == []                        # 先着では振り返らない
+        r = orch.get_reflection("dup-1")
+        assert r.status == "retry"               # 後着の parse error が残る
+        assert "parse_error" in r.last_error
+
+    def test_broken_earlier_duplicate_yields_to_valid_later_row(
+            self, tmp_path, orch, monkeypatch):
+        """先着が壊れていても、後着が正常なら後着で処理される。"""
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        broken = {"order_id": "dup-2", "pair": "USDJPY=X",
+                  "opened_at": "not-a-datetime"}
+        good = _closed_order("dup-2").to_dict()
+        (state / "trades.json").write_text(
+            json.dumps([broken, good]), encoding="utf-8")
+        seen = []
+
+        async def fake(config, store, orch_store, llm, embed_fn, order,
+                       entry_analysis):
+            seen.append(order.order_id)
+            return ("t", True)
+
+        monkeypatch.setattr("src.cycles.reflection._reflect_and_record", fake)
+        monkeypatch.setattr("src.cycles.reflection.create_llm_client",
+                            lambda config, role: object())
+        monkeypatch.setattr("src.cycles.reflection.make_embed_fn",
+                            lambda config: object())
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        assert seen == ["dup-2"]                 # 壊れた先着は無視される
+        assert orch.get_reflection("dup-2").status == "done"
+
+    def test_broken_duplicates_advance_attempt_only_once_per_cycle(
+            self, tmp_path, orch, monkeypatch):
+        """壊れた重複行 5 件でも 1 サイクルで attempt は 1 しか進まない。
+
+        parse ループが行ごとに retry を記録すると、1 回の走査で backoff を
+        飛び越して dead に落ちる (5 件で即 dead)。
+        """
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        rows = [{"order_id": "dup-3", "pair": "USDJPY=X",
+                 "opened_at": "not-a-datetime", "seq": i} for i in range(5)]
+        (state / "trades.json").write_text(json.dumps(rows), encoding="utf-8")
+        monkeypatch.setattr("src.cycles.reflection.create_llm_client",
+                            lambda config, role: object())
+        monkeypatch.setattr("src.cycles.reflection.make_embed_fn",
+                            lambda config: object())
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        r = orch.get_reflection("dup-3")
+        assert r.status == "retry"
+        assert r.attempt_count == 1
+
+    def test_valid_duplicates_use_latest_row_end_to_end(
+            self, tmp_path, orch, monkeypatch):
+        """正常な重複行同士では後着が採用される (既存挙動の維持)。"""
+        state = tmp_path / "state"
+        state.mkdir(exist_ok=True)
+        old = _closed_order("dup-4", closed_at=NOW)
+        old.realized_pnl = 100.0
+        new = _closed_order("dup-4", closed_at=NOW + timedelta(hours=1))
+        new.realized_pnl = -200.0
+        (state / "trades.json").write_text(
+            json.dumps([old.to_dict(), new.to_dict()]), encoding="utf-8")
+        got = []
+
+        async def fake(config, store, orch_store, llm, embed_fn, order,
+                       entry_analysis):
+            got.append(order.realized_pnl)
+            return ("t", True)
+
+        monkeypatch.setattr("src.cycles.reflection._reflect_and_record", fake)
+        monkeypatch.setattr("src.cycles.reflection.create_llm_client",
+                            lambda config, role: object())
+        monkeypatch.setattr("src.cycles.reflection.make_embed_fn",
+                            lambda config: object())
+        run_reflection_cycle(_config(tmp_path), store=None, orch_store=orch,
+                             slot=_FakeSlot())
+        assert got == [-200.0]                   # 後着の補正 PnL で振り返る
 
     def test_trades_json_not_a_list_is_noop(self, tmp_path, orch, monkeypatch):
         state = tmp_path / "state"
