@@ -2442,6 +2442,39 @@ test_insights」という記述の訂正も Task 6 Step 0 に含まれる。**
 §5 の実 config 削除キー一覧 + §4 のバックアップ手順を転記)。
 デプロイは本 plan のスコープ外 (ユーザー実施)。
 
+- [ ] **Step 2b: deploy ノートに「追加/必須化キー」の項を新設する** (Task 7 レビュー M-5)
+
+§5 は**削除**キーしか列挙していないが、Task 7 の fail-fast 化で**新規に必須化された
+キー**がある。`config/settings.yaml` は gitignore 対象のホスト個別ファイルであり、
+作業ツリーの実物にも `orchestrator.enabled` は**書かれていない**。
+`OrchestratorConfig.enabled` の schema 既定は `False` (`src/config/schema.py`)。
+→ **このブランチを stick / Fiosracht に rsync して再起動すると、ホスト側
+settings.yaml が同様に `enabled` 未記載なら即 `exit(1)` で起動不能になる。**
+
+deploy ノートに以下を明記すること:
+
+| キー | 必須度 | 未設定/不整合時の挙動 |
+|------|--------|----------------------|
+| `orchestrator.enabled: true` | **必須・明示記載** | 未記載だと schema 既定 `false` → fail-fast で起動中止 (`exit 1`) |
+| `orchestrator.mode` | 必須 | `live` = 実発注。`shadow` / `observe` = 発注なし (起動時 warning のみ) |
+| `orchestrator.pairs` | 任意 (書くなら厳密) | 省略時は tradeable 全体。書く場合 **tradeable 全体と一致必須** — 真部分集合なら live で起動中止。**非 tradeable symbol (instruments 側 `mode: watch` 等) の混入も live で起動中止** (Task 7 レビュー H-2) |
+
+「pairs で subset 運用したい」場合は orchestrator 側ではなく **instruments 側の
+`mode` で表現する** (許可フラグは設けない方針)。
+
+- [ ] **Step 2c: 後続 TODO を記録する** (Task 7 レビュー M-4 / L-5)
+
+本 plan スコープ外として見送った項目。別途着手する:
+
+1. **`main.py` の起動コールバック結線を検証するテストを追加する** (M-4) —
+   現状 `tests/test_main_failfast.py` は `run_startup_sequence` に全コールバックを
+   spy で渡すため、**順序の契約は守られているが `main.py` の実結線
+   (`_build_orchestrator` / `_validate_orchestrator` / `_initial_collection` /
+   `_start_api` / `_start_scheduler` が正しい引数で渡されているか) が無検証**。
+   `main.py` のリファクタを伴うため Task 7 では見送った。
+2. **README / DETAIL のドキュメント更新** (L-5) — 起動順序と
+   orchestrator 必須化の記述を反映する。
+
 - [ ] **Step 3: ノートはローカル保存のみ**
 
 deploy note は commit しない (docs/ は gitignore 運用 — plan レビュー Low-4)。

@@ -540,9 +540,10 @@ def main() -> None:
         if not config.api.enabled:
             return
         from src.api.server import start_api_server
-        # gate spec F-5: API から plan gate を操作する store。orchestrator 有効時のみ
-        # 生成 (無効時に不要な DB を作らない — 実装後レビュー Low-Med)。engine は
-        # _get_engine が db_path 単位で共有するため runtime 側と実体は同一。
+        # gate spec F-5: API から plan gate を操作する store。engine は _get_engine が
+        # db_path 単位で共有するため runtime 側と実体は同一。
+        # 注: _api_orchestrator_store の disabled 分岐は spec §1.5 の fail-fast 化
+        # (orchestrator 無効なら起動中止) 以降は到達しない。無害なので防御的に残す。
         start_api_server(config, store, analysis_store, _llm_slot,
                          price_store, hold_store,
                          _api_orchestrator_store(config))
