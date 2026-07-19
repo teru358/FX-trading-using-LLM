@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
@@ -30,6 +31,19 @@ logger = logging.getLogger(__name__)
 
 _NEW_QUOTA = 2      # 未試行 (新しい順) の優先枠 (spec §3.2b)
 _TOTAL_QUOTA = 10   # 1 回の実行枠
+
+# 1 回あたりの実行時間上限 (外部レビュー High)。件数上限 (_TOTAL_QUOTA) だけだと
+# ローカル LLM が遅いとき 10 件連続で LLM slot を占め、後続の news / econ ジョブが
+# skip される (PriorityJobSlot は競合時に待機せず即スキップする)。
+#
+# 10 分の根拠: reflection は毎時実行なので 1 周期 (60 分) の 1/6 に抑える。残り 50 分を
+# news (既定 15 分間隔 = 3〜4 回) と econ (10 分間隔) に空ける。1 件あたり数十秒〜2 分の
+# 想定なので 10 分あれば通常 5 件以上は捌け、滞留分も数周期で解消する。
+#
+# config 化しない理由: spec §3.6 が「新規 config キーは追加しない (interval は固定毎時)」
+# と決めており、この上限は同じスケジュール前提から導かれる内部定数のため。運用で調整が
+# 要ると分かった時点で config へ引き上げる。
+_TIME_BUDGET_SECONDS = 600.0
 
 
 def _load_states(orch_store) -> dict:
@@ -323,7 +337,18 @@ def run_reflection_cycle(config, store, orch_store, *, slot) -> None:
         return
     llm = None
     embed_fn = None
-    for order in targets:
+    # 時間上限は「次の 1 件に着手する前」にだけ見る (外部レビュー High)。処理途中で
+    # 打ち切らないので状態機械は壊れない: 着手済みの件は _process_one 内で done か
+    # retry まで必ず到達し、未着手の件には行が作られない (= 次回 未試行として再選択、
+    # attempt_count も進まない)。slot busy / waiting_user_job による既存の中断と
+    # 同じ意味論。
+    deadline = time.monotonic() + _TIME_BUDGET_SECONDS
+    for i, order in enumerate(targets):
+        if i > 0 and time.monotonic() >= deadline:
+            logger.info(
+                f"[REFLECT] time budget {_TIME_BUDGET_SECONDS:.0f}s exhausted "
+                f"after {i}/{len(targets)} — carrying the rest over")
+            break
         if slot.waiting_user_job:
             logger.info("[REFLECT] user job waiting — yielding")
             break

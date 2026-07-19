@@ -71,18 +71,50 @@ def _run_with_guard(guard: JobGuard, fn, *args, **kwargs) -> None:
 
 # reflection は spec §3.6 で「毎時」と決まっている独立要件。technical の cadence
 # (technical_watch_interval_hours 等) とは無関係なので、時刻列を借用せず自前で持つ。
-_REFLECTION_TIMES = [f"{h:02d}:00" for h in range(24)]
+#
+# 分は news と衝突しない値を選ぶ (外部レビュー High)。PriorityJobSlot は競合時に
+# 待機・再投入せず即スキップするため (priority_job_slot.py:70)、news と同じ分に
+# 置くと reflection か news のどちらかが必ず欠落する。news の分は
+# `range(offset_minutes, 60, interval_minutes)` で設定により動くので、実 news 時刻
+# から動的に避ける。
+#
+# 候補順の根拠:
+#   - :00 は exit_check / technical / price_monitor が集中するので優先度を最下位に
+#     近い位置へ落とす (LLM slot ではないが CPU/IO で競合する)。
+#   - 既定 (offset=0, interval=15) では :07 が選ばれる。:05/:10 等の「切りのいい分」は
+#     interval=5/10 設定で news に取られやすいので、素数寄りの分を先に並べる。
+_REFLECTION_MINUTE_CANDIDATES = (7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59,
+                                 *range(1, 60), 0)
 
 
-def _register_reflection_jobs(tz_name: str, fn, *args) -> None:
+def _pick_reflection_minute(news_times: "list[str] | None") -> int:
+    """news と衝突しない分を候補列から選ぶ (外部レビュー High)。
+
+    news_times は main() が組む実時刻列 ("HH:MM")。全候補が塞がっている病的設定
+    (interval_minutes=1 等) では衝突を受け入れて先頭候補に倒す — 登録を消すと
+    決済振り返りが永久に走らなくなるため、欠落より衝突の方が害が小さい。
+    """
+    taken = {int(t.split(":")[1]) for t in (news_times or [])}
+    for m in _REFLECTION_MINUTE_CANDIDATES:
+        if m not in taken:
+            return m
+    return _REFLECTION_MINUTE_CANDIDATES[0]
+
+
+def _register_reflection_jobs(tz_name: str, fn, *args,
+                              news_times: "list[str] | None" = None) -> None:
     """決済振り返りジョブを毎時スロットへ登録する (spec §3.6)。
 
     main() から切り出したのはテスト可能な seam にするため。休場中も決済は残るので
     reflection guard には skip_predicate を付けない。LLM は guard 配下で slot を
     取るため、``_run_with_slot`` は使わない。
+
+    分は news_times と衝突しない値を選ぶ (外部レビュー High、_pick_reflection_minute)。
     """
-    for t in _REFLECTION_TIMES:
-        schedule.every().day.at(t, tz_name).do(
+    minute = _pick_reflection_minute(news_times)
+    _logger.info(f"[REFLECT] scheduled hourly at :{minute:02d} ({tz_name})")
+    for h in range(24):
+        schedule.every().day.at(f"{h:02d}:{minute:02d}", tz_name).do(
             _run_with_guard, _guards["reflection"], fn, *args, slot=_llm_slot,
         )
 
@@ -319,7 +351,11 @@ def main() -> None:
         "Exit check",
         "every :00  (SL/TP + position review, no LLM)",
     )
-    sched_table.add_row("Reflection", "every :00  (close reflection, 1-per-slot)")
+    sched_table.add_row(
+        "Reflection",
+        f"every :{_pick_reflection_minute(news_times):02d}  "
+        f"(close reflection, 1-per-slot, news と別 offset)",
+    )
     monitor_status = (
         f"every [cyan]{config.price_monitor.interval_minutes}[/cyan] min  :00 aligned  "
         f"(alert≥{config.price_monitor.alert_threshold_pct:.1%}"
@@ -389,6 +425,7 @@ def main() -> None:
     from src.cycles.reflection import run_reflection_cycle
     _register_reflection_jobs(
         news_tz, run_reflection_cycle, config, store, _reflect_store,
+        news_times=news_times,
     )
 
     # 3. ニュース収集（LLMあり・時間がかかる）
