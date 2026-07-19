@@ -26,10 +26,12 @@
   (spec/plan コミットを含む最新ブランチ。main には未マージの前提)。
 - コミットメッセージは conventional commits (日本語可)。attribution なし。
 - 回帰基準: 作業中は per-file green、**最終合格基準は full suite `uv run pytest` で
-  既知失敗のみ** = **`tests/test_analysis_store_write.py` の 2 件** (固定日時
-  `datetime(2026, 7, 11, ...)` + 48h prune 窓の時限崩壊。本ブランチと無関係 — 実測)。
+  0 failed**。着手時点で失敗していた `tests/test_analysis_store_write.py` の 2 件
+  (固定日時 `datetime(2026, 7, 11, ...)` + 48h prune 窓の時限崩壊。本ブランチと無関係 —
+  実測) は **Task 6 Step 0 で `db_now()` 相対 seed に修正して green にする**ため、
+  据え置く既知失敗は無い。
   ⚠️ CLAUDE.md には「既知 2 件 = `test_insights.py`」とあるが**実測では
-  `test_insights.py` は 3 passed**。CLAUDE.md の記述が古い。詳細と扱いの判断は Task 10。
+  `test_insights.py` は 3 passed**。この CLAUDE.md 記述の訂正も Task 6 Step 0 に含む。
 - 実行順序は Task 番号順 (0→1→…→11)。fail-fast (Task 7) が削除 (Task 8) より
   先なのは意図的 (中間コミットの起動安全性)。
 
@@ -1496,6 +1498,33 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 
 ### Task 6: forecast 系 完全削除
 
+- [ ] **Step 0: baseline 確定 (削除に着手する前に必ず実施)**
+
+削除作業を始めると、本ブランチ由来の新規失敗と、それ以前から存在する失敗の区別が
+つかなくなる。**Task 6 の他ステップより先に**以下を済ませ、baseline を green に揃える。
+(第3巡指摘: 旧 plan はこの手順を Task 10 に置きつつ「Task 6 以降に着手する前に」と
+書いており、実行者が Task 6〜9 を終えるまで到達できず要件を守れなかった。)
+
+1. **`tests/test_analysis_store_write.py` の固定日時 seed を `db_now()` 相対に直す** —
+   `:13` 付近の `datetime(2026, 7, 11, ...)` が `AnalysisStore` の 48 時間 prune 窓を
+   外れたことによる**時限崩壊**で、本ブランチとは無関係に 2 件失敗している
+   (`test_add_snapshot_persists_json_columns` / `test_add_snapshot_single_tf_nulls_mtf`)。
+   memory `finance_test_db_now_relative_seed` の方針どおり `db_now()` 相対 seed に
+   変更して green にする。再発防止も兼ねるため、**これは修正する** (「baseline として
+   据え置く」選択肢は採らない — 原因も修正方法も確定しているため)。
+
+2. **`CLAUDE.md` の記述を訂正する** — 「既知 2 件失敗 = `tests/test_insights.py`
+   ChromaDB 系」という記述は誤り。**実測で `test_insights.py` は 3 passed** で失敗しない。
+   1. の修正で `test_analysis_store_write.py` も green になるため、
+   「既知失敗あり」という記述自体を削る。
+
+3. **full suite を流して baseline を確定する**:
+   ```bash
+   wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest -q 2>&1 | tail -10"
+   ```
+   **ここで得た full green を Task 6 着手時点の baseline とする。** 以降のタスクで
+   出た失敗はすべて本ブランチ由来として扱う。
+
 **Files (削除):**
 - Delete: `src/cycles/forecast.py`、`src/analysis/forecaster.py`、`src/signals/accuracy_tracker.py`
 - **Modify: `src/cycles/__init__.py` — 【最重要】このタスクで必ず一緒に直す**
@@ -1848,15 +1877,52 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
    を `_CATEGORY` に加え、health レスポンスの返り値 dict にも `reflection` が
    出るようにする。これをしないと新ジョブが健全性監視から完全に見えなくなる
    (main.py の Schedule 表示行だけでは監視にならない)。
-6. **`_CATEGORY` の内容を固定するテストを新設する (必須。再レビュー Low-6)** —
+6. **`/schedule` レスポンスのカテゴリを固定するテストを新設する
+   (必須。再レビュー Low-6、第3巡で検証方法を変更)** —
    旧 plan の「health テストがあれば追記する」は誤り。**実測で `/schedule` の
    カテゴリを検証するテストは現在存在しない**ため、「あれば」では実質何も担保されない。
-   → **新規テストを必ず書く**。検証内容:
-   - `_CATEGORY` から `trading` / `forecast` が**消えている**こと
-   - `_CATEGORY` に `reflection` (`"run_reflection_cycle": "reflection"`) が
-     **入っている**こと
-   - `/schedule` (health) レスポンスのカテゴリ集合に `reflection` が現れ、
-     `trading` / `forecast` が現れないこと
+   → **新規テストを必ず書く**。
+
+   **検証は公開レスポンスに対して行う** — `_CATEGORY` は `schedule_info()`
+   (`src/api/routes/health.py:271`) の**ローカル変数**であり、モジュール属性として
+   外から参照できない。ソース検査でこの内部辞書を覗く形は脆いので採らない。
+   代わりに **fake の schedule job を登録した上で `/schedule` エンドポイントの
+   レスポンスを検証する**。
+
+   **検証内容:**
+   - レスポンスのカテゴリ集合に `reflection` が現れること
+   - `trading` / `forecast` が現れないこと
+
+   **テストの書き方 (現行 API に合わせた形。`tests/test_api_endpoints.py` に追記):**
+   - 同ファイル既存の `_api_key` / `_state_setup` fixture と `_client_get` ヘルパを
+     そのまま使う (`/schedule` も `verify_api_key` 依存なので `X-API-Key` が必要)。
+   - `schedule_info()` は `import schedule as sched_mod` した上で
+     `sched_mod.get_jobs()` を読むので、テスト側で実際に `schedule` へジョブを登録する。
+     ジョブ名の解決は `_resolve_job_name()` が `functools.partial` の `args` から
+     `__name__` を持つ callable を拾う実装なので、**main.py と同じ partial 形**で
+     登録すれば本番と同じ経路を通る。イメージ:
+     ```python
+     import schedule as sched_mod
+
+     def _run_reflection_cycle():  # 名前が _CATEGORY のキーと一致することが要点
+         ...
+
+     # fixture 内: 既存ジョブと干渉しないよう前後で clear する
+     sched_mod.clear()
+     sched_mod.every().day.at("00:00").do(
+         functools.partial(_run_with_guard_stub, run_reflection_cycle)
+     )
+     ```
+     実際の関数名は `_CATEGORY` のキー (`run_reflection_cycle`) と一致させること。
+   - 検証:
+     ```python
+     data = _client_get("/schedule").json()
+     assert "reflection" in data
+     assert "trading" not in data
+     assert "forecast" not in data
+     ```
+   - テスト終了時に `sched_mod.clear()` して他テストへ漏らさないこと
+     (`schedule` はモジュールグローバルな job レジストリを持つため必須)。
 
 **Files (削除):**
 - Delete: `src/cycles/trading.py`、`src/data/session_store.py`、
@@ -1995,26 +2061,64 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
       **確実に不整合**になるので必ず追従修正)
     - `tests/test_close_paths.py` (`:69`)
     - `tests/test_api_endpoints.py` (`:41`)
-  - **`tests/test_execution_result.py` (部分削除。再レビュー Medium-3 で追加)** —
+  - **`tests/test_execution_result.py` (部分削除。再レビュー Medium-3 で追加、
+    第3巡で削除範囲を確定)** —
     `:11 from src.notifications.notifier import NotifierAdapter, SignalSkippedEvent` が
     module-top import のため、`SignalSkippedEvent` 削除で **collection error** になる。
     ただし**ファイル全削除は誤り**: 前半の `ExecutionResult` factory テストは
     orchestrator でも有効なので残す。
-    → **通知テスト部分だけ削除する**: `:25` の `_notify` ヘルパと、`SignalSkippedEvent` を
-    使う 4 テスト (`:59` / `:72` / `:84` / `:95` 付近) を削除し、import 行から
-    `SignalSkippedEvent` (および不要になれば `NotifierAdapter`) を外す。
-    **`ExecutionResult` 型テストは温存する。**
 
-- **`scripts/` の追従 (再レビュー Medium-2)**:
-  - [ ] **`scripts/migrate_directional_rag.py` の扱いを決める** — `:24` で
+    行番号ではなく**構造で指定する** (第3巡指摘: 旧記述の「4 テスト」は実測 5 件で誤り)。
+
+    **削除するもの:**
+    - `:9 import asyncio`
+    - `:11` の `from src.notifications.notifier import NotifierAdapter, SignalSkippedEvent`
+      行**全体**
+    - `:15-22 _CapturingNotifier` クラス
+    - `:25-28 _notify` ヘルパ
+    - `:55` の `# ── 通知: outcome 別の文面 ──` 区切り以降の**全テスト 5 件**:
+      `test_rejected_outcome_is_not_labeled_existing_position` /
+      `test_failed_outcome_is_not_labeled_existing_position` /
+      `test_skipped_outcome_shows_actual_reason` /
+      `test_halted_outcome_mentions_halt` /
+      `test_hold_action_still_renders_hold_message`
+      (旧 plan は最後の `test_hold_action_still_renders_hold_message` を挙げ忘れていたが、
+      これも `_notify(SignalSkippedEvent(...))` を呼ぶため削除対象)
+
+    **残すもの:**
+    - `from src.trading.broker_adapter import ExecutionResult`
+    - `# ── ExecutionResult 型 ──` セクションの 3 テストのみ:
+      `test_executed_result_is_executed_and_carries_order` /
+      `test_rejected_result_is_not_executed` /
+      `test_skipped_halted_failed_factories`
+
+    **モジュール docstring も更新する** — 冒頭の「通知文面を outcome 別に出し分けることを
+    検証する」等の通知テストへの言及を削り、`ExecutionResult` の分類のみを検証する
+    ファイルである実態に合わせる。
+
+    **完了条件:**
+    - ファイル内に `SignalSkippedEvent` / `NotifierAdapter` / `asyncio` の文字列が
+      1 つも残らないこと
+    - `uv run pytest tests/test_execution_result.py -q` が **3 passed** になること
+
+- **`scripts/` の追従 (再レビュー Medium-2、第3巡で「削除」に確定)**:
+  - Delete: **`scripts/migrate_directional_rag.py`** — `:24` で
     `from src.data.session_store import SessionStore`、`:46` で
     `SessionStore(config.prices_db_path)` を生成しており、`SessionStore` 削除で壊れる。
     (旧 plan の grep 検証が `src/ main.py config/settings.yaml.example` しか見ておらず
     `scripts/` を含まなかったため未検出だった。)
-    選択肢は以下のいずれか。**どちらを選んだかをコミットメッセージに記録し、報告する**:
-    1. **旧 migration ごと削除** — 既に適用済みなら不要なので `scripts/migrate_directional_rag.py`
-       を削除する
-    2. **`SessionStore` 非依存に書き換える** — 旧 migration を将来も再実行し得る場合
+
+    **削除で確定する根拠 (いずれも実測済み。実装時の判断余地は無い):**
+    1. **役割が新経路に引き継がれている** — このスクリプトが `:114` で生成する card ID は
+       `{order_id}_complete` 形式で、新 reflection の
+       `src/rag/directional_writer.py:98` が生成する ID と**同一**。新経路が同じ
+       ID 空間を埋めるため、旧 migration が担っていた移行の役割は終わっている。
+    2. **読み元が消えて再実行不能になる** — このスクリプトが読む `trading_sessions`
+       テーブルは **Task 9 の migration で drop される**。存置しても実行できない。
+
+    ※ legacy collection 移行を再実行する運用要件が今後残ると判明した場合に限り、
+    その部分だけを `SessionStore` 非依存の独立スクリプトへ分離する
+    (デフォルトはあくまで削除)。
 
 - [ ] **Step 1: 上記リストを順に削除・修正する**
 
@@ -2241,30 +2345,18 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest -q 2>&1 | tail -10"
 ```
 
-Expected: **失敗は既知のみ** = **`tests/test_analysis_store_write.py` の 2 件**
-(`test_add_snapshot_persists_json_columns` / `test_add_snapshot_single_tf_nulls_mtf`)。
-それ以外の失敗はすべて解消してから次へ。
+Expected: **0 failed**。Task 6 Step 0 で `tests/test_analysis_store_write.py` の
+date-flake を解消済みのため、据え置く既知失敗は無い。1 件でも失敗が残っていれば
+本ブランチ由来として解消してから次へ。
 
-**再レビュー Low-5 で合格基準を訂正** — 旧 plan は「既知失敗 = `tests/test_insights.py`
-ChromaDB 系 2 件」としていたが、**実測では `test_insights.py` は 3 passed** で失敗しない。
-代わりに `tests/test_analysis_store_write.py` の 2 件が失敗する。原因は `:13` の固定日時
-`datetime(2026, 7, 11, ...)` が `AnalysisStore` の 48 時間 prune 窓を外れたことによる
-**時限崩壊で、本ブランチとは無関係**。
-**CLAUDE.md の「既知 2 件 = test_insights」という記述とも食い違っている**ので、
-CLAUDE.md 側も併せて訂正が必要 (本 plan のスコープ外だが要認識)。
-
-- [ ] **Step 1b: 実装着手前に既知失敗 2 件の扱いを決める**
-
-Task 6 以降に着手する**前**に、以下のどちらかを選ぶ。選択結果を記録し報告する:
-
-1. **`db_now()` 相対 seed に直す** — `tests/test_analysis_store_write.py:13` の固定日時を
-   `db_now()` 相対に変更して green にする (memory の
-   `finance_test_db_now_relative_seed` 方針に沿う。再発防止として本命)
-2. **baseline として明記する** — 直さず「本ブランチ着手時点の既知失敗」として
-   記録し、Task 10 の合格基準にそのまま据える
-
-いずれにせよ、**着手前に一度 `uv run pytest -q` を流して baseline を確定**させ、
-本ブランチ由来の新規失敗と時限崩壊由来の失敗を区別できるようにしておくこと。
+**経緯 (再レビュー Low-5 → 第3巡)** — 旧 plan は「既知失敗 = `tests/test_insights.py`
+ChromaDB 系 2 件」を合格基準としていたが、**実測では `test_insights.py` は 3 passed** で
+失敗しない。実際に失敗していたのは `tests/test_analysis_store_write.py` の 2 件で、
+原因は `:13` の固定日時 `datetime(2026, 7, 11, ...)` が `AnalysisStore` の 48 時間
+prune 窓を外れたことによる**時限崩壊 (本ブランチとは無関係)** だった。
+第3巡でこれを「Task 6 Step 0 で修正して full green を baseline にする」方針に確定し、
+baseline 確定手順ごと Task 6 の先頭へ移設した。**CLAUDE.md の「既知 2 件 =
+test_insights」という記述の訂正も Task 6 Step 0 に含まれる。**
 
 - [ ] **Step 2: 実 config 掃除の TODO を deploy ノートに残す**
 
@@ -2334,8 +2426,8 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/discord_bot && git add -A && git c
 
 ## 完了条件
 
-1. finance full suite: 既知失敗 (`tests/test_analysis_store_write.py` 2 件 — Task 10
-   Step 1b で「修正」を選んだ場合は 0 件) のみ
+1. finance full suite: **0 failed** (`tests/test_analysis_store_write.py` の date-flake は
+   Task 6 Step 0 で修正済みのため、据え置く既知失敗は無い)
 2. discord_bot full suite: 全 PASS
 3. grep 検証 (Task 6/8 の grep 検証 Step) ヒット 0 件
 4. spec §1.5 fail-fast がテストで担保されている
