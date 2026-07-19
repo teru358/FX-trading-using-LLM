@@ -1629,6 +1629,14 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && \
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commit -m 'feat!: forecastサイクル完全削除 (cycle/store/accuracy/表示/API/config)'"
 ```
 
+> **実施済み注記 (Task 6 レビュー対応)**: Task 6 レビューで、`forecaster.py` 削除により
+> trading.py の `_review_hold_decisions` (Phase 2.5) が lazy import していた
+> `build_hold_review` が失われ、runtime `ModuleNotFoundError` になることが判明 (CRITICAL)。
+> hold review は退役対象のため、Task 8 を待たず前倒しで解消した。
+> `_review_hold_decisions` は spec §2.2 (Task 8 の削除スコープ) に掲載されているが、
+> 本修正で削除済み (関数本体・呼び出し・`record_hold_review` import・shim re-export・
+> テスト mock 追従)。Task 8 実施時に二重削除しようとして見つからなくても正常。
+
 ---
 
 ### Task 7: fail-fast 起動再構成 + pair 整合チェック
@@ -1953,6 +1961,9 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
   `_get_price`/`_summarize_pair` 温存。`__all__` 整理。
 - Modify: `src/rag/directional_writer.py` — `record_trade_entry` (:35-68)、
   `record_hold_review` (:200-232)、`_normalize_direction` (:20-29) 削除
+  ※ `record_hold_review` の caller (`trading.py` の `_review_hold_decisions`, Phase 2.5)
+  は Task 6 修正で前倒し削除済み (Task 6 末尾の注記参照)。ここで消すのは
+  directional_writer 側の関数本体のみ。
 - Modify: `src/data/analysis_store.py` — `_HoldDecisionRecord`/`HoldDecisionStore`
   (446-527) 削除
 - Modify: `src/notifications/notifier.py` — `OrderOpenedEvent` (:20-32)、

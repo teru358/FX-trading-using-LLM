@@ -102,6 +102,11 @@ directional RAG complete カードだけは生きた consumer が残る
   `forecast_min_combined_score`、`forecast_significance_atr_ratio`、
   `rag_adjustment_forecast_multiplier`
 - `src/analysis/forecaster.py` (forecast サイクルの LLM なし予測生成本体)
+  - **訂正 (Task 6 実施時判明)**: 実際には `build_forecast_review` /
+    `build_forecast_review_summary` / `build_hold_review` の 3 関数が同居しており、
+    `build_hold_review` は取引サイクル Phase 2.5 の hold review (退役対象) の部品だった。
+    ファイル削除により trading.py の lazy import が破損したため、hold review 側は
+    前倒しで削除した (plan Task 6 の注記参照)
 - 表示・導線: weekly_diagnosis の accuracy セクション、
   `ask_context_builder` の forecast_accuracy (プロンプト変数 `prompts/ask_user.j2` 含む)、
   API `/forecast` (`src/api/routes/data.py`)、views/CLI/TUI の forecast ビュー、
