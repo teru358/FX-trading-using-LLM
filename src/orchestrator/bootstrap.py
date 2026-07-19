@@ -213,6 +213,28 @@ def build_orchestrator_runtime(
             )
     else:
         pairs = tradeable
+
+    # 重複 pair (外部レビュー Medium)。下の整合チェックは set 比較なので重複を
+    # 素通りするが、pairs は重複 list のまま runtime に渡り material_landing 等で
+    # 同一 pair が複数回処理される (LLM 計画の重複・plan の不要な supersede・
+    # 余分な watch)。重複は明らかに config のミスなので、非 tradeable symbol の
+    # 扱い (H-2) と同じ方針で live は起動中止・非 live は warning + 続行にする。
+    if len(set(pairs)) != len(pairs):
+        dupes = sorted({s for s in pairs if pairs.count(s) > 1})
+        if orch_cfg.mode == "live":
+            raise RuntimeError(
+                f"[ORCH] orchestrator の対象 pair に重複があります: {dupes} "
+                f"(live mode)。同一 pair が多重に planning/watch され、計画重複や "
+                f"plan の不要な supersede を招きます。orchestrator.pairs / "
+                f"instruments の設定を修正してください。"
+            )
+        logger.warning(
+            "[ORCH] 対象 pair に重複があるため除去しました (%s mode): %s",
+            orch_cfg.mode, dupes,
+        )
+        # 順序は config の初出順を維持する (dedup で並べ替えない)。
+        pairs = list(dict.fromkeys(pairs))
+
     if not pairs:
         logger.warning(
             "[ORCH] no tradeable pairs to orchestrate (configured=%s) — runtime not built",
@@ -245,7 +267,8 @@ def build_orchestrator_runtime(
     # 全ペア」= tradeable 全体でなければならない。さもないと subset 外の tradeable ペア
     # (例: orchestrator.pairs=USDJPY のときの EURUSD) で利益保護が完全に消える。
     # よって producer / 保護 worker は protection_pairs (= tradeable 全体) をカバーする。
-    protection_pairs = tradeable
+    # instruments 側に重複 symbol があっても producer / 保護 worker は 1 回だけ。
+    protection_pairs = list(dict.fromkeys(tradeable))
 
     context_builder = DecisionContextBuilder(
         orch_store, analysis_store, orch_cfg,
