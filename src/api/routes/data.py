@@ -3,7 +3,6 @@
 GET /news      — カテゴリ別の最新ニュースセンチメント
 GET /tech      — 銘柄別の最新収集行 (全 status) + 最新 ok 行 (run tech と同等)
 GET /analyze   — 保存済みスナップショット + ニュースから総合シグナル算出 (LLM 不使用)
-GET /forecast  — 直近 N 時間の予測サイクルレコード
 GET /feeds     — RSS フィード疎通確認
 """
 from __future__ import annotations

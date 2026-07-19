@@ -2,7 +2,6 @@
 
 Phase 1: SL/TP に到達した既存ポジションを決済 (broker)
 Phase 1.5: 決済済みオーダーの振り返り → adaptive params 更新 → RAG 蓄積
-Phase 2.5: 前回 HOLD 判断のレビュー (LLM 不使用)
 Phase 3: 並列ペア分析 (LLM 使用) → シグナル + macro_ctx
 Phase 4a: position_review (Layer1-3) → 早期決済 → 振り返り
 Phase 4b: 新規シグナルの RAG 補正 + 発注 / HOLD 保存
@@ -42,7 +41,6 @@ from src.notifications.notifier import (
 from src.persistence.adaptive_params_store import AdaptiveParamsStore
 from src.persistence.state_store import StateStore
 from src.rag.directional_writer import (
-    record_hold_review,
     record_trade_complete,
     record_trade_entry,
 )
@@ -329,57 +327,6 @@ async def _finalize_closed_orders(
                 )
         except Exception as e:
             logger.warning(f"{log_source} Failed for {closed_order.pair}: {e}")
-
-
-async def _review_hold_decisions(
-    config: AppConfig,
-    hold_store: HoldDecisionStore,
-    store: VectorStore,
-    price_provider: PriceProvider | None = None,
-    price_store=None,
-) -> None:
-    """前回 HOLD した判断を検証して RAG に蓄積する (LLM 不使用)。"""
-    from src.analysis.forecaster import build_hold_review
-    from src.cycles._helpers import _fetch_and_compute_atr
-
-    unreviewed = hold_store.get_unreviewed()
-    if not unreviewed:
-        return
-
-    logger.info(f"[HOLD REVIEW] Reviewing {len(unreviewed)} hold decision(s)")
-    embed_fn = make_embed_fn(config)
-
-    for hold in unreviewed:
-        try:
-            current_price = _get_price(hold.pair, price_provider)
-            hold_atr = _fetch_and_compute_atr(
-                hold.pair, config, price_store,
-                atr_timeframe=config.trading.atr_timeframe,
-            )
-
-            review_text, lesson, worth_storing = build_hold_review(
-                pair=hold.pair,
-                hold=hold,
-                current_price=current_price,
-                review_ts=db_now(),
-                # 旧 config.analysis の予測サイクル用キー削除に伴い既定値 0.30 を直書き
-                # (取引サイクル自体が Task 8 で退役予定)
-                significance_atr_ratio=0.30,
-                atr_value=hold_atr,
-            )
-            logger.info(f"[HOLD REVIEW] {hold.pair}: {review_text}")
-
-            if worth_storing:
-                await record_hold_review(
-                    store, embed_fn, hold, review_text, lesson,
-                    horizon=config.orchestrator.policy.trade_horizon,
-                )
-
-            hold_store.mark_reviewed(hold.id)
-        except Exception as e:
-            logger.warning(f"[HOLD REVIEW] {hold.pair}: error — {e}")
-
-    hold_store.prune_old()
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -1050,10 +997,7 @@ async def trading_cycle(
         adaptive_store, session_store, log_source="[REFLECT/CLOSE]",
     )
 
-    # Phase 2.5: 前回 HOLD 判断のレビュー
-    await _review_hold_decisions(config, hold_store, store, price_provider=price_provider, price_store=price_store)
-
-    # halt 中は新規エントリー分析・発注を skip (既存ポジ管理 Phase 1〜2.5 は継続済)
+    # halt 中は新規エントリー分析・発注を skip (既存ポジ管理 Phase 1〜1.5 は継続済)
     # 二重チェック: ここと execute_signal 入口の両方で is_halted を確認する。
     from src.persistence import halt_state
     if halt_state.is_halted(config.state_dir):

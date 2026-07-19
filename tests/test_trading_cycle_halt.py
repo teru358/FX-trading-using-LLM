@@ -20,7 +20,7 @@ def _runtime_mock(c):
 @pytest.mark.asyncio
 async def test_trading_cycle_skips_phase_analyze_when_halted(tmp_path, monkeypatch):
     """halt 中は Phase 3 (_phase_analyze_pairs) 以降が呼ばれない。
-    Phase 1〜2.5 (close/reflection/hold review) は継続する。
+    Phase 1〜1.5 (close/reflection) は継続する。
     """
     from src.persistence import halt_state
     halt_state.trigger_manual(tmp_path, reason="test")
@@ -29,7 +29,7 @@ async def test_trading_cycle_skips_phase_analyze_when_halted(tmp_path, monkeypat
     config.state_dir = tmp_path
     config.mode = "paper"
 
-    # Phase 1, 1.5, 2.5 はモックで no-op に
+    # Phase 1, 1.5 はモックで no-op に
     monkeypatch.setattr(
         "src.cycles.trading._phase_close_sl_tp",
         AsyncMock(return_value=[]),
@@ -37,11 +37,6 @@ async def test_trading_cycle_skips_phase_analyze_when_halted(tmp_path, monkeypat
     monkeypatch.setattr(
         "src.cycles.trading._finalize_closed_orders",
         AsyncMock(return_value=None),
-    )
-    review_hold_mock = AsyncMock(return_value=None)
-    monkeypatch.setattr(
-        "src.cycles.trading._review_hold_decisions",
-        review_hold_mock,
     )
     # Phase 3 系: 呼ばれてはいけない
     analyze_mock = AsyncMock(return_value=([], {}, []))
@@ -71,8 +66,6 @@ async def test_trading_cycle_skips_phase_analyze_when_halted(tmp_path, monkeypat
         price_provider=MagicMock(), session_store=MagicMock(),
     )
 
-    # Phase 2.5 (review_hold) は走った
-    review_hold_mock.assert_awaited_once()
     # Phase 3 (analyze) と Phase 4b (execute) は halt 中 skip
     analyze_mock.assert_not_called()
     execute_mock.assert_not_called()
@@ -95,10 +88,6 @@ async def test_trading_cycle_runs_phase_analyze_when_not_halted(tmp_path, monkey
     )
     monkeypatch.setattr(
         "src.cycles.trading._finalize_closed_orders",
-        AsyncMock(return_value=None),
-    )
-    monkeypatch.setattr(
-        "src.cycles.trading._review_hold_decisions",
         AsyncMock(return_value=None),
     )
     analyze_mock = AsyncMock(return_value=([], {}, []))
@@ -144,8 +133,6 @@ async def test_halt_runs_timeout_only_review(tmp_path, monkeypatch):
     monkeypatch.setattr("src.cycles.trading._phase_close_sl_tp",
                         AsyncMock(return_value=[]))
     monkeypatch.setattr("src.cycles.trading._finalize_closed_orders",
-                        AsyncMock(return_value=None))
-    monkeypatch.setattr("src.cycles.trading._review_hold_decisions",
                         AsyncMock(return_value=None))
     review_open_mock = AsyncMock(return_value=[])
     monkeypatch.setattr("src.cycles.trading._phase_review_open_positions",
@@ -202,8 +189,6 @@ async def test_halt_timeout_runs_even_when_review_disabled(tmp_path, monkeypatch
     monkeypatch.setattr("src.cycles.trading._phase_close_sl_tp",
                         AsyncMock(return_value=[]))
     monkeypatch.setattr("src.cycles.trading._finalize_closed_orders",
-                        AsyncMock(return_value=None))
-    monkeypatch.setattr("src.cycles.trading._review_hold_decisions",
                         AsyncMock(return_value=None))
     monkeypatch.setattr("src.cycles.trading._build_trading_runtime", _runtime_mock)
     monkeypatch.setattr("src.cycles.trading.is_market_open", lambda *a, **k: True)

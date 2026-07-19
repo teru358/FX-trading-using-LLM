@@ -23,7 +23,6 @@ from src.cycles.trading import (
     _phase_execute_signals,
     _phase_review_open_positions,
     _process_pair,
-    _review_hold_decisions,
     run_trading_cycle,
     trading_cycle,
 )
@@ -55,7 +54,6 @@ __all__ = [
     "_process_pair",
     "_apply_atr_sltp_to_signal",
     "_finalize_closed_orders",
-    "_review_hold_decisions",
     "_phase_close_sl_tp",
     "_phase_analyze_pairs",
     "_phase_review_open_positions",

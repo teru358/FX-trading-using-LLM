@@ -355,7 +355,6 @@ async def test_halt_cycle_sends_halt_summary(tmp_path, monkeypatch):
     )
     monkeypatch.setattr("src.cycles.trading._phase_close_sl_tp", AsyncMock(return_value=[]))
     monkeypatch.setattr("src.cycles.trading._finalize_closed_orders", AsyncMock(return_value=None))
-    monkeypatch.setattr("src.cycles.trading._review_hold_decisions", AsyncMock(return_value=None))
     monkeypatch.setattr(
         "src.cycles.trading._phase_review_open_positions", AsyncMock(return_value=[]))
     monkeypatch.setattr("src.cycles.trading.is_market_open", lambda *a, **k: True)

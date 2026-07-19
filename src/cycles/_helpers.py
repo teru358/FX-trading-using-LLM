@@ -1,8 +1,8 @@
-"""3つのトレーディングサイクル (trading / exit_check / forecast) で共有する純ヘルパー群。
+"""2つのトレーディングサイクル (trading / exit_check) で共有する純ヘルパー群。
 
 これらの関数は副作用が小さく、テストから直接呼ぶことも想定している
 (``tests/test_trading_cycle_helpers.py``)。サイクル本体に閉じた処理は
-それぞれの ``trading.py`` / ``exit_check.py`` / ``forecast.py`` に置く。
+それぞれの ``trading.py`` / ``exit_check.py`` に置く。
 """
 from __future__ import annotations
 
@@ -126,7 +126,7 @@ def _build_macro_context(config: AppConfig, analysis_store: AnalysisStore) -> st
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 共有シグナル要約 (exit_check / forecast / views / api から呼ばれる)
+# 共有シグナル要約 (exit_check / views / api から呼ばれる)
 # ──────────────────────────────────────────────────────────────────────
 
 async def _summarize_pair(

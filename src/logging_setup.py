@@ -55,8 +55,6 @@ _PREFIX_REGISTRY: tuple[tuple[str, str | None, bool], ...] = (
     ("[REFLECT]",      "magenta",       True),
     ("[AGGREGATE]",    "dim cyan",      True),
     ("[MONITOR]",      "bold red",      True),
-    ("[HOLD REVIEW]",  "yellow",        True),
-    ("[FORECAST]",     "cyan",          True),
     ("[EXIT]",         "bold red",      True),
     ("[API]",          None,            True),
     # 取引判定・ポジション運用に関わるが従来 activity に載っていなかった
