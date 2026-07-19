@@ -8,11 +8,13 @@ from pathlib import Path
 import pytest
 
 from scripts.migrate_cycle_retirement import (
+    PreflightError,
     build_parser,
     delete_adaptive_params,
     drop_retired_tables,
     inspect_retired_tables,
     main,
+    preflight,
     render_dry_run,
 )
 
@@ -160,7 +162,7 @@ def test_parser_execute_flag():
     assert build_parser().parse_args(["--execute"]).execute is True
 
 
-# --- 外部レビュー対応: main() 経由の副作用ゼロ ---------------------
+# --- 外部レビュー対応: main() 経由の副作用ゼロ + preflight ---------------------
 #
 # これまでのテストは render_dry_run() だけを叩いており、main() が dry-run 経路で
 # VectorStore を構築して ChromaDB (chroma.sqlite3) を作ってしまう乖離を見逃した。
@@ -235,3 +237,91 @@ def test_main_dry_run_explains_rag_counts_are_deferred(stub_config, tmp_path, ca
 
     assert "--execute" in out
     assert "ChromaDB" in out
+
+
+# --- 修正3: DB 不在で空 DB を作らない --------------------------------------
+
+
+def test_main_execute_aborts_when_db_missing(stub_config, tmp_path):
+    missing = tmp_path / "absent" / "prices.db"
+    stub_config(db=missing)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--execute"])
+
+    assert exc.value.code != 0
+    assert not missing.exists(), "存在しない DB が新規作成された"
+
+
+def test_preflight_rejects_missing_db(tmp_path):
+    with pytest.raises(PreflightError, match="DB"):
+        preflight(
+            db_path=tmp_path / "nope.db",
+            state_dir=tmp_path,
+            rag_db_path=tmp_path / "rag",
+            check_rag=False,
+        )
+    assert not (tmp_path / "nope.db").exists()
+
+
+def test_preflight_rejects_db_without_preserved_tables(tmp_path):
+    """温存テーブルが1つも無い = finance の prices.db ではない可能性。"""
+    db = tmp_path / "other.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE unrelated (id INTEGER)")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(PreflightError):
+        preflight(db_path=db, state_dir=tmp_path,
+                  rag_db_path=tmp_path / "rag", check_rag=False)
+
+
+def test_preflight_accepts_valid_db(tmp_path):
+    db = _make_db(tmp_path)
+    preflight(db_path=db, state_dir=tmp_path,
+              rag_db_path=tmp_path / "rag", check_rag=False)   # 例外なし
+
+
+def test_preflight_rejects_missing_state_dir(tmp_path):
+    db = _make_db(tmp_path)
+    with pytest.raises(PreflightError, match="state_dir"):
+        preflight(db_path=db, state_dir=tmp_path / "absent",
+                  rag_db_path=tmp_path / "rag", check_rag=False)
+
+
+def test_preflight_does_not_open_rag_when_check_rag_false(tmp_path):
+    db = _make_db(tmp_path)
+    rag = tmp_path / "never_created"
+
+    preflight(db_path=db, state_dir=tmp_path, rag_db_path=rag, check_rag=False)
+
+    assert not rag.exists()
+
+
+# --- 修正2: RAG 不通なら破壊的操作へ進まない ---------------------------------
+
+
+def test_main_execute_aborts_before_destructive_ops_when_rag_fails(
+    stub_config, tmp_path, monkeypatch
+):
+    """RAG が開けないとき、SQLite も adaptive ファイルも変更されないこと。"""
+    db = _make_db(tmp_path)
+    params = tmp_path / "adaptive_params.yaml"
+    params.write_text("{}")
+    stub_config(db=db, rag=tmp_path / "rag")
+    before = _snapshot(db)
+
+    import scripts.migrate_cycle_retirement as mod
+
+    def _boom(rag_db_path):
+        raise RuntimeError("chroma unavailable")
+
+    monkeypatch.setattr(mod, "open_vector_store", _boom)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--execute"])
+
+    assert exc.value.code != 0
+    assert _snapshot(db) == before, "RAG 失敗後に SQLite が変更された"
+    assert params.exists(), "RAG 失敗後に adaptive_params.yaml が削除された"
