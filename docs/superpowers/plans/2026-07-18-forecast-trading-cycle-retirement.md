@@ -2224,7 +2224,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
     その部分だけを `SessionStore` 非依存の独立スクリプトへ分離する
     (デフォルトはあくまで削除)。
 
-- [ ] **Step 1: 上記リストを順に削除・修正する**
+- [x] **Step 1: 上記リストを順に削除・修正する**
 
 注意点:
 - `_llm_slot`/`_run_with_slot` 自体は news 収集が使うため温存。`_market_aware`
@@ -2241,7 +2241,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
      最小テストを書く
   2. `views.py` 経由の間接カバレッジで妥協する (理由を明記)
 
-- [ ] **Step 2: 参照残りゼロ確認**
+- [x] **Step 2: 参照残りゼロ確認**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && grep -rn 'run_trading_cycle\|trading_cycle\|HoldDecisionStore\|AdaptiveParamsStore\|SessionStore\|rag_adjustment\|record_trade_entry\|record_hold_review\|performance_audit\|audit_post_hoc\|audit_report\|CycleSummaryEvent\|SignalSkippedEvent\|OrderOpenedEvent\|notify_cycle_summary\|notify_order_opened\|notify_signal_skipped\|run_times\|atr_timeframe\|sl_atr_mult\|tp_atr_mult\|calculate_sl_tp\|SLTPResult\|entry_context_builder\|build_entry_context\|_compute_atr_from_price_data\|_fetch_and_compute_atr\|_build_macro_context\|vol_regime\|compute_vol_regime\|run_trade_soft_timeout_sec' src/ scripts/ main.py config/settings.yaml config/settings.yaml.example client.py README.md DETAIL.md --include='*.py' --include='*.yaml' --include='*.example' --include='*.md' | grep -v Binary; grep -rn '_cmd_run_trade\|run/trade\|run trade\|取引判定' client.py README.md DETAIL.md"
@@ -2261,7 +2261,7 @@ Expected: いずれもヒット 0 件 (`src/trading_cycle.py` 自体も削除済
 2 本目は orchestrator 前提へ書き換えた記述が「取引判定」の語を残す場合のみ
 例外を許容するが、その場合は 1 件ずつ理由を確認すること。
 
-- [ ] **Step 3: 影響 per-file テスト green 確認**
+- [x] **Step 3: 影響 per-file テスト green 確認**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_exit_check_review_gate.py tests/test_signal_combiner.py tests/test_main_wiring.py tests/test_api_endpoints.py tests/test_close_paths.py tests/test_execution_result.py tests/test_notifier_close_labels.py tests/test_config_loader.py tests/test_config_example_sync.py -q 2>&1 | tail -3"
@@ -2274,7 +2274,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 - `tests/test_close_paths.py` / `tests/test_execution_result.py` を追加
   (それぞれ run_times 参照 / `SignalSkippedEvent` 参照の追従対象)
 
-- [ ] **Step 4: 削除後の不変条件確認**
+- [x] **Step 4: 削除後の不変条件確認**
 
 削除で壊れていないことを確認する:
 
@@ -2298,7 +2298,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && \
    `test_trading_fallback_skip.py` / `test_taskf_single_writer_guard.py` /
    `test_integration_directional.py` の取りこぼし検出用)
 
-- [ ] **Step 5: commit**
+- [x] **Step 5: commit**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commit -m 'feat!: 取引サイクル完全削除 + reflection job登録 (旧新経路の重複なし切替)'"
