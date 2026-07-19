@@ -26,9 +26,6 @@
 │  テクニカル分析 (毎時 :00・LLM)                                │
 │  OHLCV → 指標 → ルールベーススコア → スナップショット蓄積       │
 ├─────────────────────────────────────────────────────────────┤
-│  予測サイクル (2 時間間隔・LLM なし)                           │
-│  スナップショット集約 → シグナル合成 → 精度検証 → RAG          │
-├─────────────────────────────────────────────────────────────┤
 │  取引判定 (1 日 N 回・schedule.run_times で指定)               │
 │  bridge gate → SL/TP 確認 → 振り返り → シグナル統合           │
 │  → ATR ベース SL/TP → ポートフォリオガード → broker 発注        │
@@ -113,7 +110,6 @@ config/
 | `run tech` | `run t` | テクニカル分析を即時実行 |
 | `run analyze` | `run a` | 総合シグナル表示 |
 | `run trade` | `run tr` | 取引判定を即時実行 |
-| `run forecast [pair]` | `run f` | 予測データ表示 |
 | `ask <質問>` | | セマンティック検索で回答 |
 | `close <pair>` | | ポジション手動決済 |
 | `halt soft\|hard <reason>` | | 取引停止 (soft = 新規停止 / hard = bridge 全 close) |
@@ -141,7 +137,6 @@ config/
 | `GET` | `/news` | ニュースセンチメント |
 | `GET` | `/tech` | テクニカルスナップショット (latest_collect + latest_ok) |
 | `GET` | `/analyze` | 総合シグナル |
-| `GET` | `/forecast/{pair}` | 予測サイクルデータ |
 | `GET` | `/feeds` | RSS フィード疎通確認 |
 | `POST` | `/close/{pair}` | ポジション手動決済 |
 | `POST` | `/run/trade` | 取引判定ループ即時実行 |

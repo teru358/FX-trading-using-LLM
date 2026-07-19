@@ -1584,7 +1584,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 - [x] **Step 2: 参照残りゼロ確認**
 
 ```bash
-wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && grep -rn 'ForecastStore\|run_forecast_cycle\|forecast_cycle\|accuracy_tracker\|compute_recent_accuracy\|ForecastAccuracyFeedbackConfig\|forecast_accuracy_feedback\|record_forecast_entry\|record_forecast_review\|build_forecast_accuracy\|forecast_review_interval\|forecast_start_hour\|forecast_min_combined\|forecast_significance' src/ scripts/ main.py prompts/ config/settings.yaml.example --include='*' | grep -v Binary"
+wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && grep -rn 'ForecastStore\|run_forecast_cycle\|forecast_cycle\|accuracy_tracker\|compute_recent_accuracy\|ForecastAccuracyFeedbackConfig\|forecast_accuracy_feedback\|record_forecast_entry\|record_forecast_review\|build_forecast_accuracy\|forecast_review_interval\|forecast_start_hour\|forecast_min_combined\|forecast_significance' src/ scripts/ main.py prompts/ config/settings.yaml.example client.py README.md DETAIL.md --include='*' --include='*.md' | grep -v Binary; grep -rni 'forecast' client.py README.md DETAIL.md"
 ```
 
 **`scripts/` を必ず含めること (再レビュー Medium-2 の根本原因)** — 旧 plan の grep は
@@ -1592,7 +1592,16 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && grep -rn 'ForecastStore
 削除対象 import (例: `scripts/migrate_directional_rag.py` の `SessionStore`) を
 検出できなかった。Task 6 / Task 8 の両方で `scripts/` を対象に含める。
 
-Expected: ヒット 0 件。
+**repo 直下の `client.py` と `README.md` / `DETAIL.md` も必ず含めること
+(Task 6 実施後の外部レビューで発覚した盲点)** — 旧 grep はこの 3 ファイルを対象に
+しておらず、`client.py` の `run forecast` コマンド (High) と README/DETAIL の
+forecast 記述 (Medium) の削除漏れを検出できなかった。識別子パターンは doc の
+散文 (`run forecast` 等) にマッチしないため、CLI/doc 表面には 2 本目の素の
+`forecast` grep (case-insensitive) を併用する。
+
+Expected: いずれもヒット 0 件。
+(src/ 側に素の `forecast` grep を使わないのは意図的 — 経済指標カレンダーの
+予想値フィールド (`forecast` 列) 等、別概念の正当なヒットが多数あるため。)
 
 - [x] **Step 3: 影響 per-file テスト green 確認**
 
@@ -1636,6 +1645,14 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commi
 > `_review_hold_decisions` は spec §2.2 (Task 8 の削除スコープ) に掲載されているが、
 > 本修正で削除済み (関数本体・呼び出し・`record_hold_review` import・shim re-export・
 > テスト mock 追従)。Task 8 実施時に二重削除しようとして見つからなくても正常。
+
+> **実施済み注記 (外部レビュー追補)**: Task 6 実施済みだが、外部レビューで
+> Step 2 の grep 射程 (`src/ scripts/ main.py config/`) 外だった repo 直下
+> `client.py` の `run forecast` コマンド (High) と README.md / DETAIL.md の
+> forecast 記述 (Medium) の削除漏れが発覚し、追補修正済み (本コミット)。
+> 再発防止として上記 Step 2 の grep 対象に `client.py README.md DETAIL.md` を追加し、
+> 回帰テスト `tests/test_client_cli.py` (client.py に forecast が存在しないこと・
+> `run forecast` が unknown 扱いに落ちること) を新設した。
 
 ---
 
@@ -1988,6 +2005,31 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 - Modify: `src/tui.py` (:279/:310-321 run trade 導線、および
   **`hold_store` 引数・代入の削除: `:61 hold_store=None` / `:77 self._hold_store = hold_store`**)。
   Task 6 で消す `forecast_store` (`:59`/`:75`) と対になる同型の削除。
+- Modify: **repo 直下 `client.py` (外部レビュー追補で追加 — Task 6 の forecast 漏れと
+  同型の盲点。以下は 2026-07-19 実測):**
+  - `_cmd_run_trade` 関数 (`:553` 付近。`_post("/run/trade")` を呼ぶ) 削除
+  - dispatch の `elif sub in ("trade", "tr"): _cmd_run_trade()` 分岐削除
+  - `_HELP` の `run trade` 行削除
+  - `run` サブコマンドの usage 文字列 2 箇所
+    (`使い方: run news | tech | analyze | trade`) から `trade` を削除
+  - `_HELP` の `schedule` 行の説明 `(取引/ニュース/技術/exit_check)` から `取引` を削除
+  - あわせて `tests/test_client_cli.py` (Task 6 追補で新設) に run trade 不在の
+    回帰テストを追記する
+- Modify: **`README.md` / `DETAIL.md` の取引サイクル記述 (同上・2026-07-19 実測):**
+  - README: アーキテクチャ図の「取引判定 (1 日 N 回・schedule.run_times で指定)」
+    ブロック (`:29-31` 付近)、CLI 表の `run trade` 行 (`:114`)、API 表の
+    `POST /run/trade` 行 (`:145`)、休場動作の「取引判定・価格監視を自動スキップ」
+    (`:193` 付近) は文意を保って書き換え
+  - DETAIL: 目次の「取引判定ループ」(`:10`)、スケジュール表の「取引判定」行
+    (`:51`)、「## 取引判定ループ」章 (`:83-97` 付近)、ポジション管理表の
+    「exit_check :00 / 取引判定」トリガー表記 (`:128-129` 付近)、bridge probe の
+    「取引判定・価格監視サイクルの起動時に…」(`:268` 付近)、curl 例の
+    `POST $HOST/run/trade` (`:386` 付近)、ディレクトリ構成の
+    `cycles/ # 取引/exit_check サイクル` コメント、休場表の
+    「取引判定・価格監視は無音スキップ」(`:537` 付近)
+  - ※ 行番号は追補時点の目印 — 実際は文字列で探すこと。orchestrator が発注主体に
+    なる前提で、単純削除が不適切な箇所 (休場動作・bridge probe・ポジション管理
+    トリガー等) は orchestrator 前提の記述へ置換する。
 - Modify: `src/api/routes/health.py` (:283/:337-340 の trading/forecast カテゴリ削除 +
   上記「reflection job 登録」5. の `reflection` カテゴリ追加)
 - Modify: `main.py` (:36 HoldDecisionStore、:39、:53-54 相当 guard 整理、
@@ -2157,7 +2199,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 - [ ] **Step 2: 参照残りゼロ確認**
 
 ```bash
-wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && grep -rn 'run_trading_cycle\|trading_cycle\|HoldDecisionStore\|AdaptiveParamsStore\|SessionStore\|rag_adjustment\|record_trade_entry\|record_hold_review\|performance_audit\|audit_post_hoc\|audit_report\|CycleSummaryEvent\|SignalSkippedEvent\|OrderOpenedEvent\|notify_cycle_summary\|notify_order_opened\|notify_signal_skipped\|run_times\|atr_timeframe\|sl_atr_mult\|tp_atr_mult\|calculate_sl_tp\|SLTPResult\|entry_context_builder\|build_entry_context\|_compute_atr_from_price_data\|_fetch_and_compute_atr\|_build_macro_context\|vol_regime\|compute_vol_regime\|run_trade_soft_timeout_sec' src/ scripts/ main.py config/settings.yaml config/settings.yaml.example --include='*.py' --include='*.yaml' --include='*.example' | grep -v Binary"
+wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && grep -rn 'run_trading_cycle\|trading_cycle\|HoldDecisionStore\|AdaptiveParamsStore\|SessionStore\|rag_adjustment\|record_trade_entry\|record_hold_review\|performance_audit\|audit_post_hoc\|audit_report\|CycleSummaryEvent\|SignalSkippedEvent\|OrderOpenedEvent\|notify_cycle_summary\|notify_order_opened\|notify_signal_skipped\|run_times\|atr_timeframe\|sl_atr_mult\|tp_atr_mult\|calculate_sl_tp\|SLTPResult\|entry_context_builder\|build_entry_context\|_compute_atr_from_price_data\|_fetch_and_compute_atr\|_build_macro_context\|vol_regime\|compute_vol_regime\|run_trade_soft_timeout_sec' src/ scripts/ main.py config/settings.yaml config/settings.yaml.example client.py README.md DETAIL.md --include='*.py' --include='*.yaml' --include='*.example' --include='*.md' | grep -v Binary; grep -rn '_cmd_run_trade\|run/trade\|run trade\|取引判定' client.py README.md DETAIL.md"
 ```
 
 **`scripts/` を必ず含めること (再レビュー Medium-2 の根本原因)** — 旧 plan の grep は
@@ -2165,7 +2207,14 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && grep -rn 'run_trading_c
 `scripts/migrate_directional_rag.py:24` の `from src.data.session_store import SessionStore`
 を検出できなかった。実 config (`config/settings.yaml`) も対象に含める。
 
-Expected: ヒット 0 件 (`src/trading_cycle.py` 自体も削除済み)。
+**repo 直下の `client.py` と `README.md` / `DETAIL.md` も必ず含めること
+(Task 6 外部レビュー追補と同根の再発防止)** — 識別子パターンは doc の散文
+(`run trade` 等) にマッチしないため、CLI/doc 表面には 2 本目の grep
+(`_cmd_run_trade` / `run/trade` / `run trade` / `取引判定`) を併用する。
+
+Expected: いずれもヒット 0 件 (`src/trading_cycle.py` 自体も削除済み)。
+2 本目は orchestrator 前提へ書き換えた記述が「取引判定」の語を残す場合のみ
+例外を許容するが、その場合は 1 件ずつ理由を確認すること。
 
 - [ ] **Step 3: 影響 per-file テスト green 確認**
 

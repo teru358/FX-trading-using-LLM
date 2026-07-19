@@ -7,7 +7,6 @@
 - [運用モードとブローカー](#運用モードとブローカー)
 - [スケジューラと各サイクル](#スケジューラと各サイクル)
 - [情報収集ループ](#情報収集ループ)
-- [予測サイクル](#予測サイクル)
 - [取引判定ループ](#取引判定ループ)
 - [exit_check サイクル](#exit_check-サイクル)
 - [価格監視ループ](#価格監視ループ)
@@ -49,7 +48,6 @@
 | ニュース収集 | `news_collection.interval_minutes` | あり | RSS/Feedly 取得 + センチメント分析 |
 | RAG クリーンアップ | 1 日 1 回 | なし | 古い記事の削除 |
 | テクニカル分析 | 毎時 :00 | あり | OHLCV + 指標 + LLM スコアリング |
-| 予測サイクル | `analysis.forecast_review_interval_hours` | なし | 予測精度検証 + 新規予測生成 |
 | 取引判定 | `schedule.run_times` で指定 | あり | bridge gate + シグナル統合 + 発注 |
 | 経済指標フェッチ | 1 日 1 回 | なし | calendar 取得 |
 | Performance audit | 週 1 (任意) | あり | 統計診断 + 改善提案 |
@@ -81,18 +79,6 @@
 - 価格データが 6 時間以上古い場合は LLM 分析をスキップ (閉場時の無駄なコスト抑止)
 - ルールベーススコアリング: SMA/RSI/MACD/Ichimoku/BB/Pattern の 6 カテゴリ重み付き合計 × ADX フィルター
 - スナップショット保存時に `collect_status` sentinel を記録 (`ok` / `stale_price` / `failed`)
-
-## 予測サイクル
-
-LLM 不使用。蓄積済テクニカルスナップショットからシグナル合成 → 精度検証 → RAG 蓄積。
-
-1. **Phase 1**: 直近 24h の全予測を毎サイクル更新検証
-   - 有意な変動 (ATR(14) × `forecast_significance_atr_ratio` 以上) があれば集計サマリーを RAG に upsert
-2. **Phase 2**: 新規予測生成
-   - 蓄積済みテクニカルスナップショットからシグナル合成
-   - `|combined_score| < forecast_min_combined_score` → スキップレコードを保存
-
-ノイズ対策: ATR 有意性フィルター / 検証ウィンドウ制御 / スコア閾値 / RAG には事実文字列のみ蓄積。
 
 ## 取引判定ループ
 
@@ -392,7 +378,6 @@ curl -H "X-API-Key: $KEY" $HOST/usage
 curl -H "X-API-Key: $KEY" $HOST/news
 curl -H "X-API-Key: $KEY" $HOST/tech
 curl -H "X-API-Key: $KEY" $HOST/analyze
-curl -H "X-API-Key: $KEY" "$HOST/forecast/USDJPY%3DX"
 curl -H "X-API-Key: $KEY" $HOST/feeds
 
 # 取引系
@@ -486,7 +471,7 @@ finance/
 ├── prompts/                        # LLM プロンプトテンプレート
 ├── src/
 │   ├── config/                     # 設定スキーマ + ローダー
-│   ├── cycles/                     # 取引/予測/exit_check サイクル
+│   ├── cycles/                     # 取引/exit_check サイクル
 │   ├── llm/                        # LLM クライアント + サーキットブレーカー
 │   ├── analysis/                   # ニュース・テクニカル分析・振り返り・audit
 │   ├── signals/                    # シグナル統合・RAG 補正
@@ -526,7 +511,7 @@ finance/
 
 | ファイル | 内容 | 書込み経路 |
 |---|---|---|
-| `data/prices.db` | OHLCV + スナップショット + 予測 + セッション + HOLD 判定 + 経済指標 | 各収集ジョブ |
+| `data/prices.db` | OHLCV + スナップショット + セッション + HOLD 判定 + 経済指標 | 各収集ジョブ |
 | `data/state/positions.json` | オープンポジション | PositionManager (StateStore lock) |
 | `data/state/trades.json` | クローズ済み取引履歴 | PositionManager (lock) |
 | `data/state/balance.json` | 残高 / deposit / peak / source / fetched_at | balance_snapshot.mutate (lock) |
