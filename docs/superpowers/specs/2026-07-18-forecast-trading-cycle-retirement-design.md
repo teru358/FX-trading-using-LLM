@@ -411,8 +411,16 @@ migration スクリプトは冪等 (`DROP TABLE IF EXISTS`、ChromaDB 削除も�
 実行前に **DB・ChromaDB データディレクトリ (directional collections を含む
 `data/` 配下の RAG 永続化先)・state_dir (削除対象の adaptive params YAML (adaptive_params.yaml) を含む)
 をシステム停止中にバックアップ**する手順を明記する
-(rsync 事故の教訓に従い、バックアップ→実行の順を厳守。rollback は
-このバックアップ + `git revert` で行う)。
+(rsync 事故の教訓に従い、バックアップ→実行の順を厳守)。
+**3 点は同一停止時点で取得する。** migration は DB・RAG・state_dir をまとめて
+変更するため、取得時点がずれると復元時に不整合になる。
+
+rollback は「コードを戻し先 SHA に戻す + この 3 点セットを同一バックアップから
+復元する」。サービス停止を最初に行い、3 つのうち 1 つだけ戻さないこと
+(DB だけ戻すと RAG から退役カードが消えたまま、RAG だけ戻すと旧コードが必要と
+する 3 テーブルが無いまま起動する)。旧 config も戻す必要があり、
+`/forecast` と `/run/trade` が復活するため discord_bot も旧版に戻す。
+実行可能な手順は deploy ノート §6 に記載。
 
 ## 5. config 変更
 
@@ -472,11 +480,19 @@ migration スクリプトは冪等 (`DROP TABLE IF EXISTS`、ChromaDB 削除も�
 - 本変更は stick (Live) / Fiosracht (paper) 両方に影響する。
   デプロイ時は §4 の migration + §5 の実 config 掃除をセットで実施。
 - **デプロイ順序** (§2.2b): bot 側の削除は旧 finance API とも互換
-  (導線を消すだけ) なので、404 窓を作らない順序は:
+  (導線を消すだけ) なので先行して良い。404 窓を作らない順序は:
   1. discord_bot 更新 (forecast / run_trade 導線削除)
-  2. finance 停止 → バックアップ (§4) → migration 実行
-  3. finance 更新・起動 (fail-fast 検証が通ることを確認)
-  4. 疎通確認 (orchestrator 稼働・reflection job・bot コマンド)
+  2. finance 停止
+  3. バックアップ (§4) — DB / RAG / state_dir を**同一停止時点で**取得
+  4. **新コード・新 config の配置** (rsync)
+  5. migration dry-run → 内容を確認
+  6. migration `--execute`
+  7. finance 起動 (fail-fast 検証が通ることを確認)
+  8. 疎通確認 (orchestrator 稼働・reflection job・bot コマンド)
+
+  **migration は新コード配置の後**でなければ実行できない。
+  `scripts/migrate_cycle_retirement.py` は本ブランチで新規追加されるファイルであり、
+  旧リリースの作業ツリーには存在しないため。「migration → コード更新」の順は不成立。
 - technical-llm-omit (未マージ、0 ベース migration 必須) とマージ順序・デプロイ順序を
   合わせて計画すること。
 - 停止対象 job が消えることで Schedule 表示・health エンドポイントの job 一覧も変わる。
