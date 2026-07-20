@@ -14,30 +14,49 @@ def _write(p: Path, content: str) -> None:
 
 
 def _minimal_settings(extra: str = "") -> str:
-    """LLM 必須項目のみ埋めた最小 settings.yaml。"""
+    """最小 settings.yaml (llm/embedding は llm.yaml へ分離済み)。"""
     return f"""
 mode: paper
 paper_provider: yfinance
 live_broker: null
-
-llm:
-  provider: ollama
-  provider_config:
-    base_url: "http://localhost:11434"
-  news_analysis: {{model: "n", temperature: 0.3}}
-  price_analysis: {{model: "p", temperature: 0.1}}
-  reflection: {{model: "r", temperature: 0.3}}
-
-rag:
-  embedding_provider: ollama
-  embedding_base_url: "http://localhost:11434"
+timezone: "Asia/Tokyo"
 {extra}
 """
 
 
+# llm/embedding は config/llm.yaml へ移動 (config migration 2026-07-20)。
+# 必須ファイルのため、tmp config を作るテストは常にこれを書き出す。
+_MINIMAL_LLM_YAML = """
+llm:
+  provider: ollama
+  provider_config:
+    base_url: "http://localhost:11434"
+  news_analysis: {model: "n", temperature: 0.3}
+  price_analysis: {model: "p", temperature: 0.1}
+  reflection: {model: "r", temperature: 0.3}
+
+embedding:
+  provider: ollama
+  base_url: "http://localhost:11434"
+"""
+
+_MINIMAL_STRATEGY_YAML = """
+trading:
+  risk_per_trade: 0.02
+"""
+
+
+def _write_min_config(tmp_path: Path, extra: str = "") -> Path:
+    """settings/llm/strategy の 3 ファイルを書き、settings.yaml のパスを返す。"""
+    _write(tmp_path / "settings.yaml", _minimal_settings(extra))
+    _write(tmp_path / "llm.yaml", _MINIMAL_LLM_YAML)
+    _write(tmp_path / "strategy.yaml", _MINIMAL_STRATEGY_YAML)
+    return tmp_path / "settings.yaml"
+
+
 def test_load_config_paper_yfinance_no_provider_files(tmp_path):
     """mode=paper + paper_provider=yfinance なら provider yaml 不要で起動できる。"""
-    _write(tmp_path / "settings.yaml", _minimal_settings())
+    _write_min_config(tmp_path)
     cfg = load_config(tmp_path / "settings.yaml")
     assert cfg.mode == "paper"
     assert cfg.paper_provider == "yfinance"
@@ -48,22 +67,22 @@ def test_load_config_paper_yfinance_no_provider_files(tmp_path):
 
 def test_load_config_paper_twelvedata_requires_provider_yaml(tmp_path):
     """paper_provider=twelvedata で providers/twelvedata.yaml が無いと ConfigError。"""
-    _write(tmp_path / "settings.yaml", _minimal_settings("""
+    _write_min_config(tmp_path, """
 mode: paper
 paper_provider: twelvedata
 live_broker: null
-"""))
+""")
     with pytest.raises(ConfigError, match="providers/twelvedata.yaml not found"):
         load_config(tmp_path / "settings.yaml")
 
 
 def test_load_config_paper_twelvedata_loads_provider_yaml(tmp_path):
     """providers/twelvedata.yaml がロードされ、indices が反映される。"""
-    _write(tmp_path / "settings.yaml", _minimal_settings("""
+    _write_min_config(tmp_path, """
 mode: paper
 paper_provider: twelvedata
 live_broker: null
-"""))
+""")
     _write(tmp_path / "providers" / "twelvedata.yaml", """
 daily_limit: 1000
 per_minute_limit: 10
@@ -82,22 +101,22 @@ indices:
 
 def test_load_config_live_mt5_requires_provider_yaml(tmp_path):
     """mode=live + live_broker=mt5 で providers/mt5.yaml が無いと ConfigError。"""
-    _write(tmp_path / "settings.yaml", _minimal_settings("""
+    _write_min_config(tmp_path, """
 mode: live
 paper_provider: yfinance
 live_broker: mt5
-"""))
+""")
     with pytest.raises(ConfigError, match="providers/mt5.yaml not found"):
         load_config(tmp_path / "settings.yaml")
 
 
 def test_load_config_live_mt5_loads_provider_yaml(tmp_path):
     """providers/mt5.yaml がロードされ、bridge_url が反映される。"""
-    _write(tmp_path / "settings.yaml", _minimal_settings("""
+    _write_min_config(tmp_path, """
 mode: live
 paper_provider: yfinance
 live_broker: mt5
-"""))
+""")
     _write(tmp_path / "providers" / "mt5.yaml", """
 bridge_url: "http://localhost:8812"
 api_key: "secret"
@@ -114,11 +133,11 @@ health_retry_after_sec: 90.0
 
 def test_load_config_mt5_empty_bridge_url_rejected(tmp_path):
     """providers/mt5.yaml の bridge_url が空文字なら ConfigError。"""
-    _write(tmp_path / "settings.yaml", _minimal_settings("""
+    _write_min_config(tmp_path, """
 mode: live
 paper_provider: yfinance
 live_broker: mt5
-"""))
+""")
     _write(tmp_path / "providers" / "mt5.yaml", """
 bridge_url: ""
 api_key: "secret"
@@ -129,11 +148,11 @@ api_key: "secret"
 
 def test_load_config_live_test_mt5_works(tmp_path):
     """mode=live_test + live_broker=mt5 が正常にロードされる。"""
-    _write(tmp_path / "settings.yaml", _minimal_settings("""
+    _write_min_config(tmp_path, """
 mode: live_test
 paper_provider: yfinance
 live_broker: mt5
-"""))
+""")
     _write(tmp_path / "providers" / "mt5.yaml", """
 bridge_url: "http://localhost:8812"
 """)
@@ -144,30 +163,30 @@ bridge_url: "http://localhost:8812"
 
 def test_load_config_live_without_broker_fails(tmp_path):
     """mode=live で live_broker=null は ConfigError。"""
-    _write(tmp_path / "settings.yaml", _minimal_settings("""
+    _write_min_config(tmp_path, """
 mode: live
 paper_provider: yfinance
 live_broker: null
-"""))
+""")
     with pytest.raises(ConfigError, match="mode='live' requires live_broker"):
         load_config(tmp_path / "settings.yaml")
 
 
 def test_load_config_live_test_oanda_rejected(tmp_path):
     """mode=live_test + live_broker=oanda は ConfigError。"""
-    _write(tmp_path / "settings.yaml", _minimal_settings("""
+    _write_min_config(tmp_path, """
 mode: live_test
 paper_provider: yfinance
 live_broker: oanda
-"""))
+""")
     with pytest.raises(ConfigError, match="not supported with live_broker='oanda'"):
         load_config(tmp_path / "settings.yaml")
 
 
 def test_load_config_invalid_mode(tmp_path):
     """未定義の mode 値は ConfigError。"""
-    _write(tmp_path / "settings.yaml", _minimal_settings("""
+    _write_min_config(tmp_path, """
 mode: signal
-"""))
+""")
     with pytest.raises(ConfigError, match="mode='signal' is invalid"):
         load_config(tmp_path / "settings.yaml")

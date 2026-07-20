@@ -27,6 +27,8 @@ from src.config.schema import (
     BASE_DIR,
     ChartPatternConfig,
     EconomicCalendarConfig,
+    EMBEDDING_PROVIDERS,
+    EmbeddingConfig,
     FeedlyConfig,
     IndicatorToggleConfig,
     InstrumentConfig,
@@ -67,11 +69,12 @@ from src.config.schema import (
 )
 
 
-# embedding provider 別の default base_url (rag.embedding_base_url が空欄かつ未バリデート時のヒント表示用)
+# embedding provider 別の default base_url (embedding.base_url が空欄時のヒント表示用)
 _EMBEDDING_BASE_URL_HINTS = {
     "ollama":   "http://localhost:11434",
     "llamacpp": "http://localhost:8080/v1",
 }
+
 
 # LLM provider 別の default base_url (provider_config.base_url が空欄時のヒント表示用)
 _LLM_BASE_URL_HINTS = {
@@ -81,6 +84,7 @@ _LLM_BASE_URL_HINTS = {
 
 
 from src.config.errors import ConfigError
+from src.config.migration import check_migration, check_required_files
 
 
 # ── 汎用ヘルパー ────────────────────────────────────────────────
@@ -99,6 +103,31 @@ def _from_dict(cls, data: dict):
         if f.name in data:
             kwargs[f.name] = data[f.name]
     return cls(**kwargs)
+
+
+def _build_embedding_config(raw: dict) -> EmbeddingConfig:
+    """llm.yaml の embedding: ブロックから EmbeddingConfig を構築する。
+
+    provider の値検証と base_url 必須チェックを行う。未知の provider は
+    embedder.py で「llamacpp 以外 = Ollama」と扱われ、誤ったプロトコルへ
+    黙って接続してしまうため fail-fast にする。
+    """
+    cfg = _from_dict(EmbeddingConfig, raw or {})
+
+    if cfg.provider not in EMBEDDING_PROVIDERS:
+        raise ConfigError(
+            f"embedding.provider must be one of {EMBEDDING_PROVIDERS}, "
+            f"got '{cfg.provider}'. Edit config/llm.yaml."
+        )
+
+    if not cfg.base_url:
+        hint = _EMBEDDING_BASE_URL_HINTS.get(cfg.provider, "")
+        raise ConfigError(
+            f"embedding.base_url is required when provider='{cfg.provider}'. "
+            f"Edit config/llm.yaml and set base_url (e.g. \"{hint}\")."
+        )
+
+    return cfg
 
 
 def _build_orchestrator_config(data: dict) -> OrchestratorConfig:
@@ -135,8 +164,10 @@ def _build_orchestrator_config(data: dict) -> OrchestratorConfig:
 
 
 # 分割設定ファイル。settings.yaml にマージされる top-level ブロックを持つ。
-# agents.yaml は Task 4 で llm.yaml に置き換える (このタスクでは現状維持)。
-SPLIT_CONFIG_FILES = ("instruments.yaml", "news_sources.yaml", "agents.yaml")
+# llm.yaml / strategy.yaml は必須 (migration.REQUIRED_CONFIG_FILES)。
+SPLIT_CONFIG_FILES = (
+    "instruments.yaml", "news_sources.yaml", "llm.yaml", "strategy.yaml",
+)
 
 
 def _load_split_yaml(fpath: Path) -> dict | None:
@@ -240,8 +271,8 @@ def _build_providers_config(
     return ProvidersConfig(twelvedata=td_cfg, mt5=mt5_cfg, oanda=oanda_cfg)
 
 
-def _validate_top_level(raw: dict) -> tuple[str, str, str | None]:
-    """settings.yaml トップレベルから mode/paper_provider/live_broker を検証して返す。"""
+def _validate_top_level(raw: dict) -> tuple[str, str, str | None, str]:
+    """settings.yaml トップレベルから mode/paper_provider/live_broker/timezone を検証して返す。"""
     mode = raw.get("mode", "paper")
     if mode not in _VALID_MODES:
         raise ConfigError(
@@ -275,7 +306,18 @@ def _validate_top_level(raw: dict) -> tuple[str, str, str | None]:
             "Use live_broker='mt5'."
         )
 
-    return mode, paper_provider, live_broker
+    # 移行リリース限定 (§3.5): 既定値への静かな転落を防ぐ。
+    # 移行完了後は既定値ありキーに戻してよい。
+    timezone = raw.get("timezone")
+    if not timezone:
+        raise ConfigError(
+            "settings.yaml: timezone is required at the top level. "
+            "It replaces schedule.timezone / news_collection.timezone / "
+            "economic_calendar.fetch_timezone. "
+            "(config migration 2026-07-20)"
+        )
+
+    return mode, paper_provider, live_broker, timezone
 
 
 _DEPRECATED_TRADING_KEYS = {
@@ -327,7 +369,7 @@ _AGENT_LLM_NAMES = (
 
 
 def _build_agent_llms(raw_agents: dict) -> OrchestratorAgentsLlmConfig:
-    """config/agents.yaml の agents: ブロックを OrchestratorAgentsLlmConfig に組み立てる。
+    """config/llm.yaml の agents: ブロックを OrchestratorAgentsLlmConfig に組み立てる。
 
     起動時に検証する (typo/欠落を silent fallback させない):
       - 未知 agent キー (typo) → ConfigError
@@ -342,7 +384,7 @@ def _build_agent_llms(raw_agents: dict) -> OrchestratorAgentsLlmConfig:
     for key in raw_agents:
         if key not in _AGENT_LLM_NAMES:
             raise ConfigError(
-                f"config/agents.yaml: unknown agent key {key!r} "
+                f"config/llm.yaml: unknown agent key {key!r} "
                 f"(expected one of {_AGENT_LLM_NAMES}). "
                 f"Fix the typo — an unknown key would silently fall back to the "
                 f"default role LLM instead of using the intended per-agent config."
@@ -355,13 +397,13 @@ def _build_agent_llms(raw_agents: dict) -> OrchestratorAgentsLlmConfig:
         entry = raw_agents[name]
         if not isinstance(entry, dict):
             raise ConfigError(
-                f"config/agents.yaml: agents.{name} must be a mapping "
+                f"config/llm.yaml: agents.{name} must be a mapping "
                 f"(provider/model/temperature), got {type(entry).__name__}."
             )
         unknown = set(entry) - allowed_keys
         if unknown:
             raise ConfigError(
-                f"config/agents.yaml: agents.{name} has unknown key(s) {sorted(unknown)} "
+                f"config/llm.yaml: agents.{name} has unknown key(s) {sorted(unknown)} "
                 f"(allowed: {sorted(allowed_keys)}). Fix the typo — an unknown key would "
                 f"be silently dropped, causing an unintended fallback instead of the "
                 f"intended per-agent LLM config."
@@ -371,13 +413,13 @@ def _build_agent_llms(raw_agents: dict) -> OrchestratorAgentsLlmConfig:
             if agent_cfg.provider not in LLM_PROVIDERS:
                 raise ConfigError(
                     f"Unknown provider {agent_cfg.provider!r} for agent {name!r} "
-                    f"in config/agents.yaml. Must be one of {LLM_PROVIDERS}."
+                    f"in config/llm.yaml. Must be one of {LLM_PROVIDERS}."
                 )
             if not agent_cfg.model:
                 raise ConfigError(
                     f"agents.{name}.model is required when a provider is set "
                     f"(provider={agent_cfg.provider!r}). "
-                    f"Set a model name appropriate for the provider in config/agents.yaml."
+                    f"Set a model name appropriate for the provider in config/llm.yaml."
                 )
         kwargs[name] = agent_cfg
     return OrchestratorAgentsLlmConfig(**kwargs)
@@ -419,7 +461,7 @@ def _build_provider_config(provider: str, raw: dict) -> ProviderConfig:
         hint = _LLM_BASE_URL_HINTS.get(provider, "")
         raise ConfigError(
             f"llm.provider_config.base_url is required when provider='{provider}'. "
-            f"Edit config/settings.yaml and set base_url (e.g. \"{hint}\")."
+            f"Edit config/llm.yaml and set base_url (e.g. \"{hint}\")."
         )
 
     if provider == "claude-cli" and not pc.command:
@@ -437,7 +479,7 @@ def _build_role_config(raw: dict, default_temp: float, *, provider: str, role: s
     if not model:
         raise ConfigError(
             f"llm.{role}.model is required (provider='{provider}'). "
-            f"Edit config/settings.yaml and set a model name appropriate for the provider."
+            f"Edit config/llm.yaml and set a model name appropriate for the provider."
         )
     return LLMRoleConfig(model=model, temperature=temperature)
 
@@ -454,7 +496,7 @@ def _build_llm_config(lc: dict) -> LLMConfig:
         raise ConfigError(
             f"Legacy LLM config detected (keys: {legacy_keys}). "
             "The schema was consolidated to a single 'provider' + 'provider_config'. "
-            "See config/settings.yaml.example for the new layout."
+            "See config/llm.yaml.example for the new layout."
         )
     # 旧形式の検出: llm.<role>.provider が指定されている
     for role in ("news_analysis", "price_analysis", "reflection"):
@@ -462,14 +504,14 @@ def _build_llm_config(lc: dict) -> LLMConfig:
             raise ConfigError(
                 f"Legacy per-role 'provider' detected at llm.{role}.provider. "
                 "Use a single top-level 'llm.provider' instead. "
-                "See config/settings.yaml.example for the new layout."
+                "See config/llm.yaml.example for the new layout."
             )
 
     provider = lc.get("provider", "")
     if not provider:
         raise ConfigError(
             "llm.provider is required. "
-            f"Choose one of {LLM_PROVIDERS} in config/settings.yaml."
+            f"Choose one of {LLM_PROVIDERS} in config/llm.yaml."
         )
     if provider not in LLM_PROVIDERS:
         raise ConfigError(
@@ -513,13 +555,32 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     if config_path is None:
         config_path = BASE_DIR / "config" / "settings.yaml"
 
+    config_dir = config_path.parent
+
+    check_required_files(config_dir)
+
     with open(config_path, encoding="utf-8") as f:
         raw = yaml.safe_load(f)
+    if raw is None:
+        raise ConfigError(f"{config_path.name} is empty.")
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"{config_path.name} must contain a YAML mapping at the top level."
+        )
 
-    raw = _merge_split_configs(raw, config_path.parent)
+    # 移行検出はマージ前に行う (§3.6)。マージ後ではブロック全置換により
+    # 旧キーが他ファイルに覆い隠されて消え、検出できない。
+    per_file = {config_path.name: raw}
+    for fname in SPLIT_CONFIG_FILES:
+        data = _load_split_yaml(config_dir / fname)
+        if data:
+            per_file[fname] = data
+    check_migration(per_file)
+
+    raw = _merge_split_configs(raw, config_dir)
 
     # ── トップレベル mode + provider 選択 ──
-    mode, paper_provider, live_broker = _validate_top_level(raw)
+    mode, paper_provider, live_broker, timezone = _validate_top_level(raw)
     providers_cfg = _build_providers_config(
         mode, paper_provider, live_broker, config_path.parent,
     )
@@ -531,6 +592,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     schedule = _from_dict(ScheduleConfig, raw.get("schedule", {}))
     news_collection = _from_dict(NewsCollectionConfig, raw.get("news_collection", {}))
     rag = _from_dict(RagConfig, raw.get("rag", {}))
+    embedding = _build_embedding_config(raw.get("embedding", {}))
     notifier = _from_dict(NotifierConfig, raw.get("notification", {}))
     api_cfg = _from_dict(ApiConfig, raw.get("api", {}))
     price_monitor = _from_dict(PriceMonitorConfig, raw.get("price_monitor", {}))
@@ -635,14 +697,6 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             f"got {trading.news_weight + trading.price_weight}"
         )
 
-    # rag.embedding_base_url: 空欄なら起動阻止 (provider 別 default を提示)
-    if rag.embedding_provider in LLM_PROVIDERS_REQUIRING_BASE_URL and not rag.embedding_base_url:
-        hint = _EMBEDDING_BASE_URL_HINTS.get(rag.embedding_provider, "")
-        raise ConfigError(
-            f"rag.embedding_base_url is required when embedding_provider='{rag.embedding_provider}'. "
-            f"Edit config/settings.yaml and set embedding_base_url (e.g. \"{hint}\")."
-        )
-
     # ── AppConfig 組み立て ────────────────────────────────────────
 
     # agent_llms を先に構築・検証 (provider_configs クロスチェックは llm_cfg が必要)
@@ -653,6 +707,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         mode=mode,
         paper_provider=paper_provider,
         live_broker=live_broker,
+        timezone=timezone,
         providers=providers_cfg,
         trading=trading,
         instruments=instruments,
@@ -661,6 +716,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
         news_collection=news_collection,
         news_sources=news_sources,
         rag=rag,
+        embedding=embedding,
         notifier=notifier,
         price_monitor=price_monitor,
         api=api_cfg,

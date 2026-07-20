@@ -9,6 +9,7 @@ spec: docs/superpowers/specs/2026-07-20-config-file-reorganization-design.md §3
 from __future__ import annotations
 
 import difflib
+from pathlib import Path
 
 from src.config.errors import ConfigError
 
@@ -94,6 +95,46 @@ def _check_unknown_top_level(files: dict[str, dict]) -> list[str]:
                 f"Known keys: {', '.join(sorted(KNOWN_TOP_LEVEL_KEYS))}"
             )
     return errors
+
+
+# 欠損を許容できないファイル。llm.yaml は llm.provider/model が必須のため
+# 既定値では起動せず、strategy.yaml の欠損は trading/orchestrator の
+# 無警告な既定値化 (fail-open) を招く。
+REQUIRED_CONFIG_FILES = ("llm.yaml", "strategy.yaml")
+
+# 移行により廃止されたファイル。残っていてもマージされないため黙殺される。
+OBSOLETE_CONFIG_FILES = ("agents.yaml",)
+
+
+def check_required_files(config_dir: Path) -> None:
+    """必須ファイルの存在と、廃止ファイルの不在を検証する。"""
+    errors = []
+
+    for fname in REQUIRED_CONFIG_FILES:
+        fpath = config_dir / fname
+        if not fpath.exists():
+            errors.append(
+                f"{fname} is required but not found in {config_dir}. "
+                f"Copy {fname}.example and edit it. {_MIGRATION_TAG}"
+            )
+        elif not fpath.read_text(encoding="utf-8").strip():
+            errors.append(
+                f"{fname} is empty. It must define its configuration blocks; "
+                f"an empty file would silently fall back to schema defaults. "
+                f"{_MIGRATION_TAG}"
+            )
+
+    for fname in OBSOLETE_CONFIG_FILES:
+        if (config_dir / fname).exists():
+            errors.append(
+                f"{fname} is obsolete and no longer read. Its contents moved to "
+                f"llm.yaml (agents: block). Merge and delete it. {_MIGRATION_TAG}"
+            )
+
+    if errors:
+        raise ConfigError(
+            "config migration required:\n  - " + "\n  - ".join(errors)
+        )
 
 
 def check_migration(files: dict[str, dict]) -> None:

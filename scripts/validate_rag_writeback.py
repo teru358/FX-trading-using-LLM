@@ -25,7 +25,7 @@ from src.rag.embedder import make_embed_fn
 
 async def main() -> None:
     config = load_config()
-    print(f"Config: embedding_provider={config.rag.embedding_provider!r}")
+    print(f"Config: embedding_provider={config.embedding.provider!r}")
     print(f"        db_path={config.rag_db_path}")
 
     embed_fn = make_embed_fn(config)

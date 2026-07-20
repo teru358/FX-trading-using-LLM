@@ -42,9 +42,9 @@ def _make_fake_config(deep_fetch_enabled: bool = True):
     cfg.news_sources.feedly.streams_for = lambda c: []
     cfg.user_notes_path = None
     cfg.llm.news_analysis.temperature = 0.3
-    cfg.rag.embedding_provider = "ollama"
-    cfg.rag.embedding_base_url = "http://localhost:11434"
-    cfg.rag.embedding_model = "nomic-embed-text"
+    cfg.embedding.provider = "ollama"
+    cfg.embedding.base_url = "http://localhost:11434"
+    cfg.embedding.model = "nomic-embed-text"
     return cfg
 
 

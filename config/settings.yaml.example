@@ -18,6 +18,12 @@ paper_provider: yfinance
 #   null    — paper モードのとき
 live_broker: null
 
+# 全スケジューラ登録と local_now() が使う唯一のタイムゾーン (必須)。
+# 旧 schedule.timezone / news_collection.timezone /
+# economic_calendar.fetch_timezone を統合 (config migration 2026-07-20)。
+# 注意: db_now() は OS ローカル TZ であり、この設定とは独立。
+timezone: "Asia/Tokyo"
+
 logging:
   level: "INFO"
   file: "logs/finance.log"

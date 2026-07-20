@@ -156,7 +156,7 @@ class TradingConfig:
 class NewsCollectionConfig:
     interval_minutes: int = 30
     offset_minutes: int = 0              # 開始オフセット（15 → :15, :45）
-    timezone: str = "Asia/Tokyo"
+    # timezone は AppConfig.timezone に統合 (config migration 2026-07-20)
     inter_pair_delay_seconds: int = 60
     news_freshness_hours: float = 24.0   # この時間以上古い記事は除外
     summary_max_chars: int = 600         # RSS summary の切り捨て文字数
@@ -173,7 +173,7 @@ class EconomicCalendarConfig:
     """経済指標カレンダー設定。"""
     enabled: bool = False
     fetch_time: str = "06:00"
-    fetch_timezone: str = "Asia/Tokyo"
+    # fetch_timezone は AppConfig.timezone に統合 (config migration 2026-07-20)
     lookahead_hours: int = 48
     currencies: list[str] = field(default_factory=lambda: ["USD", "JPY", "EUR", "GBP"])
     min_importance: int = 0
@@ -246,17 +246,26 @@ class NewsSourcesConfig:
     feedly: FeedlyConfig = field(default_factory=FeedlyConfig)
 
 
+# embedding provider の許容値。embedder.py は "llamacpp" 以外を全て Ollama として
+# 扱うため、未知の値は誤ったプロトコルへの接続になる。loader で検証する。
+EMBEDDING_PROVIDERS = ("ollama", "llamacpp")
+
+
+@dataclass
+class EmbeddingConfig:
+    """RAG の embedding プロバイダー設定 (config/llm.yaml の embedding:)。
+
+    LLM 用の provider_config とは独立。LLM が claude-cli でも embedding は
+    ローカルの ollama/llamacpp を使えるようにするため分離している。
+    """
+    provider: str = "ollama"        # "ollama" | "llamacpp"
+    model: str = "nomic-embed-text"
+    base_url: str = ""              # 空欄なら起動時 ConfigError
+
+
 @dataclass
 class RagConfig:
     db_path: str = "data/rag"
-    embedding_model: str = "nomic-embed-text"
-    # embedding プロバイダー: "ollama" | "llamacpp"
-    # "ollama"   — Ollama の /api/embeddings を使用 (従来互換)
-    # "llamacpp" — llama-swap の /v1/embeddings (OpenAI 互換) を使用
-    embedding_provider: str = "ollama"
-    # embedding プロバイダーの接続先。空欄なら起動時 ConfigError。
-    # LLM 用 provider_config.base_url とは独立 (LLM が claude-cli でも embedding は ollama を使えるため)。
-    embedding_base_url: str = ""
     news_lookback_hours: int = 24
     retrieval_top_k: int = 5
     reflection_lookback_count: int = 3
@@ -265,7 +274,7 @@ class RagConfig:
 
 @dataclass
 class ScheduleConfig:
-    timezone: str = "Asia/Tokyo"
+    # timezone は AppConfig.timezone に統合 (config migration 2026-07-20)
     # technical 収集の間隔 (時間)。既定は現状維持 = 毎時 (1h)。
     # trade は cadence resolver で boost される土台、watch は低頻度固定用。
     technical_trade_interval_hours: int = 1
@@ -791,6 +800,12 @@ class AppConfig:
     paper_provider: str = "yfinance"              # "yfinance" | "twelvedata"
     live_broker: str | None = None                # "mt5" | "oanda" | None
 
+    # 全スケジューラ登録と local_now() が使う唯一のタイムゾーン。
+    # 旧 schedule.timezone / news_collection.timezone /
+    # economic_calendar.fetch_timezone を統合 (2026-07-20)。
+    # 注意: db_now() は OS ローカル TZ であり、この設定とは独立。
+    timezone: str = "Asia/Tokyo"
+
     # ── 既存フィールド (順序維持) ──
     trading: TradingConfig = field(default_factory=TradingConfig)
     instruments: list[InstrumentConfig] = field(default_factory=list)
@@ -799,6 +814,7 @@ class AppConfig:
     news_collection: NewsCollectionConfig = field(default_factory=NewsCollectionConfig)
     news_sources: NewsSourcesConfig = field(default_factory=NewsSourcesConfig)
     rag: RagConfig = field(default_factory=RagConfig)
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
     notifier: NotifierConfig = field(default_factory=NotifierConfig)
     price_monitor: PriceMonitorConfig = field(default_factory=PriceMonitorConfig)
     api: ApiConfig = field(default_factory=ApiConfig)

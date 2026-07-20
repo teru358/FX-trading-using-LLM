@@ -53,7 +53,7 @@ def _collect_llm_role_entries(config: AppConfig) -> list[tuple[str, str, str]]:
     """表示用に (role_label, provider, model_name) のリストを組み立てる。
 
     新スキーマでは provider は config.llm.provider で 1 つだけ。
-    embedding は config.rag.embedding_provider で別管理。
+    embedding は config.embedding.provider で別管理。
     """
     entries: list[tuple[str, str, str]] = []
     provider = config.llm.provider
@@ -61,8 +61,8 @@ def _collect_llm_role_entries(config: AppConfig) -> list[tuple[str, str, str]]:
         rc = getattr(config.llm, role)
         entries.append((_ROLE_LABEL[role], provider, rc.model or "(unset)"))
 
-    emb_provider = getattr(config.rag, "embedding_provider", "ollama")
-    entries.append((_ROLE_LABEL["embedding"], emb_provider, config.rag.embedding_model))
+    emb_provider = getattr(config.embedding, "provider", "ollama")
+    entries.append((_ROLE_LABEL["embedding"], emb_provider, config.embedding.model))
     return entries
 
 
@@ -74,8 +74,8 @@ def _ollama_required_models(config: AppConfig) -> set[str]:
             rc = getattr(config.llm, role)
             if rc.model:
                 models.add(rc.model)
-    if getattr(config.rag, "embedding_provider", "ollama") == "ollama":
-        models.add(config.rag.embedding_model)
+    if getattr(config.embedding, "provider", "ollama") == "ollama":
+        models.add(config.embedding.model)
     return models
 
 
@@ -87,8 +87,8 @@ def _llamacpp_required_models(config: AppConfig) -> set[str]:
             rc = getattr(config.llm, role)
             if rc.model:
                 models.add(rc.model)
-    if getattr(config.rag, "embedding_provider", "ollama") == "llamacpp":
-        models.add(config.rag.embedding_model)
+    if getattr(config.embedding, "provider", "ollama") == "llamacpp":
+        models.add(config.embedding.model)
     return models
 
 
@@ -96,14 +96,14 @@ def _fetch_ollama_models(config: AppConfig) -> set[str] | None:
     """Ollama の /api/tags から登録モデル一覧を取得。疎通失敗時は None。
 
     base_url は LLM provider が ollama のときは provider_config から、
-    それ以外で embedding が ollama のときは rag.embedding_base_url から取得。
+    それ以外で embedding が ollama のときは embedding.base_url から取得。
     """
     import httpx
 
     if config.llm.provider == "ollama":
         base_url = config.llm.provider_config.base_url
     else:
-        base_url = getattr(config.rag, "embedding_base_url", "")
+        base_url = getattr(config.embedding, "base_url", "")
     if not base_url:
         return None
     try:
@@ -121,7 +121,7 @@ def _fetch_llamacpp_models(config: AppConfig) -> set[str] | None:
     if config.llm.provider == "llamacpp":
         base_url = config.llm.provider_config.base_url
     else:
-        base_url = getattr(config.rag, "embedding_base_url", "")
+        base_url = getattr(config.embedding, "base_url", "")
     if not base_url:
         return None
     base_url = base_url.rstrip("/")

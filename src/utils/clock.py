@@ -33,11 +33,12 @@ def utc_now() -> datetime:
 
 
 def local_now(config: "AppConfig") -> datetime:
-    """tz-aware ローカル (``config.schedule.timezone``) 現在時刻。
+    """tz-aware ローカル (``config.timezone``) 現在時刻。
 
     スケジューラ起点の時刻表示・cycle 開始時刻記録に使用する。
+    注意: ``db_now()`` は OS ローカル TZ であり、この設定とは独立。
     """
-    return datetime.now(ZoneInfo(config.schedule.timezone))
+    return datetime.now(ZoneInfo(config.timezone))
 
 
 def db_now() -> datetime:

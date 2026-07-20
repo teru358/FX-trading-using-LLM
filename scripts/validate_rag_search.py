@@ -22,7 +22,7 @@ from src.rag.vector_store import VectorStore
 
 async def main() -> None:
     config = load_config()
-    print(f"Config: embedding_provider={config.rag.embedding_provider!r}")
+    print(f"Config: embedding_provider={config.embedding.provider!r}")
 
     store = VectorStore(db_path=config.rag_db_path)
 
@@ -38,7 +38,7 @@ async def main() -> None:
     for q in queries:
         print(f"\nQuery: {q!r}")
         vec = await embed_fn(text=q)
-        print(f"  embedded with {config.rag.embedding_provider}: dim={len(vec)}")
+        print(f"  embedded with {config.embedding.provider}: dim={len(vec)}")
 
         # directional RAG 検索
         try:

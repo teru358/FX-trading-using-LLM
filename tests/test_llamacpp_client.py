@@ -212,15 +212,15 @@ async def test_embed_text_ollama_uses_legacy_format(fake_httpx_response):
 
 
 def test_make_embed_fn_ollama_default():
-    """config.rag.embedding_provider 未指定時は ollama にフォールバック。
+    """config.embedding.provider 未指定時は ollama にフォールバック。
 
-    新スキーマでは embedding は config.rag に独立した base_url を持つ
+    新スキーマでは embedding は config.embedding に独立した base_url を持つ
     (LLM 用 provider_config.base_url とは分離)。
     """
     config = SimpleNamespace(
-        rag=SimpleNamespace(
-            embedding_model="nomic-embed-text",
-            embedding_base_url="http://localhost:11434",
+        embedding=SimpleNamespace(
+            model="nomic-embed-text",
+            base_url="http://localhost:11434",
         ),
     )
     fn = make_embed_fn(config)
@@ -230,12 +230,12 @@ def test_make_embed_fn_ollama_default():
 
 
 def test_make_embed_fn_llamacpp():
-    """embedding_provider=llamacpp で base_url が llama-swap に切替わる。"""
+    """embedding.provider=llamacpp で base_url が llama-swap に切替わる。"""
     config = SimpleNamespace(
-        rag=SimpleNamespace(
-            embedding_model="nomic-embed-text",
-            embedding_provider="llamacpp",
-            embedding_base_url="http://localhost:8080/v1",
+        embedding=SimpleNamespace(
+            model="nomic-embed-text",
+            provider="llamacpp",
+            base_url="http://localhost:8080/v1",
         ),
     )
     fn = make_embed_fn(config)

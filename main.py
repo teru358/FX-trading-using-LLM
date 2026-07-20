@@ -284,8 +284,8 @@ def main() -> None:
         else:
             _console.print("[yellow][WARN][/yellow] Twelve Data API: key not set — yfinance only")
 
-    tz = config.schedule.timezone
-    news_tz = config.news_collection.timezone
+    tz = config.timezone
+    news_tz = tz          # 旧 news_collection.timezone。統一により同一値 (2026-07-20)
     interval = config.news_collection.interval_minutes
 
     news_offset = config.news_collection.offset_minutes
@@ -472,7 +472,7 @@ def main() -> None:
 
         schedule.every().day.at(
             config.economic_calendar.fetch_time,
-            config.economic_calendar.fetch_timezone,
+            tz,
         ).do(_run_with_guard, _guards["econ"], _econ_daily)
 
     # 経済指標影響分析 (LLM 使用 → slot 経由。collector から分離、spec §2.K)

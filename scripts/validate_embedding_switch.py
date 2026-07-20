@@ -44,8 +44,8 @@ TEST_TEXTS = [
 
 async def main() -> None:
     config = load_config()
-    print(f"Config loaded. rag.embedding_provider = {config.rag.embedding_provider!r}")
-    print(f"            rag.embedding_model    = {config.rag.embedding_model!r}")
+    print(f"Config loaded. embedding.provider = {config.embedding.provider!r}")
+    print(f"            embedding.model    = {config.embedding.model!r}")
     print()
 
     for i, text in enumerate(TEST_TEXTS, 1):
@@ -70,7 +70,7 @@ async def main() -> None:
             text=text,
             provider="llamacpp",
             base_url=llamacpp_url,
-            model=config.rag.embedding_model,  # llama-swap 側のモデル名
+            model=config.embedding.model,  # llama-swap 側のモデル名
         )
         print(f"    llamacpp:  dim={len(vec_llamacpp)} sample={vec_llamacpp[:3]}")
 

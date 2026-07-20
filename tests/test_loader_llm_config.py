@@ -22,15 +22,28 @@ from src.config import BASE_DIR, ConfigError, load_config
 
 
 def _write_settings(tmp_path: Path, overrides: dict) -> Path:
-    """本番 config/ を tmp_path にコピーし、settings.yaml にパッチを当てる。"""
+    """本番 config/ を tmp_path にコピーし、パッチを当てる。
+
+    llm: / embedding: は config/llm.yaml へ移動したため (config migration
+    2026-07-20)、それらのキーは llm.yaml に、他は settings.yaml に当てる。
+    settings.yaml に llm: を書いてもマージで llm.yaml に上書きされる。
+    """
     src_config_dir = BASE_DIR / "config"
     dst_config_dir = tmp_path / "config"
     shutil.copytree(src_config_dir, dst_config_dir)
 
     settings_path = dst_config_dir / "settings.yaml"
-    data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
-    _deep_merge(data, overrides)
-    settings_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    llm_keys = {"llm", "embedding", "agents"}
+    for fname, keys in (
+        ("llm.yaml", {k: v for k, v in overrides.items() if k in llm_keys}),
+        ("settings.yaml", {k: v for k, v in overrides.items() if k not in llm_keys}),
+    ):
+        if not keys:
+            continue
+        fpath = dst_config_dir / fname
+        data = yaml.safe_load(fpath.read_text(encoding="utf-8")) or {}
+        _deep_merge(data, keys)
+        fpath.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
     return settings_path
 
 
@@ -177,21 +190,21 @@ def test_legacy_per_role_provider_rejected(tmp_path):
 
 def test_embedding_ollama_requires_base_url(tmp_path):
     settings_path = _write_settings(tmp_path, {
-        "rag": {
-            "embedding_provider": "ollama",
-            "embedding_base_url": "",
+        "embedding": {
+            "provider": "ollama",
+            "base_url": "",
         }
     })
-    with pytest.raises(ConfigError, match="embedding_base_url is required"):
+    with pytest.raises(ConfigError, match="embedding.base_url is required"):
         load_config(settings_path)
 
 
 def test_embedding_llamacpp_requires_base_url(tmp_path):
     settings_path = _write_settings(tmp_path, {
-        "rag": {
-            "embedding_provider": "llamacpp",
-            "embedding_base_url": "",
+        "embedding": {
+            "provider": "llamacpp",
+            "base_url": "",
         }
     })
-    with pytest.raises(ConfigError, match="embedding_base_url is required"):
+    with pytest.raises(ConfigError, match="embedding.base_url is required"):
         load_config(settings_path)

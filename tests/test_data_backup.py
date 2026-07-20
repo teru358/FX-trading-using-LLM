@@ -108,9 +108,9 @@ def _make_cfg(*, enabled: bool, output_dir: str = "backup/data",
     @dataclass
     class _C:
         data_backup: DataBackupConfig
-        schedule: ScheduleConfig = field(
-            default_factory=lambda: ScheduleConfig(timezone="Asia/Tokyo")
-        )
+        # local_now(config) が参照する top-level timezone (config migration 2026-07-20)
+        timezone: str = "Asia/Tokyo"
+        schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
 
     return _C(
         data_backup=DataBackupConfig(

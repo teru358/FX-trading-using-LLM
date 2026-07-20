@@ -1,7 +1,7 @@
-"""orchestrator 5-agent 個別 LLM 設定 (config/agents.yaml) のテスト。
+"""orchestrator 5-agent 個別 LLM 設定 (config/llm.yaml の agents:) のテスト。
 
 AgentLlmConfig / OrchestratorAgentsLlmConfig の既定値と、loader による
-agents.yaml の構築・検証を確認する。実 LLM 接続は起こさない。
+agents: ブロックの構築・検証を確認する。実 LLM 接続は起こさない。
 """
 from __future__ import annotations
 
@@ -49,11 +49,15 @@ def test_app_config_has_default_agent_llms() -> None:
     assert cfg.agent_llms.planner.provider == ""
 
 
-def test_merge_split_configs_picks_up_agents_yaml(tmp_path) -> None:
-    """config/agents.yaml があれば base['agents'] に top-level merge される。"""
+def test_merge_split_configs_picks_up_agents_block(tmp_path) -> None:
+    """config/llm.yaml の agents: が base['agents'] に top-level merge される。
+
+    agents: は agents.yaml から llm.yaml へ移動した (config migration 2026-07-20)。
+    agents.yaml はマージ対象外で、残存は check_required_files が弾く。
+    """
     from src.config.loader import _merge_split_configs
 
-    (tmp_path / "agents.yaml").write_text(
+    (tmp_path / "llm.yaml").write_text(
         "agents:\n"
         "  planner:\n"
         "    provider: claude-cli\n"
@@ -67,16 +71,35 @@ def test_merge_split_configs_picks_up_agents_yaml(tmp_path) -> None:
 
 
 def _write_with_agents(tmp_path: Path, agents_yaml: str | None) -> Path:
-    """本番 config/ を tmp にコピーし、agents.yaml を差し込む (None なら作らない)。"""
+    """本番 config/ を tmp にコピーし、llm.yaml に agents: を差し込む。
+
+    agents: ブロックは config/llm.yaml へ移動した (config migration 2026-07-20)。
+    None なら agents: を持たない llm.yaml のままにする。
+    """
     src_config_dir = BASE_DIR / "config"
     dst_config_dir = tmp_path / "config"
     shutil.copytree(src_config_dir, dst_config_dir)
-    agents_path = dst_config_dir / "agents.yaml"
-    if agents_yaml is None:
-        agents_path.unlink(missing_ok=True)
-    else:
-        agents_path.write_text(agents_yaml, encoding="utf-8")
+
+    llm_path = dst_config_dir / "llm.yaml"
+    data = yaml.safe_load(llm_path.read_text(encoding="utf-8")) or {}
+    data.pop("agents", None)
+    if agents_yaml is not None:
+        data.update(yaml.safe_load(agents_yaml) or {})
+    llm_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
     return dst_config_dir / "settings.yaml"
+
+
+def _patch_llm(settings_path: Path, overrides: dict) -> None:
+    """llm.yaml の llm: ブロックにパッチを当てる (llm: は settings.yaml から移動済み)。"""
+    llm_path = settings_path.parent / "llm.yaml"
+    data = yaml.safe_load(llm_path.read_text(encoding="utf-8")) or {}
+    for k, v in overrides.items():
+        if isinstance(v, dict) and isinstance(data.get(k), dict):
+            data[k].update(v)
+        else:
+            data[k] = v
+    llm_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
 
 
 def test_build_agent_llms_from_yaml(tmp_path) -> None:
@@ -89,9 +112,7 @@ def test_build_agent_llms_from_yaml(tmp_path) -> None:
         "    temperature: 0.15\n",
     )
     # cross-provider (top-level=llamacpp) なので provider_configs に claude-cli を登録
-    data = yaml.safe_load(settings.read_text(encoding="utf-8")) or {}
-    data.setdefault("llm", {})["provider_configs"] = {"claude-cli": {}}
-    settings.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    _patch_llm(settings, {"llm": {"provider_configs": {"claude-cli": {}}}})
 
     cfg = load_config(settings)
     assert cfg.agent_llms.planner.provider == "claude-cli"
@@ -153,12 +174,10 @@ def test_provider_configs_built_per_provider(tmp_path) -> None:
     dst = tmp_path / "config"
     shutil.copytree(src_config_dir, dst)
     settings_path = dst / "settings.yaml"
-    data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
-    data.setdefault("llm", {})["provider_configs"] = {
+    _patch_llm(settings_path, {"llm": {"provider_configs": {
         "claude-cli": {"command": "", "timeout_seconds": 90},
         "llamacpp": {"base_url": "http://localhost:8080/v1"},
-    }
-    settings_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    }}})
 
     cfg = load_config(settings_path)
     assert "llamacpp" in cfg.llm.provider_configs
@@ -176,11 +195,9 @@ def test_provider_configs_llamacpp_missing_base_url_raises(tmp_path) -> None:
     dst = tmp_path / "config"
     shutil.copytree(src_config_dir, dst)
     settings_path = dst / "settings.yaml"
-    data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
-    data.setdefault("llm", {})["provider_configs"] = {
+    _patch_llm(settings_path, {"llm": {"provider_configs": {
         "llamacpp": {"base_url": ""},   # 欠落
-    }
-    settings_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    }}})
 
     with pytest.raises(ConfigError, match="base_url is required"):
         load_config(settings_path)
@@ -211,20 +228,14 @@ def test_agent_cross_provider_ok_when_provider_config_present(tmp_path) -> None:
     dst = tmp_path / "config"
     shutil.copytree(src_config_dir, dst)
     settings_path = dst / "settings.yaml"
-    data = yaml.safe_load(settings_path.read_text(encoding="utf-8")) or {}
     # top-level は llamacpp。cross-provider の claude-cli を provider_configs に追加。
     # claude-cli は base_url 不要、command 空欄は "claude" 補完されるので空 dict で valid。
-    data.setdefault("llm", {})["provider_configs"] = {
-        "claude-cli": {},
-    }
-    settings_path.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
-    (dst / "agents.yaml").write_text(
-        "agents:\n"
-        "  technical:\n"
-        "    provider: claude-cli\n"
-        "    model: claude-sonnet-4-6\n",
-        encoding="utf-8",
-    )
+    _patch_llm(settings_path, {
+        "llm": {"provider_configs": {"claude-cli": {}}},
+        "agents": {"technical": {
+            "provider": "claude-cli", "model": "claude-sonnet-4-6",
+        }},
+    })
     cfg = load_config(settings_path)
     assert cfg.agent_llms.technical.provider == "claude-cli"
 

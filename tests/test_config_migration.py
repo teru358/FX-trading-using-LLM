@@ -18,27 +18,20 @@ def test_merge_rejects_non_mapping_file(tmp_path):
     """分割ファイルが mapping でない場合、黙ってスキップせず ConfigError。
 
     旧実装は isinstance(extra, dict) false で silent skip していた。
-    Task 4 以降は strategy.yaml がリストとして書かれると
-    trading/orchestrator が全て既定値に落ちるため、fail-fast にする。
-
-    ファイル名が instruments.yaml なのは、この時点の SPLIT_CONFIG_FILES に
-    含まれるファイルで検証する必要があるため (llm.yaml/strategy.yaml への
-    切替は Task 4)。検証対象は非 mapping 分岐でありファイル名に依存しない。
+    strategy.yaml がリストとして書かれると trading/orchestrator が
+    全て既定値に落ちるため、fail-fast にする。
     """
-    _write(tmp_path, "instruments.yaml", "- item1\n- item2\n")
+    _write(tmp_path, "strategy.yaml", "- item1\n- item2\n")
 
-    with pytest.raises(ConfigError, match="instruments.yaml"):
+    with pytest.raises(ConfigError, match="strategy.yaml"):
         _merge_split_configs({}, tmp_path)
 
 
 def test_merge_wraps_yaml_syntax_error(tmp_path):
-    """YAML 構文エラーは生 traceback ではなく ConfigError にラップする。
+    """YAML 構文エラーは生 traceback ではなく ConfigError にラップする。"""
+    _write(tmp_path, "llm.yaml", "llm:\n  provider: [unclosed\n")
 
-    ファイル名の選択理由は test_merge_rejects_non_mapping_file と同じ。
-    """
-    _write(tmp_path, "news_sources.yaml", "keywords:\n  fx: [unclosed\n")
-
-    with pytest.raises(ConfigError, match="news_sources.yaml"):
+    with pytest.raises(ConfigError, match="llm.yaml"):
         _merge_split_configs({}, tmp_path)
 
 
@@ -161,3 +154,133 @@ def test_known_top_level_keys_accepted():
     }
 
     check_migration(files)  # raises しない
+
+
+REQUIRED_SAMPLE = {
+    "settings.yaml": "mode: paper\ntimezone: \"Asia/Tokyo\"\n",
+    "llm.yaml": "llm:\n  provider: llamacpp\n",
+    "strategy.yaml": "trading:\n  risk_per_trade: 0.02\n",
+}
+
+
+def test_missing_required_file_rejected(tmp_path):
+    """strategy.yaml の欠損は ConfigError (既定値での fail-open を防ぐ)。"""
+    from src.config.migration import check_required_files
+
+    _write(tmp_path, "settings.yaml", REQUIRED_SAMPLE["settings.yaml"])
+    _write(tmp_path, "llm.yaml", REQUIRED_SAMPLE["llm.yaml"])
+    # strategy.yaml を置かない
+
+    with pytest.raises(ConfigError, match="strategy.yaml"):
+        check_required_files(tmp_path)
+
+
+def test_empty_required_file_rejected(tmp_path):
+    """空ファイルも欠損と同じく ConfigError。"""
+    from src.config.migration import check_required_files
+
+    for name, text in REQUIRED_SAMPLE.items():
+        _write(tmp_path, name, text)
+    _write(tmp_path, "llm.yaml", "")
+
+    with pytest.raises(ConfigError, match="llm.yaml"):
+        check_required_files(tmp_path)
+
+
+def test_legacy_agents_yaml_rejected(tmp_path):
+    """残存する agents.yaml を検出する。
+
+    マージ対象から外れているため放置すると黙って無視され、
+    ユーザーが編集し続けても何も起きない。
+    """
+    from src.config.migration import check_required_files
+
+    for name, text in REQUIRED_SAMPLE.items():
+        _write(tmp_path, name, text)
+    _write(tmp_path, "agents.yaml", "agents:\n  planner:\n    model: x\n")
+
+    with pytest.raises(ConfigError, match="agents.yaml"):
+        check_required_files(tmp_path)
+
+
+def test_all_required_files_present(tmp_path):
+    """必要なファイルが揃っていれば通る。"""
+    from src.config.migration import check_required_files
+
+    for name, text in REQUIRED_SAMPLE.items():
+        _write(tmp_path, name, text)
+
+    check_required_files(tmp_path)  # raises しない
+
+
+def test_top_level_timezone_and_embedding(tmp_path):
+    """新スキーマ: top-level timezone と embedding ブロックが読める。"""
+    from src.config import load_config
+
+    _write(tmp_path, "settings.yaml",
+           'mode: paper\npaper_provider: yfinance\ntimezone: "Europe/London"\n')
+    _write(tmp_path, "llm.yaml",
+           'llm:\n'
+           '  provider: llamacpp\n'
+           '  provider_config:\n'
+           '    base_url: "http://localhost:8080/v1"\n'
+           '  news_analysis:\n    model: m1\n'
+           '  price_analysis:\n    model: m2\n'
+           '  reflection:\n    model: m3\n'
+           'embedding:\n'
+           '  provider: llamacpp\n'
+           '  model: nomic-embed-text\n'
+           '  base_url: "http://localhost:8080/v1"\n')
+    _write(tmp_path, "strategy.yaml", 'trading:\n  risk_per_trade: 0.03\n')
+
+    config = load_config(tmp_path / "settings.yaml")
+
+    assert config.timezone == "Europe/London"
+    assert config.embedding.provider == "llamacpp"
+    assert config.embedding.model == "nomic-embed-text"
+    assert config.embedding.base_url == "http://localhost:8080/v1"
+    assert not hasattr(config.schedule, "timezone")
+    assert not hasattr(config.rag, "embedding_provider")
+
+
+def test_timezone_is_required(tmp_path):
+    """移行リリース限定: timezone 未指定は既定値に落とさず ConfigError。
+
+    既定 Asia/Tokyo への静かな転落は、Asia/Tokyo 以外を設定していた
+    ホストで全時刻判定をずらす (finance_orchestrator_zero_plans_tz_bug と同型)。
+    """
+    from src.config import load_config
+
+    _write(tmp_path, "settings.yaml", "mode: paper\npaper_provider: yfinance\n")
+    _write(tmp_path, "llm.yaml",
+           'llm:\n  provider: llamacpp\n'
+           '  provider_config:\n    base_url: "http://x/v1"\n'
+           '  news_analysis:\n    model: m1\n'
+           '  price_analysis:\n    model: m2\n'
+           '  reflection:\n    model: m3\n')
+    _write(tmp_path, "strategy.yaml", "trading: {}\n")
+
+    with pytest.raises(ConfigError, match="timezone"):
+        load_config(tmp_path / "settings.yaml")
+
+
+def test_embedding_provider_value_validated(tmp_path):
+    """未知の embedding provider は fail-fast。
+
+    embedder.py は「llamacpp 以外は全て Ollama」で分岐するため、
+    typo が誤ったプロトコルへの接続として黙って通ってしまう。
+    """
+    from src.config import load_config
+
+    _write(tmp_path, "settings.yaml", 'mode: paper\ntimezone: "Asia/Tokyo"\n')
+    _write(tmp_path, "llm.yaml",
+           'llm:\n  provider: llamacpp\n'
+           '  provider_config:\n    base_url: "http://x/v1"\n'
+           '  news_analysis:\n    model: m1\n'
+           '  price_analysis:\n    model: m2\n'
+           '  reflection:\n    model: m3\n'
+           'embedding:\n  provider: ollamaa\n  base_url: "http://x"\n')
+    _write(tmp_path, "strategy.yaml", "trading: {}\n")
+
+    with pytest.raises(ConfigError, match="ollamaa"):
+        load_config(tmp_path / "settings.yaml")

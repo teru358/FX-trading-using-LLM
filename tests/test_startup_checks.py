@@ -1,7 +1,7 @@
 """startup_checks の provider 別必要モデル判定のテスト。
 
 新スキーマ: llm.provider が単一、3 役割すべて同じ provider を共有。
-embedding は config.rag.embedding_provider で別管理 (LLM と独立)。
+embedding は config.embedding (llm.yaml) で別管理 (LLM と独立)。
 実際の HTTP チェックは省略し、モデルリスト計算ロジックのみ検証する。
 """
 from __future__ import annotations
@@ -36,10 +36,10 @@ def _make_config(
             price_analysis=SimpleNamespace(model=price_model),
             reflection=SimpleNamespace(model=reflection_model),
         ),
-        rag=SimpleNamespace(
-            embedding_provider=embedding_provider,
-            embedding_model=embedding_model,
-            embedding_base_url=embedding_base_url,
+        embedding=SimpleNamespace(
+            provider=embedding_provider,
+            model=embedding_model,
+            base_url=embedding_base_url,
         ),
     )
 
