@@ -56,7 +56,7 @@ def test_live_notifier_uses_normal_webhook_not_shadow(monkeypatch):
 
     inner = ln._notifier
     assert isinstance(inner, DiscordNotifier)
-    assert inner.webhook_url == "https://example.test/normal"
+    assert inner._url == "https://example.test/normal"
 
 
 def test_live_notifier_disabled_when_notification_disabled(monkeypatch):

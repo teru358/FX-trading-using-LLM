@@ -12,6 +12,7 @@ shadow 境界 (§7.3): broker / order_intents には触れない。本 bootstrap
   - make_news_provider(config, store)        — §7 news を RAG 集計から供給
   - make_hindsight_evaluator(price_store)    — trigger 後 MFE-R/MAE-R/PnL-R 評価
   - create_shadow_notifier(notifications cfg) — 🧪 shadow 専用 Discord 通知
+  - create_live_notifier(notifier cfg)       — live 発注結果の通知 (通常 webhook)
   - LlmDispatcher + PlanningPipeline         — planning loop の LLM 逐次パイプライン
   - MaterialLandingDetector                  — planning 発火フィルタ (material + debounce)
 """
@@ -29,6 +30,7 @@ from src.orchestrator.context_builder import (
 from src.orchestrator.hindsight_evaluator import make_hindsight_evaluator
 from src.orchestrator.material_landing import MaterialLandingDetector
 from src.orchestrator.runtime import OrchestratorRuntime, QuoteProvider
+from src.orchestrator.live_notifier import create_live_notifier
 from src.orchestrator.shadow_notifier import create_shadow_notifier
 from src.trading.market_state import market_skip_check
 from src.utils.clock import db_now
@@ -368,6 +370,10 @@ def build_orchestrator_runtime(
     pipeline = _build_pipeline(config, orch_store, risk_gate)
     hindsight = make_hindsight_evaluator(price_store, interval=config.trading.ohlcv_interval)
     notifier = create_shadow_notifier(orch_cfg.notifications)
+    # live 発注結果は shadow とは別経路で通知する (レビュー High)。制御は通常の
+    # notification.enabled + DISCORD_WEBHOOK_URL で、shadow フラグ・shadow webhook
+    # からは完全に独立。
+    live_notifier = create_live_notifier(config.notifier)
 
     mstate, state_bridge = _build_market_state(
         config, orch_cfg, pairs,
@@ -395,6 +401,7 @@ def build_orchestrator_runtime(
         risk_gate=risk_gate,
         hindsight_evaluator=hindsight,
         shadow_notifier=notifier,
+        live_notifier=live_notifier,
         market_state_detector=mstate,
         state_bridge=state_bridge,
         # Task F: mode=live のとき発注 broker / position_mgr / app_config を執行段へ注入。

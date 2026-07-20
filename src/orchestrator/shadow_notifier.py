@@ -62,23 +62,6 @@ class ShadowTriggerInfo:
 
 
 @dataclass
-class LiveExecutionInfo:
-    """live 発注の結果 (外部レビュー Medium)。
-
-    ``outcome`` は ``ExecutionResult.outcome`` と同じ語彙
-    (executed / skipped / halted / rejected / failed)。broker まで届かず
-    final gate で弾かれた場合も ``rejected`` として通す (運用者から見ると
-    「発注されなかった」点で同じで、理由は reason に載る)。
-    """
-    pair: str
-    action: str             # "buy" | "sell"
-    plan_id: int
-    outcome: str
-    order_id: str | None = None
-    reason: str = ""
-
-
-@dataclass
 class HindsightInfo:
     pair: str
     direction: str
@@ -96,20 +79,6 @@ class HindsightInfo:
 
 def _fmt_opt(value: float | None, spec: str = "+.2f") -> str:
     return format(value, spec) if value is not None else "—"
-
-
-# live 発注結果の見出し (ExecutionResult.outcome 別、外部レビュー Medium)。
-# 旧 notifier の _SKIP_HEADLINES と同じ方針: ``skipped`` のみ運用上「無害・想定内」で、
-# halted / rejected / failed は要注意であることが文面から分かるようにする。
-# **発注に至らなかった outcome の文面に「約定」「executed」等を混ぜないこと** —
-# 拒否されたのに発注されたと誤読されるのが本修正の対象そのもの。
-_LIVE_HEADLINES: dict[str, tuple[str, str]] = {
-    "executed": ("✅ 発注約定", "約定"),
-    "skipped":  ("⏭ 発注スキップ", "発注せず (想定内)"),
-    "halted":   ("⛔ halt 中のため発注見送り", "発注せず"),
-    "rejected": ("🚫 発注拒否", "発注されていません"),
-    "failed":   ("❌ 発注失敗", "発注されていません"),
-}
 
 
 class ShadowNotifier:
@@ -176,34 +145,11 @@ class ShadowNotifier:
             lines.append(f"reason: {info.reason}")
         await self._send_capped("\n".join(lines))
 
-    # ── live 発注結果 (外部レビュー Medium) ─────────────────────
-
-    async def notify_live_execution(self, info: LiveExecutionInfo) -> None:
-        """live 発注の結果を通知する。
-
-        Task 8 で旧 notify_order_opened / notify_signal_skipped を削除したため、
-        約定・拒否・失敗を Discord で確認する経路が無くなっていた。文面は outcome
-        ごとに見出しを変え、**発注に至らなかったケースを「発注された」と誤読させない**
-        (旧 notifier の _SKIP_HEADLINES と同じ方針)。
-
-        shadow の 🧪 prefix は付けない — live は実弾なので、shadow 通知と一目で
-        区別できることが最優先。
-        """
-        if not self._enabled(self._config.shadow_triggered):
-            return
-        headline, detail = _LIVE_HEADLINES.get(
-            info.outcome, ("❓ 発注結果不明", "outcome"))
-        lines = [
-            f"{headline} {info.pair} {info.action.upper()}",
-            f"plan={info.plan_id}",
-        ]
-        if info.outcome == "executed" and info.order_id:
-            lines[-1] += f" order={info.order_id}"
-        else:
-            lines[-1] += f" — {detail}"
-        if info.reason:
-            lines.append(f"reason: {info.reason}")
-        await self._send_capped("\n".join(lines))
+    # NOTE: live 発注結果の通知は本モジュールの責務ではない。
+    # ``src/orchestrator/live_notifier.py`` が通常の DISCORD_WEBHOOK_URL と
+    # ``notification.enabled`` で制御する (レビュー High)。ここに live 通知を
+    # 戻すと shadow フラグ・shadow webhook に巻き込まれて実弾の発注結果が
+    # 消える / shadow チャンネルへ漏れる。
 
     # ── hindsight ─────────────────────────────────────────────
 

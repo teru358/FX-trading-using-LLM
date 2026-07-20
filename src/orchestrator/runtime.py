@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from src.orchestrator.market_state_detector import MarketStateDetector
     from src.orchestrator.material_landing import MaterialLandingDetector
     from src.orchestrator.planning_pipeline import PipelineResult, PlanningPipeline
+    from src.orchestrator.live_notifier import LiveNotifier
     from src.orchestrator.shadow_notifier import ShadowNotifier
 
 logger = logging.getLogger(__name__)
@@ -138,6 +139,7 @@ class OrchestratorRuntime:
         risk_gate: RiskGateWorker | None = None,
         hindsight_evaluator: HindsightEvaluator | None = None,
         shadow_notifier: "ShadowNotifier | None" = None,
+        live_notifier: "LiveNotifier | None" = None,
         market_state_detector: "MarketStateDetector | None" = None,
         state_bridge: "MarketStateBridge | None" = None,
         mode: str = "shadow",
@@ -161,6 +163,9 @@ class OrchestratorRuntime:
         # shadow 専用通知 (Phase 5)。未注入なら通知しない (後方互換・shadow 境界不変)。
         # 通知は deterministic path の外側で fire-and-forget し、失敗は握り潰す。
         self._notifier = shadow_notifier
+        # live 発注結果の通知 (レビュー High)。shadow とは別 notifier・別 webhook・
+        # 別フラグ (notification.enabled / DISCORD_WEBHOOK_URL)。未注入なら通知しない。
+        self._live_notifier = live_notifier
         # trigger 後の判断品質を後追い計測する評価器 (Phase 4)。未注入なら hindsight を
         # enqueue/評価しない (Phase 1〜3 後方互換・shadow 境界も不変)。
         self._hindsight = hindsight_evaluator
@@ -1340,17 +1345,20 @@ class OrchestratorRuntime:
         self, plan, pair: str, outcome: str, *,
         order_id: str | None = None, reason: str = "",
     ) -> None:
-        """live 発注の結果を通知する (外部レビュー Medium)。
+        """live 発注の結果を通知する (レビュー High)。
 
         約定・拒否・失敗・order_id・broker 理由を運用者へ届ける唯一の経路。
         Task 8 で旧 notify_order_opened / notify_signal_skipped を削除して以降、
         これが無いと live の発注結果が Discord から一切見えない。
-        """
-        if self._notifier is None:
-            return
-        from src.orchestrator.shadow_notifier import LiveExecutionInfo
 
-        n = self._notifier
+        **shadow notifier ではなく live notifier を使う。** shadow 通知 OFF や
+        shadow webhook 未設定で実弾の発注結果が消えてはならない。
+        """
+        if self._live_notifier is None:
+            return
+        from src.orchestrator.live_notifier import LiveExecutionInfo
+
+        n = self._live_notifier
         info = LiveExecutionInfo(
             pair=pair, action=_side_of(plan.direction) or "?",
             plan_id=plan.plan_id, outcome=outcome,

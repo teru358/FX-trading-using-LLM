@@ -11,7 +11,8 @@ Task 8 で旧 notify_order_opened / notify_signal_skipped を削除した結果�
 """
 from __future__ import annotations
 
-from src.orchestrator.shadow_notifier import LiveExecutionInfo, ShadowNotifier
+from src.config.schema import NotifierConfig
+from src.orchestrator.live_notifier import LiveExecutionInfo, LiveNotifier
 from src.trading.broker_adapter import ExecutionResult
 
 from tests.test_taskf_live_execution_helpers import (
@@ -69,23 +70,24 @@ class _CapturingSend:
         self.sent.append(message)
 
 
-def _notif_config():
-    from src.config.schema import OrchestratorNotificationsConfig
-
-    return OrchestratorNotificationsConfig()
-
-
 # ── runtime 配線 ────────────────────────────────────────────────
 
 
 def _run_live(tmp_path, result, gate=None):
     broker = _FakeBroker(result)
     rt = make_live_runtime(tmp_path, broker, gate or _GatePass())
-    notifier = RecordingNotifier()
-    rt._notifier = notifier
+    # shadow と live は**別々のスパイ**を挿す (レビュー High)。同一スパイだと
+    # 「live イベントが shadow notifier 経由で飛んだ」誤配線を検出できない。
+    shadow = RecordingNotifier()
+    live = RecordingNotifier()
+    rt._notifier = shadow
+    rt._live_notifier = live
     plan_id = seed_active_plan_ready_to_trigger(rt)
     rt.run_watch_cycle(now=NOW)
-    return rt, notifier, plan_id
+    # live 発注結果は live notifier からのみ出ること。
+    assert "live_execution" not in shadow.kinds(), (
+        "live 通知が shadow notifier 経由で送られている (shadow webhook 誤配線)")
+    return rt, live, plan_id
 
 
 def test_live_executed_emits_live_notification(tmp_path):
@@ -163,14 +165,14 @@ def test_shadow_mode_still_emits_shadow_trigger(tmp_path):
     assert "live_execution" not in notifier.kinds()
 
 
-# ── ShadowNotifier の文面 ────────────────────────────────────────
+# ── LiveNotifier の文面 ─────────────────────────────────────────
 
 
 def _fmt(outcome, *, order_id=None, reason=""):
     import asyncio
 
     send = _CapturingSend()
-    n = ShadowNotifier(send, _notif_config())
+    n = LiveNotifier(send, NotifierConfig(enabled=True))
     info = LiveExecutionInfo(
         pair="USDJPY=X", action="buy", plan_id=7, outcome=outcome,
         order_id=order_id, reason=reason,
@@ -220,14 +222,16 @@ def test_live_notification_is_not_prefixed_as_shadow():
     assert "🧪" not in msg
 
 
-def test_live_notification_gated_by_flag():
+def test_live_notification_gated_by_notification_enabled():
+    """live 通知は notification.enabled で止まる (shadow フラグではない)。
+
+    以前は shadow_enabled=False で live 通知が消えていた — shadow 検証を切ると
+    実弾の約定・拒否・失敗が全て見えなくなる誤配線 (レビュー High)。
+    """
     import asyncio
 
-    from src.config.schema import OrchestratorNotificationsConfig
-
     send = _CapturingSend()
-    cfg = OrchestratorNotificationsConfig(shadow_enabled=False)
-    n = ShadowNotifier(send, cfg)
+    n = LiveNotifier(send, NotifierConfig(enabled=False))
     info = LiveExecutionInfo(
         pair="USDJPY=X", action="buy", plan_id=1, outcome="executed",
         order_id="x", reason="",
