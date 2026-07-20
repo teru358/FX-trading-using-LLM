@@ -15,8 +15,10 @@ dry-run の副作用ゼロ保証:
     よって RAG 退役カード件数は dry-run では取得せず、`--execute` 時に判明する。
 
 preflight: 破壊的操作の前に DB 実在・温存テーブル・integrity_check・state_dir・
-RAG 疎通をまとめて検証する。1つでも失敗すれば何も変更せず終了コード 1 で中止する
-(SQLite だけ drop されて RAG が残る部分適用を防ぐ)。
+RAG (パス実在 + 必要 collection の実在) をまとめて検証する。1つでも失敗すれば
+何も変更せず終了コード 1 で中止する (SQLite だけ drop されて RAG が残る部分適用を防ぐ)。
+RAG は「開けた」だけでは不十分 — PersistentClient は不在パスを自動作成するため、
+開く前にパスを確認しないと空 ChromaDB を作って preflight を通過してしまう。
 
 前提: システム停止中に実行し、実行前に以下をバックアップ済みであること。
   - prices.db (DB)
@@ -188,6 +190,67 @@ def open_vector_store(rag_db_path):
     return VectorStore(Path(rag_db_path))
 
 
+def _list_rag_collections(rag_db_path):
+    """既存 collection を **作らずに** 列挙する (パス実在確認後に呼ぶこと)。
+
+    `VectorStore` を通さず素の `PersistentClient` を使うのが要点。VectorStore は
+    `get_or_create_collection` を呼ぶため、それ経由では「無いこと」を観測できない。
+    """
+    import chromadb
+
+    return chromadb.PersistentClient(path=str(rag_db_path)).list_collections()
+
+
+def _check_rag(rag_db_path):
+    """RAG が「実在する正しい永続化先」かを検証してから開く。
+
+    `PersistentClient` は存在しないパスを **無条件に新規作成する** (実測: mkdir +
+    chroma.sqlite3、collection 0 件)。`VectorStore.__init__` 自体も先頭で
+    `db_path.mkdir(parents=True, exist_ok=True)` を呼ぶ。つまり「開けた」ことは
+    「正しい RAG を指している」証拠にならない。config のパス設定ミスがあると空の
+    ChromaDB が作られて preflight を通過し、SQLite だけが移行される
+    (= preflight の目的である部分適用の防止が成立しない)。
+
+    そこで 2 段で確認する。
+
+    1. **開く前に** パスの実在を確認する。不在ならここで止める
+       (破壊的操作に進まないだけでなく、空 ChromaDB も作らない)。
+    2. **VectorStore を構築する前に** 素の client で collection 一覧を取り、削除対象の
+       directional collection が実在するかを確認する。`VectorStore.__init__` は
+       `get_or_create_collection` を呼ぶため、先に構築してしまうと欠けている
+       collection がその場で作られ、検査が常に通ってしまう。
+       パスは在るが中身が空 = 別のディレクトリを指している可能性を捉えたい。
+    """
+    rag_db_path = Path(rag_db_path)
+    if not rag_db_path.is_dir():
+        raise PreflightError(
+            f"RAG (ChromaDB) のパスが存在しません: {rag_db_path} "
+            "(設定ミス / 未同期の可能性。空の ChromaDB は作成しません)")
+
+    # 削除対象は directional の 2 collection (directional_store.py の実値)。
+    # 片方でも欠けていれば finance の RAG ではないか、別世代のデータ。
+    from src.rag.directional_store import _BEARISH_COL, _BULLISH_COL
+
+    try:
+        found = {c.name for c in _list_rag_collections(rag_db_path)}
+    except Exception as exc:
+        raise PreflightError(
+            f"RAG (ChromaDB) を開けません: {rag_db_path}: {exc}") from exc
+
+    required = {_BULLISH_COL, _BEARISH_COL}
+    if missing := required - found:
+        raise PreflightError(
+            f"RAG に必要な collection がありません: {rag_db_path} "
+            f"(不足={sorted(missing)}, 検出={sorted(found) or 'なし'})。"
+            "別のディレクトリを指している可能性があります")
+
+    try:
+        return open_vector_store(rag_db_path)
+    except Exception as exc:
+        raise PreflightError(
+            f"RAG (ChromaDB) を開けません: {rag_db_path}: {exc}") from exc
+
+
 def preflight(*, db_path, state_dir, rag_db_path, check_rag: bool):
     """破壊的操作の前に全ての前提を検証する (spec §4)。
 
@@ -196,9 +259,10 @@ def preflight(*, db_path, state_dir, rag_db_path, check_rag: bool):
     破壊的操作より前にまとめて確認する。
 
     Args:
-        check_rag: True なら ChromaDB を実際に開いて疎通確認する (=副作用あり)。
-            dry-run では必ず False。dry-run の副作用ゼロ保証と、`--execute` の
-            部分適用防止を両立させるための分岐。
+        check_rag: True ならパスの実在を確認したうえで ChromaDB を開き、必要な
+            collection の実在まで確認する (=副作用あり)。dry-run では必ず False。
+            dry-run の副作用ゼロ保証と、`--execute` の部分適用防止を両立させる
+            ための分岐。詳細は `_check_rag`。
 
     Returns:
         check_rag=True なら構築済み VectorStore、False なら None。
@@ -213,10 +277,7 @@ def preflight(*, db_path, state_dir, rag_db_path, check_rag: bool):
 
     if not check_rag:
         return None
-    try:
-        return open_vector_store(rag_db_path)
-    except Exception as exc:
-        raise PreflightError(f"RAG (ChromaDB) を開けません: {rag_db_path}: {exc}") from exc
+    return _check_rag(rag_db_path)
 
 
 def drop_retired_tables(db_path) -> list[str]:
