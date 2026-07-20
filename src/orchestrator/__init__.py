@@ -1,5 +1,5 @@
 """orchestrator agent loop ランタイム (spec §4)。
 
-Phase 1 foundation: LLM queue / context builder / runtime skeleton。
-発注は行わない (observe mode)。
+LLM queue / context builder / runtime を提供する。
+発注の有無は `orchestrator.mode` で決まる (`shadow` = 記録のみ、`live` = 実発注)。
 """

@@ -40,11 +40,13 @@ class TestEnsureOrExit:
             ensure_orchestrator_or_exit(object(), enabled=True, mode="shadow")
         assert any("発注は行われません" in r.message for r in caplog.records)
 
-    def test_observe_mode_warns_not_exits(self, caplog):
-        # observe は schema の有効値 (src/config/schema.py)。live 以外は一律 warning
-        # で通す — mode == "shadow" のような値決め打ちにしない。
+    def test_non_live_mode_warns_not_exits(self, caplog):
+        # live 以外は一律 warning で通す — mode == "shadow" のような値決め打ちに
+        # しない。将来 mode が増えてもこの関数は変更不要、という契約の固定。
+        # (schema の有効値は shadow / live のみ。ここは startup 側の分岐が
+        #  「live か否か」でしか場合分けしないことを示すための未知値。)
         with caplog.at_level("WARNING"):
-            ensure_orchestrator_or_exit(object(), enabled=True, mode="observe")
+            ensure_orchestrator_or_exit(object(), enabled=True, mode="future_mode")
         assert any("発注は行われません" in r.getMessage() for r in caplog.records)
 
     def test_fatal_reason_goes_to_logger(self, caplog):

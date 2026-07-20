@@ -3051,7 +3051,7 @@ deploy ノートに以下を明記すること:
 | キー | 必須度 | 未設定/不整合時の挙動 |
 |------|--------|----------------------|
 | `orchestrator.enabled: true` | **必須・明示記載** | 未記載だと schema 既定 `false` → fail-fast で起動中止 (`exit 1`) |
-| `orchestrator.mode` | 必須 | `live` = 実発注。`shadow` / `observe` = 発注なし (起動時 warning のみ) |
+| `orchestrator.mode` | 必須 | 有効値は `shadow` / `live` の 2 つのみ。`live` = 実発注、`shadow` = 発注なし (起動時 warning のみ)。**`observe` は受理されない** — 設定すると `ValueError` で起動中止 (`schema.py` の `OrchestratorConfig.__post_init__`) |
 | `orchestrator.pairs` | 任意 (書くなら厳密) | 省略時は tradeable 全体。書く場合 **tradeable 全体と一致必須** — 真部分集合なら live で起動中止。**非 tradeable symbol (instruments 側 `mode: watch` 等) の混入も live で起動中止** (Task 7 レビュー H-2) |
 
 「pairs で subset 運用したい」場合は orchestrator 側ではなく **instruments 側の

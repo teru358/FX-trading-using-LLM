@@ -721,7 +721,7 @@ class OrchestratorAgentsConfig:
 class OrchestratorConfig:
     """orchestrator agent loop の設定 (spec §12)。既定は安全側 (enabled=false)。"""
     enabled: bool = False
-    mode: str = "shadow"   # observe | shadow | live
+    mode: str = "shadow"   # shadow | live (__post_init__ で検証。observe は不可)
     # approval gate (spec 2026-07-05): ON のとき plan の publish が pending_approval
     # になり、人間の承認 (API approve) を経てから active 化する。既定 OFF = 挙動不変。
     approval_gate: bool = False
@@ -774,8 +774,9 @@ class OrchestratorConfig:
                 f"quote_stream_poll_seconds must be >= 1, "
                 f"got {self.quote_stream_poll_seconds!r}"
             )
-        # Task F (spec §5): 執行段の発注主体モード。observe は現状未使用で執行段を
-        # 起動しないため F では shadow/live のみ許容。
+        # Task F (spec §5): 執行段の発注主体モード。有効値は shadow / live のみ。
+        # observe は執行段を起動しない構想値だったが現状未実装のため受理しない
+        # (設定しても ValueError で起動中止。発注なし運用は shadow を使う)。
         valid_modes = ("shadow", "live")
         if self.mode not in valid_modes:
             raise ValueError(
