@@ -135,16 +135,44 @@ def _build_orchestrator_config(data: dict) -> OrchestratorConfig:
     )
 
 
+# 分割設定ファイル。settings.yaml にマージされる top-level ブロックを持つ。
+# agents.yaml は Task 4 で llm.yaml に置き換える (このタスクでは現状維持)。
+SPLIT_CONFIG_FILES = ("instruments.yaml", "news_sources.yaml", "agents.yaml")
+
+
+def _load_split_yaml(fpath: Path) -> dict | None:
+    """分割設定ファイルを読み、mapping であることを検証する。
+
+    存在しない / 空ファイルなら None。非 mapping・構文エラーは ConfigError。
+    """
+    if not fpath.exists():
+        return None
+    try:
+        with open(fpath, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise ConfigError(f"{fpath.name}: YAML syntax error: {e}") from e
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise ConfigError(
+            f"{fpath.name} must contain a YAML mapping at the top level "
+            f"(got {type(data).__name__})."
+        )
+    return data
+
+
 def _merge_split_configs(base: dict, config_dir: Path) -> dict:
-    """分割設定ファイルをメイン設定にマージする。"""
-    for fname in ("instruments.yaml", "news_sources.yaml", "agents.yaml"):
-        fpath = config_dir / fname
-        if fpath.exists():
-            with open(fpath, encoding="utf-8") as f:
-                extra = yaml.safe_load(f)
-            if extra and isinstance(extra, dict):
-                for key, value in extra.items():
-                    base[key] = value
+    """分割設定ファイルをメイン設定にマージする。
+
+    マージは top-level キー粒度の上書きであり、サブキーは合成されない
+    (同名ブロックがあれば丸ごと置換)。重複の検出は _check_migration が担当する。
+    """
+    for fname in SPLIT_CONFIG_FILES:
+        extra = _load_split_yaml(config_dir / fname)
+        if extra:
+            for key, value in extra.items():
+                base[key] = value
     return base
 
 
