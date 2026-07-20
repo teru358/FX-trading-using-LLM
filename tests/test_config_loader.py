@@ -14,14 +14,25 @@ def _write(p: Path, content: str) -> None:
 
 
 def _minimal_settings(extra: str = "") -> str:
-    """最小 settings.yaml (llm/embedding は llm.yaml へ分離済み)。"""
-    return f"""
-mode: paper
-paper_provider: yfinance
-live_broker: null
-timezone: "Asia/Tokyo"
-{extra}
-"""
+    """最小 settings.yaml (llm/embedding は llm.yaml へ分離済み)。
+
+    extra に既定と同名のキーが含まれる場合、単純追記すると YAML の重複キーに
+    なる。StrictLoader (config migration 2026-07-20) はこれを拒否するため、
+    extra 側のキーで既定行を置き換える。
+    """
+    defaults = {
+        "mode": "paper",
+        "paper_provider": "yfinance",
+        "live_broker": "null",
+        "timezone": '"Asia/Tokyo"',
+    }
+    # extra が定義する top-level キーを既定から除く (インデントのない行が対象)
+    for line in extra.splitlines():
+        if line[:1].isalnum() and ":" in line:
+            defaults.pop(line.split(":", 1)[0].strip(), None)
+
+    base = "\n".join(f"{k}: {v}" for k, v in defaults.items())
+    return f"\n{base}\n{extra}\n"
 
 
 # llm/embedding は config/llm.yaml へ移動 (config migration 2026-07-20)。

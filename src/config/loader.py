@@ -170,16 +170,49 @@ SPLIT_CONFIG_FILES = (
 )
 
 
+class _DuplicateKeyError(yaml.YAMLError):
+    """YAML mapping 内にキーが重複していた。"""
+
+
+class StrictLoader(yaml.SafeLoader):
+    """重複した mapping キーを拒否する SafeLoader。
+
+    yaml.safe_load は重複キーを無警告で後勝ち上書きする。config を複数ファイルへ
+    分割する作業ではブロックの二重記載が起きやすく、そのまま通すとリスク
+    パラメータを含む設定が黙って消える。migration._check_duplicate_blocks は
+    読み込み後の dict を見るためファイル間の重複しか検出できず、この経路は
+    ここで塞ぐ必要がある。
+    """
+
+
+def _construct_mapping_no_duplicates(loader, node, deep=False):
+    mapping = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if key in mapping:
+            raise _DuplicateKeyError(
+                f"duplicate key {key!r} at line {key_node.start_mark.line + 1}"
+            )
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+StrictLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_mapping_no_duplicates,
+)
+
+
 def _load_split_yaml(fpath: Path) -> dict | None:
     """分割設定ファイルを読み、mapping であることを検証する。
 
-    存在しない / 空ファイルなら None。非 mapping・構文エラーは ConfigError。
+    存在しない / 空ファイルなら None。非 mapping・構文エラー・重複キーは ConfigError。
     """
     if not fpath.exists():
         return None
     try:
         with open(fpath, encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            data = yaml.load(f, Loader=StrictLoader)
     except yaml.YAMLError as e:
         raise ConfigError(f"{fpath.name}: YAML syntax error: {e}") from e
     if data is None:
@@ -212,7 +245,7 @@ def _load_provider_yaml(name: str, config_dir: Path) -> dict | None:
     if not fpath.exists():
         return None
     with open(fpath, encoding="utf-8") as f:
-        data = yaml.safe_load(f)
+        data = yaml.load(f, Loader=StrictLoader)
     if data is None:
         return {}
     if not isinstance(data, dict):
@@ -560,7 +593,7 @@ def load_config(config_path: Path | None = None) -> AppConfig:
     check_required_files(config_dir)
 
     with open(config_path, encoding="utf-8") as f:
-        raw = yaml.safe_load(f)
+        raw = yaml.load(f, Loader=StrictLoader)
     if raw is None:
         raise ConfigError(f"{config_path.name} is empty.")
     if not isinstance(raw, dict):
@@ -632,7 +665,10 @@ def load_config(config_path: Path | None = None) -> AppConfig:
             quote_currency=p.get("quote_currency", ""),
             currency=p.get("currency", ""),
         )
-        for p in raw.get("instruments", raw.get("pairs", []))
+        # 旧名 "pairs" の後方互換は廃止 (2026-07-20)。top-level typo 検出
+        # (migration.KNOWN_TOP_LEVEL_KEYS) が "pairs" を未知キーとして弾くため、
+        # この fallback は到達不能だった。意図を明確にするため経路ごと削除する。
+        for p in raw.get("instruments", [])
     ]
 
     # ── ネスト configs ────────────────────────────────────────────

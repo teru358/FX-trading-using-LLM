@@ -284,3 +284,48 @@ def test_embedding_provider_value_validated(tmp_path):
 
     with pytest.raises(ConfigError, match="ollamaa"):
         load_config(tmp_path / "settings.yaml")
+
+
+def test_duplicate_key_within_same_file_rejected(tmp_path):
+    """同一ファイル内の重複 top-level キーを拒否する。
+
+    yaml.safe_load は重複キーを無警告で後勝ち上書きする。分割作業中に
+    ブロックを二重記載すると、片方の設定 (リスクパラメータを含む) が
+    黙って消えるため fail-fast にする。ファイル間の重複を見る
+    _check_duplicate_blocks は、読み込み後の dict を扱うため
+    この経路を検出できない。
+    """
+    from src.config import load_config
+
+    _write(tmp_path, "settings.yaml", 'mode: paper\ntimezone: "Asia/Tokyo"\n')
+    _write(tmp_path, "llm.yaml",
+           'llm:\n  provider: llamacpp\n'
+           '  provider_config:\n    base_url: "http://x/v1"\n'
+           '  news_analysis:\n    model: m1\n'
+           '  price_analysis:\n    model: m2\n'
+           '  reflection:\n    model: m3\n'
+           'embedding:\n  provider: llamacpp\n  base_url: "http://x/v1"\n')
+    _write(tmp_path, "strategy.yaml",
+           "trading:\n  risk_per_trade: 0.02\ntrading:\n  risk_per_trade: 0.99\n")
+
+    with pytest.raises(ConfigError, match="duplicate"):
+        load_config(tmp_path / "settings.yaml")
+
+
+def test_duplicate_subkey_within_block_rejected(tmp_path):
+    """ネストしたサブキーの重複も拒否する。"""
+    from src.config import load_config
+
+    _write(tmp_path, "settings.yaml", 'mode: paper\ntimezone: "Asia/Tokyo"\n')
+    _write(tmp_path, "llm.yaml",
+           'llm:\n  provider: llamacpp\n'
+           '  provider_config:\n    base_url: "http://x/v1"\n'
+           '  news_analysis:\n    model: m1\n'
+           '  price_analysis:\n    model: m2\n'
+           '  reflection:\n    model: m3\n'
+           'embedding:\n  provider: llamacpp\n  base_url: "http://x/v1"\n')
+    _write(tmp_path, "strategy.yaml",
+           "trading:\n  risk_per_trade: 0.02\n  risk_per_trade: 0.99\n")
+
+    with pytest.raises(ConfigError, match="duplicate"):
+        load_config(tmp_path / "settings.yaml")
