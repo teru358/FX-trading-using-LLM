@@ -1,6 +1,6 @@
 """reflection job のテスト (spec §3.2/§3.2b/§3.3/§3.5/§3.6)。"""
 import json
-from datetime import timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -180,8 +180,13 @@ class TestDedupeRawRows:
         あり (mt5_bridge_broker.py:635 が bridge 供給テキストに無防備な
         fromisoformat をかける)、offset 付き payload が来れば伝播する。
         """
+        # aware 側はローカル offset で組む。UTC 固定にすると「naive 側が新しい」の
+        # 期待がマシン TZ 依存になる (naive-local 規約では aware は壁時計へ換算される
+        # ため、UTC 表記の同時刻は JST では +9h の未来になってしまう)。
+        # 規約そのものの検証は test_reflection_closed_at_tz.py が受け持つ。
+        local_tz = datetime.now().astimezone().tzinfo
         aware = {"order_id": "d1", "realized_pnl": 1.0,
-                 "closed_at": NOW.replace(tzinfo=timezone.utc).isoformat()}
+                 "closed_at": NOW.replace(tzinfo=local_tz).isoformat()}
         naive = {"order_id": "d1", "realized_pnl": 999.0,
                  "closed_at": (NOW + timedelta(hours=5)).isoformat()}
         kept = _dedupe_raw_rows([aware, naive])      # 例外を出さない
@@ -199,12 +204,14 @@ class TestDedupeRawRows:
         assert len(kept) == 1
         assert kept[0]["realized_pnl"] == 999.0
 
-    def test_offset_normalized_to_utc_not_just_stripped(self):
-        """offset は UTC に寄せてから naive 化する (単に捨てない)。
+    def test_offset_normalized_not_just_stripped(self):
+        """offset は絶対時刻を保って正規化する (単に tzinfo を捨てない)。
 
         tzinfo を捨てるだけだと「+09:00 の 18:00」が naive 18:00 と同値に
-        なり、実際には UTC 09:00 = naive 規約より 9 時間早いのに「新しい」と
-        誤判定される。db_now() は naive machine-local (= 本番 JST) 規約。
+        なり、実際には 09:00 UTC = 12:00 UTC より早いのに「新しい」と誤判定
+        される。正規化先は DB 規約の naive machine-local
+        (clock.to_db_naive_datetime) — naive UTC ではない (レビュー Medium)。
+        両方 offset 付きなので、どちらの規約でも大小関係は同じ。
         """
         # 壁時計は 18:00 > 12:00 だが、offset を効かせると
         # 18:00+09:00 = UTC 09:00 < 12:00+00:00 = UTC 12:00 で大小が逆転する。

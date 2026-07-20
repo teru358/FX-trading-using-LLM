@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from src.analysis.price_analyzer import load_user_notes   # 現行定義元 (price_analyzer.py:30)
@@ -22,7 +22,7 @@ from src.persistence.state_store import StateStore
 from src.rag.directional_writer import record_trade_complete
 from src.rag.embedder import make_embed_fn
 from src.trading.position_manager import Order
-from src.utils.clock import db_now
+from src.utils.clock import db_now, to_db_naive_datetime
 
 if TYPE_CHECKING:
     from src.data.orchestrator_store import OrchestratorStore
@@ -75,10 +75,14 @@ def _raw_closed_at(d: dict) -> datetime | None:
     bridge 供給テキストに無防備な fromisoformat をかけるため、offset 付き
     payload が来れば伝播しうる。
 
-    offset 付きは UTC に寄せてから naive 化する。単に tzinfo を捨てると
-    「+09:00 の 10:00」と「naive の 10:00」が同値になり、db_now() 規約
-    (naive machine-local) と 9 時間ずれる。clock.py の db_utc_now() と
-    同じ正規化。
+    offset 付きは**ローカルへ寄せてから** naive 化する (clock.to_db_naive_datetime)。
+    DB 規約は db_now() = naive machine-local であり、naive UTC へ寄せると JST 環境で
+    9 時間ずれる。実測 (レビュー Medium): 重複行 "10:00 naive local" と "11:00+09:00"
+    を与えると、UTC 正規化では 11:00+09:00 が 02:00 UTC になって古いと誤判定され、
+    本来採るべき新しい行ではなく 10:00 の行が残っていた。
+
+    単に tzinfo を捨てるのも誤り — offset の違いが無視され、異なる offset 同士の
+    絶対時刻比較が壊れる。astimezone(local) → tzinfo 剥がし の順が正しい。
     """
     v = d.get("closed_at")
     if not isinstance(v, str):
@@ -87,9 +91,7 @@ def _raw_closed_at(d: dict) -> datetime | None:
         ts = datetime.fromisoformat(v)
     except ValueError:
         return None
-    if ts.tzinfo is not None:
-        ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
-    return ts
+    return to_db_naive_datetime(ts)
 
 
 def _dedupe_raw_rows(raw: list) -> list:
