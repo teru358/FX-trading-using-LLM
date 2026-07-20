@@ -101,6 +101,19 @@ def _pick_reflection_minute(news_times: "list[str] | None") -> int:
     return _REFLECTION_MINUTE_CANDIDATES[0]
 
 
+def daily_at(at_time: str, tz: str):
+    """日次スケジュール登録の共通入口。
+
+    全ての .at() 登録をここに集約し、timezone の渡し忘れを弾く。
+    旧構成では schedule.timezone / news_collection.timezone /
+    economic_calendar.fetch_timezone の3系統が混在していた
+    (2026-07-20 に config.timezone へ統一)。
+    """
+    if not tz:
+        raise ValueError("timezone must not be empty for scheduled jobs")
+    return schedule.every().day.at(at_time, tz)
+
+
 def _register_reflection_jobs(tz_name: str, fn, *args,
                               news_times: "list[str] | None" = None) -> None:
     """決済振り返りジョブを毎時スロットへ登録する (spec §3.6)。
@@ -114,7 +127,7 @@ def _register_reflection_jobs(tz_name: str, fn, *args,
     minute = _pick_reflection_minute(news_times)
     _logger.info(f"[REFLECT] scheduled hourly at :{minute:02d} ({tz_name})")
     for h in range(24):
-        schedule.every().day.at(f"{h:02d}:{minute:02d}", tz_name).do(
+        daily_at(f"{h:02d}:{minute:02d}", tz_name).do(
             _run_with_guard, _guards["reflection"], fn, *args, slot=_llm_slot,
         )
 
@@ -285,7 +298,6 @@ def main() -> None:
             _console.print("[yellow][WARN][/yellow] Twelve Data API: key not set — yfinance only")
 
     tz = config.timezone
-    news_tz = tz          # 旧 news_collection.timezone。統一により同一値 (2026-07-20)
     interval = config.news_collection.interval_minutes
 
     news_offset = config.news_collection.offset_minutes
@@ -341,7 +353,7 @@ def main() -> None:
     sched_table.add_row("Instruments",     ", ".join(trade_names + watch_names))
     sched_table.add_row(
         "News collection",
-        f"every [cyan]{interval}[/cyan] min  ([cyan]{news_tz}[/cyan] aligned)",
+        f"every [cyan]{interval}[/cyan] min  ([cyan]{tz}[/cyan] aligned)",
     )
     sched_table.add_row(
         "Technical analysis",
@@ -406,7 +418,7 @@ def main() -> None:
             for m in range(0, 60, monitor_interval)
         ]
         for t in monitor_times:
-            schedule.every().day.at(t, tz).do(
+            daily_at(t, tz).do(
                 _run_with_guard, _guards["price_monitor"],
                 run_price_monitor, config, price_provider, bridge_gate,
                 decision_store=_prot_store, protection_mode=stage,
@@ -414,7 +426,7 @@ def main() -> None:
 
     # 2. SL/TP確認・ポジション再評価（毎時:00・LLMなし）
     for t in technical_times:
-        schedule.every().day.at(t, news_tz).do(
+        daily_at(t, tz).do(
             _run_with_guard, _guards["exit_check"],
             run_exit_check_cycle, config, store, analysis_store, price_provider=price_provider
         )
@@ -424,18 +436,18 @@ def main() -> None:
     _reflect_store = _OrchStoreForReflect(config.prices_db_path)
     from src.cycles.reflection import run_reflection_cycle
     _register_reflection_jobs(
-        news_tz, run_reflection_cycle, config, store, _reflect_store,
+        tz, run_reflection_cycle, config, store, _reflect_store,
         news_times=news_times,
     )
 
     # 3. ニュース収集（LLMあり・時間がかかる）
     for t in news_times:
-        schedule.every().day.at(t, news_tz).do(
+        daily_at(t, tz).do(
             _run_with_slot, run_news_collection, config, store
         )
 
     # RAGクリーンアップ（毎日1回、ニュース収集の最初の時刻に実行）
-    schedule.every().day.at(news_times[0], news_tz).do(_run_rag_cleanup)
+    daily_at(news_times[0], tz).do(_run_rag_cleanup)
 
     # 4. テクニカル分析。cadence_enabled なら可変 interval driver、そうでなければ
     #    現行の union 時刻 dispatch (後方互換・ロールバック先)。
@@ -451,7 +463,7 @@ def main() -> None:
         _logger.info("[CADENCE] variable-interval driver enabled (union dispatch bypassed)")
     else:
         for t in _tech_union_times:
-            schedule.every().day.at(t, news_tz).do(
+            daily_at(t, tz).do(
                 _run_with_guard, _guards["technical"], _tech_dispatch, t,
             )
 
@@ -470,7 +482,7 @@ def main() -> None:
                 min_importance=config.economic_calendar.min_importance,
             )
 
-        schedule.every().day.at(
+        daily_at(
             config.economic_calendar.fetch_time,
             tz,
         ).do(_run_with_guard, _guards["econ"], _econ_daily)
@@ -501,11 +513,12 @@ def main() -> None:
             def _weekly_diagnosis_run():
                 _run_weekly(config)
 
-            _wd_picker.at(_wd_cfg.at_time, news_tz).do(
+            # 週次登録のため daily_at (every().day) は通せない。tz は同一。
+            _wd_picker.at(_wd_cfg.at_time, tz).do(
                 _run_with_guard, _guards["weekly_diagnosis"], _weekly_diagnosis_run,
             )
             _logger.info(
-                f"[WEEKLY] Scheduled: {_wd_weekday} {_wd_cfg.at_time} ({news_tz})"
+                f"[WEEKLY] Scheduled: {_wd_weekday} {_wd_cfg.at_time} ({tz})"
             )
 
     # data/ 定期バックアップ (sync 失敗・破損対策、cron 不使用)
@@ -517,11 +530,11 @@ def main() -> None:
         def _data_backup_run():
             _run_backup(config)
 
-        schedule.every().day.at(_bk_cfg.at_time, news_tz).do(
+        daily_at(_bk_cfg.at_time, tz).do(
             _run_with_guard, _guards["data_backup"], _data_backup_run,
         )
         _logger.info(
-            f"[BACKUP] Scheduled: daily {_bk_cfg.at_time} ({news_tz}), "
+            f"[BACKUP] Scheduled: daily {_bk_cfg.at_time} ({tz}), "
             f"keep {_bk_cfg.retention_count} archives in {_bk_cfg.output_dir}"
         )
 
