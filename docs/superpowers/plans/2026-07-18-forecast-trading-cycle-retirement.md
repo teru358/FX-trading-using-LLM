@@ -3124,15 +3124,15 @@ finance 側 Task 8 で `src/api/routes/health.py` の返り値から `trading`/`
 (a) 消えるキーへの直参照がないこと、(b) 新カテゴリ `reflection` が表示されること
 を確認・追従する。
 
-- [ ] **Step 1: discord_bot に作業ブランチを切る**
+- [x] **Step 1: discord_bot に作業ブランチを切る**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/discord_bot && git checkout master && git checkout -b feat/finance-cycle-retirement"
 ```
 
-- [ ] **Step 2: 上記削除を実施**
+- [x] **Step 2: 上記削除を実施**
 
-- [ ] **Step 3: 参照残りゼロ + 全テスト**
+- [x] **Step 3: 参照残りゼロ + 全テスト**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/discord_bot && grep -rn 'forecast\|run_trade\|run/trade' cogs/finance/ --include='*.py' | grep -v gate" 
@@ -3142,11 +3142,50 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/discord_bot && uv run pytest -q 2>
 Expected: grep は gate 系以外ヒット 0 件、pytest 全 PASS
 (既存テストは gate 系のみで forecast/run_trade に依存しない — 調査済み)。
 
-- [ ] **Step 4: commit**
+- [x] **Step 4: commit**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/discord_bot && git add -A && git commit -m 'feat: finance forecast/run_trade 導線削除 (cycle retirement 追従)'"
 ```
+
+**実施結果 (2026-07-20)**
+
+ブランチ `feat/finance-cycle-retirement` に 2 コミット (未 push):
+
+- `3cfa765` test: 回帰テストを先に追加 (RED 12 failures を確認)
+- `67c57cc` feat: 削除実施 (RED → GREEN)
+
+**173 passed, 0 failed** (baseline 157 + 新規 16)。テスト環境は `uv` (`asyncio_mode=auto`)。
+
+plan 記載の行番号はすべて正確で、「旧 plan に欠落していた 4 件」も実在を確認して削除した。
+
+**plan 外で追加削除したもの (使用箇所を追跡して発見)**:
+
+- `_DIRECTION_COLOR` / `_REVIEWED_LABEL` — `_forecast_embeds` 専用だったため dead 化。
+  他の 4 つの color map は別途使用中であることを確認した上で削除
+- 「既存 0..15 は不変」というインデックス互換コメント — schema 削除で偽になったため訂正
+  (登録は `TOOL_METHODS` の name-keyed なので実害はない)
+- `client.py:148` の「`run_trade` は長時間呼び出しの例」というコメント — 実体が消えたので
+  `/ask` に差し替え
+
+**回帰テストを一般化した**: 「forecast / run_trade が無いこと」だけでなく、
+`TOOL_SCHEMAS ≡ TOOL_METHODS`、`ADMIN_TOOLS ⊆ TOOL_METHODS`、
+**`TOOL_METHODS` の全 target が `FinanceClient` に実在すること**を検証する。
+最後の 1 つは「tool が削除済みエンドポイントを指す」という一般の失敗モードを捕まえる。
+
+**mock でない実 cog ロード smoke** も実施 (`add_cog` を通してライブレジストリをダンプ)。
+残存コマンドは `account, analyze, ask, close, halt, help, logs, manual, news, resume,
+schedule, status, tech, usage` で `forecast` / `run` は不在。
+
+**health 追従は不要と判明** — discord_bot に `health()` メソッドは存在せず、
+`/health` は以前 `/status` に統合済み。`_status_embed` は全て `.get()` + デフォルトで
+カテゴリも汎用反復のため、`reflection` 追加・`trading`/`forecast` 削除のどちらも
+コード変更なしで通る。`categories` を添字参照しているのは `_news_embeds` のみ (無関係)。
+
+**未処置 (要判断)**: discord_bot の `CLAUDE.md` が gitignore 対象。作業中に偽と確認した
+記述 (「テストランナーもリンターも未設定」= 実際は 173 テストある、`?health` コマンド参照
+= `?status` に統合済み) をディスク上では修正したが**コミットできない**。
+ignore ルールを変えるかはリポジトリ方針のため未着手。
 
 ---
 
