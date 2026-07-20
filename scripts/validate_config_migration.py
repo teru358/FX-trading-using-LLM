@@ -22,23 +22,60 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from src.config import load_config
 from dump_config_snapshot import flatten
 
-# 移行で消えるキー (旧スナップショットにのみ存在してよい)
-EXPECTED_REMOVED = {
-    "schedule.timezone",
-    "news_collection.timezone",
-    "economic_calendar.fetch_timezone",
-    "rag.embedding_provider",
-    "rag.embedding_model",
-    "rag.embedding_base_url",
+# 移設の対応表: 新キー ← 移設元の旧キー群。
+# 単に「消えてよい / 増えてよい」を許可するだけでは、移設の過程で値が化けても
+# 検出できない (旧キーは removed、新キーは added として別々に許可されるため)。
+# 値の一致まで検証する。
+MIGRATIONS: dict[str, tuple[str, ...]] = {
+    # 3 つの timezone を 1 つに統合。統合元同士も一致していなければならない
+    # (異なる値だった場合、統合はいずれかの設定を黙って捨てることになる)。
+    "timezone": (
+        "schedule.timezone",
+        "news_collection.timezone",
+        "economic_calendar.fetch_timezone",
+    ),
+    "embedding.provider": ("rag.embedding_provider",),
+    "embedding.model": ("rag.embedding_model",),
+    "embedding.base_url": ("rag.embedding_base_url",),
 }
 
-# 移行で増えるキー (新 config にのみ存在してよい)
-EXPECTED_ADDED = {
-    "timezone",
-    "embedding.provider",
-    "embedding.model",
-    "embedding.base_url",
-}
+EXPECTED_REMOVED = {old for olds in MIGRATIONS.values() for old in olds}
+EXPECTED_ADDED = set(MIGRATIONS)
+
+
+def check_migrated_values(before: dict, after: dict) -> list[str]:
+    """移設元と移設先の値が一致することを検証する。
+
+    旧キーがスナップショットに無い場合 (既に移行済みの config 同士の比較) は
+    検証をスキップする。
+    """
+    errors = []
+    for new_key, old_keys in MIGRATIONS.items():
+        present = {k: before[k] for k in old_keys if k in before}
+        if not present:
+            continue  # 移行前スナップショットではない
+
+        # 統合元が複数ある場合、それら同士の一致を先に確認する
+        distinct = set(present.values())
+        if len(distinct) > 1:
+            detail = ", ".join(f"{k}={v}" for k, v in sorted(present.items()))
+            errors.append(
+                f"{new_key}: source keys disagree before migration ({detail}). "
+                f"Consolidating them would silently discard one of the settings. "
+                f"Decide which value to keep before migrating."
+            )
+            continue
+
+        old_value = distinct.pop()
+        new_value = after.get(new_key)
+        if new_value is None:
+            errors.append(f"{new_key}: missing in the new config (expected {old_value}).")
+        elif new_value != old_value:
+            errors.append(
+                f"{new_key}: value changed during migration "
+                f"({', '.join(sorted(old_keys))} was {old_value}, now {new_value})."
+            )
+    return errors
 
 
 def main() -> int:
@@ -90,11 +127,21 @@ def main() -> int:
             print(f"  ~ {k}: {before[k]} -> {after[k]}")
         problems += len(unexpected_changed)
 
+    # 移設した値そのものが正しく引き継がれているかを検証する。
+    # removed/added の許可だけでは、移設中に値が化けても素通りしてしまう。
+    value_errors = check_migrated_values(before, after)
+    if value_errors:
+        print("\n=== MIGRATED VALUE MISMATCH ===")
+        for msg in value_errors:
+            print(f"  ! {msg}")
+        problems += len(value_errors)
+
     if problems:
         print(
-            f"\nFAIL: {problems} unexpected difference(s). "
-            "This usually means a block was dropped or misspelled during the split, "
-            "and its values fell back to schema defaults."
+            f"\nFAIL: {problems} problem(s) found. "
+            "Unexpected key differences usually mean a block was dropped or "
+            "misspelled during the split (values fell back to schema defaults). "
+            "Value mismatches mean a migrated setting did not carry over correctly."
         )
         return 1
 
