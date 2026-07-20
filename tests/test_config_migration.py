@@ -45,3 +45,81 @@ def test_merge_accepts_missing_file(tmp_path):
     """ファイル不在は正常 (存在チェックは Task 4 の必須ファイル検証が担当)。"""
     result = _merge_split_configs({"mode": "paper"}, tmp_path)
     assert result == {"mode": "paper"}
+
+
+from src.config.migration import check_migration
+
+
+def test_denylist_detects_old_timezone_key():
+    """schedule.timezone の残存を検出し、移動先を示す。"""
+    files = {"settings.yaml": {"schedule": {"timezone": "Asia/Tokyo"}}}
+
+    with pytest.raises(ConfigError) as exc:
+        check_migration(files)
+
+    msg = str(exc.value)
+    assert "schedule.timezone" in msg
+    assert "timezone" in msg
+    assert "settings.yaml" in msg
+
+
+def test_denylist_reports_all_violations_at_once():
+    """複数の旧キーが残っていれば全件まとめて報告する (1つ直すたびの再起動を避ける)。"""
+    files = {
+        "settings.yaml": {
+            "schedule": {"timezone": "Asia/Tokyo"},
+            "news_collection": {"timezone": "Asia/Tokyo"},
+        },
+        "strategy.yaml": {"rag": {"embedding_provider": "ollama"}},
+    }
+
+    with pytest.raises(ConfigError) as exc:
+        check_migration(files)
+
+    msg = str(exc.value)
+    assert "schedule.timezone" in msg
+    assert "news_collection.timezone" in msg
+    assert "rag.embedding_provider" in msg
+
+
+def test_denylist_detects_key_masked_by_block_replacement():
+    """マージ後検査では見えない masking ケースを検出する。
+
+    settings.yaml の schedule.timezone は、strategy.yaml が schedule ブロックを
+    持つとマージ後の dict から消える (ブロック全置換)。移行途中に最も
+    起こりやすい状態であり、ここを取りこぼすと検出機構の意味がない。
+    """
+    files = {
+        "settings.yaml": {"schedule": {"timezone": "Asia/Tokyo"}},
+        "strategy.yaml": {"schedule": {"technical_trade_interval_minutes": 30}},
+    }
+
+    with pytest.raises(ConfigError, match="schedule.timezone"):
+        check_migration(files)
+
+
+def test_duplicate_top_level_block_rejected():
+    """同一 top-level ブロックが複数ファイルにあると後勝ちで片方が消えるため拒否。"""
+    files = {
+        "settings.yaml": {"trading": {"risk_per_trade": 0.02}},
+        "strategy.yaml": {"trading": {"risk_per_trade": 0.01}},
+    }
+
+    with pytest.raises(ConfigError) as exc:
+        check_migration(files)
+
+    msg = str(exc.value)
+    assert "trading" in msg
+    assert "settings.yaml" in msg
+    assert "strategy.yaml" in msg
+
+
+def test_clean_config_passes():
+    """正しく移行された構成では何も起きない。"""
+    files = {
+        "settings.yaml": {"timezone": "Asia/Tokyo", "mode": "paper"},
+        "llm.yaml": {"llm": {"provider": "llamacpp"}, "embedding": {"provider": "ollama"}},
+        "strategy.yaml": {"trading": {"risk_per_trade": 0.02}},
+    }
+
+    check_migration(files)  # raises しなければ成功

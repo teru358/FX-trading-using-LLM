@@ -80,8 +80,7 @@ _LLM_BASE_URL_HINTS = {
 }
 
 
-class ConfigError(ValueError):
-    """設定の起動時バリデーションで検出された致命的エラー。"""
+from src.config.errors import ConfigError
 
 
 # ── 汎用ヘルパー ────────────────────────────────────────────────
