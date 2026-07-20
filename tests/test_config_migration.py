@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.config.loader import ConfigError, _merge_split_configs
+from src.config.migration import check_migration
 
 
 def _write(dirpath: Path, name: str, text: str) -> None:
@@ -45,9 +46,6 @@ def test_merge_accepts_missing_file(tmp_path):
     """ファイル不在は正常 (存在チェックは Task 4 の必須ファイル検証が担当)。"""
     result = _merge_split_configs({"mode": "paper"}, tmp_path)
     assert result == {"mode": "paper"}
-
-
-from src.config.migration import check_migration
 
 
 def test_denylist_detects_old_timezone_key():
@@ -123,3 +121,43 @@ def test_clean_config_passes():
     }
 
     check_migration(files)  # raises しなければ成功
+
+
+def test_unknown_top_level_key_rejected_with_suggestion():
+    """top-level ブロック名の typo を検出し、近い既知キーを提示する。"""
+    files = {"strategy.yaml": {"tradng": {"risk_per_trade": 0.02}}}
+
+    with pytest.raises(ConfigError) as exc:
+        check_migration(files)
+
+    msg = str(exc.value)
+    assert "tradng" in msg
+    assert "trading" in msg  # 候補提示
+
+
+def test_unknown_subkey_is_ignored():
+    """サブキーの未知は無視する (検査は top-level 1 階層のみ)。"""
+    files = {"strategy.yaml": {"trading": {"totally_unknown_subkey": 1}}}
+
+    check_migration(files)  # raises しない
+
+
+def test_known_top_level_keys_accepted():
+    """AppConfig が受け付ける全 top-level キーが通ること。"""
+    files = {
+        "settings.yaml": {
+            "mode": "paper", "paper_provider": "yfinance", "live_broker": None,
+            "timezone": "Asia/Tokyo", "logging": {}, "api": {},
+            "notification": {}, "data_backup": {},
+        },
+        "llm.yaml": {"llm": {}, "agents": {}, "embedding": {}},
+        "strategy.yaml": {
+            "trading": {}, "price_monitor": {}, "schedule": {}, "analysis": {},
+            "news_collection": {}, "economic_calendar": {}, "orchestrator": {},
+            "rag": {}, "weekly_diagnosis": {},
+        },
+        "instruments.yaml": {"instruments": []},
+        "news_sources.yaml": {"keywords": {}, "news_sources": {}},
+    }
+
+    check_migration(files)  # raises しない
