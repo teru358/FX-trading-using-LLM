@@ -1,6 +1,6 @@
 """PriorityJobSlot: LLMリソース用の優先度付き単一スロット。
 
-ユーザー起動ジョブ (POST /ask, POST /run/trade 等) はスロット競合時に
+ユーザー起動ジョブ (POST /ask 等) はスロット競合時に
 バックグラウンドキューに1件だけ入れられる。定期ジョブは競合時にスキップ。
 """
 from __future__ import annotations

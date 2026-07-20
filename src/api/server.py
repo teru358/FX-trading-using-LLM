@@ -10,7 +10,7 @@
 - ``routes.account`` — /account (残高 + ポジション一覧、halt は /status へ集約)
 - ``routes.admin``   — /admin/halt, /admin/resume (MT5 bridge へのプロキシ)
 - ``routes.data``    — /news, /tech, /analyze, /feeds
-- ``routes.trading`` — /run/trade, /close/{pair}
+- ``routes.trading`` — /close/{pair}
 - ``routes.ask``     — /ask
 
 共有ステート (config, store, llm_slot 等) は ``src/api/_state.py`` の

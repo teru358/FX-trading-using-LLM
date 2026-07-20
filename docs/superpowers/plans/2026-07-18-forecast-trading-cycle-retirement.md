@@ -58,7 +58,7 @@
 
 ### Task 0: ブランチ作成
 
-- [ ] **Step 1: ブランチを切る**
+- [x] **Step 1: ブランチを切る**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git checkout feat/orchestrator-observability && git checkout -b feat/cycle-retirement && git log --oneline -1"
@@ -76,7 +76,7 @@ Expected: HEAD が spec 最新コミット (1185b89 以降)。
 
 spec: §3.2b (retry/dead/backoff)、§3.4 (テーブル定義)、§3.3 (`get_order_intent_by_order_id` + index)、§3.6 (`has_running_planning_run` / dangling 回収)。
 
-- [ ] **Step 1: failing tests を書く**
+- [x] **Step 1: failing tests を書く**
 
 `tests/test_orchestrator_store_reflections.py` を新規作成。既存 `tests/test_orchestrator_store.py` の fixture パターン (`OrchestratorStore(tmp_path / "orch.db")`) を踏襲:
 
@@ -238,7 +238,7 @@ class TestPlanningRunQuery:
 ```
 
 
-- [ ] **Step 2: テストが fail することを確認**
+- [x] **Step 2: テストが fail することを確認**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_orchestrator_store_reflections.py -x -q 2>&1 | tail -5"
@@ -246,7 +246,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 
 Expected: `AttributeError: ... has no attribute 'mark_reflection_done'` 等で FAIL。
 
-- [ ] **Step 3: 実装**
+- [x] **Step 3: 実装**
 
 `src/data/orchestrator_store.py` に追加。
 
@@ -426,7 +426,7 @@ _PLANNING_STALE_SECONDS = 600
 import に `timedelta` (`from datetime import datetime, timedelta`)・`update`・`Boolean` が
 なければ追加。
 
-- [ ] **Step 4: green 確認 + 既存 store テスト回帰**
+- [x] **Step 4: green 確認 + 既存 store テスト回帰**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_orchestrator_store_reflections.py tests/test_orchestrator_store.py -q 2>&1 | tail -3"
@@ -451,7 +451,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add src/data/orches
 
 spec: §3.3 (プロンプト簡素化)、§3.5 (fallback 削除・例外伝搬)、§3.5b (schema validation + 機械判定)。
 
-- [ ] **Step 1: failing tests を書く**
+- [x] **Step 1: failing tests を書く**
 
 `tests/test_reflector_strict.py`:
 
@@ -604,7 +604,7 @@ async def test_rag_failure_propagates():
         await record_trade_complete(_FailingStore(), _embed, _Order(), "text")
 ```
 
-- [ ] **Step 2: fail 確認**
+- [x] **Step 2: fail 確認**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_reflector_strict.py tests/test_directional_writer_strict.py -x -q 2>&1 | tail -5"
@@ -612,7 +612,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 
 Expected: `ImportError: cannot import name 'ReflectionValidationError'` 等で FAIL。
 
-- [ ] **Step 3: 実装**
+- [x] **Step 3: 実装**
 
 `src/analysis/reflector.py`:
 
@@ -667,7 +667,7 @@ Expected: `ImportError: cannot import name 'ReflectionValidationError'` 等で F
 `src/rag/directional_writer.py` の `record_trade_complete` (`:92-113`):
 try/except を外し例外伝搬にする (embedding 生成 + upsert をベタに実行)。
 
-- [ ] **Step 4: green 確認 + 既存呼び出し元の暫定追従**
+- [x] **Step 4: green 確認 + 既存呼び出し元の暫定追従**
 
 `_finalize_closed_orders` (trading.py) は旧シグネチャで呼んでいるため、この時点で
 trading 系テストが壊れる場合は **trading.py 側の呼び出しを新シグネチャに合わせる
@@ -685,7 +685,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 旧 `tests/test_reflector.py` が fallback 前提で fail する場合は、このタスクで削除する
 (spec §6: 再設計後は新規テストに置換)。
 
-- [ ] **Step 5: commit**
+- [x] **Step 5: commit**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A src/analysis/reflector.py src/rag/directional_writer.py src/cycles/trading.py tests/ && git commit -m 'feat(reflect): reflector strict化 (fallback削除/schema validation/価格方向の機械判定) + record_trade_complete例外伝搬'"
@@ -702,7 +702,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A src/analysis
 
 spec: §3.4b。
 
-- [ ] **Step 1: failing tests を書く**
+- [x] **Step 1: failing tests を書く**
 
 `tests/test_directional_store_filters.py`:
 
@@ -769,7 +769,7 @@ def test_trade_complete_survives_cleanup(seeded):
     assert seeded.count("bullish") == 1
 ```
 
-- [ ] **Step 2: fail 確認**
+- [x] **Step 2: fail 確認**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_directional_store_filters.py -x -q 2>&1 | tail -5"
@@ -777,7 +777,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 
 Expected: `TypeError: query() got an unexpected keyword argument 'session_type_filter'` で FAIL。
 
-- [ ] **Step 3: 実装**
+- [x] **Step 3: 実装**
 
 `src/rag/directional_store.py`:
 
@@ -835,13 +835,13 @@ Expected: `TypeError: query() got an unexpected keyword argument 'session_type_f
             phase_filter="complete", session_type_filter="trade")
 ```
 
-- [ ] **Step 4: green 確認**
+- [x] **Step 4: green 確認**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_directional_store_filters.py tests/test_integration_directional.py tests/test_directional_writer_horizon.py -q 2>&1 | tail -3"
 ```
 
-- [ ] **Step 5: commit**
+- [x] **Step 5: commit**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add src/rag/directional_store.py src/jobs/news_collector.py tests/test_directional_store_filters.py && git commit -m 'feat(rag): directional query複合filter + 退役カード削除API + news教訓検索をtrade completeに限定'"
@@ -861,7 +861,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add src/rag/directi
 
 spec: §3.2 (検知)、§3.2b (枠/retry)、§3.3 (plan 文脈)、§3.5 (失敗時)、§3.6 (controller/slot/planning 譲り)。
 
-- [ ] **Step 1: failing tests を書く**
+- [x] **Step 1: failing tests を書く**
 
 `tests/test_reflection_cycle.py`。fake slot / fake orch_store / trades.json を tmp_path に
 組んでテストする:
@@ -1218,7 +1218,7 @@ class TestRunReflectionCycle:
 ```
 
 
-- [ ] **Step 2: fail 確認**
+- [x] **Step 2: fail 確認**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_reflection_cycle.py -x -q 2>&1 | tail -5"
@@ -1226,7 +1226,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 
 Expected: `ModuleNotFoundError: No module named 'src.cycles.reflection'`。
 
-- [ ] **Step 3: 実装 — `src/cycles/reflection.py`**
+- [x] **Step 3: 実装 — `src/cycles/reflection.py`**
 
 ```python
 """reflection job — 決済済みトレードの LLM 振り返り (spec §3)。
@@ -1441,13 +1441,13 @@ def run_reflection_cycle(config, store, orch_store, *, slot) -> None:
 ```
 
 
-- [ ] **Step 4: green 確認**
+- [x] **Step 4: green 確認**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_reflection_cycle.py tests/test_orchestrator_store_reflections.py -q 2>&1 | tail -3"
 ```
 
-- [ ] **Step 5: commit**
+- [x] **Step 5: commit**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add src/cycles/reflection.py tests/test_reflection_cycle.py && git commit -m 'feat(reflect): reflection job本体 (検知/枠規則/retry/plan文脈/slot逐次controller)'"
@@ -1465,7 +1465,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add src/cycles/refl
 - Modify: `src/orchestrator/bootstrap.py` (dangling 回収)
 - Test: 既存 bootstrap テストに追記
 
-- [ ] **Step 1: 実装**
+- [x] **Step 1: 実装**
 
 `src/orchestrator/bootstrap.py` — `OrchestratorStore` 生成直後 (`:178` 付近) に:
 
@@ -1478,7 +1478,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add src/cycles/refl
 
 (`db_now` の import が bootstrap にあるか確認、なければ追加。)
 
-- [ ] **Step 2: テスト**
+- [x] **Step 2: テスト**
 
 既存 bootstrap テストに「起動時に dangling run が failed になる」ケースを追加:
 
@@ -1632,7 +1632,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && \
 5. orchestrator が動く
 6. Step 2 の grep 検証がヒット 0
 
-- [ ] **Step 5: commit**
+- [x] **Step 5: commit**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && git add -A && git commit -m 'feat!: forecastサイクル完全削除 (cycle/store/accuracy/表示/API/config)'"
@@ -2983,7 +2983,7 @@ if __name__ == "__main__":
     main()
 ```
 
-- [ ] **Step 3: green 確認 + commit**
+- [x] **Step 3: green 確認 + commit**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/test_migrate_cycle_retirement.py tests/test_directional_store_filters.py -q 2>&1 | tail -3 && git add scripts/migrate_cycle_retirement.py tests/test_migrate_cycle_retirement.py && git commit -m 'feat(migration): 退役テーブルdrop + adaptive JSON削除 + RAG退役カード削除 (冪等)'"

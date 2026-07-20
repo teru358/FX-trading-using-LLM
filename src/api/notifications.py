@@ -1,7 +1,7 @@
 """API ジョブ完了通知 + Discord webhook ヘルパー。
 
-``/run/trade`` と ``/ask`` から呼ばれる「promote/slot_busy ブランチを共通化する
-完了通知ロジック」を集約する。
+``/ask`` から呼ばれる「promote/slot_busy ブランチを共通化する完了通知ロジック」を
+集約する。
 """
 from __future__ import annotations
 
