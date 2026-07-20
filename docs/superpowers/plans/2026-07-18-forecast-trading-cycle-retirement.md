@@ -2993,7 +2993,7 @@ wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest tests/tes
 
 ### Task 10: 全体回帰 — full suite + 実 config 掃除チェックリスト
 
-- [ ] **Step 1: full suite 実行 (合格基準)**
+- [x] **Step 1: full suite 実行 (合格基準)**
 
 ```bash
 wsl -d Ubuntu-24.04 -- bash -lc "cd ~/project/finance && uv run pytest -q 2>&1 | tail -10"
@@ -3012,7 +3012,7 @@ prune 窓を外れたことによる**時限崩壊 (本ブランチとは無関�
 baseline 確定手順ごと Task 6 の先頭へ移設した。**CLAUDE.md の「既知 2 件 =
 test_insights」という記述の訂正も Task 6 Step 0 に含まれる。**
 
-- [ ] **Step 2: 実 config 掃除の TODO を deploy ノートに残す**
+- [x] **Step 2: 実 config 掃除の TODO を deploy ノートに残す**
 
 `docs/superpowers/notes/2026-07-18-cycle-retirement-deploy.md` を作成 (§8 の順序 +
 §5 の実 config 削除キー一覧 + §4 のバックアップ手順を転記)。
@@ -3037,7 +3037,7 @@ loader は未知キーを**黙殺**するため、残っていても起動は壊
 「消し忘れに気づけない」ことと同義であり、§5 が警告しているのはまさにこの点。
 deploy ノートには上記 20 キーを行番号つきで転記し、消し込みチェックリストにすること。
 
-- [ ] **Step 2b: deploy ノートに「追加/必須化キー」の項を新設する** (Task 7 レビュー M-5)
+- [x] **Step 2b: deploy ノートに「追加/必須化キー」の項を新設する** (Task 7 レビュー M-5)
 
 §5 は**削除**キーしか列挙していないが、Task 7 の fail-fast 化で**新規に必須化された
 キー**がある。`config/settings.yaml` は gitignore 対象のホスト個別ファイルであり、
@@ -3057,7 +3057,7 @@ deploy ノートに以下を明記すること:
 「pairs で subset 運用したい」場合は orchestrator 側ではなく **instruments 側の
 `mode` で表現する** (許可フラグは設けない方針)。
 
-- [ ] **Step 2c: 後続 TODO を記録する** (Task 7 レビュー M-4 / L-5)
+- [x] **Step 2c: 後続 TODO を記録する** (Task 7 レビュー M-4 / L-5)
 
 本 plan スコープ外として見送った項目。別途着手する:
 
@@ -3090,7 +3090,7 @@ deploy ノートに以下を明記すること:
    ただし本 plan の削除リスト外の関数のため、スコープを守って手を付けていない。
    別途の dead code 掃除で処理すること。
 
-- [ ] **Step 3: ノートはローカル保存のみ**
+- [x] **Step 3: ノートはローカル保存のみ**
 
 deploy note は commit しない (docs/ は gitignore 運用 — plan レビュー Low-4)。
 ユーザーが必要と判断すれば手動で `git add -f` する。
