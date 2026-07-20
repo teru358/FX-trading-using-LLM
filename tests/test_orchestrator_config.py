@@ -202,3 +202,22 @@ def test_build_orchestrator_config_null_notifications_uses_defaults() -> None:
     cfg = _build_orchestrator_config({"enabled": True, "notifications": None})
     assert cfg.notifications.shadow_enabled is True
     assert cfg.notifications.shadow_plan_created is True
+
+
+# --- 外部レビュー Medium (修正2): mode の有効値を固定する ----------------------
+#
+# 実装 (schema.py の __post_init__) が受理するのは shadow / live のみ。
+# observe は Task F 時点で執行段を起動しないため valid_modes から外されているが、
+# フィールド宣言のコメントと deploy ノート / plan には observe が有効値として
+# 残っていた。どちらが真かをテストで固定し、再発を防ぐ。
+
+
+@pytest.mark.parametrize("mode", ["shadow", "live"])
+def test_orchestrator_mode_valid_values_accepted(mode) -> None:
+    assert OrchestratorConfig(mode=mode).mode == mode
+
+
+@pytest.mark.parametrize("mode", ["observe", "paper", "", "LIVE"])
+def test_orchestrator_mode_invalid_values_rejected(mode) -> None:
+    with pytest.raises(ValueError, match="mode must be one of"):
+        OrchestratorConfig(mode=mode)

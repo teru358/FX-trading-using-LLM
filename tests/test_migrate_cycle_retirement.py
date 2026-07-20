@@ -325,3 +325,72 @@ def test_main_execute_aborts_before_destructive_ops_when_rag_fails(
     assert exc.value.code != 0
     assert _snapshot(db) == before, "RAG 失敗後に SQLite が変更された"
     assert params.exists(), "RAG 失敗後に adaptive_params.yaml が削除された"
+
+
+# --- 外部レビュー Medium (修正1): RAG パス / collection の実在確認 --------------
+#
+# PersistentClient は存在しないパスを自動作成する (実測: mkdir + chroma.sqlite3 生成、
+# collection は 0 件)。したがって「開けた」ことは「正しい RAG を指している」証拠に
+# ならず、config のパス設定ミスがあっても preflight を通過して SQLite だけが移行され、
+# 部分適用の防止という preflight の目的が成立しない。
+# よって開く前にパスの実在を確認し、開いた後に既定 collection の実在も確認する。
+
+
+_EXPECTED_COLLECTIONS = ("fx_reflections_bullish", "fx_reflections_bearish")
+
+
+def _make_rag(path, *, collections=_EXPECTED_COLLECTIONS):
+    """実際の chromadb で collection 付きの永続化先を作る。"""
+    import chromadb
+
+    client = chromadb.PersistentClient(path=str(path))
+    for name in collections:
+        client.get_or_create_collection(name=name)
+    return path
+
+
+def test_preflight_rejects_nonexistent_rag_path(tmp_path):
+    """RAG パスが不在なら中止し、そのパスが作られないこと。"""
+    db = _make_db(tmp_path)
+    rag = tmp_path / "absent_rag"
+
+    with pytest.raises(PreflightError, match="RAG"):
+        preflight(db_path=db, state_dir=tmp_path, rag_db_path=rag, check_rag=True)
+
+    assert not rag.exists(), f"preflight が RAG パスを作成した: {_tree(rag)}"
+
+
+def test_preflight_rejects_rag_path_without_collections(tmp_path):
+    """パスは在るが既定 collection が無い (= 別物を指している) なら中止すること。"""
+    db = _make_db(tmp_path)
+    rag = _make_rag(tmp_path / "empty_rag", collections=())
+
+    with pytest.raises(PreflightError, match="collection"):
+        preflight(db_path=db, state_dir=tmp_path, rag_db_path=rag, check_rag=True)
+
+
+def test_preflight_accepts_rag_path_with_expected_collections(tmp_path):
+    db = _make_db(tmp_path)
+    rag = _make_rag(tmp_path / "real_rag")
+
+    store = preflight(db_path=db, state_dir=tmp_path, rag_db_path=rag, check_rag=True)
+
+    assert store is not None
+
+
+def test_main_execute_aborts_when_rag_path_absent(stub_config, tmp_path):
+    """end-to-end: RAG パス不在の --execute が DB も adaptive も RAG も触らないこと。"""
+    db = _make_db(tmp_path)
+    params = tmp_path / "adaptive_params.yaml"
+    params.write_text("{}")
+    rag = tmp_path / "absent_rag"
+    stub_config(db=db, rag=rag)
+    before = _snapshot(db)
+
+    with pytest.raises(SystemExit) as exc:
+        main(["--execute"])
+
+    assert exc.value.code != 0
+    assert _snapshot(db) == before, "RAG パス不在なのに SQLite が変更された"
+    assert params.exists(), "RAG パス不在なのに adaptive_params.yaml が削除された"
+    assert not rag.exists(), f"RAG パスが新規作成された: {_tree(rag)}"
