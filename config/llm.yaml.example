@@ -1,0 +1,144 @@
+# ============================================================
+# LLM・agent・embedding の設定 (config/llm.yaml)
+#
+# config は 3 ファイルに分割されている (config migration 2026-07-20):
+#   settings.yaml — 実行基盤 (mode / provider 選択 / timezone / logging / api /
+#                   notification / data_backup)
+#   llm.yaml      — 本ファイル。LLM / agents / embedding
+#   strategy.yaml — 売買戦略パラメータ (trading / schedule / analysis / rag 等)
+#
+# 3 ファイルは top-level ブロック単位でマージされる。同じブロックを
+# 複数ファイルに書くと起動時 ConfigError になる。
+#
+# provider に応じて意味のあるフィールドが provider_config 側で異なる:
+#   ollama / llamacpp — base_url 必須（空欄なら起動時 ConfigError）
+#   claude-cli        — command (空欄なら "claude" 補完) / isolated_cwd / extra_args
+#   claude (API)      — max_tokens (0 なら 4096 補完) / API キーは ANTHROPIC_API_KEY
+#   gemini / openai   — API キーは GEMINI_API_KEY / OPENAI_API_KEY
+#
+# 各役割は model のみを provider に合わせて差し替える:
+#   ollama:     "llama3.1:8b" など
+#   llamacpp:   llama-swap config.yaml の models.<name> と一致
+#   claude-cli: "claude-haiku-4-5" / "claude-sonnet-4-6"
+#   claude:     "claude-haiku-4-5-20251001" など
+#   gemini:     "gemini-2.0-flash" など
+#   openai:     "gpt-4o-mini" など
+# ============================================================
+llm:
+  # 使用する LLM プロバイダー (1 つだけ選ぶ)
+  # 候補: ollama / llamacpp / claude-cli / claude / gemini / openai
+  provider: "claude-cli"
+
+  # provider 共通の接続設定 (該当 provider で意味のあるフィールドのみ使われる)
+  provider_config:
+    # ollama / llamacpp で必須。空欄なら起動時 ConfigError。
+    # 例: ollama   → "http://localhost:11434"
+    #     llamacpp → "http://localhost:8080/v1"
+    base_url: ""
+    # claude-cli の実行コマンド (空欄なら "claude" を PATH 解決)
+    command: ""
+    # claude-cli の隔離 cwd (CLAUDE.md/skills 汚染回避。例 "/opt/finance-cli")
+    isolated_cwd: ""
+    # claude-cli の追加引数 (例: ["--dangerously-skip-permissions"])
+    extra_args: []
+    # claude (API) の応答最大トークン (0 のままなら 4096 補完)
+    max_tokens: 0
+    # 共通: HTTP / プロセスタイムアウト秒
+    timeout_seconds: 120
+    # 共通: リトライ回数
+    max_retries: 2
+    # 共通: 同時呼び出し上限 (Semaphore に渡る)
+    max_concurrent: 2
+
+  # orchestrator agent 用: provider 名ごとの接続設定 (下の agents: から参照)。
+  # 空 dict なら未使用 (既存 provider_config に fallback)。agents: で
+  # top-level provider と異なる provider を使う agent はここに接続設定が必須。
+  provider_configs: {}
+  # 例:
+  #   claude-cli:
+  #     command: ""
+  #     isolated_cwd: ""
+  #     timeout_seconds: 120
+  #   llamacpp:
+  #     base_url: "http://localhost:8080/v1"
+  #     timeout_seconds: 120
+
+  # 各役割で使うモデルと温度
+  news_analysis:
+    model: "claude-haiku-4-5"
+    temperature: 0.3
+  # price_analysis: 直接の price 分析 LLM は廃止済み (technical-llm-omit)。
+  # この枠は planner/execution_opinion の fallback 役として残存する
+  # (agents: 未記載時に両者がこのモデル/温度に落ちる)。削除しないこと。
+  price_analysis:
+    model: "claude-sonnet-4-6"
+    temperature: 0.1
+  reflection:
+    model: "claude-haiku-4-5"
+    temperature: 0.3
+
+# ============================================================
+# orchestrator 5-agent の個別 LLM 設定 (任意)。
+#
+# agents: ブロックを書かない場合、全 agent は上の役割 LLM に fallback する
+# (planner/execution_opinion/technical → price_analysis、news → news_analysis、
+# context_summary → reflection)。後方互換のため、本番では書かずに
+# fallback に任せても良い。
+#
+# provider に上の llm.provider と異なる値を指定する場合、
+# llm.provider_configs[provider] に接続設定が必須 (未定義は起動時 ConfigError)。
+#
+# 現状の実配線: planner / execution_opinion のみが実 LLM client を受け取る。
+# technical collector は決定的計算のみで LLM を使わない (technical-llm-omit)。
+# news は既存 news collector が news_analysis 役割 LLM を使う。
+# context_summary は agent 未実装のため設定枠のみ。
+# ============================================================
+agents:
+  # 実配線される 2 agent。下記は上の llm.provider が claude-cli の前提の例。
+  # 【重要】provider は上の llm.provider と揃えること。揃えれば
+  #   provider_configs 不要 (既存 provider_config を流用)。異なる provider に
+  #   するなら llm.provider_configs.<provider> に接続設定が必須
+  #   (未定義は起動時 ConfigError)。
+  #   例: top-level が llamacpp なら provider を "llamacpp"、model を llama 系に変える。
+  planner:
+    provider: "claude-cli"
+    model: "claude-sonnet-4-6"
+    temperature: 0.1
+  execution_opinion:
+    provider: "claude-cli"
+    model: "claude-sonnet-4-6"
+    temperature: 0.1
+
+  # ↓ 設定枠のみ (現時点では LLM 呼出に未使用)。コメントアウトのまま = fallback。
+  #   有効化して別 provider (例: llamacpp) を使う場合は llm.provider_configs.llamacpp
+  #   に接続設定 (base_url) が必須。未定義だと起動時 ConfigError になる
+  #   (このファイルをそのままコピーしても、provider_configs が空の既定では
+  #   llamacpp 行が弾かれるため、コメントのままにしておく)。
+  # news:
+  #   provider: "llamacpp"
+  #   model: "llama3.1-8b"
+  #   temperature: 0.3
+  # technical:
+  #   provider: "llamacpp"
+  #   model: "plutus"
+  #   temperature: 0.1
+  # context_summary:
+  #   provider: "llamacpp"
+  #   model: "deepseek-r1-8b"
+  #   temperature: 0.3
+
+# ============================================================
+# RAG の embedding プロバイダー設定 (旧 rag.embedding_* から移動)。
+#
+# LLM 用 provider_config.base_url とは独立している。LLM が claude-cli でも
+# embedding はローカルの ollama/llamacpp を使えるようにするため分離。
+# ============================================================
+embedding:
+  # "ollama" (従来) | "llamacpp" (llama-swap 経由)。他の値は起動時 ConfigError。
+  provider: "ollama"
+  # llamacpp の場合は llama-swap config.yaml の model 名に合わせる
+  model: "nomic-embed-text"
+  # embedding プロバイダーの接続先 URL。空欄なら起動時 ConfigError。
+  # 例: ollama   → "http://localhost:11434"
+  #     llamacpp → "http://localhost:8080/v1"
+  base_url: "http://localhost:11434"

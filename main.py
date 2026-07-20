@@ -114,6 +114,19 @@ def daily_at(at_time: str, tz: str):
     return schedule.every().day.at(at_time, tz)
 
 
+def weekly_at(picker, at_time: str, tz: str):
+    """週次スケジュール登録の共通入口。
+
+    daily_at と同じ timezone 検証を週次登録にも適用する。週次は
+    every().day を通せないため daily_at を使えず、ここだけが tz を
+    直接扱う経路になっていた。
+    picker は schedule.every().monday 等の曜日指定オブジェクト。
+    """
+    if not tz:
+        raise ValueError("timezone must not be empty for scheduled jobs")
+    return picker.at(at_time, tz)
+
+
 def _register_reflection_jobs(tz_name: str, fn, *args,
                               news_times: "list[str] | None" = None) -> None:
     """決済振り返りジョブを毎時スロットへ登録する (spec §3.6)。
@@ -513,8 +526,9 @@ def main() -> None:
             def _weekly_diagnosis_run():
                 _run_weekly(config)
 
-            # 週次登録のため daily_at (every().day) は通せない。tz は同一。
-            _wd_picker.at(_wd_cfg.at_time, tz).do(
+            # 週次登録のため daily_at (every().day) は通せない。tz 検証は
+            # weekly_at が daily_at と同じ内容で行う。
+            weekly_at(_wd_picker, _wd_cfg.at_time, tz).do(
                 _run_with_guard, _guards["weekly_diagnosis"], _weekly_diagnosis_run,
             )
             _logger.info(

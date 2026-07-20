@@ -1,0 +1,293 @@
+# ============================================================
+# 売買戦略パラメータ (config/strategy.yaml)
+#
+# config は 3 ファイルに分割されている (config migration 2026-07-20):
+#   settings.yaml — 実行基盤 (mode / provider 選択 / timezone / logging / api /
+#                   notification / data_backup)
+#   llm.yaml      — LLM / agents / embedding
+#   strategy.yaml — 本ファイル。trading / price_monitor / schedule / analysis /
+#                   news_collection / rag / economic_calendar / weekly_diagnosis /
+#                   orchestrator
+#
+# 3 ファイルは top-level ブロック単位でマージされる。同じブロックを
+# 複数ファイルに書くと起動時 ConfigError になる。
+#
+# 時刻に関する設定 (何時に走るか) は本ファイルに書くが、タイムゾーン自体は
+# settings.yaml の top-level `timezone` が唯一の設定箇所
+# (旧 schedule.timezone / news_collection.timezone /
+#  economic_calendar.fetch_timezone は廃止。書くと起動時 ConfigError)。
+# ============================================================
+
+trading:
+  # 残高は state/balance.json (balance_snapshot) を真実のソースとして読む。
+  # paper モードは初期化時に ¥100,000 で seed、live/live_test モードは MT5 から取得する。
+  risk_per_trade: 0.02
+  signal_confidence_threshold: 0.55     # この confidence 未満は hold
+  # min_rr_ratio — planned R:R がこの値未満なら hold に差し戻す (0 = 無効)
+  # 新規運用では 0 のまま、audit で 30 件以上溜まってから tiny TP が目立つなら 1.2〜1.5 を検討
+  min_rr_ratio: 0.0
+  lookback_days: 90
+  ohlcv_interval: "15m"             # 基底足。1h → 15m (day horizon, spec 2026-07-05 S-4)
+  news_weight: 0.20                     # テクニカル主導 (LLM ニュース分析はノイジーなため price 側を厚く)
+  price_weight: 0.80
+  signal_deadband: 0.15            # BUY/SELL判定のスコア閾値（±）
+  min_lot_size: 1000.0             # 最小ロットサイズ
+  lot_unit: 1000.0                 # ロット切り捨て単位
+  # ポジション再評価（Phase 4a: Layer 1〜3）
+  # Phase 3c は OFF 固定。Phase 4 で
+  # docs/superpowers/plans/2026-05-14-incident-driven-safety-hardening.md
+  # Task 3 のガード (price source != "mt5" / soft halt 中の close 抑制) を
+  # 導入した後に true への再切替を検討する。
+  position_review_enabled: false        # Phase 3c OFF (Phase 4 で再評価)
+  reversal_confidence_min: 0.70         # Layer 1: 反転シグナルの最低信頼度
+  reversal_score_threshold: 0.25        # Layer 1: 反転スコアの絶対値閾値
+  # Position management v2 (day horizon: 1/4 スケール, spec 2026-07-05 §5.2)
+  reversal_min_holding_minutes: 60      # 240 → 60 (day)
+  reversal_guard_enabled: true
+  reversal_close_enabled: false
+  reversal_consecutive_required: 2
+  reversal_raise_sl_to_breakeven: true
+  time_stop_enabled: true
+  no_progress_enabled: true
+  no_progress_watch_hours: 2            # 6 → 2 (day)
+  no_progress_exit_hours: 4             # 12 → 4 (day)
+  no_progress_min_mfe_r: 0.1
+  no_progress_requires_signal_weakness: true
+  stale_position_review_hours: 8        # 24 → 8 (time_stop 実体, セッション長アンカー, D-7)
+  timeout_cooldown_hours: 1             # 4 → 1 (day)
+  stale_signal_hours: 2                 # 8 → 2 (day)
+  session_end_flatten_enabled: false
+  profit_protection_enabled: true
+  protect_half_r: 0.3
+  protect_breakeven_r: 0.5
+  protect_lock_r: 1.0
+  giveback_close_r: 0.4
+  giveback_close_min_mfe_r: 0.8
+  remote_sl_sync_enabled: false
+  # ATRベースSL/TP (day horizon: 1h足ATR対応, spec 2026-07-05 §5.2 D-5)
+  # ペアごとのポジション数上限 (1 ペアでの最大累積 open ポジ数)
+  max_positions_per_pair: 2              # scale-in 含めて 1 ペアで最大 N ポジ
+  # Scale-in (順張り増し玉): 既存ポジと同方向で強い signal が来た時に追加発注
+  scale_in_enabled: false                # フラグ式段階導入: 初期 OFF
+  scale_in_conf_margin: 0.05             # confidence 上回り幅
+  scale_in_score_margin: 0.05            # |combined_score| 上回り幅
+  # Drawdown kill switch — 新規エントリーのみ停止 (既存ポジションは維持)
+  # 運用保険。新規運用時は false のままで OK、audit で DD 履歴を確認してから有効化を検討
+  drawdown_kill_switch_enabled: false
+  drawdown_kill_switch_max_pct: 0.10    # peak equity からこの割合以上落ちたら新規停止 (0.10 = 10%)
+
+price_monitor:
+  enabled: true
+  interval_minutes: 10             # Layer 4: 監視間隔（分）
+  alert_threshold_pct: 0.003       # 損失 0.3% で最初の通知
+  alert_step_pct: 0.002            # 追加 0.2% ごとに再通知（スパム防止）
+  emergency_close_pct: 0.008       # 損失 0.8% で緊急損切り（0 = 無効）
+  enable_emergency_close: false    # 緊急損切りを有効にするか（false = 通知のみ）
+  # トレーリングストップ（段階型・利益保護）
+
+schedule:
+  # timezone は settings.yaml の top-level に統合 (config migration 2026-07-20)。
+  # ここに timezone を書くと起動時 ConfigError。
+  # technical 収集の間隔（時間）。trade/watch 別に調整可能（既定はどちらも 1h = 毎時）。
+  # trade は将来 cadence resolver で boost される土台、watch は低頻度固定用。
+  # 収集スケジュールはこの interval から生成し union dispatch で回す
+  # （exit_check の毎時:00 はこれとは独立で固定）。
+  technical_trade_interval_hours: 1
+  technical_watch_interval_hours: 1
+  # technical trade 収集の分粒度 interval。設定時は technical_trade_interval_hours より
+  # 優先。day horizon (spec 2026-07-05 §5.2): 1h → 30min (15m 足 2 本分)
+  technical_trade_interval_minutes: 30
+  # cadence resolver による可変 interval 収集 (§5.3/§5.6)。false = 現行の毎時 union
+  # dispatch を維持。true で「経済カレンダー/市場 state の boost に応じて trade の収集
+  # 頻度を動的に上げる」cadence_driver に切替 (watch は base 固定)。
+  cadence_enabled: false
+  cadence_boost_interval_minutes: 5      # boost 中の収集間隔 (分)
+  # FX technical 鮮度閾値 (分)。既定 360 = 従来の 6h と等価。day horizon では 90 に
+  # 短縮 (15m 足 6 本分 = 収集 interval×3, spec 2026-07-05 S-3)。watch 側は定数のまま。
+  technical_max_staleness_fx_minutes: 90
+  # technical collector の pair 間待機 (秒)。news 収集 (news_collection.inter_pair_delay_seconds)
+  # とは分離。LLM 廃止後は provider レート緩和のみが目的なので短め。
+  technical_inter_pair_delay_seconds: 5
+
+analysis:
+  # テクニカル指標の有効/無効
+  indicators:
+    moving_averages: true    # SMA(20/50/200) / EMA(12/26)
+    rsi: true
+    macd: true
+    bollinger_bands: true
+    atr: true
+    adx: true
+    ichimoku: true           # 一目均衡表
+
+  # チャートパターン検出
+  chart_patterns:
+    # ── ローソク足パターン ────────────────────────────
+    hammer: true              # ハンマー（下ヒゲ長・下降トレンド末）
+    shooting_star: true       # シューティングスター（上ヒゲ長・上昇トレンド末）
+    engulfing: true           # 包み足（強気/弱気エングルフィング）
+    doji: true                # 十字線（始値≒終値）
+    morning_evening_star: true  # モーニング/イブニングスター（3本）
+    three_soldiers_crows: true  # 三白兵/三黒烏（連続3本同方向）
+    pin_bar: true             # ピンバー（最長ヒゲ≥実体×3）
+    inside_bar: true          # インサイドバー（前足の範囲内に収まる）
+
+    # ── チャート形状パターン ──────────────────────────
+    double_top_bottom: false  # ダブルトップ/ダブルボトム
+    head_shoulders: false     # ヘッド＆ショルダー（通常/逆）
+    triangle: false           # 三角保ち合い（上昇/下降/対称）
+    range_bound: false        # レンジ相場検出
+
+    # ── ブレイクアウト系 ──────────────────────────────
+    bb_squeeze: false         # BBスクイーズ（ボラティリティ収縮）
+    atr_contraction: false    # ATR収縮（ブレイクアウト前兆）
+    sr_breakout: false        # サポート/レジスタンス・ブレイク
+
+  # 選択的 Multi-Timeframe (MTF) 分析
+  #   各 TF で compute_indicators() を別々に呼び、規則的に合成してrule-baseで
+  #   bias_score / direction / confidence を決定する。
+  #   LLM には短期 TF の詳細 + 小さな MTF サマリーブロックを渡し、
+  #   エントリー水準 / SL / TP の決定に集中させる。
+  #
+  #   long   (regime):    大局レジーム判定 — Ichimoku + SMA + ADX + 長期パターン
+  #   medium (structure): セットアップ判定  — SMA + ADX + 全パターン
+  #   short  (full):      エントリー判定    — 既存の全指標セット (形状パターンは除外)
+  multi_timeframe:
+    enabled: true                  # false で従来の単一 TF (1h) 動作に fallback
+    # day horizon (spec 2026-07-05 §5.2 D-9): bar 本数がほぼ同じになるよう縮小
+    long:
+      lookback_days: 15            # 1d/90d → 4h/15d (~90 本を保存)
+      interval: "4h"
+      enabled: true
+    medium:
+      lookback_days: 4             # 4h/14d → 1h/4d (~96 本)
+      interval: "1h"
+      enabled: true
+    short:
+      lookback_days: 1             # 1h/2d → 15m/1d (~96 本、執行足)
+      interval: "15m"
+      enabled: true
+    # 合成重み (合計 1.0 が推奨。欠落 TF は自動的に再正規化される)
+    weights:
+      long: 0.40
+      medium: 0.35
+      short: 0.25
+
+news_collection:
+  # timezone は settings.yaml の top-level に統合 (config migration 2026-07-20)。
+  # ここに timezone を書くと起動時 ConfigError。
+  interval_minutes: 15             # この間隔で timezone に揃えた時刻を自動生成（OHLCV+テクニカル分析も同時実行）
+  offset_minutes: 0                # 開始オフセット（例: 15 → :15, :30, :45, :00 の順に実行）
+  inter_pair_delay_seconds: 10     # ペア間の待機（Ollama VRAM保護）
+  news_freshness_hours: 24         # この時間以上古い記事は除外
+  summary_max_chars: 600           # RSS summary の切り捨て文字数（LLM context に合わせて調整）
+  # Deep fetch (新規記事のみ trafilatura で本文取得)
+  # 既知記事は title+summary だけ、新規記事のみ本文を含めて LLM プロンプトに投入
+  deep_fetch_enabled: true              # false で従来動作 (タイトル+サマリーのみ)
+  deep_fetch_timeout_seconds: 8.0       # 1 記事あたりの HTTP タイムアウト
+  deep_fetch_max_chars: 3000            # 本文の切詰上限 (LLM context 配慮)
+  deep_fetch_max_concurrent: 3          # 同時 HTTP fetch の上限 (同一 host 配慮)
+  deep_fetch_user_agent: "finance-news-collector/1.0"
+
+# keywords → config/news_sources.yaml に分離
+# news_sources → config/news_sources.yaml に分離
+
+rag:
+  # embedding_* は config/llm.yaml の embedding: へ移動 (config migration 2026-07-20)。
+  # ここに embedding_provider / embedding_model / embedding_base_url を書くと
+  # 起動時 ConfigError。
+  db_path: "data/rag"
+  news_lookback_hours: 24
+  retrieval_top_k: 5
+  reflection_lookback_count: 3
+  analysis_lookback_hours: 8       # 取引判定時に集約するテクニカル分析の時間幅（最大32スナップショット）
+
+# 経済指標カレンダー（TradingView非公式API経由）
+economic_calendar:
+  # fetch_timezone は settings.yaml の top-level timezone に統合
+  # (config migration 2026-07-20)。ここに書くと起動時 ConfigError。
+  enabled: false                   # true で経済指標カレンダー連携を有効化
+  fetch_time: "06:00"              # HH:MM (settings.yaml の timezone を使用)
+  lookahead_hours: 48
+  currencies: ["USD", "JPY", "EUR", "GBP"]
+  min_importance: 0
+  post_event_window_min: 30
+  post_event_impact_min: 1
+  refresh_lookback_min: 60
+
+# 週次自己診断レポート (FX 休場の週末に走らせる、cron 不要 / schedule ライブラリ使用)
+# 過去 N 日のパフォーマンス・予測精度・LLM 使用量・現状設定を集約して
+# Claude (claude-cli) に診断させ、Markdown + Discord embed で配信する。
+weekly_diagnosis:
+  enabled: false                   # true で週次レポートを有効化
+  weekday: "saturday"              # monday / tuesday / ... / sunday
+  at_time: "09:00"                 # HH:MM (settings.yaml の timezone を使用)
+  lookback_days: 7
+  llm_role: "reflection"           # llm.<role> から client を取得 (claude-cli 推奨)
+  output_dir: "reports"            # プロジェクトルート相対、自動 mkdir
+  notify_discord: true             # 完了時に Discord embed でサマリ通知
+
+# ── Orchestrator Agent Loop (spec §12) ─────────────────────────
+# Phase 1 foundation. enabled=false で既存サイクルに影響しない。
+orchestrator:
+  enabled: false
+  # Task F: shadow→本番発注 昇格。live は orchestrator 執行段が単一発注主体になる
+  # (旧 trading cycle の新規 entry は停止)。発注先 broker は settings.yaml の
+  # top-level mode が決める:
+  #   - mode=live + AppConfig.mode=paper     → paper_broker (仮想資金) で動作確認 (推奨の段階検証)
+  #   - mode=live + AppConfig.mode=live_test → paper + MT5 observer (実発注なし。bridge DRY_RUN=true 必須)
+  #   - mode=live + AppConfig.mode=live      → 本番発注 (live_broker 必須、未設定は起動時エラー)
+  mode: shadow  # shadow | live
+  # 承認ゲート (spec 2026-07-05): true で plan が pending_approval で公開され、
+  # Discord 承認 (API approve) を経てから発注待機 (active) になる。既定 false。
+  approval_gate: false
+  pairs: [USDJPY=X, EURUSD=X]  # 空なら tradeable instruments を使う
+  # 発注直前の ExecutionOpinion 再点火 (material change 時)。既定 OFF (決定的・高速執行)。
+  execution_opinion_recheck_enabled: false
+  # Phase 2/D: tick migration 段階導入 (off→producer→protect_shadow→protect_live)。
+  # producer 以上で quote-stream producer 起動 + watch 直読 + spread 実値化。
+  tick_migration_stage: "off"
+  quote_stream_poll_seconds: 2
+  # plan expires_at の上限クランプ (時間)。0=無効。day 運用は 1 セッション上限として 8
+  # (spec 2026-07-05 S-1)
+  plan_ttl_max_hours: 8
+  policy:
+    trade_horizon: day      # day | swing。swing → day (2026-07-05 移行)
+    advice_memo: ""         # 自然文助言メモ (参考程度・hard gate 不可侵)
+  market_state:
+    calm_seconds: 300
+    normal_seconds: 60
+    active_seconds: 30
+    critical_seconds: 60
+  llm:
+    max_concurrent_jobs: 1  # 固定。2 以上にしない (sequential-by-design)
+    planning_timeout_seconds: 180
+    execution_recheck_timeout_seconds: 30
+  locks:
+    pair_lock_ttl_seconds: 300
+    decision_lock_ttl_seconds: 600
+    order_lock_ttl_seconds: 120
+  entry:
+    spread_max_pips: 2.0
+    # 最低 reward/risk 比 (決定的導出 RR で判定)。プロンプトは RR >= 2 を狙わせ、
+    # gate は 1.5 で切る (マージン構造は意図的)。
+    min_rr: 1.5
+    news_impact_min: 0.5
+    require_fresh_technical: true
+    max_quote_age_seconds: 10
+    max_technical_age_seconds: 5400  # 1800 → 5400 (staleness 90min と整合, day)
+    news_cache_ttl_seconds: 60.0
+    news_cache_negative_ttl_seconds: 30.0
+  firing:
+    material_news_impact_min: 0.5
+    material_bias_delta_min: 0.20
+    debounce_window_seconds: 180
+    min_planning_interval_seconds: 900  # 1800 → 900 (収集 interval の半分, day)
+  hindsight:
+    horizon_seconds: 28800  # 86400 → 28800 (24h→8h, time_stop と整合, D-7)
+  agents:
+    news_enabled: true
+    technical_enabled: true
+    execution_opinion_enabled: true
+    risk_enabled: true
+    audit_enabled: true

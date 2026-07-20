@@ -22,6 +22,8 @@ PAIRS = [
     ("settings.yaml",      "settings.yaml.example"),
     ("instruments.yaml",   "instruments.yaml.example"),
     ("news_sources.yaml",  "news_sources.yaml.example"),
+    ("llm.yaml",           "llm.yaml.example"),
+    ("strategy.yaml",      "strategy.yaml.example"),
 ]
 
 
@@ -81,10 +83,6 @@ def test_example_has_all_keys_from_real(real_name, example_name):
 # ── .example 読み込み動作チェック ─────────────────────────────
 
 
-@pytest.mark.skip(
-    reason="config migration 2026-07-20: llm.yaml.example / strategy.yaml.example は "
-           "Task 7 で作成する。それまで .example だけでは必須ファイルが揃わない。"
-)
 def test_load_config_from_examples(tmp_path):
     """*.yaml.example ファイル群だけで AppConfig が構築できること。
 
@@ -110,6 +108,10 @@ def test_load_config_from_examples(tmp_path):
     assert config.news_collection is not None
     assert config.rag is not None
     assert config.schedule is not None
+    # 3 分割後 (config migration 2026-07-20): llm.yaml / strategy.yaml 由来の
+    # ブロックが実際にマージされていること
+    assert config.timezone
+    assert config.embedding.provider in ("ollama", "llamacpp")
 
 
 def test_settings_do_not_carry_removed_position_management_keys() -> None:
@@ -140,32 +142,26 @@ def test_settings_do_not_carry_removed_position_management_keys() -> None:
         assert not (removed & set(trading)), f"{path} still has removed keys: {removed & set(trading)}"
 
 
-@pytest.mark.skip(
-    reason="config migration 2026-07-20: agents.yaml.example は llm.yaml.example の "
-           "agents: へ統合する。Task 7 で llm.yaml.example 前提のテストに置換する。"
-)
-def test_agents_example_loads_with_settings_example(tmp_path) -> None:
-    """agents.yaml.example をそのままコピーしても既定 settings.yaml.example で load できる。
+def test_examples_load_together(tmp_path) -> None:
+    """全 .example をコピーした構成が load_config で読めること。
 
-    Task 5.5 の strict 検証 (cross-provider は provider_configs 必須) に対し、
-    .example が内部整合していることを保証する (有効行は claude-cli = top-level 同一)。
+    agents.yaml.example は llm.yaml.example の agents: へ統合済み (2026-07-20)。
+    strict 検証 (cross-provider は provider_configs 必須) に対し
+    .example が内部整合していることを保証する
+    (有効行は claude-cli = llm.yaml の top-level provider と同一)。
     """
     from src.config import load_config
 
-    examples = [
-        ("settings.yaml.example", "settings.yaml"),
-        ("instruments.yaml.example", "instruments.yaml"),
-        ("news_sources.yaml.example", "news_sources.yaml"),
-        ("agents.yaml.example", "agents.yaml"),
-    ]
-    for example_name, dst_name in examples:
+    for real_name, example_name in PAIRS:
         src = CONFIG_DIR / example_name
-        if not src.exists():
-            pytest.skip(f"{example_name} not found")
-        shutil.copy2(src, tmp_path / dst_name)
+        assert src.exists(), f"{example_name} must exist in repo"
+        shutil.copy2(src, tmp_path / real_name)
 
     cfg = load_config(tmp_path / "settings.yaml")
-    # 有効化されている 2 agent が読める (claude-cli = top-level provider)
+
+    assert cfg.timezone
+    assert cfg.embedding.provider in ("ollama", "llamacpp")
+    # 有効化されている 2 agent が読める (claude-cli = llm.yaml の top-level provider)
     assert cfg.agent_llms.planner.provider == "claude-cli"
     assert cfg.agent_llms.execution_opinion.provider == "claude-cli"
     # コメントアウトされた 3 agent は fallback (provider 空)

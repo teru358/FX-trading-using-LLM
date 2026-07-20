@@ -177,34 +177,3 @@ def trailing_sell_pos() -> Order:
         position_size=10000.0,
         signal_reason="trailing-test",
     )
-
-
-@pytest.fixture
-def minimal_config_dir(tmp_path):
-    """load_config が通る最小構成の config ディレクトリを作る。
-
-    移行後は llm.yaml / strategy.yaml が必須のため、tmp config を
-    作る全テストがこの 3 ファイルを必要とする。
-    """
-    (tmp_path / "settings.yaml").write_text(
-        'mode: paper\npaper_provider: yfinance\ntimezone: "Asia/Tokyo"\n',
-        encoding="utf-8",
-    )
-    (tmp_path / "llm.yaml").write_text(
-        'llm:\n'
-        '  provider: llamacpp\n'
-        '  provider_config:\n'
-        '    base_url: "http://localhost:8080/v1"\n'
-        '  news_analysis:\n    model: m1\n'
-        '  price_analysis:\n    model: m2\n'
-        '  reflection:\n    model: m3\n'
-        'embedding:\n'
-        '  provider: llamacpp\n'
-        '  model: nomic-embed-text\n'
-        '  base_url: "http://localhost:8080/v1"\n',
-        encoding="utf-8",
-    )
-    (tmp_path / "strategy.yaml").write_text(
-        "trading:\n  risk_per_trade: 0.02\n", encoding="utf-8"
-    )
-    return tmp_path

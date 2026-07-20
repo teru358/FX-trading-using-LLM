@@ -7,7 +7,7 @@
 import pytest
 import schedule as schedule_lib
 
-from main import daily_at
+from main import daily_at, weekly_at
 
 
 def test_daily_at_uses_given_timezone():
@@ -36,5 +36,19 @@ def test_daily_at_rejects_empty_timezone():
     try:
         with pytest.raises(ValueError, match="timezone"):
             daily_at("09:00", "")
+    finally:
+        schedule_lib.clear()
+
+
+def test_weekly_at_rejects_empty_timezone():
+    """週次登録も日次と同じく tz 未指定を弾く。
+
+    weekly_diagnosis は every().day を通せないため daily_at のガードの
+    外にあり、空 tz が OS ローカル TZ に落ちる唯一の経路だった。
+    """
+    schedule_lib.clear()
+    try:
+        with pytest.raises(ValueError, match="timezone"):
+            weekly_at(schedule_lib.every().monday, "09:00", "")
     finally:
         schedule_lib.clear()
