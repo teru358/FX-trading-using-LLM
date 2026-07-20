@@ -76,8 +76,10 @@ def test_status_returns_merged_payload(_state_setup):
     resp = _client_get("/status")
     assert resp.status_code == 200
     data = resp.json()
-    # プロセス基本情報 (旧 /health から統合)
-    assert data["status"] == "ok"
+    # プロセス基本情報 (旧 /health から統合)。
+    # status は起動状態 (starting/ready/failed)。常時 "ok" ではなくなった
+    # (レビュー Medium) — 起動途中に ready と誤認させないため。
+    assert data["status"] in ("starting", "ready", "failed")
     assert "mode" in data
     assert "live_broker" in data
     assert "started_at" in data

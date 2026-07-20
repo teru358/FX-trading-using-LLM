@@ -396,7 +396,19 @@ def run_startup_sequence(
     再送出する — main.py の try/finally は run_startup_sequence より後ろにあり、
     ここで stop() しないと通知 worker drain / quote producer 停止 / plan finalize
     が走らないまま部分起動状態で例外が抜ける。
+
+    **起動状態の公開 (レビュー Medium):** API が発注ループより前に立つため、
+    /status が常に ok を返すと初回収集中・scheduler 未起動でも外部監視から ready に
+    見えてしまう。``api._state.readiness`` を starting → ready で遷移させ、
+    scheduler 起動完了で初めて ready にする。
+
+    観測可能な失敗だけが failed になる。build / validate の失敗は API 起動前なので
+    fail-fast でプロセスごと落ち、/status を読む相手がそもそもいない (failed を
+    返す暇はない)。API 起動後の initialize / runtime.start / start_scheduler の
+    失敗は、例外送出後も API スレッドが生きている間 /status で failed として観測できる。
     """
+    from src.api._state import state as _api_state
+
     runtime = build()
     validate(runtime)
     # validate 通過後は非 None が契約。将来 validate を差し替えて None を通した
@@ -404,15 +416,24 @@ def run_startup_sequence(
     # 契約違反はここで顕在化させる (レビュー L-2)。
     assert runtime is not None, "validate() must reject a None runtime"
     start_api()
-    initialize()
+    # ここから先が「API は応答するが、まだ ready ではない」区間 (レビュー Medium)。
+    # 初回収集 (LLM 込みで数分) と scheduler 起動が済むまで /status は starting。
+    try:
+        initialize()
+    except BaseException:
+        _api_state.readiness = "failed"
+        raise
     try:
         runtime.start()
         start_scheduler()
     except BaseException:
+        _api_state.readiness = "failed"
         try:
             runtime.stop()
         except Exception:
             # stop() の失敗で元の起動失敗理由を握り潰さない。
             _logger.exception("[STARTUP] 起動中止中の runtime.stop() が失敗")
         raise
+    # scheduler まで起動して初めて ready。
+    _api_state.readiness = "ready"
     return runtime

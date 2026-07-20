@@ -31,6 +31,14 @@ class APIState:
     price_store: PriceStore | None = None
     orchestrator_store: Any = None  # OrchestratorStore (gate spec F-5)
     started_at: datetime | None = None
+    # 起動状態 (レビュー Medium)。API は起動シーケンスの途中 (初回収集・runtime
+    # 起動・scheduler 起動より前) で応答を開始するため、常に ok を返すと外部監視から
+    # ready に見えてしまう。scheduler 起動完了で初めて "ready"。
+    #
+    # 観測可能な失敗のみ "failed" になる — build/validate は API 起動前なので
+    # fail-fast でプロセスごと落ち、この値を読める者はいない。API 起動後の
+    # initialize / runtime.start / start_scheduler の失敗だけがここに現れる。
+    readiness: str = "starting"     # starting | ready | failed
 
 
 state = APIState()

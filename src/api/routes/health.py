@@ -35,6 +35,11 @@ router = APIRouter()
 def status() -> dict[str, Any]:
     """運用状態レポート (プロセス + halt + サブシステム健全性の統合応答)。
 
+    ``status`` は起動状態 (``starting`` / ``ready`` / ``failed``、レビュー Medium)。
+    API は起動シーケンスの途中で応答を開始するため、常時 ``ok`` を返すと初回収集中・
+    scheduler 未起動でも外部監視から ready に見えてしまう。``ready`` は scheduler
+    起動完了後にのみ立つ。
+
     旧 /health のフィールド (status/mode/live_broker/started_at/uptime/scheduler) と、
     finance 側 halt (halt.json)、LLM CB、price_provider、snapshots、MT5 bridge 状態
     を 1 ヶ所にまとめる。bridge 不通でも本 endpoint は 200 を返す (`mt5_bridge.reachable`
@@ -128,7 +133,7 @@ def status() -> dict[str, Any]:
     econ_status = get_econ_impact_status()
 
     return {
-        "status":               "ok",
+        "status":               state.readiness,
         "mode":                 mode,
         "live_broker":          live_broker,
         "started_at":           state.started_at.isoformat() if state.started_at else None,
