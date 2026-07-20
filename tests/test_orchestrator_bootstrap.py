@@ -331,7 +331,7 @@ def test_risk_state_provider_all_clear(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_planner_and_exec_get_separate_agent_llms(tmp_path: Path, monkeypatch) -> None:
-    """agents.yaml で Planner / ExecutionOpinion に別 provider/temperature を指定すると、
+    """llm.yaml で Planner / ExecutionOpinion に別 provider/temperature を指定すると、
     別 client + 別 temperature の AgentLlm が配線される。"""
     from src.config.schema import AgentLlmConfig
 
@@ -364,7 +364,7 @@ def test_planner_and_exec_get_separate_agent_llms(tmp_path: Path, monkeypatch) -
 
 
 def test_no_agents_yaml_falls_back_to_price_analysis(tmp_path: Path, monkeypatch) -> None:
-    """agents.yaml 無し → 両 agent が price_analysis client + 役割 temperature (従来動作)。"""
+    """llm.yaml の agents: 無し → 両 agent が price_analysis client + 役割 temperature (従来動作)。"""
     monkeypatch.setattr(
         "src.llm.factory._build_client",
         lambda provider, pc, model: ("client", provider, model),

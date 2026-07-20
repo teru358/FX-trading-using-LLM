@@ -524,7 +524,7 @@ def _build_pipeline(config: "AppConfig", orch_store: "OrchestratorStore", risk_g
     """planning loop の LLM パイプラインを組む。
 
     PlannerAgent / ExecutionOpinionAgent はそれぞれ独立した AgentLlm
-    (client + temperature) を受け取る (per-agent llm config)。agents.yaml に
+    (client + temperature) を受け取る (per-agent llm config)。llm.yaml に
     設定が無ければ両者とも price_analysis 役割 client + 役割 temperature に
     fallback し従来動作 (逐次・worker=1, §4.2)。
 

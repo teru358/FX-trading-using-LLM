@@ -59,6 +59,8 @@ Python 3.12+、[uv](https://docs.astral.sh/uv/)、Discord Webhook (任意)、MT5
 uv sync
 cp .env.example .env             # API キー・Webhook URL 等
 cp config/settings.yaml.example config/settings.yaml
+cp config/llm.yaml.example config/llm.yaml
+cp config/strategy.yaml.example config/strategy.yaml
 cp config/instruments.yaml.example config/instruments.yaml
 cp config/news_sources.yaml.example config/news_sources.yaml
 cp config/hosts.yaml.example config/hosts.yaml
@@ -91,7 +93,10 @@ uv run python main.py --skip-tech       # 起動時テクニカル収集スキ�
 
 ```
 config/
-  settings.yaml          — 運用パラメータ (mode/LLM/trading/schedule/通知)
+  settings.yaml          — 実行基盤 (mode / provider 選択 / timezone / logging / api / 通知)
+  llm.yaml               — LLM / agents / embedding
+  strategy.yaml          — 売買戦略 (trading / price_monitor / schedule / analysis /
+                           news_collection / economic_calendar / orchestrator / rag)
   instruments.yaml       — 銘柄定義 + asset_type / pip_value
   news_sources.yaml      — キーワード + RSS フィード + Feedly
   hosts.yaml             — REST API クライアントの接続先プロファイル
@@ -101,6 +106,13 @@ config/
 ```
 
 各ファイルは `.example` をコピーして利用。
+
+`settings.yaml` / `llm.yaml` / `strategy.yaml` は top-level ブロック単位でマージされる
+(config migration 2026-07-20)。同じブロックを複数ファイルに書くと起動時 `ConfigError`。
+`llm.yaml` / `strategy.yaml` は必須で、欠損・空でも `ConfigError` (既定値への無警告な
+転落を防ぐため)。タイムゾーンは `settings.yaml` の top-level `timezone` が唯一の設定箇所
+(旧 `schedule.timezone` / `news_collection.timezone` / `economic_calendar.fetch_timezone`
+は廃止)。
 
 ## CLI コマンド (`uv run python client.py` から対話)
 

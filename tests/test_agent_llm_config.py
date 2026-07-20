@@ -123,7 +123,7 @@ def test_build_agent_llms_from_yaml(tmp_path) -> None:
 
 
 def test_missing_agents_yaml_yields_all_fallback(tmp_path) -> None:
-    settings = _write_with_agents(tmp_path, None)  # agents.yaml 無し
+    settings = _write_with_agents(tmp_path, None)  # llm.yaml の agents: 無し
     cfg = load_config(settings)
     for name in ("planner", "news", "technical", "execution_opinion", "context_summary"):
         assert getattr(cfg.agent_llms, name).provider == ""

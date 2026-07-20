@@ -719,8 +719,7 @@ def _cmd_usage() -> None:
             "usage_limit 追跡対象はありません。[/yellow]"
         )
         _console.print(
-            "[dim]  config/settings.yaml の llm.{news,price,reflection}_analysis.provider "
-            "を確認してください。[/dim]"
+            "[dim]  config/llm.yaml の llm.provider を確認してください。[/dim]"
         )
         # 参考情報として他プロバイダの CB 状態は表示する (health の簡易版)
         providers = data.get("providers", {}) or {}

@@ -424,7 +424,7 @@ class LLMRoleConfig:
 
 @dataclass
 class AgentLlmConfig:
-    """1 agent の LLM 設定 (config/agents.yaml の agents.<name>)。
+    """1 agent の LLM 設定 (config/llm.yaml の agents.<name>)。
 
     provider 空欄なら fallback (既存役割 model)。provider 指定時は
     LLMConfig.provider_configs[provider] から接続設定を引く。
@@ -448,7 +448,7 @@ class AgentLlm:
 
 @dataclass
 class OrchestratorAgentsLlmConfig:
-    """5 agent の LLM 設定 (config/agents.yaml の agents:)。
+    """5 agent の LLM 設定 (config/llm.yaml の agents:)。
 
     未指定 agent は AgentLlmConfig 既定 (provider 空 = fallback)。
     既存 OrchestratorAgentsConfig (*_enabled = 「動かすか」) とは別物で、
@@ -481,7 +481,7 @@ class LLMConfig:
         default_factory=lambda: LLMRoleConfig(temperature=0.3)
     )
     # provider 名 → 接続設定 (orchestrator agent 用)。既存 provider_config (単一) は
-    # 後方互換 fallback として維持。agents.yaml で別 provider を使う agent がこれを参照。
+    # 後方互換 fallback として維持。llm.yaml で別 provider を使う agent がこれを参照。
     provider_configs: dict[str, ProviderConfig] = field(default_factory=dict)
 
 
@@ -825,7 +825,7 @@ class AppConfig:
     weekly_diagnosis: WeeklyDiagnosisConfig = field(default_factory=WeeklyDiagnosisConfig)
     data_backup: DataBackupConfig = field(default_factory=DataBackupConfig)
     orchestrator: OrchestratorConfig = field(default_factory=OrchestratorConfig)
-    # 5-agent 個別 LLM 設定 (config/agents.yaml)。別ファイル top-level merge のため
+    # 5-agent 個別 LLM 設定 (config/llm.yaml)。別ファイル top-level merge のため
     # instruments / news_sources と同じく AppConfig top-level に持つ。
     agent_llms: OrchestratorAgentsLlmConfig = field(
         default_factory=OrchestratorAgentsLlmConfig
