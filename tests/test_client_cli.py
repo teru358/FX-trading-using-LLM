@@ -74,3 +74,80 @@ def test_run_trade_falls_to_unknown_subcommand():
         result = client._dispatch("run trade")
     assert result is True
     assert "不明" in cap.get()
+
+
+# ── plans コマンド (REST 経由 GET /orchestrator/plans) ─────────────────
+
+def _plan_row(**kw):
+    base = {
+        "plan_id": 1,
+        "pair": "USDJPY=X",
+        "direction": "long",
+        "entry_summary": "price<=150.0",
+        "sl": 149.5,
+        "tp": 151.0,
+        "rr": 2.0,
+        "expires_at": "2026-07-24T18:00:00",
+        "created_at": "2026-07-24T12:00:00",
+    }
+    base.update(kw)
+    return base
+
+
+def test_help_has_plans():
+    assert "plans" in client._HELP
+
+
+def test_dispatch_routes_plans(monkeypatch):
+    called = {}
+    monkeypatch.setattr(client, "_cmd_plans", lambda: called.setdefault("hit", True))
+    assert client._dispatch("plans") is True
+    assert called.get("hit")
+
+
+def test_cmd_plans_queries_both_statuses(monkeypatch):
+    """pending_approval と active の両方を GET する。"""
+    seen = []
+
+    def fake_get(path, params=None):
+        seen.append((params or {}).get("status"))
+        return {"plans": []}
+
+    monkeypatch.setattr(client, "_get", fake_get)
+    client._cmd_plans()
+    assert "pending_approval" in seen
+    assert "active" in seen
+
+
+def test_cmd_plans_renders_rows(monkeypatch):
+    def fake_get(path, params=None):
+        status = (params or {}).get("status")
+        if status == "pending_approval":
+            return {"plans": [_plan_row(plan_id=7)]}
+        return {"plans": [_plan_row(plan_id=3, direction="short")]}
+
+    monkeypatch.setattr(client, "_get", fake_get)
+    # Rich は console 幅 (既定 80) で列を切り詰めるため、幅を広げて全列を出す
+    from rich.console import Console
+    monkeypatch.setattr(client, "_console", Console(width=200))
+    with client._console.capture() as cap:
+        client._cmd_plans()
+    out = cap.get()
+    assert "USDJPY=X" in out
+    assert "149.500" in out          # SL (承認待ちグループ)
+    assert "承認待ち" in out and "発注監視中" in out
+
+
+def test_cmd_plans_broken_row_does_not_crash(monkeypatch):
+    """sl/tp None (壊れた action_json) でも落ちない。"""
+    def fake_get(path, params=None):
+        return {"plans": [_plan_row(sl=None, tp=None, rr=None, entry_summary="")]}
+
+    monkeypatch.setattr(client, "_get", fake_get)
+    client._cmd_plans()  # 例外なく完了すれば OK
+
+
+def test_cmd_plans_api_failure_returns_quietly(monkeypatch):
+    """_get が None (通信断) を返しても落ちない。"""
+    monkeypatch.setattr(client, "_get", lambda path, params=None: None)
+    client._cmd_plans()

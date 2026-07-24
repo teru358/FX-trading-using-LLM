@@ -578,6 +578,73 @@ def _cmd_ask(message: str) -> None:
         _console.print(f"[red]ask 失敗: status={status!r}[/red]\n{data!r}")
 
 
+def _plan_num(v) -> str:
+    """数値を小数3桁に整形。None・非数値 (壊れた action_json) は「-」。"""
+    if v is None:
+        return "-"
+    try:
+        return f"{float(v):.3f}"
+    except (TypeError, ValueError):
+        return "-"
+
+
+def _plan_dt(iso) -> str:
+    """API が返す ISO 文字列を MM-DD HH:MM に短縮。None・空は「-」。"""
+    if not iso:
+        return "-"
+    return str(iso)[5:16].replace("T", " ")
+
+
+def _plans_table(title: str, rows: list[dict]) -> Table:
+    """整形済み row 群から Rich テーブルを作る (0件でも見出しは呼び出し側で出す)。"""
+    tbl = Table(title=title, box=box.SIMPLE, show_header=True, padding=(0, 1))
+    tbl.add_column("#", justify="right")
+    tbl.add_column("ペア")
+    tbl.add_column("方向", justify="center")
+    tbl.add_column("entry条件")
+    tbl.add_column("SL", justify="right")
+    tbl.add_column("TP", justify="right")
+    tbl.add_column("RR", justify="right")
+    tbl.add_column("期限", justify="right")
+    tbl.add_column("作成", justify="right")
+    for r in rows:
+        arrow = "📈 long" if r.get("direction") == "long" else "📉 short"
+        tbl.add_row(
+            str(r.get("plan_id", "-")),
+            r.get("pair", "?"), arrow, r.get("entry_summary") or "-",
+            _plan_num(r.get("sl")), _plan_num(r.get("tp")), _plan_num(r.get("rr")),
+            _plan_dt(r.get("expires_at")), _plan_dt(r.get("created_at")),
+        )
+    return tbl
+
+
+def _cmd_plans() -> None:
+    """保持中の取引 plan (承認待ち + 発注監視中) を REST API 経由で表示。
+
+    finance API `GET /orchestrator/plans?status=...` を pending_approval / active
+    の 2 状態で叩く (src/cli.py の DB 直読版 _cmd_plans と表示を揃える)。
+    """
+    pending_data = _get("/orchestrator/plans", params={"status": "pending_approval"})
+    active_data = _get("/orchestrator/plans", params={"status": "active"})
+    # 両方 None = 通信断 (_get が診断済み)。片方 None は空扱いで続行。
+    if pending_data is None and active_data is None:
+        return
+    pending = (pending_data or {}).get("plans", [])
+    active = (active_data or {}).get("plans", [])
+
+    _console.print()
+    if pending:
+        _console.print(_plans_table("承認待ち (pending_approval)", pending))
+    else:
+        _console.print("[bold]承認待ち (pending_approval)[/bold]  [dim](なし)[/dim]")
+    _console.print()
+    if active:
+        _console.print(_plans_table("発注監視中 (active)", active))
+    else:
+        _console.print("[bold]発注監視中 (active)[/bold]  [dim](なし)[/dim]")
+    _console.print()
+
+
 def _cmd_close(pair: str) -> None:
     data = _post(f"/close/{pair}")
     if data is None:
@@ -931,6 +998,7 @@ _HELP = """\
   [cyan]run news[/cyan]             — 最新ニュースセンチメント
   [cyan]run tech[/cyan]             — 最新テクニカルスナップショット
   [cyan]run analyze[/cyan]          — 総合分析シグナル
+  [cyan]plans[/cyan]  (plan)        — 保持中の取引plan (承認待ち + 発注監視中)
   [cyan]ask[/cyan] (メッセージ)     — FX分析LLMへ質問  例: ask USDJPYの見通しは？
   [cyan]close[/cyan] (pair)         — ポジションを手動決済  例: close USDJPY=X
   [cyan]logs[/cyan] (N)             — activity.log の末尾N行（デフォルト50）
@@ -985,6 +1053,8 @@ def _dispatch(raw: str) -> bool:
             _console.print("[red]使い方: ask <メッセージ>[/red]")
         else:
             _cmd_ask(" ".join(args))
+    elif cmd in ("plans", "plan"):
+        _cmd_plans()
     elif cmd == "close":
         if not args:
             _console.print("[red]使い方: close <pair>  例: close USDJPY=X[/red]")
